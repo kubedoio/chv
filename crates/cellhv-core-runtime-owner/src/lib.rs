@@ -295,6 +295,26 @@ impl CoreRuntimeOwner {
                     tokio::select! {
                         _ = stop_rx.changed() => break,
                         _ = tokio::time::sleep(delay) => {
+                            // Drain in-process execution failure events every
+                            // poll, independent of the scan outcome: an
+                            // execution failure abandons its operation
+                            // (InspectRequired, operator resolution required)
+                            // and failure-quarantines the VM, and the operator
+                            // needs the causal link (which VM, which
+                            // operation, which failure code) in the agent log
+                            // at the moment it happens — not only via the next
+                            // scan's inspect-required diff. The journal remains
+                            // the source of truth.
+                            for failure in executor.drain_failure_events() {
+                                // Debug formatting escapes identifier content;
+                                // the journal is the trust boundary for ids.
+                                tracing::error!(
+                                    vm_id = ?failure.vm_id,
+                                    operation_id = ?failure.operation_id,
+                                    code = failure.code.as_str(),
+                                    "execution failure: operation abandoned (InspectRequired) and VM failure-quarantined; resolve via the agent resolve RPC"
+                                );
+                            }
                             match tokio::time::timeout(scan_timeout, executor.scan_ready()).await {
                                 Ok(Ok(report)) => {
                                     consecutive_failures = 0;

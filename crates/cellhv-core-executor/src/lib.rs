@@ -98,6 +98,8 @@ impl ExecutionFailureCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionFailure {
     pub operation_id: Option<OperationId>,
+    /// The VM the failed operation targeted (quarantine + operator context).
+    pub vm_id: VmId,
     pub code: ExecutionFailureCode,
 }
 
@@ -264,6 +266,10 @@ impl QuarantineState {
     }
 }
 
+/// Upper bound on the retained failure-event ring: a composition that never
+/// drains must not grow executor memory without limit.
+const MAX_FAILURE_EVENTS: usize = 256;
+
 /// Owns one bounded execution scheduler. Explicit shutdown is required to
 /// establish the executor-before-authority shutdown ordering contract.
 pub struct JournalExecutor {
@@ -276,6 +282,10 @@ pub struct JournalExecutor {
     token_factory: TokenFactory,
     fatality: Arc<Mutex<Option<ExecutorFatality>>>,
     task: Option<tokio::task::JoinHandle<ExecutionReport>>,
+    /// Bounded ring of recent in-process execution failures, drained by the
+    /// composition (runtime-owner) for logging/telemetry: this crate is
+    /// runtime-neutral and holds no logging facade (architecture guard).
+    failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>>,
 }
 
 impl JournalExecutor {
@@ -312,14 +322,19 @@ impl JournalExecutor {
         let fatality: Arc<Mutex<Option<ExecutorFatality>>> = Arc::new(Mutex::new(None));
         let capacity = Arc::new(Semaphore::new(queue_capacity));
         let scheduled: Arc<Mutex<HashSet<OperationId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
         let task = tokio::spawn(run_scheduler(
             receiver,
             execution.clone(),
             runtime,
             concurrency,
-            scheduled.clone(),
-            quarantined.clone(),
-            fatality.clone(),
+            SchedulerState {
+                scheduled: scheduled.clone(),
+                quarantined: quarantined.clone(),
+                fatality: fatality.clone(),
+                failure_events: Arc::clone(&failure_events),
+            },
         ));
         Ok(Self {
             sender: Some(sender),
@@ -331,6 +346,7 @@ impl JournalExecutor {
             token_factory,
             fatality,
             task: Some(task),
+            failure_events,
         })
     }
 
@@ -472,6 +488,17 @@ impl JournalExecutor {
         Ok(())
     }
 
+    /// Drains and returns recent in-process execution failures (bounded
+    /// ring; see [`MAX_FAILURE_EVENTS`]). The composition logs these with
+    /// full context at its boundary — this crate holds no logging facade.
+    pub fn drain_failure_events(&self) -> Vec<ExecutionFailure> {
+        let mut events = self
+            .failure_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        events.drain(..).collect()
+    }
+
     pub async fn shutdown(mut self) -> Result<ExecutionReport> {
         self.close_ingress();
         Ok(self
@@ -550,20 +577,37 @@ impl Drop for JournalExecutor {
     }
 }
 
+/// Shared scheduler state handed to the background task (mirrors the
+/// `JournalExecutor` fields).
+struct SchedulerState {
+    scheduled: Arc<Mutex<HashSet<OperationId>>>,
+    quarantined: Arc<QuarantineState>,
+    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
+    failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>>,
+}
+
 async fn run_scheduler(
     mut receiver: mpsc::Receiver<Work>,
     execution: ExecutionHandle,
     runtime: Arc<dyn CoreVmRuntime>,
     concurrency: usize,
-    scheduled: Arc<Mutex<HashSet<OperationId>>>,
-    quarantined: Arc<QuarantineState>,
-    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
+    state: SchedulerState,
 ) -> ExecutionReport {
+    let SchedulerState {
+        scheduled,
+        quarantined,
+        fatality,
+        failure_events,
+    } = state;
     let mut report = ExecutionReport::default();
     let mut pending = VecDeque::new();
     let mut active_vms = HashSet::new();
     let mut tasks = JoinSet::new();
     let mut task_owners = std::collections::HashMap::new();
+    // Task id → owning VM, so a task that panics (whose return value is
+    // lost) still reports the VM it was executing for.
+    let mut task_vms: std::collections::HashMap<tokio::task::Id, VmId> =
+        std::collections::HashMap::new();
     let mut ingress_closed = false;
 
     loop {
@@ -599,12 +643,14 @@ async fn run_scheduler(
             let execution = execution.clone();
             let runtime = runtime.clone();
             let operation_id = work.operation_id.clone();
+            let work_vm_id = work.vm_id.clone();
             let task = tasks.spawn(async move {
                 let vm_id = work.vm_id.clone();
                 let result = execute_one(work, execution, runtime).await;
                 (vm_id, result)
             });
             task_owners.insert(task.id(), operation_id);
+            task_vms.insert(task.id(), work_vm_id);
         }
 
         if ingress_closed && pending.is_empty() && tasks.is_empty() {
@@ -617,6 +663,7 @@ async fn run_scheduler(
                     match completed {
                         Ok((task_id, (vm_id, outcome))) => {
                             task_owners.remove(&task_id);
+                            task_vms.remove(&task_id);
                             active_vms.remove(&vm_id);
                             if let WorkOutcome::Failure(failure) = &outcome {
                                 // Every `Failure` outcome failure-quarantines
@@ -636,20 +683,23 @@ async fn run_scheduler(
                                     // operation stays unmarked and restart
                                     // classification covers it on the next boot.
                                     let code = failure.code.as_str().to_owned();
-                                    // The journal is the source of truth, but
-                                    // the operator needs the causal link (which
-                                    // operation, which failure code) in the
-                                    // agent log at the moment it happens — not
-                                    // only via the next scan's inspect-required
-                                    // diff. Debug formatting escapes identifier
-                                    // content; the journal is the trust boundary
-                                    // for these ids.
-                                    tracing::error!(
-                                        vm_id = ?vm_id,
-                                        operation_id = ?operation_id,
-                                        code = code,
-                                        "execution failure: operation abandoned (InspectRequired) and VM failure-quarantined; resolve via the agent resolve RPC"
-                                    );
+                                    // Record the failure event for the
+                                    // composition to drain and log: the journal
+                                    // is the source of truth, but the operator
+                                    // needs the causal link (which operation,
+                                    // which failure code) at the moment it
+                                    // happens, not only via the next scan's
+                                    // inspect-required diff. Bounded ring: a
+                                    // wedged composition cannot grow memory.
+                                    {
+                                        let mut events = failure_events
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        events.push_back(failure.clone());
+                                        while events.len() > MAX_FAILURE_EVENTS {
+                                            events.pop_front();
+                                        }
+                                    }
                                     let _ = execution
                                         .mark_operation_abandoned(operation_id.clone(), code)
                                         .await;
@@ -667,9 +717,16 @@ async fn run_scheduler(
                         }
                         Err(error) => {
                             let operation_id = task_owners.remove(&error.id());
+                            let vm_id = task_vms.remove(&error.id()).unwrap_or_else(|| {
+                                // A spawned task always has an owner entry;
+                                // fall back to the null VM rather than
+                                // panicking in the scheduler loop.
+                                VmId::new("vm-unknown").expect("fallback vm id is valid")
+                            });
                             let code = if error.is_cancelled() { ExecutionFailureCode::TaskCancelled } else { ExecutionFailureCode::TaskPanicked };
                             report.failures.push(ExecutionFailure {
                                 operation_id: operation_id.clone(),
+                                vm_id: vm_id.clone(),
                                 code,
                             });
                             // The containment below is the single-effector
@@ -732,6 +789,7 @@ async fn execute_one(
         Err(_) => {
             return WorkOutcome::Failure(ExecutionFailure {
                 operation_id: Some(work.operation_id),
+                vm_id: work.vm_id.clone(),
                 code: ExecutionFailureCode::ClaimAmbiguous,
             })
         }
@@ -745,6 +803,7 @@ async fn execute_one(
         Ok(_) => {
             return WorkOutcome::Failure(ExecutionFailure {
                 operation_id: Some(work.operation_id),
+                vm_id: work.vm_id.clone(),
                 code: ExecutionFailureCode::ResultInvalid,
             })
         }
@@ -760,6 +819,7 @@ async fn execute_one(
         Ok(_) => WorkOutcome::AcquiredCompleted,
         Err(_) => WorkOutcome::Failure(ExecutionFailure {
             operation_id: Some(work.operation_id),
+            vm_id: work.vm_id,
             code: ExecutionFailureCode::FinishAmbiguous,
         }),
     }

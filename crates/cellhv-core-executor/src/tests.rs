@@ -1460,6 +1460,22 @@ async fn resolution_releases_failure_quarantine_and_readmits_dropped_work() {
     assert!(released.quarantined.is_empty());
     assert_eq!(released.scheduled, vec![OperationId::new("two").unwrap()]);
 
+    // The failure-event ring recorded the failure with full operator
+    // context (VM, operation, code): this is what the runtime-owner poller
+    // drains and logs at its boundary.
+    let events = executor.drain_failure_events();
+    assert_eq!(events.len(), 1, "exactly one failure event was recorded");
+    assert_eq!(events[0].vm_id, VmId::new("a").unwrap());
+    assert_eq!(
+        events[0].operation_id,
+        Some(OperationId::new("one").unwrap())
+    );
+    assert_eq!(events[0].code, ExecutionFailureCode::ResultInvalid);
+    assert!(
+        executor.drain_failure_events().is_empty(),
+        "drain is destructive"
+    );
+
     let report = executor.shutdown().await.unwrap();
     assert!(report
         .failures
