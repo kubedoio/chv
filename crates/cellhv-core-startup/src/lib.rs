@@ -780,19 +780,32 @@ mod tests {
 
     #[test]
     fn stale_staging_sibling_does_not_block_migration_target_bootstrap() {
-        // Crash leftover from the staged publish: a junk staging sibling in
-        // the core directory. The next bootstrap must pick a fresh staging
-        // name and succeed (staging names embed the pid and a sequence, and
-        // skip existing candidates).
+        // Crash leftover from the staged publish: junk staging siblings in
+        // the core directory — including names carrying THIS process's pid
+        // (pid reuse after a crash), so the existence-checked allocation
+        // must skip occupied candidates, not merely differ by pid. The
+        // next bootstrap must pick a fresh staging name and succeed.
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(&dir);
         write_private(&paths.node_cache, source());
-        let stale = paths
+        let parent = paths.core_database.parent().unwrap();
+        let name = paths
             .core_database
-            .parent()
+            .file_name()
             .unwrap()
-            .join(".core.db.fresh-999999-0");
-        fs::write(&stale, b"interrupted staging garbage").unwrap();
+            .to_str()
+            .unwrap()
+            .to_owned();
+        for sequence in 0..6 {
+            let stale = parent.join(format!(".{}.fresh-{}-{sequence}", name, std::process::id()));
+            fs::write(&stale, b"interrupted staging garbage").unwrap();
+        }
+        // And one from a different (restarted) pid.
+        fs::write(
+            parent.join(format!(".{}.fresh-999999-0", name)),
+            b"interrupted staging garbage",
+        )
+        .unwrap();
 
         let active = StartupTransaction::begin(&paths)
             .unwrap()
