@@ -1639,11 +1639,12 @@ fn apply_migrations_with_host(
 }
 
 /// Read-only probe: is `path` a scrap left by an interrupted bootstrap?
-/// True only when the file carries NO committed schema (no user tables,
-/// `user_version` 0) — an empty or header-only database. Any real authority
-/// has migration-0001 tables and a nonzero `user_version`; unreadable or
-/// foreign content is NOT a scrap (fail closed: `create_new` then keeps its
-/// never-clobber error).
+/// True only when the file carries NO committed schema of any kind (zero
+/// user objects — tables, views, triggers, indexes — and `user_version` 0):
+/// an empty or header-only database. Any real authority has migration-0001
+/// tables and a nonzero `user_version`; unreadable or foreign content —
+/// including a foreign database holding only views or triggers — is NOT a
+/// scrap (fail closed: `create_new` then keeps its never-clobber error).
 fn is_bootstrap_scrap(path: &Path) -> bool {
     let Ok(conn) = Connection::open_with_flags(
         path,
@@ -1659,7 +1660,11 @@ fn is_bootstrap_scrap(path: &Path) -> bool {
     }
     matches!(
         conn.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            // Any user object of any type disqualifies the file from being
+            // a bootstrap scrap: counting only tables would let a foreign
+            // database whose schema consists of views (or triggers) be
+            // deleted as "scrap".
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get::<_, i64>(0),
         ),
@@ -5241,6 +5246,33 @@ mod tests {
             Err(StoreError::AlreadyExists(_))
         ));
         drop(directory);
+    }
+
+    #[test]
+    fn create_new_never_replaces_a_foreign_views_only_database() {
+        // A foreign SQLite file whose schema consists only of views (no
+        // tables, user_version 0) must not be classified as a bootstrap
+        // scrap and deleted: scrap detection fails closed on ANY user
+        // schema object, not only tables.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("foreign.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE VIEW v AS SELECT 1;").unwrap();
+        drop(conn);
+        assert!(matches!(
+            CoreStore::create_new(&path),
+            Err(StoreError::AlreadyExists(_))
+        ));
+        // The foreign file is intact.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='view'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

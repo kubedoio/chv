@@ -181,7 +181,12 @@ fn failure_entry_keeps(
         // ambiguity is unresolved and the op must not be retried
         // in-process — keep until restart.
         Some(RestartDisposition::Ready) => true,
-        // Terminal in the snapshot: released.
+        // Terminal in the snapshot: released. (Defensive arm: the real
+        // snapshot source — `list_incomplete_execution_operations` — only
+        // carries `accepted`/`running` ops, so a Terminal disposition
+        // cannot appear today; the release path that actually fires is the
+        // `None` + terminal point-lookup below. Kept so a future snapshot
+        // source that includes terminal dispositions behaves correctly.)
         Some(RestartDisposition::Terminal) => false,
         // Absent from the incomplete snapshot: released only when the
         // journal says the op reached a terminal status (the operator

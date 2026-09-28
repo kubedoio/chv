@@ -12,6 +12,7 @@ use chv_controlplane_types::domain::{
     ResourceId, ResourceKind,
 };
 use chv_controlplane_types::fragment::VmSpec;
+use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -188,10 +189,13 @@ pub trait LifecycleService: Send + Sync {
         request: proto::SendGratuitousArpRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
-    /// Node-scoped operator egress for restart-interrupted
-    /// (InspectRequired) core-journal operations. Not routed through the
-    /// control plane: the terminal-persisting resolution must be issued
-    /// against the owning agent's LifecycleService (or the node's Core API).
+    /// Node-scoped operator action for restart-interrupted
+    /// (InspectRequired) core-journal operations. The control plane RELAYS
+    /// it to the owning agent's LifecycleService (the agent validates and
+    /// terminal-persists against the journal); it never journals on the
+    /// node's behalf. Node-local invocation against the agent directly (or
+    /// the node's Core API) remains the fallback when the agent socket is
+    /// unreachable from the control plane.
     async fn resolve_inspect_required_operation(
         &self,
         request: proto::ResolveInspectRequiredOperationRequest,
@@ -1761,14 +1765,53 @@ impl LifecycleService for LifecycleServiceImplementation {
         })?;
         let meta = self.meta_from_request(request.meta.clone())?;
         let node_id = Self::parse_node_id(meta.target_node_id.clone())?;
+        // The node id is substituted into the configured agent socket
+        // pattern when it contains `{node_id}`: it must be a single safe
+        // path component, or an operator-supplied `target_node_id` like
+        // `../../x` could steer the control plane at an arbitrary local
+        // socket. Enrolled node ids (enrollment-generated) always pass.
+        if !chv_common::is_safe_id(node_id.as_str()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "target_node_id '{node_id}' is not a safe node id"
+            )));
+        }
         if request.operation_id.trim().is_empty() {
             return Err(ControlPlaneServiceError::InvalidArgument(
                 "operation_id is required".into(),
             ));
         }
-        // Fail fast on the disposition shape; the agent validates the rest
-        // (note presence, length, control characters) at the journal
-        // boundary.
+        if request.vm_id.trim().is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "vm_id is required".into(),
+            ));
+        }
+        // Fail fast on the shapes the agent would reject, so the caller gets
+        // a clear InvalidArgument here instead of an opaque relay error: the
+        // note must be present and single-line (audit evidence), and the
+        // audit identity must be attributable. The agent re-validates at the
+        // journal boundary (authoritative, incl. the 8000-byte note bound).
+        let note = request.note.trim();
+        if note.is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "note is required (operator inspection evidence)".into(),
+            ));
+        }
+        if note.chars().any(|c| c.is_control()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "note must not contain control characters".into(),
+            ));
+        }
+        let requested_by = meta.requested_by.trim();
+        if requested_by.chars().any(|c| c.is_control()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "requested_by must not contain control characters".into(),
+            ));
+        }
+        let requested_by = if requested_by.is_empty() {
+            "control-plane"
+        } else {
+            requested_by
+        };
         match request.disposition.as_str() {
             "succeeded" | "failed" => {}
             other => {
@@ -1784,7 +1827,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             .get_or_connect(node_id.as_str(), &socket_path)
             .await
             .map_err(|e| {
-                ControlPlaneServiceError::Internal(format!(
+                ControlPlaneServiceError::NodeUnavailable(format!(
                     "cannot reach agent for node {node_id}: {e}"
                 ))
             })?;
@@ -1795,13 +1838,18 @@ impl LifecycleService for LifecycleServiceImplementation {
                 &request.operation_id,
                 &request.disposition,
                 &request.note,
-                Some(&meta.requested_by),
+                Some(requested_by),
             )
             .await
-            .map_err(|e| {
-                ControlPlaneServiceError::Internal(format!(
-                    "agent resolve_inspect_required_operation failed: {e}"
-                ))
+            .map_err(|e| match e {
+                ChvError::BackendUnavailable { backend, reason } => {
+                    ControlPlaneServiceError::NodeUnavailable(format!(
+                        "agent resolve_inspect_required_operation unavailable ({backend}): {reason}"
+                    ))
+                }
+                other => ControlPlaneServiceError::Internal(format!(
+                    "agent resolve_inspect_required_operation failed: {other}"
+                )),
             })
     }
 }

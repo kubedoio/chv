@@ -1400,6 +1400,23 @@ fn reconcile_failures_releases_only_resolved_entries() {
     let statuses = HashMap::from([(unmarked, cellhv_core_types::OperationStatus::Unsupported)]);
     state.reconcile_failures(&dispositions, &statuses);
     assert!(state.contains(&vm), "the claimable entry remains");
+
+    // POSITIVE release pin (the keep-side asserts above cannot distinguish
+    // a correct reconcile from one that never releases anything): VM "c"
+    // has exactly one failure entry, and once that op is terminal the VM
+    // must be RELEASED — contains() goes false.
+    let vm_c = VmId::new("c").unwrap();
+    let solo = OperationId::new("solo").unwrap();
+    state.record_failure(vm_c.clone(), Some(solo.clone()));
+    assert!(state.contains(&vm_c), "vm c starts quarantined");
+    state.reconcile_failures(
+        &HashMap::new(),
+        &HashMap::from([(solo, cellhv_core_types::OperationStatus::Succeeded)]),
+    );
+    assert!(
+        !state.contains(&vm_c),
+        "a fully resolved entry set must release the quarantine"
+    );
 }
 
 /// A VM failure-quarantined by an in-process ambiguous outcome is released

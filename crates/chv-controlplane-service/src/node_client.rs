@@ -703,7 +703,7 @@ impl NodeClient {
         self.circuit_breaker.check(method)?;
         let result = with_timeout(
             self.lifecycle
-                .resolve_inspect_required_operation(req)
+                .resolve_inspect_required_operation(with_operation_id_metadata(req, operation_id))
                 .instrument(span),
             "agent",
             method,

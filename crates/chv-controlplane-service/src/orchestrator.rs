@@ -1323,8 +1323,10 @@ impl Orchestrator {
         // A relative image_ref becomes a single path component under the
         // kernels root: reject anything that could escape it (a ".."
         // component in image_ref is an API-client-supplied path traversal,
-        // not an image name).
-        if !chv_common::is_safe_id(image_ref) {
+        // not an image name). `is_safe_path_component` (not the stricter
+        // `is_safe_id`) so tag-style names accepted before this boundary
+        // check existed — e.g. `image:latest` — keep working.
+        if !chv_common::is_safe_path_component(image_ref) {
             return Err(ChvError::InvalidArgument {
                 field: "image_ref".to_string(),
                 reason: format!(
@@ -1350,7 +1352,7 @@ impl Orchestrator {
         if image_ref.starts_with('/') {
             return Some(Ok(image_ref.to_string()));
         }
-        if !chv_common::is_safe_id(image_ref) {
+        if !chv_common::is_safe_path_component(image_ref) {
             return Some(Err(ChvError::InvalidArgument {
                 field: "image_ref".to_string(),
                 reason: format!(

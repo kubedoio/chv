@@ -67,8 +67,9 @@ curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_connected
 curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_disconnected_duration_ms
 ```
 
-Core journal health (core-managed and core-native authority modes only; the
-families are absent in legacy mode):
+Core journal health (core-managed authority mode only — the metrics
+endpoint is part of the legacy/core-managed startup; core-native does not
+serve it, and the families are absent in legacy mode):
 
 ```
 # Current count of InspectRequired operations awaiting operator resolution
@@ -351,8 +352,8 @@ operation. This is fail-closed — the side effect may or may not have happened.
 
 - Agent log at startup: `restart classification marked running operations InspectRequired`
 - Scan-time log on any change: `journal scan: inspect-required operations changed`
-- Agent metrics (`curl -s http://127.0.0.1:9901/metrics`, core-managed/native
-  modes only): `chv_agent_journal_inspect_required` (current stuck count),
+- Agent metrics (`curl -s http://127.0.0.1:9901/metrics`, core-managed mode
+  only): `chv_agent_journal_inspect_required` (current stuck count),
   `chv_agent_journal_healthy` (0 while the journal scanner is wedged)
 - Node-local Core API:
   ```bash
@@ -379,16 +380,25 @@ grpcurl -unix /run/chv/agent/api.sock \
   }'
 ```
 
-Or via the control plane's relay (fleet-wide: no node login required; the
-control plane forwards to the owning agent, which validates and
-terminal-persists). The target node goes in `meta.target_node_id`:
+Or via the control plane's relay (no node login required: the control
+plane forwards to the owning agent, which validates and
+terminal-persists; if the agent socket is unreachable the call fails
+with `UNAVAILABLE` and the node-local path above is the fallback). The
+target node goes in `meta.target_node_id`. The control plane's gRPC
+surface requires mTLS — every request must present a certificate signed
+by the control-plane CA (the same requirement as every other node-facing
+RPC). The installed agent client certificate works:
 
 ```bash
-grpcurl -insecure 127.0.0.1:8443 \
+grpcurl \
+  -cacert /etc/chv/certs/ca.crt \
+  -cert /etc/chv/certs/agent-client.crt \
+  -key /etc/chv/certs/agent-client.key \
+  127.0.0.1:8443 \
   chv.controlplane.node.v1.LifecycleService/ResolveInspectRequiredOperation \
   -d '{
     "meta": {
-      "operation_id": "resolve-<operation_id>",
+      "operation_id": "<operation_id>",
       "requested_by": "operator-name",
       "target_node_id": "<owning node id>"
     },

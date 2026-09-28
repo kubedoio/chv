@@ -3197,15 +3197,53 @@ async fn resolve_relay_validates_payload_before_egress() {
         LifecycleService::resolve_inspect_required_operation(&service, request).await,
         Err(ControlPlaneServiceError::InvalidArgument(_))
     ));
-    // Valid payload → the relay is attempted (connection to the node's
-    // agent socket fails with an internal error naming the node).
+    // Missing note → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.note = "   ".into();
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // Control characters in the note → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.note = "line\ninjection".into();
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // Empty vm_id → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.vm_id = " ".into();
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // A target_node_id that is not a single safe path component would be
+    // substituted into the agent socket pattern: rejected before any socket
+    // resolution (injection defense).
+    let mut injected_meta = meta.clone();
+    injected_meta.target_node_id = "../../etc/passwd".into();
+    let result = LifecycleService::resolve_inspect_required_operation(
+        &service,
+        resolve_request(&injected_meta),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ControlPlaneServiceError::InvalidArgument(ref reason))
+            if reason.contains("safe node id")
+    ));
+    // Valid payload → the relay is attempted; the socket does not exist, so
+    // the failure is UNAVAILABLE (not internal) and names the node: the
+    // caller can distinguish "bad request" from "node unreachable" and fall
+    // back to node-local resolution.
     let result =
         LifecycleService::resolve_inspect_required_operation(&service, resolve_request(&meta))
             .await;
     match result {
-        Err(ControlPlaneServiceError::Internal(reason)) => {
+        Err(ControlPlaneServiceError::NodeUnavailable(reason)) => {
             assert!(reason.contains("node-resolve-2"), "got: {reason}");
         }
-        other => panic!("expected internal relay error, got {other:?}"),
+        other => panic!("expected node-unavailable relay error, got {other:?}"),
     }
 }

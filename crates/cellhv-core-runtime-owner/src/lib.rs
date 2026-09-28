@@ -308,11 +308,15 @@ impl CoreRuntimeOwner {
                             for failure in executor.drain_failure_events() {
                                 // Debug formatting escapes identifier content;
                                 // the journal is the trust boundary for ids.
+                                // Worded carefully: the VM quarantine is
+                                // synchronous and certain, but the abandonment
+                                // marking is best-effort (the journal is
+                                // authoritative for the operation's state).
                                 tracing::error!(
                                     vm_id = ?failure.vm_id,
                                     operation_id = ?failure.operation_id,
                                     code = failure.code.as_str(),
-                                    "execution failure: operation abandoned (InspectRequired) and VM failure-quarantined; resolve via the agent resolve RPC"
+                                    "execution failure: VM failure-quarantined; operation abandonment (InspectRequired) recorded best-effort, journal is authoritative; resolve via the agent resolve RPC"
                                 );
                             }
                             match tokio::time::timeout(scan_timeout, executor.scan_ready()).await {

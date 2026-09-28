@@ -391,6 +391,21 @@ mod tests {
     }
 
     #[test]
+    fn intercept_rejects_requests_without_a_peer_certificate() {
+        // The R2 C-MAJOR fix routes the lifecycle service through this
+        // interceptor like its four siblings: a request with no TLS peer
+        // certificate (no TlsConnectInfo extension — e.g. a plain TCP or
+        // in-process call) must be rejected with UNAUTHENTICATED, never
+        // passed through to the handler.
+        let interceptor = PeerIdentityInterceptor::new(false).unwrap();
+        let status = interceptor
+            .intercept(tonic::Request::new(()))
+            .expect_err("cert-less request must be rejected");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "peer mTLS certificate required");
+    }
+
+    #[test]
     fn validate_security_mode_rejects_insecure_without_dev_feature() {
         // In a non-dev build (the default test compilation), requesting
         // insecure mode must fail with a TYPED error — never a panic.
