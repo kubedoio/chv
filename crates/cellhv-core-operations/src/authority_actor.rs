@@ -1139,4 +1139,47 @@ mod tests {
             Err(AuthorityActorError::Unavailable)
         ));
     }
+
+    #[tokio::test]
+    async fn dropped_submit_reply_converges_on_replay_across_actor_restart() {
+        // Fault point 1 (accept committed, reply lost): the caller cannot
+        // know whether the mutation was accepted. Replaying the identical
+        // request after a restart converges on the ONE accepted operation —
+        // no second accept, no second reserved desired state.
+        let (_directory, path, service) = service();
+        let (handle, _execution, join) = AuthorityActor::spawn_with_execution(service, 2).unwrap();
+        let request = Box::new(submission(
+            MutationCommand::CreateVm {
+                definition: vm("a"),
+            },
+            "op",
+            "key",
+            1,
+        ));
+        let (reply, receive) = oneshot::channel();
+        handle
+            .sender
+            .send(Request::Submit(request.clone(), reply))
+            .await
+            .unwrap();
+        drop(receive);
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+
+        // The accept was durable even though its reply was lost; the
+        // caller's replay after restart converges instead of duplicating.
+        let (handle, _execution, join) = AuthorityActor::spawn_with_execution(
+            OperationService::open_existing(&path).unwrap(),
+            2,
+        )
+        .unwrap();
+        let replayed = handle.submit(*request).await.unwrap();
+        assert_eq!(replayed.disposition, Acceptance::Replay);
+        assert_eq!(replayed.operation.id.as_str(), "op");
+        assert_eq!(replayed.operation.status, OperationStatus::Accepted);
+        assert_eq!(handle.vms().await.unwrap().len(), 1);
+        assert_eq!(handle.operations().await.unwrap().len(), 1);
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
 }

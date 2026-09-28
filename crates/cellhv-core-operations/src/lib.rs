@@ -1511,4 +1511,64 @@ mod tests {
             Err(OperationServiceError::Store(StoreError::InvalidDomain(_)))
         ));
     }
+
+    #[test]
+    fn stale_version_is_rejected_across_journal_restart() {
+        // M2.4 concurrency/replay matrix: a restarted control plane
+        // re-sending an older compatibility generation (resource version)
+        // cannot override newer accepted state — the fence is durable in
+        // the journal, not in process memory.
+        let (_dir, path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        drop(service);
+        let mut service = OperationService::open_existing(&path).unwrap();
+        // The current generation (version 1) is accepted and bumps the VM
+        // to version 2.
+        service
+            .submit(submission(
+                MutationCommand::StartVm {
+                    vm_id: VmId::new("a").unwrap(),
+                },
+                "op-2",
+                "start",
+                1,
+            ))
+            .unwrap();
+        // The restarted sender's stale view (version 1 again) is rejected
+        // without journaling or state changes.
+        let error = service
+            .submit(submission(
+                MutationCommand::StopVm {
+                    vm_id: VmId::new("a").unwrap(),
+                },
+                "op-3",
+                "stop",
+                1,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::Store(StoreError::StaleVersion { .. })
+        ));
+        assert!(matches!(
+            service.operation(&OperationId::new("op-3").unwrap()),
+            Err(OperationServiceError::Store(StoreError::NotFound { .. }))
+        ));
+        assert_eq!(
+            service
+                .vm(&VmId::new("a").unwrap())
+                .unwrap()
+                .resource_version,
+            version(2)
+        );
+    }
 }

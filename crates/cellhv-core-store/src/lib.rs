@@ -4712,6 +4712,72 @@ mod tests {
     }
 
     #[test]
+    fn terminal_persistence_and_event_commit_atomically() {
+        // Fault point 5 (store view): the terminal status UPDATE and the
+        // terminal event INSERT commit as ONE transaction. A crash between
+        // them is unrepresentable — an aborted event insert rolls the
+        // status update back entirely, leaving the claim fence intact so
+        // the identical finish retries to completion.
+        let (_directory, _path, mut store, id) = running_recovery_store("op-terminal-atomic");
+        store
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_terminal_event BEFORE INSERT ON events
+             WHEN NEW.kind='operation.succeeded'
+             BEGIN SELECT RAISE(ABORT, 'injected terminal event failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .persist_terminal_operation(
+                &id,
+                "attempt-recovery",
+                OperationStatus::Succeeded,
+                Some(&serde_json::json!({"ok":true})),
+                None,
+            )
+            .is_err());
+        let (status, token, completed): (String, Option<String>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT status, active_attempt_token, completed_attempt_token FROM operations WHERE operation_id=?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), token.as_deref(), completed),
+            ("running", Some("attempt-recovery"), None),
+            "the aborted terminal event must roll the status update back completely"
+        );
+        let events: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='operation.succeeded'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 0);
+        // No partial state blocks the retry: the identical finish applies
+        // once the injected fault is gone.
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_terminal_event")
+            .unwrap();
+        let completed = store
+            .persist_terminal_operation(
+                &id,
+                "attempt-recovery",
+                OperationStatus::Succeeded,
+                Some(&serde_json::json!({"ok":true})),
+                None,
+            )
+            .unwrap();
+        assert_eq!(completed.disposition, CompletionDisposition::Applied);
+        assert_eq!(completed.entry.operation.status, OperationStatus::Succeeded);
+    }
+
+    #[test]
     fn recovery_revision_beyond_sqlite_range_is_rejected_without_partial_write() {
         let (_directory, _path, mut store, id) = running_recovery_store("op-recovery-overflow");
         let evidence = canonical_json(&serde_json::json!({"seed":true})).unwrap();

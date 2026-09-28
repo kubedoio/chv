@@ -680,4 +680,141 @@ mod tests {
         // Result is untouched.
         assert!(f.cache.lock().await.get_fragment("vm", "vm-a").is_some());
     }
+
+    /// M2.4 fault point 4 (after the provider effect, before the
+    /// compatibility projection): simulated process death at the window
+    /// leaves the effect done, the operation `running`, and the NodeCache
+    /// un-projected. A restart rebuilds the cache from the Core store's
+    /// desired state (repairing the projection gap), never re-executes the
+    /// effect, and the operator resolution records the outcome the effect
+    /// already had.
+    #[tokio::test]
+    async fn fault_after_effect_before_projection_is_repaired_by_rebuild() {
+        use cellhv_core_executor::{FaultPoint, FaultRuntime};
+        use cellhv_core_operations::{AuthorityActor, OperationService, SubmitMutation};
+        use cellhv_core_types::HostIdentity;
+
+        let f = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let submissions = SubmitMutation {
+            operation_id: OperationId::new("fault-p4").unwrap(),
+            idempotency_scope: "test".to_string(),
+            idempotency_key: IdempotencyKey::new("fault-p4").unwrap(),
+            expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "integration-requester".to_string(),
+                external_operation_id: "integration-external".to_string(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
+            command: MutationCommand::CreateVm {
+                definition: definition("vm-p4"),
+            },
+        };
+        let db_path = dir.path().join("core.db");
+        let mut service = OperationService::create_new(
+            &db_path,
+            &HostIdentity {
+                id: cellhv_core_types::HostId::new("node-1").unwrap(),
+                resource_version: ResourceVersion::new(1).unwrap(),
+            },
+        )
+        .unwrap();
+        service.submit(submissions).unwrap();
+
+        let (authority, join) = AuthorityActor::spawn(service, 32).unwrap();
+        let execution = authority.execution_handle();
+        // The fault runtime sits INSIDE the projecting wrapper: the stub
+        // (provider effect) completes, then the task parks before the
+        // projection can run.
+        let stub = Arc::new(StubRuntime::new(vec![Ok(None), Ok(None)]));
+        let fault = FaultRuntime::park_at(FaultPoint::AfterEffect, stub.clone());
+        let wrapper = Arc::new(ProjectingCoreRuntime::new(
+            fault.clone(),
+            f.cache.clone(),
+            f.cache_path.clone(),
+        ));
+        let executor =
+            cellhv_core_executor::JournalExecutor::start(execution, wrapper, 1, 2).unwrap();
+        executor.scan_ready().await.unwrap();
+        fault.reached.notified().await;
+        assert_eq!(
+            stub.calls(),
+            1,
+            "the effect completed before the fault point"
+        );
+        // Process death at the fault point.
+        executor.abort().await.unwrap();
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
+
+        // The projection never ran: the cache has no fragment, and the
+        // operation is still running with its claim fence.
+        {
+            let cache = f.cache.lock().await;
+            assert!(cache.get_fragment("vm", "vm-p4").is_none());
+        }
+
+        // Restart: the production composition rebuilds the NodeCache from
+        // the Core store's desired state before the executor starts.
+        let service = OperationService::open_existing(&db_path).unwrap();
+        let rebuild_vms = service.vms().unwrap();
+        {
+            let mut cache = f.cache.lock().await;
+            cache.rebuild_from_core(&rebuild_vms);
+        }
+        {
+            let cache = f.cache.lock().await;
+            assert!(
+                cache.get_fragment("vm", "vm-p4").is_some(),
+                "the rebuild repairs the projection gap from desired state"
+            );
+        }
+        let (authority, join) = AuthorityActor::spawn(service, 32).unwrap();
+        let execution = authority.execution_handle();
+        execution.classify_restart_interrupted().await.unwrap();
+        let restart = execution.restart_operations().await.unwrap();
+        assert_eq!(restart.len(), 1);
+        assert_eq!(
+            restart[0].disposition,
+            cellhv_core_operations::RestartDisposition::InspectRequired
+        );
+
+        // The restarted executor never re-executes the effect.
+        let executor = cellhv_core_executor::JournalExecutor::start(
+            execution,
+            Arc::new(ProjectingCoreRuntime::new(
+                stub.clone(),
+                f.cache.clone(),
+                f.cache_path.clone(),
+            )),
+            1,
+            2,
+        )
+        .unwrap();
+        executor.scan_ready().await.unwrap();
+        assert_eq!(stub.calls(), 1, "no second effect after restart");
+
+        // Operator resolution: the effect did happen.
+        authority
+            .resolve_inspect_required(
+                OperationId::new("fault-p4").unwrap(),
+                true,
+                "effect completed before fault point 4".to_string(),
+            )
+            .await
+            .unwrap();
+        let resolved = authority
+            .operation(OperationId::new("fault-p4").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.operation.status,
+            cellhv_core_types::OperationStatus::Succeeded
+        );
+        executor.shutdown().await.unwrap();
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
 }
