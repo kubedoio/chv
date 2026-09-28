@@ -701,7 +701,20 @@ impl LifecycleService for LifecycleServiceImplementation {
                     requested_by: Self::normalize_requested_by(&meta),
                     updated_by: None,
                     target_node_id: Some(node_id.clone()),
-                    desired_power_state: Some("Rebooting".into()),
+                    // A reboot is an operation, not a destination: the
+                    // desired end-state of a successful reboot is a running
+                    // VM. Writing the transient "Rebooting" here stranded
+                    // the VM's desired state forever (nothing ever rewrote
+                    // it after the operation completed), and because the
+                    // BFF renders COALESCE(desired_power_state,
+                    // runtime_status), a rebooted VM displayed "Rebooting"
+                    // indefinitely — observed in the M2.5 qualification
+                    // where the journal showed RebootVm succeeded while the
+                    // API kept reporting Rebooting minutes later. The
+                    // in-flight reboot remains visible through the
+                    // operation/task surfaces; the power state reflects the
+                    // desired destination.
+                    desired_power_state: Some("Running".into()),
                     requested_unix_ms: Self::now_ms(),
                 })
                 .await
