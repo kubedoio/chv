@@ -271,14 +271,11 @@ impl CoreStore {
     /// markers from any other source mean an unknown importer produced this
     /// authority.
     pub fn has_migration_state_other_than(&self, source: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM migration_state WHERE source != ?1)",
-                [source],
-                |row| row.get::<_, i64>(0),
-            )?
-            != 0)
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM migration_state WHERE source != ?1)",
+            [source],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
     }
 
     pub fn is_pristine_migration_target(&self) -> Result<bool> {

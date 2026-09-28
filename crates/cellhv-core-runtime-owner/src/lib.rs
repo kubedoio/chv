@@ -1,4 +1,5 @@
-//! Unwired native-only composition owner for one CellHV Core runtime.
+//! Composition owner for one CellHV Core runtime (core-managed and
+//! native-only activations alike).
 //!
 //! This slice owns database exclusion, exactly one serialization actor, and
 //! exactly one native API listener. It deliberately has no VM runtime or
@@ -180,7 +181,11 @@ impl CoreRuntimeOwner {
         drain_timeout: Duration,
         poller: JournalPollerConfig,
     ) -> Result<Self> {
-        let native_only = activated.native_only();
+        // Eligibility is checked before anything is consumed or mutated, so
+        // a refused activation leaves the on-disk state untouched (callers
+        // may also invoke [`validate_activation`] themselves before any
+        // pre-start work of their own).
+        validate_activation(&activated)?;
         let (mut service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         // Fail-closed on nonsensical timings: in release builds a zero
         // scan_interval would spin at max rate, a zero scan_timeout would mark
@@ -192,24 +197,6 @@ impl CoreRuntimeOwner {
             || poller.drain_budget == Duration::ZERO
         {
             return Err(RuntimeOwnerError::InvalidPollerConfig(poller));
-        }
-        // The native-only fence applies only to native-only activations
-        // (`StartupTransaction::activate_native_only`): that composition has
-        // no legacy surface and must fail closed rather than execute over
-        // migrated or cache-adjacent state. The core-managed composition is
-        // different by design — it boots from an imported legacy NodeCache
-        // (the cutover path) and runs beside the live compatibility
-        // projection (M2.2b), so those provenance signals are expected
-        // there and must not disqualify the runtime. One signal still
-        // disqualifies either way: migration state the NodeCache cutover
-        // never wrote means an unknown importer produced this authority,
-        // and it must not be silently adopted.
-        if native_only {
-            validate_native_only(kind, &provenance)?;
-        } else if provenance.has_foreign_migration_state() {
-            return Err(RuntimeOwnerError::Ineligible(
-                "durable migration state is present",
-            ));
         }
         // Restart classification: durably mark every operation still
         // `running` as restart-interrupted (`InspectRequired`). This must
@@ -562,6 +549,33 @@ impl Drop for CoreRuntimeOwner {
             std::mem::forget(runtime_guard);
         }
     }
+}
+
+/// Eligibility fence for a runtime-owner start, exposed so compositions can
+/// refuse an activation *before* any pre-start work of their own mutates
+/// on-disk state (the core-managed agent's startup cache rebuild is the
+/// motivating case: it must not clobber a live cache only for the owner to
+/// refuse the authority afterwards).
+///
+/// The native-only fence applies only to native-only activations
+/// (`StartupTransaction::activate_native_only`): that composition has no
+/// legacy surface and must fail closed rather than execute over migrated or
+/// cache-adjacent state. The core-managed composition is different by
+/// design — it boots from an imported legacy NodeCache (the cutover path)
+/// and runs beside the live compatibility projection (M2.2b), so those
+/// provenance signals are expected there and must not disqualify the
+/// runtime. One signal still disqualifies either way: migration state the
+/// NodeCache cutover never wrote means an unknown importer produced this
+/// authority, and it must not be silently adopted.
+pub fn validate_activation(activated: &ActivatedStore) -> Result<()> {
+    if activated.native_only() {
+        validate_native_only(activated.kind(), activated.provenance())?;
+    } else if activated.provenance().has_foreign_migration_state() {
+        return Err(RuntimeOwnerError::Ineligible(
+            "durable migration state is present",
+        ));
+    }
+    Ok(())
 }
 
 /// Fence for native-only activations: the composition with no legacy surface
@@ -1112,6 +1126,68 @@ mod tests {
             .activate(Some("foreign-import".to_owned()), None)
             .unwrap();
         assert!(activated.provenance().has_any_migration_state());
+        assert!(matches!(
+            CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
+                activated,
+                &socket,
+                16,
+                Duration::from_secs(1),
+                JournalPollerConfig {
+                    scan_interval: Duration::from_millis(40),
+                    scan_timeout: Duration::from_secs(1),
+                    drain_budget: Duration::from_secs(1),
+                },
+            )
+            .await,
+            Err(RuntimeOwnerError::Ineligible(
+                "durable migration state is present"
+            ))
+        ));
+        assert!(!socket.exists());
+    }
+
+    #[tokio::test]
+    async fn foreign_migration_state_with_live_cache_refuses_managed_start() {
+        // Probe C1 from the adversarial review: with a live same-identity
+        // cache beside a foreign-marker authority, activation itself opens
+        // Existing through the projection-ignore arm — the refusal must
+        // come from the runtime owner's foreign-provenance fence, not from
+        // activation, and no socket may appear.
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        let mut service = OperationService::create_migration_target(&paths.core_database).unwrap();
+        let host = HostIdentity {
+            id: HostId::new("foreign-import").unwrap(),
+            resource_version: ResourceVersion::new(1).unwrap(),
+        };
+        service
+            .import_legacy_snapshot("another-importer", "checksum", &host, &[])
+            .unwrap();
+        service
+            .cutover_legacy_snapshot("another-importer", "checksum")
+            .unwrap();
+        drop(service);
+
+        // A live cache with the SAME identity: the ignore arm opens the
+        // authority instead of failing at activation.
+        write_legacy_cache(&paths, "foreign-import");
+        let activated = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("foreign-import".to_owned()), None)
+            .unwrap();
+        assert_eq!(activated.kind(), ActivationKind::Existing);
+        assert!(activated.provenance().live_cache_present());
+        assert!(activated.provenance().has_any_migration_state());
+        assert!(activated.provenance().has_foreign_migration_state());
+        // The pre-start fence refuses without consuming the activation...
+        assert!(matches!(
+            validate_activation(&activated),
+            Err(RuntimeOwnerError::Ineligible(
+                "durable migration state is present"
+            ))
+        ));
         assert!(matches!(
             CoreRuntimeOwner::start(
                 std::sync::Arc::new(DummyRuntime),

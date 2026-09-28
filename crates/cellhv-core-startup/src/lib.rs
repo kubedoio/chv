@@ -325,8 +325,12 @@ pub enum StartupError {
         "migration archive exists beside a markerless Core database, but NodeCache is missing"
     )]
     InterruptedMigrationSourceMissing,
-    #[error("archive checksum disagrees with the exact NodeCache bytes")]
-    ArchiveMismatch,
+    #[error(
+        "NodeCache archive at {} is missing or does not match the persisted migration marker; \
+         restore the archive (or the original cache it was made from) to boot this authority",
+        path.display()
+    )]
+    ArchiveMismatch { path: PathBuf },
     #[error("archive path has no parent directory")]
     InvalidArchivePath,
     #[error("unsafe authority path configuration: {0}")]
@@ -386,6 +390,7 @@ fn activate_existing(
                 // the live cache to the projection instead of demanding a
                 // pristine import target (which a used authority can never
                 // be).
+                warn_about_unadopted_cache_content(import, service);
                 Ok((ActivationKind::Existing, None))
             } else if !service.is_pristine_migration_target()? {
                 Err(StartupError::UnrelatedAuthority)
@@ -405,8 +410,20 @@ fn activate_existing(
                 // live NodeCache is the compatibility projection and may
                 // legitimately differ from the archived migration source.
                 // Verify the retained archive (the exact source bytes) and
-                // open the existing authority without re-importing.
-                verify_archive(&paths.node_cache_archive, &marker.checksum)?;
+                // open the existing authority without re-importing. The
+                // archive self-heals from the live cache when the cache
+                // still hashes to the marker checksum (a backup or cleanup
+                // that dropped the auxiliary archive file must not brick
+                // the node); a mutated cache cannot stand in for the
+                // source and fails closed.
+                if let Err(error) = verify_archive(&paths.node_cache_archive, &marker.checksum) {
+                    if import.checksum() == marker.checksum {
+                        restore_archive(&paths.node_cache_archive, bytes, &marker.checksum)?;
+                    } else {
+                        return Err(error);
+                    }
+                }
+                warn_about_unadopted_cache_content(import, service);
                 Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
             } else {
                 if import.checksum() != marker.checksum {
@@ -422,6 +439,42 @@ fn activate_existing(
         _ => Err(StartupError::UnsafePath(
             "inconsistent NodeCache activation snapshot".to_owned(),
         )),
+    }
+}
+
+/// Warns when a live cache that this activation did NOT import references
+/// VMs the Core authority does not know. In the designed steady state the
+/// compatibility projection mirrors the authority's VMs, so this only
+/// happens for a stale projection or a restored legacy cache that was
+/// silently left unadopted (the Core database wins by design) — an
+/// operator-attention event, and the agent-side startup rebuild refuses to
+/// overwrite such a cache. Diagnostics must never fail the activation: on
+/// any listing error the warning is skipped.
+fn warn_about_unadopted_cache_content(
+    import: &cellhv_nodecache_migration::ImportPlan,
+    service: &OperationService,
+) {
+    let Ok(authority_vms) = service.vms() else {
+        return;
+    };
+    let authority_ids: std::collections::HashSet<&str> = authority_vms
+        .iter()
+        .map(|definition| definition.id.as_str())
+        .collect();
+    let unadopted: Vec<&str> = import
+        .definitions()
+        .iter()
+        .filter(|definition| !authority_ids.contains(definition.id.as_str()))
+        .map(|definition| definition.id.as_str())
+        .collect();
+    if !unadopted.is_empty() {
+        tracing::warn!(
+            unadopted = ?unadopted,
+            "live NodeCache references VMs the Core authority does not know — \
+             a stale projection or a restored legacy cache was NOT imported; \
+             the Core database is authoritative and the on-disk cache will \
+             not be overwritten by the startup rebuild"
+        );
     }
 }
 
@@ -558,11 +611,31 @@ fn set_owner_only(path: &Path) -> Result<()> {
 }
 
 fn verify_archive(path: &Path, checksum: &str) -> Result<()> {
-    let bytes = read_optional(path)?.ok_or(StartupError::ArchiveMismatch)?;
+    let bytes = read_optional(path)?.ok_or_else(|| StartupError::ArchiveMismatch {
+        path: path.to_owned(),
+    })?;
     if format!("{:x}", Sha256::digest(bytes)) != checksum {
-        return Err(StartupError::ArchiveMismatch);
+        return Err(StartupError::ArchiveMismatch {
+            path: path.to_owned(),
+        });
     }
     Ok(())
+}
+
+/// Re-creates the migration archive from bytes that have been verified to
+/// hash to the marker's source checksum (the caller holds that proof): the
+/// bytes ARE the exact migration source, so rewriting the archive from them
+/// restores the retained-source invariant without weakening the tamper
+/// evidence. Crash-safe by idempotence: a crash mid-restore leaves the
+/// archive absent and the next boot repeats the same verified restore.
+fn restore_archive(path: &Path, bytes: &[u8], checksum: &str) -> Result<()> {
+    debug_assert_eq!(format!("{:x}", Sha256::digest(bytes)), checksum);
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io_error(path, source)),
+    }
+    archive_exact(path, bytes, &mut |_| Ok(()))
 }
 
 fn archive_exact(
@@ -572,7 +645,9 @@ fn archive_exact(
 ) -> Result<()> {
     if let Some(existing) = read_optional(path)? {
         if Sha256::digest(existing) != Sha256::digest(bytes) {
-            return Err(StartupError::ArchiveMismatch);
+            return Err(StartupError::ArchiveMismatch {
+                path: path.to_owned(),
+            });
         }
         let parent = path.parent().ok_or(StartupError::InvalidArchivePath)?;
         File::open(parent)
@@ -585,7 +660,9 @@ fn archive_exact(
     let temp = archive_temp_path(path);
     if let Some(existing) = read_optional(&temp)? {
         if Sha256::digest(existing) != Sha256::digest(bytes) {
-            return Err(StartupError::ArchiveMismatch);
+            return Err(StartupError::ArchiveMismatch {
+                path: path.to_owned(),
+            });
         }
         File::open(&temp)
             .and_then(|file| file.sync_all())
@@ -986,5 +1063,145 @@ mod tests {
         assert!(native.provenance().has_any_migration_state());
         // The cutover marker is the agent's own source, not a foreign one.
         assert!(!native.provenance().has_foreign_migration_state());
+    }
+
+    #[test]
+    fn archive_deleted_after_cutover_self_heals_from_matching_cache() {
+        // Review finding 2: a backup/cleanup that drops the auxiliary
+        // archive file must not brick the node when the live cache still
+        // hashes to the marker checksum — it IS the exact migration source
+        // and the archive is rewritten from it.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        drop(active);
+        assert!(paths.node_cache_archive.exists());
+
+        fs::remove_file(&paths.node_cache_archive).unwrap();
+        let healed = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(healed.kind(), ActivationKind::ImportedNodeCache);
+        // The archive was restored from the verified live cache.
+        assert!(verify_archive(
+            &paths.node_cache_archive,
+            &format!("{:x}", Sha256::digest(cache_bytes("node-a", "7")))
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn corrupted_archive_after_cutover_self_heals_from_matching_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        drop(active);
+
+        write_private(&paths.node_cache_archive, b"corrupted-bytes");
+        let healed = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(healed.kind(), ActivationKind::ImportedNodeCache);
+        assert!(verify_archive(
+            &paths.node_cache_archive,
+            &format!("{:x}", Sha256::digest(cache_bytes("node-a", "7")))
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn archive_missing_with_mutated_cache_fails_closed_actionably() {
+        // A mutated cache cannot stand in for the migration source: the
+        // failure must stay closed and name the archive path so an operator
+        // can act on it (restore the archive or the original cache).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        drop(active);
+
+        fs::remove_file(&paths.node_cache_archive).unwrap();
+        write_private(&paths.node_cache, cache_bytes("node-a", "9"));
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::ArchiveMismatch { ref path }
+                if path == &paths.node_cache_archive
+        ));
+        assert!(error.to_string().contains("node-cache-v1.archive"));
+    }
+
+    #[test]
+    fn crash_after_import_before_cutover_with_mutated_cache_fails_closed() {
+        // Probe X2: an import interrupted before cutover, with the live
+        // cache mutated after the fact, must not be re-imported — the
+        // checksum the marker recorded is the only admissible source.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let original = cache_bytes("node-a", "7");
+        let checksum = format!("{:x}", Sha256::digest(&original));
+        let mut service = OperationService::create_migration_target(&paths.core_database).unwrap();
+        let host = cellhv_core_types::HostIdentity {
+            id: cellhv_core_types::HostId::new("node-a").unwrap(),
+            resource_version: cellhv_core_types::ResourceVersion::new(1).unwrap(),
+        };
+        service
+            .import_legacy_snapshot(SOURCE_NAME, &checksum, &host, &[])
+            .unwrap();
+        drop(service);
+
+        write_private(&paths.node_cache, cache_bytes("node-a", "9"));
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(error, StartupError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn disagreeing_identity_cache_beside_established_authority_fails_closed() {
+        // The ignore arm must never adopt or even tolerate a cache whose
+        // node identity disagrees with the DB host: identity resolution
+        // refuses before any activation arm runs.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        drop(active);
+
+        // An operator restores a different node's cache beside the
+        // authority.
+        write_private(&paths.node_cache, cache_bytes("node-b", "7"));
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::Identity(HostIdentityError::Conflict { .. })
+        ));
     }
 }
