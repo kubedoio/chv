@@ -6,8 +6,16 @@ use chv_controlplane_store::{
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// WireGuard listener port of chv-nwd's fabric transport (ADR-021 §6;
+/// matches the `fabric.wireguard_port` default in chv-config). The
+/// control plane uses it to derive a node's underlay endpoint from the
+/// observed gRPC peer address until agents report their own underlay
+/// addressing.
+pub(crate) const FABRIC_WIREGUARD_PORT: u16 = 65001;
 
 #[async_trait]
 pub trait CertificateIssuer: Send + Sync {
@@ -26,9 +34,14 @@ pub struct IssuedCertificate {
 
 #[async_trait]
 pub trait EnrollmentService: Send + Sync {
+    /// `peer_addr` is the transport-level remote address of the gRPC call
+    /// (from `tonic::Request::remote_addr`). It is used to derive the
+    /// node's fabric underlay endpoint when the request does not carry
+    /// one explicitly.
     async fn enroll_node(
         &self,
         request: proto::EnrollmentRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::EnrollmentResponse, ControlPlaneServiceError>;
 
     async fn rotate_node_certificate(
@@ -83,6 +96,7 @@ impl EnrollmentService for EnrollmentServiceImplementation {
     async fn enroll_node(
         &self,
         request: proto::EnrollmentRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::EnrollmentResponse, ControlPlaneServiceError> {
         match self
             .token_repo
@@ -248,10 +262,19 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                     node_id.as_str(),
                     &inventory.wireguard_public_key,
                     inventory.underlay_mtu,
-                    // The node underlay endpoint is not reported yet; it is
-                    // populated by a follow-up once node underlay addressing
-                    // is wired (the planner fails closed while it is NULL).
-                    None,
+                    // The enrollment request carries no explicit underlay
+                    // endpoint, so derive one from the transport-level peer
+                    // address the control plane actually observed, pinned to
+                    // the fabric WireGuard port. NAT caveat: behind NAT this
+                    // is the NAT's mapped address — usually exactly what
+                    // remote peers must dial — but a NAT that maps the gRPC
+                    // connection differently from the node's WireGuard
+                    // listener yields an unreachable endpoint; the fabric
+                    // plan compiler surfaces unreachable peers (fail
+                    // closed) instead of guessing.
+                    peer_addr
+                        .map(|addr| format!("{}:{}", addr.ip(), FABRIC_WIREGUARD_PORT))
+                        .as_deref(),
                 )
                 .await?;
         }

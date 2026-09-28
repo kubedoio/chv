@@ -445,7 +445,7 @@ async fn test_enrollment_extended_inventory_persistence() {
     };
 
     service
-        .enroll_node(request)
+        .enroll_node(request, None)
         .await
         .expect("Enrollment failed");
 
@@ -519,7 +519,7 @@ async fn test_enrollment_registers_fabric_identity() {
     };
 
     service
-        .enroll_node(request)
+        .enroll_node(request, None)
         .await
         .expect("enrollment with fabric identity must succeed");
 
@@ -538,7 +538,7 @@ async fn test_enrollment_registers_fabric_identity() {
     assert_eq!(identity.fabric_ip.as_deref(), Some("100.100.0.1"));
     assert_eq!(
         identity.underlay_endpoint, None,
-        "endpoint arrives in a follow-up"
+        "enrollment without a transport peer address stores no endpoint"
     );
 
     // The periodic inventory re-report updates the identity in place and
@@ -572,6 +572,9 @@ async fn test_enrollment_registers_fabric_identity() {
                 underlay_mtu: 0,
             }),
         },
+        // The transport-level peer address observed by tonic: the periodic
+        // re-report derives the underlay endpoint from it.
+        Some("198.51.100.7:54321".parse().unwrap()),
     )
     .await
     .expect("periodic inventory with fabric identity must succeed");
@@ -587,6 +590,83 @@ async fn test_enrollment_registers_fabric_identity() {
         "unmeasured MTU (0) stores NULL"
     );
     assert_eq!(identity.fabric_ip.as_deref(), Some("100.100.0.1"));
+    assert_eq!(
+        identity.underlay_endpoint.as_deref(),
+        Some("198.51.100.7:65001"),
+        "the underlay endpoint must be derived from the observed peer \
+         address pinned to the fabric WireGuard port"
+    );
+}
+
+/// Enrolling through a transport whose remote address is known (as tonic
+/// reports it in the server) must persist a derived underlay endpoint of
+/// `<peer_ip>:<fabric WireGuard port>` alongside the fabric identity
+/// (ADR-021 §5; the planner previously failed closed on a NULL endpoint).
+#[tokio::test]
+async fn test_enrollment_with_peer_addr_derives_underlay_endpoint() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service =
+        EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
+
+    // Reusable bootstrap token (sha256("123")).
+    let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES (?, false)")
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let request = proto::EnrollmentRequest {
+        bootstrap_token: "123".into(),
+        inventory: Some(proto::NodeInventory {
+            node_id: "node-fab-ep".into(),
+            hostname: "host-fab-ep".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
+            labels: std::collections::HashMap::new(),
+            vtep_ip: String::new(),
+            wireguard_public_key: "pub-key-ep-base64".into(),
+            underlay_mtu: 1500,
+        }),
+        versions: Some(proto::ServiceVersions {
+            node_id: "node-fab-ep".into(),
+            chv_agent_version: "1.0.0".into(),
+            chv_stord_version: "1.0.0".into(),
+            chv_nwd_version: "1.0.0".into(),
+            cloud_hypervisor_version: "40.0.0".into(),
+            host_bundle_version: "1.2.3".into(),
+        }),
+    };
+
+    // The ephemeral source port of the gRPC connection must NOT leak into
+    // the stored endpoint: only the peer IP is used, pinned to the fabric
+    // WireGuard port.
+    let peer_addr: std::net::SocketAddr = "203.0.113.9:55555".parse().unwrap();
+    service
+        .enroll_node(request, Some(peer_addr))
+        .await
+        .expect("enrollment with a peer address must succeed");
+
+    let identity = VtepRepository::new(pool)
+        .get_fabric_identity("node-fab-ep")
+        .await
+        .unwrap()
+        .expect("fabric identity must be registered");
+    assert_eq!(
+        identity.underlay_endpoint.as_deref(),
+        Some("203.0.113.9:65001"),
+        "underlay endpoint must be the observed peer IP pinned to the \
+         fabric WireGuard port"
+    );
 }
 
 #[tokio::test]
@@ -762,7 +842,7 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
         }),
     };
 
-    let result = service.enroll_node(request).await;
+    let result = service.enroll_node(request, None).await;
     match result {
         Err(ControlPlaneServiceError::Unauthorized(_)) => { /* Correct */ }
         other => panic!(

@@ -31,6 +31,7 @@ impl NetworkExecutor for MockExecutor {
             bridge_handle: spec.bridge_name.clone(),
             tenant_mtu: None,
             fabric_plan_generation: None,
+            binding_generation: None,
         })
     }
 
@@ -77,6 +78,7 @@ impl NetworkExecutor for MockExecutor {
         Ok(AppliedFabric {
             report: ApplyReport::default(),
             plan_generation: 1,
+            binding_generation: 1,
             tenant_mtu: 1380,
             consumer_veth: format!("chv-{}-a", network_id),
         })
@@ -84,6 +86,10 @@ impl NetworkExecutor for MockExecutor {
 
     async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
         Ok(())
+    }
+
+    async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
+        Ok(false)
     }
 
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
@@ -101,6 +107,17 @@ impl NetworkExecutor for MockExecutor {
             vxlan_interface_up: true,
             fdb_entry_count: 1,
         })
+    }
+
+    async fn reassert_tenant_mtu(
+        &self,
+        _network_id: &str,
+        _bridge_name: &str,
+        _subnet_cidr: &str,
+        _gateway_ip: &str,
+        _tenant_mtu: u32,
+    ) -> Result<(), ChvError> {
+        Ok(())
     }
 
     async fn set_firewall_policy(
@@ -234,6 +251,7 @@ impl NetworkExecutor for RecordingExecutor {
         Ok(AppliedFabric {
             report: ApplyReport::default(),
             plan_generation: 1,
+            binding_generation: 1,
             tenant_mtu: 1380,
             consumer_veth: format!("chv-{}-a", network_id),
         })
@@ -241,6 +259,10 @@ impl NetworkExecutor for RecordingExecutor {
 
     async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
         Ok(())
+    }
+
+    async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
+        Ok(false)
     }
 
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
@@ -258,6 +280,17 @@ impl NetworkExecutor for RecordingExecutor {
             vxlan_interface_up: true,
             fdb_entry_count: 1,
         })
+    }
+
+    async fn reassert_tenant_mtu(
+        &self,
+        _network_id: &str,
+        _bridge_name: &str,
+        _subnet_cidr: &str,
+        _gateway_ip: &str,
+        _tenant_mtu: u32,
+    ) -> Result<(), ChvError> {
+        Ok(())
     }
 
     async fn set_firewall_policy(

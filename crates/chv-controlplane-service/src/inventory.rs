@@ -5,13 +5,21 @@ use chv_controlplane_store::{
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::enrollment::FABRIC_WIREGUARD_PORT;
 
 #[async_trait]
 pub trait InventoryService: Send + Sync {
+    /// `peer_addr` is the transport-level remote address of the gRPC call
+    /// (from `tonic::Request::remote_addr`). It is used to derive the
+    /// node's fabric underlay endpoint when the request does not carry
+    /// one explicitly.
     async fn report_node_inventory(
         &self,
         request: proto::ReportNodeInventoryRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
     async fn report_service_versions(
@@ -52,6 +60,7 @@ impl InventoryService for InventoryServiceImplementation {
     async fn report_node_inventory(
         &self,
         request: proto::ReportNodeInventoryRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let inventory = request
             .inventory
@@ -158,9 +167,19 @@ impl InventoryService for InventoryServiceImplementation {
                     node_id.as_str(),
                     &inventory.wireguard_public_key,
                     inventory.underlay_mtu,
-                    // Populated by a follow-up once node underlay addressing
-                    // is wired (the planner fails closed while it is NULL).
-                    None,
+                    // The inventory report carries no explicit underlay
+                    // endpoint, so derive one from the transport-level peer
+                    // address the control plane actually observed, pinned
+                    // to the fabric WireGuard port. NAT caveat: behind NAT
+                    // this is the NAT's mapped address — usually exactly
+                    // what remote peers must dial — but a NAT that maps
+                    // the gRPC connection differently from the node's
+                    // WireGuard listener yields an unreachable endpoint;
+                    // the fabric plan compiler surfaces unreachable peers
+                    // (fail closed) instead of guessing.
+                    peer_addr
+                        .map(|addr| format!("{}:{}", addr.ip(), FABRIC_WIREGUARD_PORT))
+                        .as_deref(),
                 )
                 .await?;
         }

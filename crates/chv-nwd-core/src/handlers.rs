@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Last successfully applied CHV firewall/NAT policy for a network, used to
 /// re-scope the CHV-owned interface guard set when a VM NIC attaches so the
@@ -154,9 +154,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
         // Idempotency and fabric generation fencing (ADR-021 §4): a fabric
         // plan older than the last applied generation for this network is
-        // rejected; an unchanged topology (including fabric generation)
-        // returns OK without re-applying.
-        if let Some(existing) = self.topologies.get(&spec.network_id) {
+        // rejected; an unchanged topology (including fabric generation,
+        // VNI, and VNI binding generation) returns OK without re-applying.
+        //
+        // The VNI and its binding generation participate in the equality
+        // (M1): a VNI re-bind bumps `binding_generation` while leaving
+        // `desired_generation` (and therefore the fabric plan generation)
+        // untouched — without these fields the replay would short-circuit
+        // and the datapath would keep the OLD VNI, silently cross-bleeding
+        // two networks.
+        let existing = self.topologies.get(&spec.network_id);
+        if let Some(existing) = existing.as_ref() {
             let new_fabric_generation = spec.fabric.as_ref().map(|f| f.plan_generation);
             if let (Some(applied_gen), Some(new_gen)) =
                 (existing.fabric_plan_generation, new_fabric_generation)
@@ -171,16 +179,62 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     return Ok(Response::new(Self::err_result(&e)));
                 }
             }
+            let new_vni = if spec.vni > 0 { Some(spec.vni) } else { None };
+            let new_binding_generation = spec.fabric.as_ref().map(|f| f.binding_generation);
+            // An explicitly carried tenant MTU that differs from the
+            // applied one must not be swallowed by the replay
+            // short-circuit (m8): the re-apply path re-asserts the MTU on
+            // the bridge, its ports, and dnsmasq. MTU 0 means "plan
+            // default", which cannot be compared before the apply.
+            let explicit_mtu_changed = spec
+                .fabric
+                .as_ref()
+                .map(|f| f.tenant_mtu > 0 && existing.tenant_mtu != Some(f.tenant_mtu))
+                .unwrap_or(false);
             if existing.bridge_name == spec.bridge_name
                 && existing.namespace_name == spec.namespace_name
                 && existing.subnet_cidr == spec.subnet_cidr
                 && existing.gateway_ip == spec.gateway_ip
                 && existing.fabric_plan_generation == new_fabric_generation
+                && existing.vni == new_vni
+                && existing.binding_generation == new_binding_generation
+                && !explicit_mtu_changed
             {
                 return Ok(Response::new(Self::ok_result()));
             }
+
+            // Fabric → bridge-only re-ensure (m7): the topology previously
+            // had a fabric overlay applied, and the new request carries no
+            // fabric plan (bridge-only). Remove the fabric overlay so the
+            // applied fabric object does not leak; the local re-ensure
+            // below rebuilds the bridge-only topology and the state upsert
+            // clears the fabric fields. Teardown semantics are fail-open
+            // (warn-and-continue) like the delete path — the residue stays
+            // visible via the provider ownership journal.
+            if existing.fabric_plan_generation.is_some() && spec.fabric.is_none() && spec.vni == 0 {
+                match self.executor.remove_fabric_overlay(&spec.network_id).await {
+                    Ok(()) => {
+                        self.metrics.increment_nwd_fabric_remove("success");
+                        info!(
+                            network_id = %spec.network_id,
+                            "fabric overlay removed on bridge-only re-ensure"
+                        );
+                    }
+                    Err(e) => {
+                        self.metrics.increment_nwd_fabric_remove("failure");
+                        warn!(
+                            network_id = %spec.network_id,
+                            error = %e,
+                            "fabric overlay removal failed on bridge-only re-ensure; \
+                             continuing with the local re-ensure (residue remains visible \
+                             via the provider ownership journal)"
+                        );
+                    }
+                }
+            }
         }
 
+        let fabric_intent = spec.fabric.is_some();
         let result = self.executor.ensure_topology(&spec).await;
         match result {
             Ok(TopologyApplyResult {
@@ -188,7 +242,35 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 bridge_handle: _,
                 tenant_mtu,
                 fabric_plan_generation,
+                binding_generation,
             }) => {
+                if fabric_plan_generation.is_some() {
+                    self.metrics.increment_nwd_fabric_apply("success");
+                }
+                // Tenant MTU change (m8): the running dnsmasq still
+                // advertises the old DHCP option 26 and the existing bridge
+                // ports (TAPs, fabric consumer veth) still carry the old
+                // MTU. Re-assert both before persisting the new state.
+                // Bounded: only when a previously applied MTU changed.
+                if let (Some(old_mtu), Some(new_mtu)) =
+                    (existing.as_ref().and_then(|s| s.tenant_mtu), tenant_mtu)
+                {
+                    if old_mtu != new_mtu {
+                        if let Err(e) = self
+                            .executor
+                            .reassert_tenant_mtu(
+                                &spec.network_id,
+                                &spec.bridge_name,
+                                &spec.subnet_cidr,
+                                &spec.gateway_ip,
+                                new_mtu,
+                            )
+                            .await
+                        {
+                            return Ok(Response::new(Self::err_result(&e)));
+                        }
+                    }
+                }
                 let vni = if spec.vni > 0 { Some(spec.vni) } else { None };
                 let state = TopologyState {
                     network_id: spec.network_id.clone(),
@@ -201,11 +283,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     vni,
                     tenant_mtu,
                     fabric_plan_generation,
+                    binding_generation,
                 };
-                self.topologies.upsert(state.clone());
+                self.topologies.upsert(state);
                 Ok(Response::new(Self::ok_result()))
             }
-            Err(e) => Ok(Response::new(Self::err_result(&e))),
+            Err(e) => {
+                if fabric_intent {
+                    self.metrics.increment_nwd_fabric_apply("failure");
+                }
+                Ok(Response::new(Self::err_result(&e)))
+            }
         }
     }
 
@@ -223,10 +311,62 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .unwrap_or_else(|| operation_span(""));
 
         if let Some(state) = self.topologies.get(&req.network_id) {
+            let fabric_was_applied = state.fabric_plan_generation.is_some();
             if let Err(e) = self.executor.delete_topology(&req.network_id, &state).await {
+                // The executor's fabric teardown inside delete_topology is
+                // fail-open (m5); a failure here is a local teardown
+                // failure.
+                if fabric_was_applied {
+                    self.metrics.increment_nwd_fabric_remove("failure");
+                }
                 return Ok(Response::new(Self::err_result(&e)));
             }
+            if fabric_was_applied {
+                self.metrics.increment_nwd_fabric_remove("success");
+            }
             self.topologies.remove(&req.network_id);
+        } else {
+            // No local topology state row (typically after an nwd restart
+            // wiped the in-memory table), but the fabric provider's durable
+            // ownership journal may still hold the network (M3). A delete
+            // must not silently no-op while the fabric network survives
+            // forever — bounded fix: check ownership and tear the fabric
+            // half down. (Full startup reconciliation stays a Phase-4
+            // item.) A fabric teardown failure must not turn this delete
+            // into an error — there is no local topology to fail on — but
+            // it is loudly visible.
+            match self.executor.fabric_owned(&req.network_id).await {
+                Ok(true) => match self.executor.remove_fabric_overlay(&req.network_id).await {
+                    Ok(()) => {
+                        self.metrics.increment_nwd_fabric_remove("success");
+                        info!(
+                            network_id = %req.network_id,
+                            "fabric overlay removed for network with no local topology \
+                             state (provider ownership journal held it across a restart)"
+                        );
+                    }
+                    Err(e) => {
+                        self.metrics.increment_nwd_fabric_remove("failure");
+                        warn!(
+                            network_id = %req.network_id,
+                            error = %e,
+                            "fabric overlay removal failed for network with no local \
+                             topology state; the fabric network may outlive the delete \
+                             (residue remains visible via the provider ownership journal)"
+                        );
+                    }
+                },
+                Ok(false) => {
+                    // Not owned by the fabric provider: nothing to do —
+                    // the current no-state behavior.
+                }
+                // Ownership cannot be determined: fail closed rather than
+                // silently no-op (the original leak was exactly a silent
+                // OK).
+                Err(e) => {
+                    return Ok(Response::new(Self::err_result(&e)));
+                }
+            }
         }
         // Drop any remembered policy so a stale firewall policy is not re-asserted
         // if a new topology with the same network_id is created later (#227 S5).
@@ -816,16 +956,37 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
         }
 
+        // VNI binding fence (M1): a binding_generation LOWER than the last
+        // applied one is a stale binding (e.g. a VNI re-bind raced by an
+        // older in-flight plan); applying it would strand the datapath on
+        // an outdated VNI. A higher or changed binding generation proceeds
+        // to re-apply — the update path never short-circuits.
+        if let Some(applied_binding) = state.binding_generation {
+            if fabric_plan.binding_generation < applied_binding {
+                let e = ChvError::StaleGeneration {
+                    resource: "network vni binding".to_string(),
+                    id: req.network_id.clone(),
+                    expected: applied_binding.to_string(),
+                    got: fabric_plan.binding_generation.to_string(),
+                };
+                return Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        }
+
         return match self
             .executor
             .apply_fabric_overlay(&req.network_id, req.vni, fabric_plan, &state.bridge_name)
             .await
         {
             Ok(applied) => {
+                self.metrics.increment_nwd_fabric_apply("success");
                 let updated_state = TopologyState {
                     vni: Some(req.vni),
                     tenant_mtu: Some(applied.tenant_mtu),
                     fabric_plan_generation: Some(applied.plan_generation),
+                    binding_generation: Some(applied.binding_generation),
                     ..state.clone()
                 };
                 self.topologies.upsert(updated_state);
@@ -848,9 +1009,12 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     result: Some(Self::ok_result()),
                 }))
             }
-            Err(e) => Ok(Response::new(proto::UpdateOverlayResponse {
-                result: Some(Self::err_result(&e)),
-            })),
+            Err(e) => {
+                self.metrics.increment_nwd_fabric_apply("failure");
+                Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                }))
+            }
         };
     }
 
@@ -1021,13 +1185,27 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         // provider. The legacy nolearning VXLAN datapath is retired, so a
         // topology without an applied fabric plan reports down.
         let status_info = if state.fabric_plan_generation.is_some() {
-            self.executor
-                .fabric_overlay_status(&req.network_id)
-                .await
-                .unwrap_or(OverlayStatusInfo {
-                    vxlan_interface_up: false,
-                    fdb_entry_count: 0,
-                })
+            match self.executor.fabric_overlay_status(&req.network_id).await {
+                Ok(info) => info,
+                // Provider disabled in configuration after the overlay was
+                // applied: the overlay state is unobservable in this
+                // process; report a truthful "down" rather than failing
+                // the read (nothing is invented — the fields stay zero).
+                Err(ChvError::InvalidArgument { field, reason })
+                    if field == "fabric" && reason.contains("disabled") =>
+                {
+                    OverlayStatusInfo {
+                        vxlan_interface_up: false,
+                        fdb_entry_count: 0,
+                    }
+                }
+                // Provider errors (foreign state, IO, ...) are surfaced
+                // through the structured ChvError mapping — never masked
+                // as a "down" status (m9). OverlayStatus carries no
+                // in-band result field, so the mapped tonic Status is the
+                // error channel for this RPC.
+                Err(e) => return Err(Status::from(e)),
+            }
         } else {
             OverlayStatusInfo {
                 vxlan_interface_up: false,

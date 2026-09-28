@@ -574,3 +574,114 @@ async fn decrypt_schedule_row_nulls_undecryptable_credential() {
     assert_ne!(row.s3_access_key.as_deref(), Some(bad_ciphertext));
     assert_ne!(row.s3_secret_key.as_deref(), Some(bad_ciphertext));
 }
+
+// --- ADR-021 fabric transport IP allocation (review finding M2) ---
+
+/// Helper: register a node row (vtep_registry has a foreign key on
+/// nodes.node_id) and return its id.
+async fn seed_fabric_node_row(pool: &StorePool, node_id: &str) {
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, ?, ?)")
+        .bind(node_id)
+        .bind(format!("host-{node_id}"))
+        .bind(format!("host-{node_id}"))
+        .execute(pool)
+        .await
+        .expect("insert node row");
+}
+
+/// Concurrent fabric identity registrations must not hand out the same
+/// 100.100.0.0/16 transport IP twice. The unique index from migration
+/// 0054 is the hard guarantee; the bounded retry in
+/// `register_fabric_identity` turns a lost race into a successful
+/// re-allocation instead of a spurious failure (review finding M2).
+#[tokio::test]
+async fn concurrent_fabric_identity_registrations_get_distinct_fabric_ips() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = VtepRepository::new(pool.clone());
+
+    const CONCURRENT_REGISTRATIONS: usize = 8;
+    for i in 0..CONCURRENT_REGISTRATIONS {
+        seed_fabric_node_row(&pool, &format!("node-m2-{i}")).await;
+    }
+
+    let mut handles = Vec::new();
+    for i in 0..CONCURRENT_REGISTRATIONS {
+        let repo = repo.clone();
+        let node_id = format!("node-m2-{i}");
+        handles.push(tokio::spawn(async move {
+            repo.register_fabric_identity(&node_id, &format!("pub-m2-{i}"), 1500, None)
+                .await
+        }));
+    }
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        handle
+            .await
+            .expect("registration task must not panic")
+            .unwrap_or_else(|e| panic!("registration {i} must succeed: {e}"));
+    }
+
+    let mut ips = Vec::new();
+    for i in 0..CONCURRENT_REGISTRATIONS {
+        let entry = repo
+            .get_vtep(&format!("node-m2-{i}"))
+            .await
+            .expect("get_vtep must succeed");
+        ips.push(entry.fabric_ip.expect("fabric IP must be allocated"));
+    }
+
+    // Distinctness is the invariant under test.
+    let mut sorted = ips.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        CONCURRENT_REGISTRATIONS,
+        "concurrent registrations must receive distinct fabric IPs, got {ips:?}"
+    );
+
+    // Every address must live in the 100.100.0.0/16 host range
+    // (100.100.0.1 ..= 100.100.255.254, ADR-021 §6).
+    let network_base: u32 = (100 << 24) | (100 << 16);
+    for ip in &ips {
+        let addr: std::net::Ipv4Addr = ip.parse().expect("fabric IP must parse as IPv4");
+        assert!(
+            (network_base + 1..=network_base + 65_534).contains(&u32::from(addr)),
+            "fabric IP {ip} outside 100.100.0.0/16 host range"
+        );
+    }
+}
+
+/// The migration 0054 unique index itself must reject a duplicate
+/// fabric_ip, independent of the allocation logic (review finding M2).
+#[tokio::test]
+async fn fabric_ip_unique_index_rejects_duplicate_rows() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    seed_fabric_node_row(&pool, "node-m2-idx-a").await;
+    seed_fabric_node_row(&pool, "node-m2-idx-b").await;
+
+    sqlx::query(
+        r#"INSERT INTO vtep_registry (node_id, vtep_ip, vtep_port, fabric_ip, updated_at)
+           VALUES ('node-m2-idx-a', '', 4789, '100.100.0.1',
+                   strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("first row with fabric_ip must insert");
+
+    let err = sqlx::query(
+        r#"INSERT INTO vtep_registry (node_id, vtep_ip, vtep_port, fabric_ip, updated_at)
+           VALUES ('node-m2-idx-b', '', 4789, '100.100.0.1',
+                   strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"#,
+    )
+    .execute(&pool)
+    .await
+    .expect_err("duplicate fabric_ip must violate the unique index");
+
+    assert!(
+        err.to_string().contains("UNIQUE constraint failed"),
+        "expected a UNIQUE constraint violation, got: {err}"
+    );
+}

@@ -25,6 +25,10 @@ pub struct TopologyApplyResult {
     /// Fabric plan generation applied by the fabric path, for stale-plan
     /// fencing on later updates. `None` for bridge-only topologies.
     pub fabric_plan_generation: Option<u64>,
+    /// VNI binding generation applied by the fabric path (ADR-021 §8), for
+    /// stale-binding fencing on later updates. `None` for bridge-only
+    /// topologies.
+    pub binding_generation: Option<u64>,
 }
 
 /// Overlay status as observed by the stretched-L2 fabric path (ADR-021).
@@ -147,12 +151,32 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     /// preserves the WireGuard key). Called before local topology teardown.
     async fn remove_fabric_overlay(&self, network_id: &str) -> Result<(), ChvError>;
 
+    /// Whether the fabric provider's durable ownership journal holds an
+    /// entry for this network. `Ok(false)` when the provider is disabled
+    /// in configuration or holds no entry — used by the delete path to
+    /// clean fabric residue after an nwd restart wiped the topology table.
+    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError>;
+
     /// The node's public fabric identity (WireGuard public key + measured
     /// underlay MTU). Fails closed when the fabric provider is disabled.
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError>;
 
     /// Observed fabric overlay status for a network.
     async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError>;
+
+    /// Re-assert a changed tenant MTU onto a running topology (m8): set
+    /// the MTU of the bridge and every currently enslaved port, then
+    /// restart the network's dnsmasq so DHCP option 26 advertises the new
+    /// value. Only invoked on an MTU change.
+    #[allow(clippy::too_many_arguments)]
+    async fn reassert_tenant_mtu(
+        &self,
+        network_id: &str,
+        bridge_name: &str,
+        subnet_cidr: &str,
+        gateway_ip: &str,
+        tenant_mtu: u32,
+    ) -> Result<(), ChvError>;
 }
 
 /// A service exposure tracked by the executor so the DNAT forward-accept rule
@@ -241,6 +265,20 @@ impl LinuxExecutor {
             string_args(&["link", "set", consumer_veth, "mtu", mtu.as_str()]),
             string_args(&["link", "set", consumer_veth, "up"]),
         ]
+    }
+
+    /// Host-namespace command sequence re-asserting the tenant MTU on the
+    /// bridge and every currently enslaved port (m8). `owned` is the
+    /// bridge plus its members as resolved by
+    /// [`LinuxExecutor::owned_ifaces_for_bridge`]; the fabric consumer
+    /// veth is a bridge member, so it is covered by the enumeration (the
+    /// provider also re-asserts it on apply).
+    fn port_mtu_commands(owned_ifaces: &[String], tenant_mtu: u32) -> Vec<Vec<String>> {
+        let mtu = tenant_mtu.to_string();
+        owned_ifaces
+            .iter()
+            .map(|dev| string_args(&["link", "set", "dev", dev, "mtu", mtu.as_str()]))
+            .collect()
     }
 
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
@@ -852,6 +890,38 @@ impl NetworkExecutor for LinuxExecutor {
             "ensuring topology"
         );
 
+        // Fail closed on a fabric plan that cannot be realized (m6):
+        // symmetric with the missing-plan error below — a plan with
+        // vni == 0 or a non-VXLAN overlay type is never silently skipped,
+        // which would desynchronize the datapath from the desired state.
+        if spec.fabric.is_some() {
+            if spec.vni == 0 {
+                return Err(ChvError::InvalidArgument {
+                    field: "vni".to_string(),
+                    reason: format!(
+                        "fabric plan present for network {} but vni is 0; \
+                         a fabric overlay requires a nonzero VNI",
+                        spec.network_id
+                    ),
+                });
+            }
+            if spec.overlay_type != OverlayType::OverlayVxlan as i32 {
+                return Err(ChvError::InvalidArgument {
+                    field: "overlay_type".to_string(),
+                    reason: format!(
+                        "fabric plan present for network {} but overlay_type is {} \
+                         ({}), not OVERLAY_VXLAN ({})",
+                        spec.network_id,
+                        spec.overlay_type,
+                        OverlayType::try_from(spec.overlay_type)
+                            .map(|t| t.as_str_name())
+                            .unwrap_or("unknown"),
+                        OverlayType::OverlayVxlan as i32
+                    ),
+                });
+            }
+        }
+
         // Bridge
         if !Self::bridge_exists(&spec.bridge_name).await {
             Self::run_ip(&["link", "add", &spec.bridge_name, "type", "bridge"]).await?;
@@ -891,6 +961,7 @@ impl NetworkExecutor for LinuxExecutor {
         // never configured and the executor failed closed).
         let mut tenant_mtu = None;
         let mut fabric_plan_generation = None;
+        let mut binding_generation = None;
         if spec.vni > 0 && spec.overlay_type == OverlayType::OverlayVxlan as i32 {
             let fabric_plan = spec
                 .fabric
@@ -913,6 +984,7 @@ impl NetworkExecutor for LinuxExecutor {
             );
             tenant_mtu = Some(applied.tenant_mtu);
             fabric_plan_generation = Some(applied.plan_generation);
+            binding_generation = Some(applied.binding_generation);
         }
 
         // Start dnsmasq for DHCP
@@ -943,6 +1015,7 @@ impl NetworkExecutor for LinuxExecutor {
             bridge_handle: spec.bridge_name.clone(),
             tenant_mtu,
             fabric_plan_generation,
+            binding_generation,
         })
     }
 
@@ -963,8 +1036,33 @@ impl NetworkExecutor for LinuxExecutor {
         // tenant bridge enslaves the fabric's consumer veth, so the fabric
         // network objects must be removed before local teardown. The shared
         // fabric and the WireGuard key survive (ADR-021 §4).
+        //
+        // Teardown is fail-open for the fabric half only (m5): a persistent
+        // fabric error — or a fabric provider disabled in configuration
+        // after the overlay was applied — must not block dnsmasq/netns/
+        // bridge/nft cleanup forever. The residue stays visible via the
+        // provider's durable ownership journal, and the apply path remains
+        // fail-closed.
         if state.fabric_plan_generation.is_some() {
-            self.remove_fabric_overlay(network_id).await?;
+            match self.fabric.as_ref() {
+                None => {
+                    warn!(
+                        network_id = %network_id,
+                        "fabric provider disabled in nwd configuration; skipping fabric \
+                         teardown (residue remains visible via the provider ownership journal)"
+                    );
+                }
+                Some(fabric) => {
+                    if let Err(e) = fabric.remove_network(network_id).await {
+                        warn!(
+                            network_id = %network_id,
+                            error = %e,
+                            "fabric overlay removal failed; continuing local topology \
+                             teardown (fail-open for teardown only — apply stays fail-closed)"
+                        );
+                    }
+                }
+            }
         }
 
         Self::stop_dnsmasq(network_id).await;
@@ -1313,6 +1411,15 @@ impl NetworkExecutor for LinuxExecutor {
         fabric.remove_network(network_id).await
     }
 
+    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError> {
+        match self.fabric.as_ref() {
+            // Provider disabled in configuration: this process holds (and
+            // can observe) no fabric state.
+            None => Ok(false),
+            Some(fabric) => fabric.fabric_owned(network_id).await,
+        }
+    }
+
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
         let fabric = self.fabric_handle()?;
         fabric.identity().await
@@ -1321,6 +1428,49 @@ impl NetworkExecutor for LinuxExecutor {
     async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError> {
         let fabric = self.fabric_handle()?;
         fabric.overlay_status(network_id).await
+    }
+
+    async fn reassert_tenant_mtu(
+        &self,
+        network_id: &str,
+        bridge_name: &str,
+        subnet_cidr: &str,
+        gateway_ip: &str,
+        tenant_mtu: u32,
+    ) -> Result<(), ChvError> {
+        // Serialize with topology create/delete so the port enumeration
+        // cannot race a concurrent enslavement.
+        let _guard = self.nft_lock.lock().await;
+        info!(
+            network_id = %network_id,
+            bridge = %bridge_name,
+            tenant_mtu = tenant_mtu,
+            "tenant MTU changed; re-asserting bridge/port MTUs and restarting dnsmasq"
+        );
+
+        // (a) Re-assert the bridge MTU and the MTU of every port currently
+        // enslaved to it (TAPs and the fabric consumer veth alike).
+        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        for args in Self::port_mtu_commands(&owned, tenant_mtu) {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            Self::run_ip(&refs).await?;
+        }
+
+        // (b) Restart dnsmasq so the rewritten config (DHCP option 26)
+        // takes effect; start_dnsmasq early-returns while the old instance
+        // is still running.
+        if !subnet_cidr.is_empty() && !gateway_ip.is_empty() {
+            Self::stop_dnsmasq(network_id).await;
+            Self::start_dnsmasq(
+                network_id,
+                bridge_name,
+                subnet_cidr,
+                gateway_ip,
+                Some(tenant_mtu),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -1447,6 +1597,48 @@ mod tests {
     }
 
     #[test]
+    fn port_mtu_commands_cover_bridge_and_every_enslaved_port() {
+        let commands = LinuxExecutor::port_mtu_commands(
+            &[
+                "br-net-1".to_string(),
+                "chv-c-0123abcd".to_string(),
+                "tap-12ab".to_string(),
+            ],
+            1400,
+        );
+        assert_eq!(
+            commands,
+            vec![
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "br-net-1".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "chv-c-0123abcd".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "tap-12ab".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+            ],
+            "the MTU must be re-asserted on the bridge and every enslaved port"
+        );
+    }
+
+    #[test]
     fn tap_name_is_stable_and_linux_safe_length() {
         let nic_id = "95f4f899-58b9-44b6-95f5-0f35a2e590a6-default-network";
         let a = LinuxExecutor::tap_name_for_nic(nic_id);
@@ -1454,6 +1646,161 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.len() <= 15, "tap name exceeds Linux IFNAMSIZ: {}", a);
         assert!(a.starts_with("tap-"));
+    }
+
+    // ---- fabric plan present but unrealizable (m6) -------------------------
+
+    fn vxlan_spec_with_fabric(vni: u32, overlay_type: i32) -> TopologySpec {
+        TopologySpec {
+            network_id: "net-m6".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-m6".to_string(),
+            namespace_name: "ns-m6".to_string(),
+            subnet_cidr: "10.0.60.0/24".to_string(),
+            gateway_ip: "10.0.60.1".to_string(),
+            options: Default::default(),
+            vni,
+            vtep_endpoints: vec![],
+            overlay_type,
+            fabric: Some(FabricPlan::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_plan_with_zero_vni_is_rejected_fail_closed() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        // Validation happens before any host command, so this is safe to
+        // run unprivileged.
+        let err = executor
+            .ensure_topology(&vxlan_spec_with_fabric(0, OverlayType::OverlayVxlan as i32))
+            .await
+            .expect_err("fabric plan with vni 0 must be rejected");
+        match err {
+            ChvError::InvalidArgument { field, reason } => {
+                assert_eq!(field, "vni");
+                assert!(reason.contains("vni is 0"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_plan_with_non_vxlan_overlay_type_is_rejected_fail_closed() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        let err = executor
+            .ensure_topology(&vxlan_spec_with_fabric(
+                100,
+                OverlayType::OverlayNone as i32,
+            ))
+            .await
+            .expect_err("fabric plan with a non-VXLAN overlay type must be rejected");
+        match err {
+            ChvError::InvalidArgument { field, reason } => {
+                assert_eq!(field, "overlay_type");
+                assert!(reason.contains("OVERLAY_VXLAN"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
+    }
+
+    // ---- fabric teardown is fail-open in the delete path (m5) --------------
+
+    /// Fabric handle whose every operation fails; used to prove the delete
+    /// path completes local teardown despite persistent fabric errors.
+    struct FailingFabricHandle;
+
+    #[async_trait]
+    impl crate::fabric::FabricHandle for FailingFabricHandle {
+        async fn apply(
+            &self,
+            _network_id: &str,
+            _vni: u32,
+            _plan: &FabricPlan,
+        ) -> Result<AppliedFabric, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric apply deliberately failing".to_string(),
+            })
+        }
+
+        async fn remove_network(&self, _network_id: &str) -> Result<(), ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric remove deliberately failing".to_string(),
+            })
+        }
+
+        async fn identity(&self) -> Result<FabricIdentity, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric identity deliberately failing".to_string(),
+            })
+        }
+
+        async fn consumer_veth(&self, _network_id: &str) -> Result<String, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric consumer veth deliberately failing".to_string(),
+            })
+        }
+
+        async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric ownership deliberately failing".to_string(),
+            })
+        }
+
+        async fn overlay_status(&self, _network_id: &str) -> Result<OverlayStatusInfo, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric status deliberately failing".to_string(),
+            })
+        }
+    }
+
+    fn fabric_backed_state() -> crate::state::TopologyState {
+        crate::state::TopologyState {
+            network_id: "net-m5".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-m5-nonexistent".to_string(),
+            namespace_name: "ns-m5-nonexistent".to_string(),
+            subnet_cidr: "10.0.61.0/24".to_string(),
+            gateway_ip: "10.0.61.1".to_string(),
+            runtime_status: "ensured".to_string(),
+            vni: Some(100),
+            tenant_mtu: Some(1380),
+            fabric_plan_generation: Some(1),
+            binding_generation: Some(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_topology_continues_local_teardown_when_fabric_removal_fails() {
+        let executor =
+            LinuxExecutor::new(std::env::temp_dir()).with_fabric(Arc::new(FailingFabricHandle));
+        // Local teardown targets objects that do not exist on this host, so
+        // every local step is a no-op — the assertion is that the fabric
+        // failure does NOT abort the delete (previously it failed forever).
+        executor
+            .delete_topology("net-m5", &fabric_backed_state())
+            .await
+            .expect("delete must succeed despite persistent fabric errors");
+    }
+
+    #[tokio::test]
+    async fn delete_topology_skips_fabric_removal_when_provider_disabled() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        executor
+            .delete_topology("net-m5", &fabric_backed_state())
+            .await
+            .expect("delete must succeed when the fabric provider is disabled");
+    }
+
+    #[tokio::test]
+    async fn fabric_owned_is_false_when_provider_disabled() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        assert!(
+            !executor
+                .fabric_owned("net-1")
+                .await
+                .expect("ownership lookup must not fail when disabled"),
+            "a disabled provider owns nothing"
+        );
     }
 
     #[test]

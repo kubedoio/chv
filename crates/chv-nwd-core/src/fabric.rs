@@ -57,6 +57,9 @@ pub struct AppliedFabric {
     pub report: ApplyReport,
     /// The plan generation that was applied.
     pub plan_generation: u64,
+    /// The VNI binding generation that was applied (from
+    /// `vni_allocations.binding_generation`, ADR-021 §8).
+    pub binding_generation: u64,
     /// The tenant MTU in effect after the apply.
     pub tenant_mtu: u32,
     /// Host-namespace consumer veth to enslave to the tenant bridge.
@@ -93,6 +96,11 @@ pub trait FabricHandle: Send + Sync + 'static {
 
     /// The deterministic host-namespace consumer veth name for a network.
     async fn consumer_veth(&self, network_id: &str) -> Result<String, ChvError>;
+
+    /// Whether the provider's durable ownership journal holds an entry for
+    /// this network. `Ok(false)` when the provider holds no entry (e.g.
+    /// after a restart with no state row, or a network never applied).
+    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError>;
 
     /// Observed fabric overlay status for a network.
     async fn overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError>;
@@ -359,6 +367,7 @@ impl<R: FabricCommand + Send + 'static> FabricHandle for NwdFabricProvider<R> {
         let plan = to_plan(network_id, vni, plan, self.defaults)?;
         let consumer_veth = self.names.consumer_port_veth(network_id);
         let plan_generation = plan.plan_generation;
+        let binding_generation = plan.binding_generation;
         let tenant_mtu = plan.tenant_mtu;
         let provider = self.provider.clone();
         let config = self.config.clone();
@@ -378,6 +387,7 @@ impl<R: FabricCommand + Send + 'static> FabricHandle for NwdFabricProvider<R> {
         Ok(AppliedFabric {
             report,
             plan_generation,
+            binding_generation,
             tenant_mtu,
             consumer_veth,
         })
@@ -442,6 +452,26 @@ impl<R: FabricCommand + Send + 'static> FabricHandle for NwdFabricProvider<R> {
         Ok(self.names.consumer_port_veth(network_id))
     }
 
+    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError> {
+        let network_id = network_id.to_string();
+        let provider = self.provider.clone();
+        let config = self.config.clone();
+        let runner = self.runner.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut guard = provider.lock().map_err(|_| lock_poisoned())?;
+            Self::open_provider(&mut guard, &config, &runner)?;
+            let Some(provider) = guard.as_ref() else {
+                return Err(lock_poisoned());
+            };
+            // The durable ownership journal is the source of truth; it
+            // survives nwd restarts (unlike the in-memory topology table).
+            Ok(provider.ownership().networks.contains_key(&network_id))
+        })
+        .await
+        .map_err(|e| join_error("ownership", e))?
+    }
+
     async fn overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError> {
         let network_id = network_id.to_string();
         let provider = self.provider.clone();
@@ -487,29 +517,26 @@ impl<R: FabricCommand + Send + 'static> FabricHandle for NwdFabricProvider<R> {
 
 /// Measure the default-route (underlay) interface MTU, raw — no VXLAN or
 /// WireGuard overhead is subtracted; the control plane derives tenant/fabric
-/// MTUs from this value (ADR-021 §3). Falls back to 1500 when the default
-/// route or its MTU cannot be observed.
+/// MTUs from this value (ADR-021 §3).
+///
+/// Returns `0` when the default route or its MTU cannot be observed (no
+/// default route, no device on the selected route, no `mtu` on the link):
+/// `0` means "unmeasured", never a guessed value. The control plane stores
+/// NULL for `0` and the plan compiler then applies the 1380/1440 defaults,
+/// so an unmeasured MTU is never mistaken for a measured 1500.
 pub(crate) async fn measure_underlay_mtu() -> u32 {
-    const FALLBACK_MTU: u32 = 1500;
-
     let route_output = match tokio::process::Command::new("ip")
         .args(["route", "show", "default"])
         .output()
         .await
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return FALLBACK_MTU,
+        _ => return 0,
     };
 
-    // Parse "default via X.X.X.X dev eth0" to get the device name.
-    let Some(dev) = route_output
-        .split_whitespace()
-        .skip_while(|w| *w != "dev")
-        .nth(1)
-    else {
-        return FALLBACK_MTU;
+    let Some(dev) = parse_default_route_device(&route_output) else {
+        return 0;
     };
-    let dev = dev.to_string();
 
     let mtu_output = match tokio::process::Command::new("ip")
         .args(["link", "show", "dev", &dev])
@@ -517,15 +544,55 @@ pub(crate) async fn measure_underlay_mtu() -> u32 {
         .await
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return FALLBACK_MTU,
+        _ => return 0,
     };
 
-    mtu_output
+    parse_link_mtu(&mtu_output).unwrap_or(0)
+}
+
+/// Select the default-route device from `ip route show default` output.
+///
+/// Multiple default routes can exist (e.g. `dhcp` + a static fallback).
+/// Selection is deterministic: every `default ...` line is parsed, the
+/// route with the LOWEST `metric` wins (a line without a `metric` field
+/// has kernel metric 0), ties break to the first line. Returns `None`
+/// when no line yields a device.
+fn parse_default_route_device(output: &str) -> Option<String> {
+    let mut best: Option<(u32, String)> = None;
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"default") {
+            continue;
+        }
+        let Some(dev_idx) = fields.iter().position(|f| *f == "dev") else {
+            continue;
+        };
+        let Some(dev) = fields.get(dev_idx + 1) else {
+            continue;
+        };
+        // A missing `metric` field is kernel metric 0 (the lowest).
+        let metric = fields
+            .iter()
+            .position(|f| *f == "metric")
+            .and_then(|i| fields.get(i + 1))
+            .and_then(|m| m.parse::<u32>().ok())
+            .unwrap_or(0);
+        let is_better = best.as_ref().map(|(m, _)| metric < *m).unwrap_or(true);
+        if is_better {
+            best = Some((metric, dev.to_string()));
+        }
+    }
+    best.map(|(_, dev)| dev)
+}
+
+/// Extract the MTU from `ip link show dev <dev>` output.
+fn parse_link_mtu(output: &str) -> Option<u32> {
+    output
         .split_whitespace()
         .skip_while(|w| *w != "mtu")
-        .nth(1)
-        .and_then(|m| m.parse::<u32>().ok())
-        .unwrap_or(FALLBACK_MTU)
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -796,7 +863,10 @@ mod tests {
 
         let identity = provider.identity().await.expect("identity must succeed");
         assert_eq!(identity.public_key.len(), 44);
-        assert!(identity.underlay_mtu > 0);
+        // The underlay MTU is a real measurement: 0 when unmeasured (no
+        // default route / no observable MTU), never an invented fallback —
+        // the CP stores NULL for 0 and derives defaults from it.
+        assert!(identity.underlay_mtu == 0 || identity.underlay_mtu >= 576);
 
         {
             let kernel = runner.lock().expect("runner lock");
@@ -880,6 +950,118 @@ mod tests {
         assert!(veth.len() < 16, "veth name must fit IFNAMSIZ: {veth}");
 
         let _unused = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn fabric_owned_reflects_the_ownership_journal() {
+        let root = test_root("owned");
+        let runner = Arc::new(StdMutex::new(RecordingRunner::new()));
+        let provider = test_provider(&root, runner.clone());
+
+        // Unknown network: not owned.
+        assert!(
+            !provider
+                .fabric_owned("net-1")
+                .await
+                .expect("ownership lookup"),
+            "a never-applied network is not owned"
+        );
+
+        provider
+            .apply("net-1", 100, &proto_plan())
+            .await
+            .expect("apply must succeed");
+
+        // Owned after apply — the durable journal survives even though no
+        // topology-table row exists (the M3 restart scenario).
+        assert!(
+            provider
+                .fabric_owned("net-1")
+                .await
+                .expect("ownership lookup"),
+            "an applied network is owned"
+        );
+
+        provider
+            .remove_network("net-1")
+            .await
+            .expect("remove must succeed");
+        assert!(
+            !provider
+                .fabric_owned("net-1")
+                .await
+                .expect("ownership lookup"),
+            "a removed network is not owned"
+        );
+
+        let _unused = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- underlay MTU measurement parsing (m4) -----------------------------
+
+    #[test]
+    fn parse_default_route_device_prefers_lowest_metric() {
+        let output = "\
+default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.42 metric 100
+default via 10.0.0.1 dev wlan0 proto static metric 50
+default via 10.0.0.254 dev tun0 metric 600
+";
+        assert_eq!(
+            parse_default_route_device(output).as_deref(),
+            Some("wlan0"),
+            "the lowest-metric default route must win"
+        );
+    }
+
+    #[test]
+    fn parse_default_route_device_breaks_metric_ties_by_first_line() {
+        let output = "\
+default via 10.0.0.1 dev eth1 metric 50
+default via 10.0.0.2 dev eth2 metric 50
+";
+        assert_eq!(
+            parse_default_route_device(output).as_deref(),
+            Some("eth1"),
+            "equal metrics must break to the first line"
+        );
+    }
+
+    #[test]
+    fn parse_default_route_device_treats_missing_metric_as_zero() {
+        let output = "\
+default via 10.0.0.1 dev eth0 metric 100
+default via 10.0.0.2 dev eth9 proto static
+";
+        assert_eq!(
+            parse_default_route_device(output).as_deref(),
+            Some("eth9"),
+            "a route without a metric field is kernel metric 0 (lowest)"
+        );
+    }
+
+    #[test]
+    fn parse_default_route_device_ignores_non_default_lines() {
+        assert_eq!(parse_default_route_device(""), None);
+        assert_eq!(
+            parse_default_route_device("10.0.0.0/8 via 10.0.0.1 dev eth0 metric 5\n"),
+            None,
+            "non-default routes must not be selected"
+        );
+        assert_eq!(
+            parse_default_route_device("default via 10.0.0.1 proto static\n"),
+            None,
+            "a default route without a device yields nothing"
+        );
+    }
+
+    #[test]
+    fn parse_link_mtu_extracts_mtu_from_ip_link_output() {
+        let output = "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000";
+        assert_eq!(parse_link_mtu(output), Some(1500));
+        assert_eq!(
+            parse_link_mtu("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> qdisc noop state DOWN"),
+            None
+        );
     }
 
     #[test]

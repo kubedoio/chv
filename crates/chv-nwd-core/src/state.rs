@@ -17,6 +17,13 @@ pub struct TopologyState {
     /// Last applied fabric plan generation for stale-plan fencing
     /// (ADR-021 §4). `None` for bridge-only topologies.
     pub fabric_plan_generation: Option<u64>,
+    /// VNI binding generation of the last applied fabric plan (from
+    /// `vni_allocations.binding_generation`, ADR-021 §8). A VNI re-bind
+    /// bumps this while `desired_generation` (and therefore
+    /// `fabric_plan_generation`) stays put, so it fences stale bindings
+    /// that the plan generation alone cannot detect. `None` for
+    /// bridge-only topologies.
+    pub binding_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,6 +71,7 @@ mod tests {
             vni: None,
             tenant_mtu: None,
             fabric_plan_generation: None,
+            binding_generation: None,
         }
     }
 
