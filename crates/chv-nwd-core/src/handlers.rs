@@ -153,12 +153,30 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             return Ok(Response::new(Self::err_result(&e)));
         }
 
-        // Idempotency: if already ensured with same network_id, return OK
+        // Idempotency and fabric generation fencing (ADR-021 §4): a fabric
+        // plan older than the last applied generation for this network is
+        // rejected; an unchanged topology (including fabric generation)
+        // returns OK without re-applying.
         if let Some(existing) = self.topologies.get(&spec.network_id) {
+            let new_fabric_generation = spec.fabric.as_ref().map(|f| f.plan_generation);
+            if let (Some(applied_gen), Some(new_gen)) =
+                (existing.fabric_plan_generation, new_fabric_generation)
+            {
+                if new_gen < applied_gen {
+                    let e = ChvError::StaleGeneration {
+                        resource: "network".to_string(),
+                        id: spec.network_id.clone(),
+                        expected: applied_gen.to_string(),
+                        got: new_gen.to_string(),
+                    };
+                    return Ok(Response::new(Self::err_result(&e)));
+                }
+            }
             if existing.bridge_name == spec.bridge_name
                 && existing.namespace_name == spec.namespace_name
                 && existing.subnet_cidr == spec.subnet_cidr
                 && existing.gateway_ip == spec.gateway_ip
+                && existing.fabric_plan_generation == new_fabric_generation
             {
                 return Ok(Response::new(Self::ok_result()));
             }
@@ -169,6 +187,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Ok(TopologyApplyResult {
                 namespace_handle: _,
                 bridge_handle: _,
+                tenant_mtu,
+                fabric_plan_generation,
             }) => {
                 let vni = if spec.vni > 0 { Some(spec.vni) } else { None };
                 let peer_vteps: Vec<String> = spec
@@ -186,6 +206,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     runtime_status: "ensured".to_string(),
                     vni,
                     peer_vteps,
+                    tenant_mtu,
+                    fabric_plan_generation,
                 };
                 self.topologies.upsert(state.clone());
                 Ok(Response::new(Self::ok_result()))
@@ -325,6 +347,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 &nic.nic_id,
                 &nic.vm_id,
                 &state.bridge_name,
+                state.tenant_mtu,
                 &nic.mac_address,
                 &nic.ip_address,
             )
@@ -793,6 +816,64 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }));
         }
 
+        // Stretched-L2 fabric path (ADR-021): a fabric plan supersedes the
+        // legacy FDB reconciliation below. Generation fencing happens here
+        // (the handler owns the topology table); the executor applies,
+        // grafts the consumer veth into the tenant bridge, and returns the
+        // applied generation/MTU for state persistence.
+        if let Some(fabric_plan) = req.fabric.as_ref() {
+            if let Some(applied_gen) = state.fabric_plan_generation {
+                if fabric_plan.plan_generation < applied_gen {
+                    let e = ChvError::StaleGeneration {
+                        resource: "network".to_string(),
+                        id: req.network_id.clone(),
+                        expected: applied_gen.to_string(),
+                        got: fabric_plan.plan_generation.to_string(),
+                    };
+                    return Ok(Response::new(proto::UpdateOverlayResponse {
+                        result: Some(Self::err_result(&e)),
+                    }));
+                }
+            }
+
+            return match self
+                .executor
+                .apply_fabric_overlay(&req.network_id, req.vni, fabric_plan, &state.bridge_name)
+                .await
+            {
+                Ok(applied) => {
+                    let updated_state = TopologyState {
+                        vni: Some(req.vni),
+                        tenant_mtu: Some(applied.tenant_mtu),
+                        fabric_plan_generation: Some(applied.plan_generation),
+                        ..state.clone()
+                    };
+                    self.topologies.upsert(updated_state);
+                    // Re-assert the CHV firewall/NAT guard scope: the fabric
+                    // consumer veth just joined the tenant bridge (same
+                    // reasoning as NIC attach; fail closed).
+                    if let Err(e) = self.refresh_policy_scope(&state).await {
+                        return Ok(Response::new(proto::UpdateOverlayResponse {
+                            result: Some(Self::err_result(&e)),
+                        }));
+                    }
+                    info!(
+                        network_id = %req.network_id,
+                        vni = req.vni,
+                        plan_generation = applied.plan_generation,
+                        tenant_mtu = applied.tenant_mtu,
+                        "fabric overlay updated"
+                    );
+                    Ok(Response::new(proto::UpdateOverlayResponse {
+                        result: Some(Self::ok_result()),
+                    }))
+                }
+                Err(e) => Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                })),
+            };
+        }
+
         // Sync explicit FDB entries for peer VTEPs (unicast MAC-to-VTEP mappings)
         for fdb in &req.fdb_entries {
             if let Err(e) = self
@@ -1016,6 +1097,26 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }));
         }
 
+        // Fabric-backed topologies (ADR-021) report from the fabric
+        // provider; legacy nolearning VXLAN topologies keep the
+        // namespace-local query below.
+        if state.fabric_plan_generation.is_some() {
+            let status_info = match self.executor.fabric_overlay_status(&req.network_id).await {
+                Ok(s) => s,
+                Err(_) => OverlayStatusInfo {
+                    vxlan_interface_up: false,
+                    fdb_entry_count: 0,
+                },
+            };
+            return Ok(Response::new(proto::OverlayStatus {
+                network_id: req.network_id,
+                vni,
+                vxlan_interface_up: status_info.vxlan_interface_up,
+                fdb_entry_count: status_info.fdb_entry_count,
+                ebpf_programs_loaded: self.ebpf.loaded_program_count(),
+            }));
+        }
+
         let status_info: OverlayStatusInfo = match self
             .executor
             .get_overlay_status(&state.namespace_name, vni)
@@ -1035,5 +1136,30 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             fdb_entry_count: status_info.fdb_entry_count,
             ebpf_programs_loaded: self.ebpf.loaded_program_count(),
         }))
+    }
+
+    async fn get_fabric_identity(
+        &self,
+        request: Request<proto::GetFabricIdentityRequest>,
+    ) -> Result<Response<proto::FabricIdentityResponse>, Status> {
+        self.metrics
+            .increment_counter("nwd_get_fabric_identity_total");
+        let _ = request.into_inner();
+
+        // Fail closed with an in-band error when the fabric provider is
+        // disabled: no identity is invented, and no key is ever returned as
+        // private material (only the public key leaves this handler).
+        match self.executor.fabric_identity().await {
+            Ok(identity) => Ok(Response::new(proto::FabricIdentityResponse {
+                result: Some(Self::ok_result()),
+                public_key: identity.public_key,
+                underlay_mtu: identity.underlay_mtu,
+            })),
+            Err(e) => Ok(Response::new(proto::FabricIdentityResponse {
+                result: Some(Self::err_result(&e)),
+                public_key: String::new(),
+                underlay_mtu: 0,
+            })),
+        }
     }
 }

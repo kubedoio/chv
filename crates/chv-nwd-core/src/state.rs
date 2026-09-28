@@ -13,6 +13,12 @@ pub struct TopologyState {
     pub vni: Option<u32>,
     /// Tracked peer VTEP IPs for FDB reconciliation on topology updates.
     pub peer_vteps: Vec<String>,
+    /// Tenant MTU applied by the fabric path (DHCP option 26, bridge/TAP
+    /// MTU). `None` for bridge-only topologies.
+    pub tenant_mtu: Option<u32>,
+    /// Last applied fabric plan generation for stale-plan fencing
+    /// (ADR-021 §4). `None` for bridge-only topologies.
+    pub fabric_plan_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +65,8 @@ mod tests {
             runtime_status: "ensured".to_string(),
             vni: None,
             peer_vteps: Vec::new(),
+            tenant_mtu: None,
+            fabric_plan_generation: None,
         }
     }
 

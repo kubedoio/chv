@@ -149,6 +149,77 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     generated
 }
 
+/// Fabric overlay (ADR-021) configuration for the network daemon.
+///
+/// When `enabled` is false (the default), `chv-nwd` runs bridge-only and every
+/// fabric RPC fails closed. `state_dir` MUST be persistent (not under `/run`,
+/// which is tmpfs): it holds the fabric ownership journal and the host's
+/// WireGuard private key, which must survive reboots and fabric teardown.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FabricNwdConfig {
+    /// Master switch for the stretched-L2 fabric provider.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Durable state root (ownership journal, plan journal, WireGuard key).
+    #[serde(default = "default_fabric_state_dir")]
+    pub state_dir: PathBuf,
+
+    /// Interface-name prefix for generated fabric objects (netns, WireGuard,
+    /// veths). Bounded to 4 characters by the shared provider (IFNAMSIZ).
+    #[serde(default = "default_fabric_name_prefix")]
+    pub name_prefix: String,
+
+    /// WireGuard listen port (shared Kubedo fabric convention).
+    #[serde(default = "default_fabric_wireguard_port")]
+    pub wireguard_port: u16,
+
+    /// VXLAN destination port inside the tunnel.
+    #[serde(default = "default_fabric_vxlan_port")]
+    pub vxlan_port: u16,
+
+    /// Tenant MTU used when a fabric plan omits it (underlay 1500 − 110 − 10).
+    #[serde(default = "default_fabric_tenant_mtu")]
+    pub default_tenant_mtu: u32,
+
+    /// Fabric (WireGuard) MTU used when a fabric plan omits it.
+    #[serde(default = "default_fabric_fabric_mtu")]
+    pub default_fabric_mtu: u32,
+}
+
+impl Default for FabricNwdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state_dir: default_fabric_state_dir(),
+            name_prefix: default_fabric_name_prefix(),
+            wireguard_port: default_fabric_wireguard_port(),
+            vxlan_port: default_fabric_vxlan_port(),
+            default_tenant_mtu: default_fabric_tenant_mtu(),
+            default_fabric_mtu: default_fabric_fabric_mtu(),
+        }
+    }
+}
+
+fn default_fabric_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/chv/nwd/fabric")
+}
+fn default_fabric_name_prefix() -> String {
+    "chv".to_string()
+}
+fn default_fabric_wireguard_port() -> u16 {
+    65_001
+}
+fn default_fabric_vxlan_port() -> u16 {
+    4789
+}
+fn default_fabric_tenant_mtu() -> u32 {
+    1380
+}
+fn default_fabric_fabric_mtu() -> u32 {
+    1440
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("io error: {0}")]
@@ -292,6 +363,9 @@ pub struct NwdConfig {
     /// eBPF policy engine settings.
     #[serde(default)]
     pub ebpf: EbpfConfig,
+    /// Stretched-L2 fabric (ADR-021) settings.
+    #[serde(default)]
+    pub fabric: FabricNwdConfig,
 }
 
 impl Default for NwdConfig {
@@ -303,6 +377,7 @@ impl Default for NwdConfig {
             metrics_bind: None,
             overlay: OverlayConfig::default(),
             ebpf: EbpfConfig::default(),
+            fabric: FabricNwdConfig::default(),
         }
     }
 }
@@ -746,6 +821,49 @@ max_lifetime_secs = 1200
         assert_eq!(config.authority_mode, AgentAuthorityMode::CoreManaged);
         assert!(config.jwt_secret.len() >= 32);
         assert_ne!(config.jwt_secret, "short");
+    }
+
+    #[test]
+    fn nwd_config_fabric_defaults_and_overrides() {
+        let defaulted = load_nwd_config(None).expect("default nwd config");
+        assert!(!defaulted.fabric.enabled);
+        assert_eq!(
+            defaulted.fabric.state_dir,
+            PathBuf::from("/var/lib/chv/nwd/fabric")
+        );
+        assert_eq!(defaulted.fabric.name_prefix, "chv");
+        assert_eq!(defaulted.fabric.wireguard_port, 65001);
+        assert_eq!(defaulted.fabric.vxlan_port, 4789);
+        assert_eq!(defaulted.fabric.default_tenant_mtu, 1380);
+        assert_eq!(defaulted.fabric.default_fabric_mtu, 1440);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("nwd.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+socket_path = "/run/chv/nwd/api.sock"
+runtime_dir = "/run/chv/nwd"
+log_level = "info"
+
+[fabric]
+enabled = true
+state_dir = "/var/lib/chv/nwd/fabric"
+name_prefix = "chv"
+wireguard_port = 65002
+vxlan_port = 4790
+default_tenant_mtu = 1370
+default_fabric_mtu = 1430
+"#,
+        )
+        .expect("write config");
+
+        let cfg = load_nwd_config(Some(&config_path)).expect("nwd config");
+        assert!(cfg.fabric.enabled);
+        assert_eq!(cfg.fabric.wireguard_port, 65002);
+        assert_eq!(cfg.fabric.vxlan_port, 4790);
+        assert_eq!(cfg.fabric.default_tenant_mtu, 1370);
+        assert_eq!(cfg.fabric.default_fabric_mtu, 1430);
     }
 
     #[test]

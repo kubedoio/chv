@@ -638,6 +638,7 @@ impl NwdClient {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         };
         let span = tracing::info_span!(
@@ -989,6 +990,7 @@ impl NwdClient {
                 range_start: range_start.to_string(),
                 range_end: range_end.to_string(),
                 dns_servers,
+                mtu: 0,
             }),
         };
         let span = tracing::info_span!(
@@ -1055,6 +1057,7 @@ impl NwdClient {
             vni,
             vtep_endpoints,
             fdb_entries,
+            fabric: None,
         };
         let span = tracing::info_span!("update_overlay", operation_id = operation_id.unwrap_or(""));
         let resp = self
@@ -1356,6 +1359,13 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
             Err(Status::unimplemented(""))
         }
     }

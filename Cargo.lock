@@ -1011,10 +1011,14 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "chv-common",
+ "chv-config",
  "chv-errors",
  "chv-nwd-api",
  "chv-observability",
  "dashmap",
+ "fabric-conformance",
+ "fabric-linux",
+ "fabric-plan",
  "hyper-util",
  "libc",
  "metrics",
@@ -1725,6 +1729,37 @@ dependencies = [
  "hashbag",
  "left-right",
  "smallvec",
+]
+
+[[package]]
+name = "fabric-conformance"
+version = "0.1.0"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+dependencies = [
+ "fabric-linux",
+ "fabric-plan",
+]
+
+[[package]]
+name = "fabric-linux"
+version = "0.1.0"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+dependencies = [
+ "fabric-plan",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "fabric-plan"
+version = "0.1.0"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

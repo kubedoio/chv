@@ -10,6 +10,7 @@ homepage: https://github.com/kubedoio/chv
 license: MIT
 depends:
   - chv-controlplane
+  - wireguard-tools
 contents:
   - src: target/release/chv-agent
     dst: /usr/bin/chv-agent

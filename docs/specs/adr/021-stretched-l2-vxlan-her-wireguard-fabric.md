@@ -33,11 +33,11 @@ CHV adopts a **stretched-L2 fabric**: kernel VXLAN with **head-end replication (
 
 ### 2. Underlay — WireGuard mesh
 
-- One WireGuard interface per host (`wg-chv`), created inside a dedicated **fabric network namespace** (`chv-fabric`), reachable from the host namespace via a veth pair plus MASQUERADE/DNAT rules (pattern proven in the o3k fabric provider).
+- One WireGuard interface per host (`chv-wg`), created inside a dedicated **fabric network namespace** (`chv-fabric`), reachable from the host namespace via a veth pair plus MASQUERADE/DNAT rules (pattern proven in the o3k fabric provider). Interface names are generated deterministically by the shared provider from the configured `chv` name prefix.
 - One keypair per host. The private key is provisioned at **node enrollment** (delivered over the existing mTLS enrollment channel), stored mode 0600 under the nwd state root, never logged, never present in plans, protocol messages, or CP state, and survives fabric teardown so peer public keys stay valid.
-- Peer configuration: `wg set wg-chv peer <pubkey> endpoint <underlay_ip:port> allowed-ips <peer_fabric_ip>/32`. AllowedIPs carry **only the peer's fabric transport address** — never tenant prefixes. The control plane distributes peer identities (`host_id`, `public_key`, `underlay_endpoint`, `fabric_ip`, MTU) as part of the VTEP registry.
+- Peer configuration: `wg set chv-wg peer <pubkey> endpoint <underlay_ip:port> allowed-ips <peer_fabric_ip>/32`. AllowedIPs carry **only the peer's fabric transport address** — never tenant prefixes. The control plane distributes peer identities (`host_id`, `public_key`, `underlay_endpoint`, `fabric_ip`, MTU) as part of the VTEP registry.
 - WireGuard listen port: configurable, default **65001** (the shared Kubedo fabric convention, matching the o3k fabric and the `o3kio/fabric` provider default); a port conflict fails closed (no random fallback); peers consume the advertised endpoint, never assume the remote port equals the local one.
-- The VXLAN `local`/`dst` addresses are the peers' **fabric addresses on `wg-chv`**; tenant VXLAN traffic never appears in cleartext on the physical underlay.
+- The VXLAN `local`/`dst` addresses are the peers' **fabric addresses on `chv-wg`**; tenant VXLAN traffic never appears in cleartext on the physical underlay.
 
 ### 3. MTU — layered, verified, advertised
 

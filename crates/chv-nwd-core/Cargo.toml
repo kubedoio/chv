@@ -7,9 +7,12 @@ publish = false
 
 [dependencies]
 chv-common = { path = "../chv-common" }
+chv-config = { path = "../chv-config" }
 chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
 chv-nwd-api = { path = "../../gen/rust/chv-nwd-api" }
+fabric-plan = { workspace = true }
+fabric-linux = { workspace = true }
 metrics = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
@@ -28,3 +31,4 @@ libc = "0.2"
 tempfile = { workspace = true }
 tower = { workspace = true }
 hyper-util = { workspace = true }
+fabric-conformance = { workspace = true }

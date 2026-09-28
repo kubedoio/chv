@@ -78,3 +78,6 @@ task_plan_ci.md
 # Playwright local run artifacts (CI uploads its own)
 ui/playwright-report/
 ui/test-results/
+
+# Python bytecode caches from local helper scripts
+__pycache__/

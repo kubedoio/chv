@@ -3377,6 +3377,13 @@ mod tests {
             Err(Status::unimplemented(""))
         }
 
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
         async fn send_gratuitous_arp(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,

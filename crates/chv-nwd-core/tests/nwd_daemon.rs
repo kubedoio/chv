@@ -3,11 +3,12 @@ use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
     network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
     DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
-    EnsureNetworkTopologyRequest, ExposeServiceRequest, ExposureSpec, FirewallPolicy,
+    EnsureNetworkTopologyRequest, ExposeServiceRequest, ExposureSpec, FabricPlan, FirewallPolicy,
     ListNamespaceStateRequest, NatPolicy, NetworkHealthRequest, NicSpec, SetFirewallPolicyRequest,
     SetNatPolicyRequest, TopologySpec, WithdrawServiceExposureRequest,
 };
 use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
+use chv_nwd_core::fabric::{AppliedFabric, ApplyReport, FabricIdentity};
 use chv_nwd_core::{NetworkServer, TopologyState};
 use chv_observability::Metrics;
 use std::path::PathBuf;
@@ -28,6 +29,8 @@ impl NetworkExecutor for MockExecutor {
         Ok(TopologyApplyResult {
             namespace_handle: spec.namespace_name.clone(),
             bridge_handle: spec.bridge_name.clone(),
+            tenant_mtu: None,
+            fabric_plan_generation: None,
         })
     }
 
@@ -49,6 +52,7 @@ impl NetworkExecutor for MockExecutor {
         nic_id: &str,
         _vm_id: &str,
         _bridge_name: &str,
+        _tenant_mtu: Option<u32>,
         _mac_address: &str,
         _ip_address: &str,
     ) -> Result<(String, String), ChvError> {
@@ -61,6 +65,42 @@ impl NetworkExecutor for MockExecutor {
         _ownership: chv_common::AttachmentOwnership,
     ) -> Result<(), ChvError> {
         Ok(())
+    }
+
+    async fn apply_fabric_overlay(
+        &self,
+        network_id: &str,
+        _vni: u32,
+        _plan: &FabricPlan,
+        _bridge_name: &str,
+    ) -> Result<AppliedFabric, ChvError> {
+        Ok(AppliedFabric {
+            report: ApplyReport::default(),
+            plan_generation: 1,
+            tenant_mtu: 1380,
+            consumer_veth: format!("chv-{}-a", network_id),
+        })
+    }
+
+    async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
+        Ok(FabricIdentity {
+            public_key: "K7XbF9cV2mQpT3nZ8sL4dW6yH1jR5uA0eG9iO2pS7kM=".to_string(),
+            underlay_mtu: 1500,
+        })
+    }
+
+    async fn fabric_overlay_status(
+        &self,
+        _network_id: &str,
+    ) -> Result<OverlayStatusInfo, ChvError> {
+        Ok(OverlayStatusInfo {
+            vxlan_interface_up: true,
+            fdb_entry_count: 1,
+        })
     }
 
     async fn set_firewall_policy(
@@ -234,6 +274,7 @@ impl NetworkExecutor for RecordingExecutor {
         nic_id: &str,
         _vm_id: &str,
         _bridge_name: &str,
+        _tenant_mtu: Option<u32>,
         _mac_address: &str,
         _ip_address: &str,
     ) -> Result<(String, String), ChvError> {
@@ -246,6 +287,42 @@ impl NetworkExecutor for RecordingExecutor {
         _ownership: chv_common::AttachmentOwnership,
     ) -> Result<(), ChvError> {
         Ok(())
+    }
+
+    async fn apply_fabric_overlay(
+        &self,
+        network_id: &str,
+        _vni: u32,
+        _plan: &FabricPlan,
+        _bridge_name: &str,
+    ) -> Result<AppliedFabric, ChvError> {
+        Ok(AppliedFabric {
+            report: ApplyReport::default(),
+            plan_generation: 1,
+            tenant_mtu: 1380,
+            consumer_veth: format!("chv-{}-a", network_id),
+        })
+    }
+
+    async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
+        Ok(FabricIdentity {
+            public_key: "K7XbF9cV2mQpT3nZ8sL4dW6yH1jR5uA0eG9iO2pS7kM=".to_string(),
+            underlay_mtu: 1500,
+        })
+    }
+
+    async fn fabric_overlay_status(
+        &self,
+        _network_id: &str,
+    ) -> Result<OverlayStatusInfo, ChvError> {
+        Ok(OverlayStatusInfo {
+            vxlan_interface_up: true,
+            fdb_entry_count: 1,
+        })
     }
 
     async fn set_firewall_policy(
@@ -459,6 +536,7 @@ async fn ensure_and_delete_topology_idempotent() {
             vni: 0,
             vtep_endpoints: vec![],
             overlay_type: 0,
+            fabric: None,
         }),
     };
 
@@ -560,6 +638,7 @@ async fn all_network_handlers_smoke() {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         })
         .await
@@ -641,6 +720,7 @@ async fn all_network_handlers_smoke() {
                 range_start: "10.0.1.50".to_string(),
                 range_end: "10.0.1.100".to_string(),
                 dns_servers: vec!["10.0.1.1".to_string()],
+                mtu: 0,
             }),
         })
         .await
@@ -769,6 +849,7 @@ async fn firewall_nat_and_exposure_smoke() {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         })
         .await
@@ -865,6 +946,7 @@ async fn attach_refreshes_policy_guard_scope() {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         })
         .await
@@ -964,6 +1046,7 @@ async fn concurrent_fw_nat_applies_persist_both_halves() {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         })
         .await
