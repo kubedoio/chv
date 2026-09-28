@@ -403,11 +403,14 @@ pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError
 }
 
 fn materialize_agent_jwt_secret(cfg: &mut AgentConfig) {
-    // Every authority mode serves the console (main.rs constructs
-    // ConsoleServer with this secret unconditionally), so a default or
-    // short secret is unacceptable in core-native/core-managed mode just as
-    // it is in legacy mode.
-    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+    // main.rs constructs ConsoleServer (the jwt_secret consumer) in legacy
+    // and core-managed modes, so a default or short secret must not survive
+    // config load in either. Core-native returns into run_core_native before
+    // the console exists: no in-process consumer, so the configured value is
+    // left untouched and no secret is minted on disk.
+    if cfg.authority_mode != AgentAuthorityMode::CoreNative
+        && (cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32)
+    {
         cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "agent");
     }
 }
@@ -710,9 +713,25 @@ max_lifetime_secs = 1200
     }
 
     #[test]
-    fn core_native_also_materializes_console_jwt_secret() {
-        // The console server consumes jwt_secret in every authority mode;
-        // a default or short secret must never survive config load.
+    fn core_managed_also_materializes_console_jwt_secret() {
+        // Core-managed agents run the console server on this secret; a
+        // default or short secret must not survive config load.
+        let mut config = AgentConfig {
+            authority_mode: AgentAuthorityMode::CoreManaged,
+            jwt_secret: "short".to_owned(),
+            ..AgentConfig::default()
+        };
+        materialize_agent_jwt_secret(&mut config);
+        assert_eq!(config.authority_mode, AgentAuthorityMode::CoreManaged);
+        assert!(config.jwt_secret.len() >= 32);
+        assert_ne!(config.jwt_secret, "short");
+    }
+
+    #[test]
+    fn core_native_does_not_materialize_unused_jwt_secret() {
+        // Core-native returns into run_core_native before the console server
+        // is constructed: there is no in-process consumer, so the configured
+        // value is stored untouched and nothing is minted on disk.
         let mut config = AgentConfig {
             authority_mode: AgentAuthorityMode::CoreNative,
             jwt_secret: "short".to_owned(),
@@ -720,7 +739,6 @@ max_lifetime_secs = 1200
         };
         materialize_agent_jwt_secret(&mut config);
         assert_eq!(config.authority_mode, AgentAuthorityMode::CoreNative);
-        assert!(config.jwt_secret.len() >= 32);
-        assert_ne!(config.jwt_secret, "short");
+        assert_eq!(config.jwt_secret, "short");
     }
 }

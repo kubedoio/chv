@@ -65,6 +65,9 @@ pub struct Reconciler {
     /// Tracks VMs that have already been requested for drain migration
     /// to avoid re-requesting on every tick.
     drain_requested_vms: HashSet<String>,
+    /// Remaining-VM count at the last observe-only drain-block warning, so a
+    /// persistently blocked drain logs on change instead of every tick.
+    drain_block_logged: Option<usize>,
     /// Shared registry of in-flight migration tasks. The drain transition to
     /// Maintenance must not fire while disk migrations are still in progress;
     /// a VM handed off to chv-stord leaves vm_runtime.list() but the transfer
@@ -148,6 +151,7 @@ impl Reconciler {
             reconcile_tick: 0,
             degraded_ticks: 0,
             drain_requested_vms: HashSet::new(),
+            drain_block_logged: None,
             migration_registry,
             mutation: Some(LegacyMutation { runtime_dir }),
         }
@@ -175,6 +179,7 @@ impl Reconciler {
             reconcile_tick: 0,
             degraded_ticks: 0,
             drain_requested_vms: HashSet::new(),
+            drain_block_logged: None,
             migration_registry,
             mutation: None,
         }
@@ -448,8 +453,14 @@ impl Reconciler {
                     cache
                         .vm_fragments
                         .iter()
+                        // Fail closed: only a fragment whose desired state
+                        // is provably Stopped is drained. A fragment that
+                        // cannot be decoded (corrupt spec_json) blocks the
+                        // drain rather than silently evacuating a VM whose
+                        // desired state is unknown.
                         .filter(|(_, fragment)| {
-                            fragment_desired_state(fragment).is_some_and(|state| state == "Running")
+                            !fragment_desired_state(fragment)
+                                .is_some_and(|state| state == "Stopped")
                         })
                         .map(|(vm_id, _)| vm_id.clone())
                         .collect()
@@ -462,18 +473,25 @@ impl Reconciler {
                         "drain complete, all VMs evacuated and no in-flight migrations — transitioning to Maintenance"
                     );
                     self.drain_requested_vms.clear();
+                    self.drain_block_logged = None;
                     self.transition_state(NodeState::Maintenance).await?;
                 } else if self.mutation.is_none() {
                     // Observe-only fail-closed: the Core runtime is the sole
                     // effector, so this Reconciler must not request
                     // migrations. The drain stays blocked until the control
                     // plane (sole writer of desired state) re-homes the
-                    // desired-Running VMs.
-                    warn!(
-                        remaining_vms = running_vms.len(),
-                        operation_id = %operation_id,
-                        "drain blocked on core-managed desired-Running VMs; the control plane must re-home them"
-                    );
+                    // desired-Running VMs. The warning logs on change only:
+                    // a drain can legitimately stay blocked for a long time,
+                    // and the state remains queryable via the node state.
+                    let remaining = running_vms.len();
+                    if self.drain_block_logged != Some(remaining) {
+                        warn!(
+                            remaining_vms = remaining,
+                            operation_id = %operation_id,
+                            "drain blocked on core-managed desired-Running VMs; the control plane must re-home them"
+                        );
+                        self.drain_block_logged = Some(remaining);
+                    }
                 } else {
                     // Request migration for each running VM via control plane event,
                     // but only if we haven't already requested it.

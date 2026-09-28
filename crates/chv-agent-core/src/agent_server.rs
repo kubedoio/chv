@@ -622,30 +622,29 @@ fn map_authority_error(e: cellhv_core_operations::AuthorityActorError) -> Status
             }
             _ => Status::internal(err.to_string()),
         },
+        // The actor is draining (shutdown) or its queue is gone: the caller
+        // resolved ambiguity by retrying the same idempotent request, so
+        // surface retryability instead of a 500.
+        cellhv_core_operations::AuthorityActorError::Unavailable => {
+            Status::unavailable("core authority is shutting down; retry the idempotent request")
+        }
         _ => Status::internal(e.to_string()),
     }
 }
 
 /// Resolves the current core-journal version of a VM for an expected-version
-/// CAS. A VM unknown to the core journal is a `not_found`; any other authority
-/// failure is `unavailable` — never a silently guessed version 1, which would
-/// turn an authority outage into a misleading stale-version rejection.
+/// CAS. The authority error is mapped by class: a VM unknown to the core
+/// journal is a `not_found`, an authority outage is `unavailable`, and
+/// internal authority failures are `internal` — never a silently guessed
+/// version 1, which would turn an authority outage into a misleading
+/// stale-version rejection.
 async fn authority_vm_version_or_status(
     authority: &cellhv_core_operations::AuthorityHandle,
     vm_id: cellhv_core_types::VmId,
 ) -> Result<cellhv_core_types::ResourceVersion, Status> {
     match authority.vm(vm_id.clone()).await {
         Ok(vm) => Ok(vm.resource_version),
-        Err(cellhv_core_operations::AuthorityActorError::Service(err))
-            if err.class() == cellhv_core_operations::ErrorClass::NotFound =>
-        {
-            Err(Status::not_found(format!(
-                "vm {vm_id} is not known to the core journal"
-            )))
-        }
-        Err(error) => Err(Status::unavailable(format!(
-            "core authority unavailable: {error}"
-        ))),
+        Err(error) => Err(map_authority_error(error)),
     }
 }
 
@@ -2628,6 +2627,25 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 "resolution note must be at most 8000 bytes",
             ));
         }
+        // Control characters are rejected outright: each one serializes as
+        // a six-byte \u escape in the evidence record, so they are the only
+        // way a note could expand past the 8000-byte bound into the store's
+        // 16 KiB record limit — and they have no place in a single-line
+        // audit record (log injection).
+        if note.chars().any(|c| c.is_control()) {
+            return Err(Status::invalid_argument(
+                "resolution note must not contain control characters",
+            ));
+        }
+        // The resolution's audit identity is taken from the caller's meta;
+        // an empty identity would make the terminal audit record
+        // unattributable. Mirrors the M2.1b submit-path rule.
+        let requested_by = meta.requested_by.trim();
+        if requested_by.is_empty() {
+            return Err(Status::invalid_argument(
+                "requested_by is required (resolution audit identity)",
+            ));
+        }
         let resolved = authority
             .resolve_inspect_required(operation_id, succeeded, note.to_owned())
             .await
@@ -3872,6 +3890,19 @@ mod tests {
             ),
             ("empty note", request("vm-1", "op-1", "succeeded", "   ")),
             (
+                "oversized note",
+                request("vm-1", "op-1", "succeeded", &"a".repeat(8_001)),
+            ),
+            (
+                "control characters in note",
+                request(
+                    "vm-1",
+                    "op-1",
+                    "succeeded",
+                    "operator inspected\nsecond line",
+                ),
+            ),
+            (
                 "empty vm_id",
                 request("", "op-1", "succeeded", "operator inspected"),
             ),
@@ -3909,6 +3940,76 @@ mod tests {
             tonic::Code::Unimplemented,
             "resolve must stay core-routed in core-managed mode"
         );
+    }
+
+    /// The audit identity is payload too: a resolution without a
+    /// `requested_by` identity must be rejected before the authority is
+    /// touched (the terminal audit record would be unattributable).
+    #[tokio::test]
+    async fn resolve_inspect_required_requires_audit_identity() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let mut req = proto::ResolveInspectRequiredOperationRequest {
+            meta: Some(test_meta("9")),
+            vm_id: "vm-1".to_string(),
+            operation_id: "op-1".to_string(),
+            disposition: "succeeded".to_string(),
+            note: "operator inspected".to_string(),
+        };
+        req.meta.as_mut().unwrap().requested_by = "   ".to_string();
+        let resp =
+            proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+                &server,
+                Request::new(req),
+            )
+            .await;
+        assert_eq!(
+            resp.unwrap_err().code(),
+            tonic::Code::InvalidArgument,
+            "blank requested_by must be rejected before the authority is touched"
+        );
+    }
+
+    /// End-to-end with a real authority over a real journal: the
+    /// core-routed lifecycle handlers must surface a VM unknown to the core
+    /// journal as `not_found` — the expected-version probe must never guess
+    /// version 1 for a phantom VM.
+    #[tokio::test]
+    async fn core_routed_lifecycle_maps_unknown_vm_to_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // The store requires the fresh Core parent to be an euid-owned 0700
+        // directory; tempdir's mode depends on the host umask, so pin it
+        // explicitly (same pattern as the cellhv-core-store test suite).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = cellhv_core_types::HostIdentity {
+            id: cellhv_core_types::HostId::new("agent-server-test-host").unwrap(),
+            resource_version: cellhv_core_types::ResourceVersion::new(1).unwrap(),
+        };
+        let service = cellhv_core_operations::OperationService::create_new(
+            &dir.path().join("core.db"),
+            &host,
+        )
+        .unwrap();
+        let (authority, join) = cellhv_core_operations::AuthorityActor::spawn(service, 16).unwrap();
+        let mut server = test_server();
+        server.core_authority = Some(authority.clone());
+        let resp = proto::lifecycle_service_server::LifecycleService::start_vm(
+            &server,
+            Request::new(proto::StartVmRequest {
+                meta: Some(test_meta("9")),
+                vm_id: "vm-unknown".to_string(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.unwrap_err().code(),
+            tonic::Code::NotFound,
+            "unknown VM must surface as not_found, never a guessed version-1 CAS"
+        );
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
     }
 
     /// Node-operator state transitions (drain/maintenance/scheduling) are not

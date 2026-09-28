@@ -693,16 +693,6 @@ impl OperationService {
     }
 }
 
-pub fn classify_restart(operation: &Operation) -> RestartDisposition {
-    match operation.status {
-        OperationStatus::Accepted => RestartDisposition::Ready,
-        OperationStatus::Running => RestartDisposition::InspectRequired,
-        OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported => {
-            RestartDisposition::Terminal
-        }
-    }
-}
-
 fn canonical_request(
     command: &MutationCommand,
     expected_vm_version: ResourceVersion,
@@ -1255,30 +1245,39 @@ mod tests {
     }
 
     #[test]
-    fn restart_classification_covers_retry_boundaries() {
-        let mut operation = Operation {
-            id: OperationId::new("op").unwrap(),
-            kind: OperationKind::StartVm,
-            vm_id: VmId::new("vm").unwrap(),
-            status: OperationStatus::Accepted,
-            request_fingerprint: "fingerprint".to_owned(),
-            attempt_count: 0,
-            max_attempts: 3,
-        };
-        assert_eq!(classify_restart(&operation), RestartDisposition::Ready);
-        operation.status = OperationStatus::Running;
-        operation.attempt_count = 2;
-        assert_eq!(
-            classify_restart(&operation),
-            RestartDisposition::InspectRequired
+    fn restart_operations_requires_marker_for_running_inspect() {
+        // Contract pin for the restart-marker semantics: a `running`
+        // operation WITHOUT the durable marker is in flight in the live
+        // process and must be excluded from the restart snapshot (its VM
+        // must not be quarantined by the executor scan); WITH the marker —
+        // written once by startup classification before the executor can
+        // claim — it is InspectRequired and carries its recovery
+        // assessment for operator resolution.
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new("op-1").unwrap();
+        let token = AttemptToken::new("attempt-1").unwrap();
+        service.claim_attempt(&id, &token).unwrap();
+        let pending = service.restart_operations().unwrap();
+        assert!(
+            pending.is_empty(),
+            "unmarked running operation is in flight in this process and must be excluded"
         );
-        operation.attempt_count = 3;
-        assert_eq!(
-            classify_restart(&operation),
-            RestartDisposition::InspectRequired
-        );
-        operation.status = OperationStatus::Succeeded;
-        assert_eq!(classify_restart(&operation), RestartDisposition::Terminal);
+        let classified = service.classify_restart_interrupted_operations().unwrap();
+        assert_eq!(classified.len(), 1);
+        let pending = service.restart_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].disposition, RestartDisposition::InspectRequired);
+        assert!(pending[0].recovery_assessment.is_some());
     }
 
     #[test]

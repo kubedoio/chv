@@ -1007,3 +1007,20 @@ async fn scheduled_bookkeeping_is_bounded_after_completion() {
         .unwrap();
     stop(f).await;
 }
+
+#[test]
+fn claim_replay_outcome_is_counted_and_never_poisons_the_vm() {
+    // Contract pin for the R1 fix: a claim replay is the idempotent-success
+    // path. It must not be a failure, must not failure-quarantine the VM
+    // (the old rule "anything but AcquiredCompleted quarantines" would
+    // poison a VM whose claim is merely shared), and must only bump the
+    // claim_replays counter. Under restart-marker semantics the executor
+    // only claims Accepted operations, so this unit pin is the regression
+    // guard for the outcome arm.
+    let outcome = WorkOutcome::ClaimReplay;
+    assert!(!outcome.quarantines());
+    let mut report = ExecutionReport::default();
+    merge_outcome(&mut report, WorkOutcome::ClaimReplay);
+    assert_eq!(report.claim_replays, 1);
+    assert!(report.failures.is_empty());
+}

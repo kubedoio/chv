@@ -1017,7 +1017,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vm_id: vm.vm_id.clone(),
                 runtime_status: vm.runtime_status.clone(),
                 observed_generation: vm.observed_generation.clone(),
-                health_status: "Healthy".to_string(),
+                // Core-managed telemetry reports the Core projection
+                // (desired state) as runtime_status — a documented residual
+                // — so observed health is genuinely not known here, and a
+                // stuck (inspect-required) VM must not be reported Healthy.
+                // Legacy reports keep their historical value.
+                health_status: if core_owner.is_some() {
+                    "Unknown"
+                } else {
+                    "Healthy"
+                }
+                .to_string(),
                 last_error: vm.last_error.unwrap_or_default(),
                 reported_unix_ms: now_unix_ms(),
                 cpu_percent: 0.0,
