@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::io::{Read as _, Seek, SeekFrom};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -720,18 +720,25 @@ impl ProcessCloudHypervisorAdapter {
     /// Spawns the console broadcaster for a VM: reads guest serial output
     /// from the console fd and fans it out to the scrollback buffer and
     /// subscribers. For the Socket transport the broadcaster is
-    /// SELF-HEALING: cloud-hypervisor tears the serial device down and
-    /// re-binds the listener at the same path across `vm.reboot`
-    /// (`SerialManager::drop` closes the accepted connection and removes
-    /// the socket file; `pre_create_console_devices` re-binds it), and the
-    /// VMM switches to a reconnecting client by shutting the previous
-    /// connection down — so on EOF the broadcaster reconnects, swaps the
-    /// stored `console_io` for the live endpoint, and keeps streaming.
-    /// Console capture therefore survives reboots and any VMM-side
-    /// connection cycle without lifecycle-path coupling. The Pty transport
-    /// exits on EOF instead (a reboot allocates a NEW pty at a different
-    /// path; re-attachment is a recorded follow-up) and revival is left
-    /// to the next `start_vm` respawn.
+    /// SELF-HEALING: whenever the current connection ends it reconnects
+    /// to the listener at the same path, swaps the stored `console_io`
+    /// for the live endpoint, and keeps streaming. Connection cycles
+    /// arise in two ways: (a) the cloud-hypervisor process dies — every
+    /// descriptor it held closes and the reader observes a genuine EOF;
+    /// (b) `vm.reboot` tears the VM down and re-creates it, re-binding
+    /// the serial listener at the same path — v43's serial manager leaks
+    /// the accepted descriptor at thread exit (it is handed to epoll via
+    /// `into_raw_fd()` and never closed), so the old connection delivers
+    /// neither data nor EOF and `reboot_vm` force-rotates it with
+    /// `shutdown(SHUT_RD)` to produce the EOF this loop reacts to. The
+    /// VMM-side connection replacement also plays a role: the serial
+    /// manager shuts its previous client down when a new one connects, so
+    /// reconnecting clients are always the live endpoint. Console capture
+    /// therefore survives reboots and VMM death without lifecycle-path
+    /// coupling. The Pty transport exits on EOF instead (a reboot
+    /// allocates a NEW pty at a different path; re-attachment is a
+    /// recorded follow-up) and revival is left to the next `start_vm`
+    /// respawn.
     fn spawn_pty_broadcaster(
         vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
         vm_id: String,
@@ -1466,9 +1473,61 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
+        // Snapshot the pre-reboot console connection BEFORE the API call.
+        // cloud-hypervisor v43's vm.reboot tears the VM down and re-creates
+        // it, re-binding the serial listener at the same path — but the OLD
+        // accepted connection is orphaned without EOF: the serial manager's
+        // accept path hands its descriptor to epoll via `into_raw_fd()` and
+        // never closes it, so the broadcaster parked on it would never wake.
+        // The forced EOF must land on exactly this connection — the one
+        // that predates the reboot — not on whatever a concurrent heal may
+        // have swapped into the map meanwhile, so a dup is taken up front:
+        // it pins the open file description, making the raw fd impossible
+        // to recycle under us. Socket transport only (the pty transport
+        // has no socket to shut down; its reboot behavior is a recorded
+        // follow-up).
+        let pre_reboot_console: Option<OwnedFd> = {
+            let vms = self.vms.read().await;
+            match vms.get(vm_id) {
+                Some(proc) if matches!(proc.serial_transport, SerialTransport::Socket(_)) => {
+                    Self::dup_cloexec(&proc.console_io).ok()
+                }
+                _ => None,
+            }
+        };
+
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
+        if status == 0 {
+            warn!(
+                vm_id = %vm_id,
+                "unparseable response from vm.reboot; serial connection not rotated"
+            );
+            return Ok(());
+        }
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vm.reboot");
+            return Ok(());
+        }
+        // A successful vm.reboot re-bound the listener; rotate the pinned
+        // connection. shutdown(2) acts on the open file description, so it
+        // wakes every blocked reader on it (the broadcaster's dup
+        // included): the broadcaster observes EOF and its self-heal
+        // reconnects to the re-bound listener, swapping the stored
+        // endpoint and streaming the new boot. Bytes still queued in the
+        // kernel receive buffer are discarded — acceptable: the old guest
+        // is mid-teardown anyway. Best-effort: a failure means the
+        // connection was already gone, which the broadcaster's own EOF
+        // handling covers.
+        if let Some(fd) = pre_reboot_console {
+            if let Err(e) =
+                nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Read)
+            {
+                warn!(
+                    vm_id = %vm_id,
+                    error = %e,
+                    "serial read-side shutdown after vm.reboot failed"
+                );
+            }
         }
         Ok(())
     }
@@ -2592,6 +2651,235 @@ mod tests {
         }
 
         server.join().expect("server thread");
+    }
+
+    /// `vm.reboot` in cloud-hypervisor v43 tears the VM down and
+    /// re-creates it, re-binding the serial listener at the same path —
+    /// but the OLD connection is orphaned without an EOF: the serial
+    /// manager's accept path hands the descriptor to epoll via
+    /// `into_raw_fd()` and never closes it, so a reader parked on it sees
+    /// neither data nor EOF. `reboot_vm` must force-rotate the connection
+    /// (`shutdown(SHUT_RD)` — description-level, so it also wakes the
+    /// broadcaster's dup) after a successful reboot; the broadcaster's
+    /// self-heal then reconnects to the re-bound listener and console
+    /// capture follows the new boot.
+    #[tokio::test]
+    async fn reboot_vm_rotates_zombie_serial_connection() {
+        use std::io::{Read as _, Write as _};
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-reboot-rotate");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+        let api_sock_path = vm_dir.join("vm.sock");
+
+        // Fake cloud-hypervisor API socket: answer vm.reboot with 204.
+        let api_listener = std::os::unix::net::UnixListener::bind(&api_sock_path).unwrap();
+        let api_server = std::thread::spawn(move || {
+            let (mut conn, _) = api_listener.accept().expect("api accept");
+            let mut request = [0u8; 1024];
+            let _ = conn.read(&mut request);
+            conn.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("api respond");
+        });
+
+        // The zombie's peer is still open for the whole test — nobody
+        // closed it — proving the rotation did not rely on the VMM
+        // closing the connection.
+        let (_zombie_peer_stays_open, zombie_agent_end) =
+            std::os::unix::net::UnixStream::pair().unwrap();
+
+        // The re-bound listener vm.reboot "left behind": the broadcaster's
+        // self-heal must connect here and receive the new boot's output.
+        let listener2 = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let rebind_server = std::thread::spawn(move || {
+            let (mut conn, _) = listener2.accept().expect("rebind accept");
+            conn.write_all(b"second-boot").expect("write second boot");
+            // Hold the connection open while the test asserts.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(true));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        let zombie_console_io: OwnedFd = zombie_agent_end.into();
+        let zombie_fd = zombie_console_io.as_raw_fd();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-reboot-rotate".to_string(),
+                VmProcess {
+                    api_socket: api_sock_path.clone(),
+                    child,
+                    console_io: zombie_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // The broadcaster is ALIVE and parked on the zombie connection —
+        // the exact production state after create + reboot. Without the
+        // rotation it would stay parked forever (this is the bug).
+        let broadcaster_fd = ProcessCloudHypervisorAdapter::dup_cloexec(
+            &adapter
+                .vms
+                .read()
+                .await
+                .get("vm-reboot-rotate")
+                .unwrap()
+                .console_io,
+        )
+        .unwrap();
+        ProcessCloudHypervisorAdapter::spawn_pty_broadcaster(
+            adapter.vms.clone(),
+            "vm-reboot-rotate".to_string(),
+            broadcaster_fd,
+            SerialTransport::Socket(sock_path.clone()),
+            pty_tx.clone(),
+            pty_scrollback.clone(),
+            broadcaster_alive.clone(),
+        );
+        let mut rx = pty_tx.subscribe();
+
+        adapter.reboot_vm("vm-reboot-rotate", None).await.unwrap();
+        api_server.join().expect("api server thread");
+
+        // The broadcaster observed the forced EOF, reconnected to the
+        // re-bound listener, and streams the new boot's output.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("second-boot probe must arrive through the fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"second-boot".to_vec());
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must survive the forced rotation"
+        );
+        {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-reboot-rotate").unwrap();
+            assert_ne!(
+                proc.console_io.as_raw_fd(),
+                zombie_fd,
+                "stored console fd must be swapped for the reconnected one"
+            );
+        }
+
+        rebind_server.join().expect("rebind server thread");
+    }
+
+    /// A failed `vm.reboot` (non-2xx) must NOT rotate the serial
+    /// connection — the listener was not re-bound, so a forced EOF would
+    /// kill console capture for a VM that is still running on the old
+    /// connection.
+    #[tokio::test]
+    async fn reboot_vm_failure_leaves_serial_connection_alone() {
+        use std::io::{Read as _, Write as _};
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-reboot-fail");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_sock_path = vm_dir.join("vm.sock");
+
+        // Fake cloud-hypervisor API socket: answer vm.reboot with 500.
+        let api_listener = std::os::unix::net::UnixListener::bind(&api_sock_path).unwrap();
+        let api_server = std::thread::spawn(move || {
+            let (mut conn, _) = api_listener.accept().expect("api accept");
+            let mut request = [0u8; 1024];
+            let _ = conn.read(&mut request);
+            conn.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                .expect("api respond");
+        });
+
+        // A healthy, live connection: the peer stays open and responsive.
+        let (mut peer, agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(b"still-streaming").unwrap();
+        let console_io: OwnedFd = agent_end.into();
+        let original_fd = console_io.as_raw_fd();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(true));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-reboot-fail".to_string(),
+                VmProcess {
+                    api_socket: api_sock_path.clone(),
+                    child,
+                    console_io,
+                    serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        let mut rx = pty_tx.subscribe();
+
+        // The broadcaster streams from the live connection.
+        let broadcaster_fd = ProcessCloudHypervisorAdapter::dup_cloexec(
+            &adapter
+                .vms
+                .read()
+                .await
+                .get("vm-reboot-fail")
+                .unwrap()
+                .console_io,
+        )
+        .unwrap();
+        ProcessCloudHypervisorAdapter::spawn_pty_broadcaster(
+            adapter.vms.clone(),
+            "vm-reboot-fail".to_string(),
+            broadcaster_fd,
+            SerialTransport::Socket(vm_dir.join("serial.sock")),
+            pty_tx.clone(),
+            pty_scrollback.clone(),
+            broadcaster_alive.clone(),
+        );
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("probe must arrive before the reboot attempt")
+            .expect("channel must be live");
+        assert_eq!(got, b"still-streaming".to_vec());
+
+        adapter.reboot_vm("vm-reboot-fail", None).await.unwrap();
+        api_server.join().expect("api server thread");
+
+        // The connection was NOT rotated: the stored fd is unchanged and
+        // the connection is still fully functional end-to-end — new peer
+        // output flows through the unchanged broadcaster.
+        {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-reboot-fail").unwrap();
+            assert_eq!(
+                proc.console_io.as_raw_fd(),
+                original_fd,
+                "failed vm.reboot must not rotate the serial connection"
+            );
+        }
+        peer.write_all(b"post-reboot").unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("post-reboot probe must arrive through the untouched connection")
+            .expect("channel must be live");
+        assert_eq!(got, b"post-reboot".to_vec());
     }
 
     #[test]
