@@ -743,6 +743,29 @@ impl NodeCache {
             self.project_vm(def, "core-rebuild".to_string(), "core".to_string());
         }
     }
+
+    /// VM ids referenced by the live cache that the Core authority does not
+    /// know. A non-empty result means the on-disk cache is not a pure
+    /// projection of the authority — either a stale projection (a mutation
+    /// that committed to Core but crashed before the cache save) or a
+    /// restored legacy cache that activation did not import. In both cases
+    /// [`NodeCache::rebuild_from_core`] would destroy the only surviving
+    /// record of those VMs, so startup callers must refuse to overwrite and
+    /// leave the record for operator inspection.
+    pub fn unadopted_cache_vm_ids(
+        &self,
+        authority: &[cellhv_core_types::VmDefinition],
+    ) -> Vec<String> {
+        let authority_ids: std::collections::HashSet<&str> = authority
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect();
+        self.vm_generations
+            .keys()
+            .filter(|id| !authority_ids.contains(id.as_str()))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Deterministic locally-administered unicast MAC derived from a VM + network
@@ -991,6 +1014,65 @@ mod tests {
             cache.get_generation("network", "net-keep"),
             Some(&"2".to_string())
         );
+    }
+
+    #[test]
+    fn unadopted_cache_vm_ids_empty_when_projection_mirrors_authority() {
+        // The designed steady state: every VM the cache references is known
+        // to the authority, so the startup rebuild may proceed.
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(
+            &projected_definition("vm-a"),
+            "3".to_string(),
+            "controller".to_string(),
+        );
+        cache.project_vm(
+            &projected_definition("vm-b"),
+            "1".to_string(),
+            "controller".to_string(),
+        );
+        let authority = vec![projected_definition("vm-a"), projected_definition("vm-b")];
+        assert!(cache.unadopted_cache_vm_ids(&authority).is_empty());
+    }
+
+    #[test]
+    fn unadopted_cache_vm_ids_flags_cache_beside_partial_authority() {
+        // A restored legacy cache (or a projection from a crashed save) can
+        // reference VMs the authority does not know: those ids are exactly
+        // what a rebuild would destroy, so the guard must flag them.
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(
+            &projected_definition("vm-a"),
+            "3".to_string(),
+            "controller".to_string(),
+        );
+        cache.project_vm(
+            &projected_definition("vm-precious"),
+            "1".to_string(),
+            "controller".to_string(),
+        );
+        let authority = vec![projected_definition("vm-a")];
+        assert_eq!(
+            cache.unadopted_cache_vm_ids(&authority),
+            vec!["vm-precious".to_string()]
+        );
+    }
+
+    #[test]
+    fn unadopted_cache_vm_ids_empty_for_authority_vms_missing_from_cache() {
+        // The inverse direction is NOT divergence: authority VMs absent from
+        // the cache are simply projected in by the rebuild.
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(
+            &projected_definition("vm-a"),
+            "3".to_string(),
+            "controller".to_string(),
+        );
+        let authority = vec![
+            projected_definition("vm-a"),
+            projected_definition("vm-authority-only"),
+        ];
+        assert!(cache.unadopted_cache_vm_ids(&authority).is_empty());
     }
 
     #[test]

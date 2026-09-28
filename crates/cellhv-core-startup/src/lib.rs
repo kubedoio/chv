@@ -331,6 +331,12 @@ pub enum StartupError {
         path.display()
     )]
     ArchiveMismatch { path: PathBuf },
+    #[error(
+        "torn temporary archive at {} does not match the archive being written; \
+         remove it (a torn write from a crashed boot) to boot this authority",
+        temp.display()
+    )]
+    TornArchiveTemp { temp: PathBuf },
     #[error("archive path has no parent directory")]
     InvalidArchivePath,
     #[error("unsafe authority path configuration: {0}")]
@@ -627,9 +633,18 @@ fn verify_archive(path: &Path, checksum: &str) -> Result<()> {
 /// bytes ARE the exact migration source, so rewriting the archive from them
 /// restores the retained-source invariant without weakening the tamper
 /// evidence. Crash-safe by idempotence: a crash mid-restore leaves the
-/// archive absent and the next boot repeats the same verified restore.
+/// archive absent and the next boot repeats the same verified restore. The
+/// temp is removed first so a crash *during* the restore's temp write also
+/// heals on the next boot — a leftover temp cannot match the verified
+/// source and would otherwise wedge every later boot.
 fn restore_archive(path: &Path, bytes: &[u8], checksum: &str) -> Result<()> {
     debug_assert_eq!(format!("{:x}", Sha256::digest(bytes)), checksum);
+    let temp = archive_temp_path(path);
+    match fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io_error(&temp, source)),
+    }
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -660,8 +675,8 @@ fn archive_exact(
     let temp = archive_temp_path(path);
     if let Some(existing) = read_optional(&temp)? {
         if Sha256::digest(existing) != Sha256::digest(bytes) {
-            return Err(StartupError::ArchiveMismatch {
-                path: path.to_owned(),
+            return Err(StartupError::TornArchiveTemp {
+                temp: temp.to_owned(),
             });
         }
         File::open(&temp)
@@ -1118,6 +1133,65 @@ mod tests {
             &format!("{:x}", Sha256::digest(cache_bytes("node-a", "7")))
         )
         .is_ok());
+    }
+
+    #[test]
+    fn torn_temp_from_crashed_restore_self_heals_on_next_boot() {
+        // Review follow-up on the self-heal: a crash *during* the restore's
+        // temp write leaves a torn temp beside the removed archive. The
+        // verified restore must remove the temp instead of wedging every
+        // later boot on its digest mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        drop(active);
+
+        fs::remove_file(&paths.node_cache_archive).unwrap();
+        write_private(
+            &archive_temp_path(&paths.node_cache_archive),
+            b"torn-write-bytes",
+        );
+        let healed = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(healed.kind(), ActivationKind::ImportedNodeCache);
+        assert!(verify_archive(
+            &paths.node_cache_archive,
+            &format!("{:x}", Sha256::digest(cache_bytes("node-a", "7")))
+        )
+        .is_ok());
+        assert!(!archive_temp_path(&paths.node_cache_archive).exists());
+    }
+
+    #[test]
+    fn torn_temp_beside_absent_archive_fails_closed_naming_the_temp() {
+        // Outside the verified-restore path (an initial import whose temp was
+        // torn by a crash and whose source has since changed) the mismatch
+        // stays a hard failure, but the error names the temp file so the
+        // recovery (remove it) is actionable.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(
+            &archive_temp_path(&paths.node_cache_archive),
+            b"torn-write-bytes",
+        );
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::TornArchiveTemp { ref temp }
+                if temp == &archive_temp_path(&paths.node_cache_archive)
+        ));
+        assert!(error.to_string().contains(".tmp"));
     }
 
     #[test]

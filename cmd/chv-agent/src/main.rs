@@ -149,19 +149,12 @@ async fn start_core_managed(
     // activation did not import — the Core database wins by design), the
     // rebuild would DESTROY the only surviving record of those VMs.
     // Refuse to overwrite it and leave operator inspection possible.
+    // (The decision itself is `NodeCache::unadopted_cache_vm_ids`, unit
+    // tested in chv-agent-core.)
     match activated.service().vms() {
         Ok(rebuild_vms) => {
             let mut cache = cache.lock().await;
-            let authority_ids: std::collections::HashSet<&str> = rebuild_vms
-                .iter()
-                .map(|definition| definition.id.as_str())
-                .collect();
-            let unadopted: Vec<&str> = cache
-                .vm_generations
-                .keys()
-                .filter(|id| !authority_ids.contains(id.as_str()))
-                .map(|id| id.as_str())
-                .collect();
+            let unadopted = cache.unadopted_cache_vm_ids(&rebuild_vms);
             if !unadopted.is_empty() {
                 warn!(
                     unadopted = ?unadopted,
