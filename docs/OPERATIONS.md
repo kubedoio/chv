@@ -341,8 +341,8 @@ operation. This is fail-closed — the side effect may or may not have happened.
   ```bash
   curl -s --unix-socket /run/chv/core/core-v1.sock http://localhost/v1/operations
   ```
-  Stuck operations are `status: "Running"` **plus** a `recovery_assessment`
-  field; in-flight operations are `Running` without it.
+  Stuck operations are `status: "running"` **plus** a `recovery_assessment`
+  field; in-flight operations are `running` without it.
 
 **Resolve it** (on the node; the control plane deliberately cannot):
 

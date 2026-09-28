@@ -491,8 +491,8 @@ service LifecycleService {
   // Core-managed nodes only: the resolution terminal-persists the operation
   // in the core journal after explicit inspection. `operation_id` identifies
   // the journal operation to resolve (see Core API /v1/operations): stuck
-  // operations are status Running with a recovery_assessment field;
-  // Running without it is in flight in the live process.
+  // operations are status `running` with a `recovery_assessment` field;
+  // `running` without it is in flight in the live process.
   rpc ResolveInspectRequiredOperation(ResolveInspectRequiredOperationRequest)
     returns (AckResponse);
 }
