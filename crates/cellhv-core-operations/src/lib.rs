@@ -24,6 +24,10 @@ use std::path::Path;
 use thiserror::Error;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// Cap for journal listing replies (the listing returns the NEWEST
+/// operations, not all history): bounded memory and latency on long-lived
+/// nodes that retain terminal operations. Mirrors the /v1/events cap.
+pub const MAX_LISTED_OPERATIONS: u32 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AttemptToken(String);
@@ -282,8 +286,14 @@ impl OperationService {
     }
 
     /// Creates an empty authority exclusively for a validated legacy import.
+    /// Staged and published atomically (`create_new_staged`): a crash during
+    /// bootstrap must leave the final path absent, not a scrap the next boot
+    /// cannot open (the R2 review caught that the previous in-place
+    /// `create_new` made the interrupted-bootstrap state unrecoverable from
+    /// `StartupTransaction::activate`, which routes existing files to
+    /// `open_existing`).
     pub fn create_migration_target(path: &Path) -> Result<Self> {
-        Ok(Self::new(CoreStore::create_new(path)?))
+        Ok(Self::new(CoreStore::create_new_staged(path)?))
     }
 
     pub fn create_new(path: &Path, host: &cellhv_core_types::HostIdentity) -> Result<Self> {
@@ -372,12 +382,25 @@ impl OperationService {
         Ok(self.store.host()?)
     }
 
+    /// [`Self::host`] for authorities that may legitimately not have a host
+    /// row yet: a pristine migration target (a crash between the staged
+    /// publish and the import transaction) has schema but no identity, and
+    /// its recovery path re-imports. Returns `Ok(None)` only for a missing
+    /// host row; every other store error propagates.
+    pub fn host_optional(&self) -> Result<Option<HostRecord>> {
+        match self.store.host() {
+            Ok(record) => Ok(Some(record)),
+            Err(cellhv_core_store::StoreError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn vms(&self) -> Result<Vec<VmDefinition>> {
         Ok(self.store.list_vms()?)
     }
 
     pub fn operations(&self) -> Result<Vec<OperationJournalEntry>> {
-        Ok(self.store.list_operations()?)
+        Ok(self.store.list_operations(MAX_LISTED_OPERATIONS)?)
     }
 
     pub fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<OperationEvent>> {

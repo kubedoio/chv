@@ -9,6 +9,13 @@
 
 ## 1. Current authority (grounded inventory, 2026-09-26)
 
+> **Historical snapshot:** this section records the state of `main` at merge
+> `731a89cf` (2026-09-26), before any campaign milestone landed. The gaps it
+> lists are closed by later sections of this plan: the journal is wired to the
+> production executor (M2.2a), the second-authority Reconciler and
+> mode-selection hazards are removed (M2.3), and the recovery/fault matrix is
+> verified (M2.4). Do not read §1 as the current state of `main`.
+
 The campaign verified the following on current `main` (merge `731a89cf`):
 
 - **Default mode `legacy`:** the sole *effectful* authority is the legacy daemon —

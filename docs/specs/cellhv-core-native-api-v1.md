@@ -24,12 +24,19 @@ Controller, VMM, or provider stack.
 | `GET`, `POST` | `/v1/vms` | List definitions; asynchronously accept create |
 | `GET`, `PATCH`, `DELETE` | `/v1/vms/{id}` | Inspect; asynchronously accept update/delete |
 | `POST` | `/v1/vms/{id}/actions/{start,stop,reboot}` | Structured `unsupported` until an executor is wired |
-| `GET` | `/v1/operations` | Ordered operation journal inspection |
+| `GET` | `/v1/operations` | Ordered operation journal inspection; newest-first, bounded to the newest 1000 entries |
 | `GET` | `/v1/operations/{id}` | Operation journal entry inspection |
 | `GET` | `/v1/events?after=N&limit=M` | Ordered polling; limit is 1 through 1000 |
 
 Mutation bodies carry a caller `request_id`; Core maps it to the durable,
-surface-namespaced operation ID `native:v1:{request_id}`. Every supported mutation requires an
+surface-namespaced operation ID `native:v1:{request_id}`. Because the
+`request_id` *is* the durable operation identity, it must be unique per
+distinct mutation the caller wants admitted: reusing a `request_id` with a
+fresh `Idempotency-Key` for a different mutation fails with a typed
+operation conflict (it cannot become a second operation), while re-sending
+the same mutation with the same `request_id` and `Idempotency-Key` is the
+documented replay path and the same key with a different body is rejected.
+Every supported mutation requires an
 `Idempotency-Key` header. Update and delete additionally require `If-Match`
 containing exactly one quoted positive decimal resource version, for example
 `"7"`. Bare integers, weak tags, lists, zero, and noncanonical leading zeroes

@@ -230,10 +230,22 @@ impl StartupTransaction {
             }
             (cache, true) => {
                 let mut service = OperationService::open_existing(&paths.core_database)?;
-                let host = service.host()?.identity;
+                // A crash between the migration target's staged publish and
+                // the import transaction leaves a PRISTINE (host-less)
+                // authority: the re-import arm in `activate_existing` below
+                // recovers exactly that state, so a missing host row is
+                // tolerated — but only when a cache is available to import
+                // from. Without one, a host-less authority is unrelated or
+                // corrupt and keeps failing closed exactly as before.
+                let host = if cache.is_some() {
+                    service.host_optional()?
+                } else {
+                    Some(service.host()?)
+                }
+                .map(|record| record.identity);
                 let import = cache.as_deref().map(plan).transpose()?;
                 resolve_host_identity(HostIdentityInputs {
-                    existing_core: Some(host),
+                    existing_core: host,
                     importable_nodecache: import.as_ref().map(|value| value.host().clone()),
                     configured_seed,
                     precreation_enrollment,
@@ -706,6 +718,102 @@ mod tests {
         assert_eq!(restarted.kind(), ActivationKind::ImportedNodeCache);
         assert_eq!(
             restarted.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
+    }
+
+    #[test]
+    fn interrupted_migration_target_with_cache_recovers_by_reimport() {
+        // Crash window: the migration target was published (staged rename)
+        // but the import transaction never ran — the authority is pristine
+        // and HOST-LESS while the node cache still exists. The next boot
+        // must take the (cache, database-exists) arm, tolerate the missing
+        // host row, and recover through the pristine re-import path instead
+        // of failing on `host()` before the recovery arm is reachable
+        // (the R2 review caught that this window bricked startup).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, source());
+
+        // Reproduce the post-crash on-disk state exactly: a published,
+        // schema-complete, host-less migration target at the final path.
+        {
+            let service = OperationService::create_migration_target(&paths.core_database)
+                .expect("migration target bootstrap");
+            assert!(
+                service.is_pristine_migration_target().unwrap(),
+                "a fresh migration target must be pristine (host-less)"
+            );
+        }
+
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        assert_eq!(
+            active.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
+    }
+
+    #[test]
+    fn hostless_authority_without_cache_still_fails_closed() {
+        // The re-import tolerance is gated on a cache being available: a
+        // host-less authority with nothing to import from is unrelated or
+        // corrupt and must keep failing closed (unchanged behavior).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        drop(
+            OperationService::create_migration_target(&paths.core_database)
+                .expect("migration target bootstrap"),
+        );
+
+        let result = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None);
+        assert!(
+            matches!(result, Err(StartupError::Operations(_))),
+            "host-less authority without a cache must fail closed"
+        );
+    }
+
+    #[test]
+    fn stale_staging_sibling_does_not_block_migration_target_bootstrap() {
+        // Crash leftover from the staged publish: junk staging siblings in
+        // the core directory — including names carrying THIS process's pid
+        // (pid reuse after a crash), so the existence-checked allocation
+        // must skip occupied candidates, not merely differ by pid. The
+        // next bootstrap must pick a fresh staging name and succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, source());
+        let parent = paths.core_database.parent().unwrap();
+        let name = paths
+            .core_database
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        for sequence in 0..6 {
+            let stale = parent.join(format!(".{}.fresh-{}-{sequence}", name, std::process::id()));
+            fs::write(&stale, b"interrupted staging garbage").unwrap();
+        }
+        // And one from a different (restarted) pid.
+        fs::write(
+            parent.join(format!(".{}.fresh-999999-0", name)),
+            b"interrupted staging garbage",
+        )
+        .unwrap();
+
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        assert_eq!(
+            active.service().host().unwrap().identity.id.as_str(),
             "node-a"
         );
     }

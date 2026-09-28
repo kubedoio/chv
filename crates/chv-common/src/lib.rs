@@ -80,6 +80,21 @@ pub fn is_safe_id(id: &str) -> bool {
         && !id.contains("..")
 }
 
+/// Validate that `component` is safe to join under a fixed directory root:
+/// non-empty, not `.` or `..`, no separators, and no control characters.
+/// Unlike [`is_safe_id`] this permits arbitrary printable characters —
+/// e.g. `:` in tag-style names such as `image:latest` — rejecting exactly
+/// the path-traversal vectors (separators and dot components) so that
+/// names accepted before the boundary check existed remain valid.
+pub fn is_safe_path_component(component: &str) -> bool {
+    !component.is_empty()
+        && component != "."
+        && component != ".."
+        && !component
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +156,28 @@ mod tests {
         assert!(!is_safe_id("a..b")); // path traversal
         assert!(!is_safe_id("a b"));
         assert!(!is_safe_id("aéb")); // non-ASCII
+    }
+
+    #[test]
+    fn is_safe_path_component_accepts_tag_style_names() {
+        // Compatibility class: names that were valid image_ref values before
+        // the trust-boundary check existed must keep working.
+        assert!(is_safe_path_component("test-image:latest"));
+        assert!(is_safe_path_component("ubuntu-22.04.qcow2"));
+        assert!(is_safe_path_component("vm image #1")); // spaces are legal in a component
+        assert!(is_safe_path_component("a..b")); // literal name, cannot traverse without a separator
+    }
+
+    #[test]
+    fn is_safe_path_component_rejects_traversal_vectors() {
+        assert!(!is_safe_path_component(""));
+        assert!(!is_safe_path_component("."));
+        assert!(!is_safe_path_component(".."));
+        assert!(!is_safe_path_component("a/b"));
+        assert!(!is_safe_path_component("a\\b"));
+        assert!(!is_safe_path_component("sub/dir/name"));
+        assert!(!is_safe_path_component("a\nb")); // control characters
+        assert!(!is_safe_path_component("a\0b"));
     }
 }
 

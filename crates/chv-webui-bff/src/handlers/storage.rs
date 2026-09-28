@@ -37,7 +37,10 @@ pub async fn list_storage_pools(
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
-            let allocatable = r.total_bytes - r.used_bytes;
+            // Saturating: if usage ever exceeds the recorded total (drift or
+            // a path shared between two pools), report zero allocatable
+            // instead of a wrapped negative capacity.
+            let allocatable = r.total_bytes.saturating_sub(r.used_bytes);
             json!({
                 "id": r.pool_id,
                 "pool_id": r.pool_id,

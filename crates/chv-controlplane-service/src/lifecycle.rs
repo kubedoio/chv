@@ -12,6 +12,7 @@ use chv_controlplane_types::domain::{
     ResourceId, ResourceKind,
 };
 use chv_controlplane_types::fragment::VmSpec;
+use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -188,10 +189,13 @@ pub trait LifecycleService: Send + Sync {
         request: proto::SendGratuitousArpRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
-    /// Node-scoped operator egress for restart-interrupted
-    /// (InspectRequired) core-journal operations. Not routed through the
-    /// control plane: the terminal-persisting resolution must be issued
-    /// against the owning agent's LifecycleService (or the node's Core API).
+    /// Node-scoped operator action for restart-interrupted
+    /// (InspectRequired) core-journal operations. The control plane RELAYS
+    /// it to the owning agent's LifecycleService (the agent validates and
+    /// terminal-persists against the journal); it never journals on the
+    /// node's behalf. Node-local invocation against the agent directly (or
+    /// the node's Core API) remains the fallback when the agent socket is
+    /// unreachable from the control plane.
     async fn resolve_inspect_required_operation(
         &self,
         request: proto::ResolveInspectRequiredOperationRequest,
@@ -204,6 +208,18 @@ pub struct LifecycleServiceImplementation {
     operation_repo: OperationRepository,
     event_repo: EventRepository,
     desired_state_repo: DesiredStateRepository,
+    /// Node egress for operator relays (resolve-inspect-required): the
+    /// client pool plus the agent socket pattern used to reach a node.
+    /// Absent in unit-test constructions — the relay then fails closed
+    /// with `Unsupported` instead of silently mis-relaying.
+    node_egress: Option<NodeEgress>,
+}
+
+/// Control-plane → agent egress for operator relays.
+#[derive(Clone)]
+struct NodeEgress {
+    pool: crate::node_client_pool::NodeClientPool,
+    agent_socket_pattern: String,
 }
 
 impl LifecycleServiceImplementation {
@@ -218,7 +234,22 @@ impl LifecycleServiceImplementation {
             operation_repo,
             event_repo,
             desired_state_repo,
+            node_egress: None,
         }
+    }
+
+    /// Wires the control-plane → agent egress used to relay operator
+    /// actions (resolve-inspect-required) to the owning node's agent.
+    pub fn with_node_egress(
+        mut self,
+        pool: crate::node_client_pool::NodeClientPool,
+        agent_socket_pattern: String,
+    ) -> Self {
+        self.node_egress = Some(NodeEgress {
+            pool,
+            agent_socket_pattern,
+        });
+        self
     }
 
     fn now_ms() -> i64 {
@@ -269,9 +300,22 @@ impl LifecycleServiceImplementation {
     }
 
     fn parse_node_id(s: String) -> Result<NodeId, ControlPlaneServiceError> {
-        NodeId::new(s).map_err(|e| {
+        let node_id = NodeId::new(s).map_err(|e| {
             ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })
+        })?;
+        // Request-supplied node ids eventually reach agent-socket pattern
+        // substitution (orchestrator dispatch, migration, the resolve relay):
+        // reject traversal-shaped ids at this single request boundary.
+        // `is_safe_path_component` (not the stricter `is_safe_id`) so ids a
+        // deployment legitimately uses keep working — only the traversal
+        // vectors (separators, dot components, control characters) fail.
+        if !chv_common::is_safe_path_component(node_id.as_str()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "invalid node_id {:?}: must be a single path component",
+                node_id.as_str()
+            )));
+        }
+        Ok(node_id)
     }
 
     fn parse_vm_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
@@ -1644,6 +1688,17 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
+        // Source and destination references bypass parse_node_id but reach
+        // the same agent-socket substitution during migration execution:
+        // gate them here so a traversal-shaped id fails as a clear
+        // InvalidArgument at the RPC instead of mid-migration.
+        for node_ref in [&request.source_node_id, &request.destination_node_id] {
+            if !chv_common::is_safe_path_component(node_ref) {
+                return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                    "invalid node reference {node_ref:?}: must be a single path component"
+                )));
+            }
+        }
 
         let (operation_id, _) = self
             .create_operation_and_emit(
@@ -1714,19 +1769,110 @@ impl LifecycleService for LifecycleServiceImplementation {
         Ok(Self::ok_ack(&operation_id, "send gratuitous arp accepted"))
     }
 
-    /// Fail-closed: the control plane is a desired-state authority and holds
-    /// no direct agent-call path for journal mutation. Resolving an
-    /// inspect-required operation terminal-persists state in the node's core
-    /// journal, so it must be issued against the owning agent's
-    /// LifecycleService (or the node's local Core API).
+    /// Operator relay: forwards the terminal resolution of a
+    /// restart-interrupted (`InspectRequired`) operation to the owning
+    /// agent's core journal. The control plane stays a desired-state
+    /// authority — it does not journal on the node's behalf; the agent
+    /// validates the payload and terminal-persists (see the agent's
+    /// `resolve_inspect_required_operation`). The target node is
+    /// `meta.target_node_id` (the request has no separate node_id field:
+    /// the operation already belongs to exactly one node).
     async fn resolve_inspect_required_operation(
         &self,
-        _request: proto::ResolveInspectRequiredOperationRequest,
+        request: proto::ResolveInspectRequiredOperationRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
-        Err(ControlPlaneServiceError::Unsupported(
-            "resolve_inspect_required_operation is a node-scoped operator action; \
-             issue it against the owning agent"
-                .into(),
-        ))
+        let egress = self.node_egress.as_ref().ok_or_else(|| {
+            ControlPlaneServiceError::Unsupported(
+                "resolve_inspect_required_operation relay is not configured on this control plane"
+                    .into(),
+            )
+        })?;
+        let meta = self.meta_from_request(request.meta.clone())?;
+        let node_id = Self::parse_node_id(meta.target_node_id.clone())?;
+        if request.operation_id.trim().is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "operation_id is required".into(),
+            ));
+        }
+        if request.vm_id.trim().is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "vm_id is required".into(),
+            ));
+        }
+        // Fail fast on the shapes the agent would reject, so the caller gets
+        // a clear InvalidArgument here instead of an opaque relay error: the
+        // note must be present and single-line (audit evidence), and the
+        // audit identity must be attributable. The agent re-validates at the
+        // journal boundary (authoritative, incl. the 8000-byte note bound).
+        let note = request.note.trim();
+        if note.is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "note is required (operator inspection evidence)".into(),
+            ));
+        }
+        if note.chars().any(|c| c.is_control()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "note must not contain control characters".into(),
+            ));
+        }
+        // Mirrors the agent's journal-boundary bound verbatim so an
+        // oversized note fails here as a clear InvalidArgument instead of
+        // surfacing the agent's rejection as an opaque internal error.
+        if note.len() > 8_000 {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "resolution note must be at most 8000 bytes".into(),
+            ));
+        }
+        let requested_by = meta.requested_by.trim();
+        if requested_by.chars().any(|c| c.is_control()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "requested_by must not contain control characters".into(),
+            ));
+        }
+        let requested_by = if requested_by.is_empty() {
+            "control-plane"
+        } else {
+            requested_by
+        };
+        match request.disposition.as_str() {
+            "succeeded" | "failed" => {}
+            other => {
+                return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                    "disposition must be \"succeeded\" or \"failed\", got {other:?}"
+                )))
+            }
+        }
+        let socket_path =
+            crate::migration::resolve_agent_socket(&egress.agent_socket_pattern, node_id.as_str())
+                .map_err(|e| ControlPlaneServiceError::InvalidArgument(e.to_string()))?;
+        let mut client = egress
+            .pool
+            .get_or_connect(node_id.as_str(), &socket_path)
+            .await
+            .map_err(|e| {
+                ControlPlaneServiceError::NodeUnavailable(format!(
+                    "cannot reach agent for node {node_id}: {e}"
+                ))
+            })?;
+        client
+            .resolve_inspect_required_operation(
+                node_id.as_str(),
+                &request.vm_id,
+                &request.operation_id,
+                &request.disposition,
+                &request.note,
+                Some(requested_by),
+            )
+            .await
+            .map_err(|e| match e {
+                ChvError::BackendUnavailable { backend, reason } => {
+                    ControlPlaneServiceError::NodeUnavailable(format!(
+                        "agent resolve_inspect_required_operation unavailable ({backend}): {reason}"
+                    ))
+                }
+                other => ControlPlaneServiceError::Internal(format!(
+                    "agent resolve_inspect_required_operation failed: {other}"
+                )),
+            })
     }
 }

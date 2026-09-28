@@ -75,6 +75,27 @@ fn generate_secure_secret() -> String {
 
 const SHARED_SECRET_PATH: &str = "/etc/chv/jwt_secret";
 
+/// Creates/rewrites the shared secret file with owner-only permissions from
+/// creation: a plain `fs::write` followed by a chmod leaves a umask-dependent
+/// window where the fresh secret is group/world-readable.
+#[cfg(unix)]
+fn write_secret_private(path: &str, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_secret_private(path: &str, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)
+}
+
 fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     if current != "chv-dev-secret-change-in-production" && current.len() >= 32 {
         return current.to_string();
@@ -103,7 +124,7 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
         }
     }
     let generated = generate_secure_secret();
-    if std::fs::write(SHARED_SECRET_PATH, &generated).is_ok() {
+    if write_secret_private(SHARED_SECRET_PATH, &generated).is_ok() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

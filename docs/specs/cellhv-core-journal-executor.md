@@ -41,7 +41,8 @@
 
 ## Pending
 
-- production composition in `chv-agent`;
+- ~~production composition in `chv-agent`~~ — done in M2.2a (core-managed
+  mode) and the core-native mode;
 - an ownership inspector and explicit attempt-supersede transition;
 - T3 real-KVM qualification.
 

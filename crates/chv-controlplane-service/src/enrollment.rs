@@ -107,6 +107,19 @@ impl EnrollmentService for EnrollmentServiceImplementation {
         let node_id = NodeId::new(inventory.node_id.clone()).map_err(|e| {
             ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
         })?;
+        // The node id persists into the nodes table and later reaches
+        // agent-socket pattern substitution (dispatch, migration, the
+        // resolve relay) and certificate subjects: it must be a single safe
+        // path component. `is_safe_path_component` keeps legitimately-named
+        // nodes enrollable — only traversal-shaped ids (separators, dot
+        // components, control characters) are rejected, at the boundary
+        // where node data enters the control plane.
+        if !chv_common::is_safe_path_component(node_id.as_str()) {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "invalid node_id {:?}: must be a single path component",
+                node_id.as_str()
+            )));
+        }
 
         // Issue certificates
         let cert_issuer = self

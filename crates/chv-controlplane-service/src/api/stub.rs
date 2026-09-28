@@ -39,7 +39,10 @@ pub async fn list_storage_pools_stub(
             let items: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|r| {
-                    let allocatable = r.total_bytes - r.used_bytes;
+                    // Saturating: usage above the recorded total (drift, or a
+                    // path shared between two pools) reports zero allocatable
+                    // instead of a wrapped negative capacity.
+                    let allocatable = r.total_bytes.saturating_sub(r.used_bytes);
                     serde_json::json!({
                         "id": r.pool_id,
                         "pool_id": r.pool_id,

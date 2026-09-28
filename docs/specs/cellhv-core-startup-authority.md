@@ -1,7 +1,6 @@
 # CellHV Core Startup Authority Coordinator
 
-Status: Phase B library and fault-injection tests; wired only by the explicit,
-default-off `core-native` authority mode.
+Status: Production wiring in the explicit, default-off `core-native` and `core-managed` authority modes (legacy NodeCache remains the default).
 
 ## Boundary
 

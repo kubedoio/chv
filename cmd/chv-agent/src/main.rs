@@ -41,17 +41,76 @@ const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
 /// Write `contents` to `path` with mode 0600, normalizing the permissions of
 /// an existing file as well. Used for TLS private key material.
+/// Durable, atomic file publish for node-local security material: write to
+/// a private temp sibling, fsync, rename into place, fsync the parent
+/// directory. A crash or power loss mid-write never leaves a truncated
+/// key/cert at the target path (the previous version, if any, stays intact
+/// until the rename commits).
+async fn write_file_durable(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    let temp = std::path::PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
+    let write = async {
+        // `.write(true)` is required: OpenOptions defaults to read-only
+        // access, and create/truncate without write access fails at the
+        // library level with InvalidInput before any file is created (a
+        // defect the R1 review caught in the first version of this
+        // function — every enrollment/rotation write silently failed).
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .mode(mode)
+            .create(true)
+            .truncate(true)
+            .open(&temp)
+            .await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, contents).await?;
+        file.sync_all().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    match write {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(error);
+        }
+    }
+    if let Err(error) = tokio::fs::rename(&temp, path).await {
+        // The publish did not happen: clean up the temp sibling so a
+        // transient failure does not leak *.tmp-{pid} files.
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error);
+    }
+    // Persist the rename itself: fsync the parent directory (O_RDONLY is
+    // sufficient for a directory fsync on Linux). Best-effort by
+    // necessity — the rename has already committed, so the target IS
+    // updated; returning an error here would make callers report the
+    // material as unwritten while it exists on disk (enrollment would
+    // refuse to mark itself complete). A failed dir-fsync weakens the
+    // crash-durability guarantee to that of a plain rename; log loudly.
+    let dir_fsync = async {
+        let directory = tokio::fs::File::open(parent).await?;
+        directory.sync_all().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    if let Err(error) = dir_fsync {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "published file but failed to fsync parent directory (crash durability weakened)"
+        );
+    }
+    Ok(())
+}
+
+/// Private (0600) variant of [`write_file_durable`] for key material.
 async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .mode(0o600)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .await?;
-    tokio::io::AsyncWriteExt::write_all(&mut file, contents).await?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .await
+    write_file_durable(path, contents, 0o600).await
 }
 
 async fn start_core_managed(
@@ -213,6 +272,16 @@ fn initial_node_id(config: &AgentConfig) -> String {
 }
 
 async fn load_or_initialize_cache(config: &AgentConfig) -> NodeCache {
+    // Fail fast and loud when the cache parent is unusable: a missing
+    // directory would otherwise make every later save fail as a per-tick
+    // warning while the node re-enrolls on each boot (state silently
+    // non-persistent). Creating the parent here is best-effort; a
+    // permission problem still surfaces through the first save's warn.
+    if let Some(parent) = config.cache_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            warn!(parent = %parent.display(), error = %e, "cannot create cache parent directory");
+        }
+    }
     match NodeCache::load(&config.cache_path).await {
         Ok(cache) => {
             info!(
@@ -475,9 +544,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         warn!(error = %e, "failed to create runtime dir");
                                     } else {
                                         let mut ok = true;
-                                        if let Err(e) =
-                                            tokio::fs::write(&cert_path, &resp.certificate_pem)
-                                                .await
+                                        if let Err(e) = write_file_durable(
+                                            &cert_path,
+                                            &resp.certificate_pem,
+                                            0o644,
+                                        )
+                                        .await
                                         {
                                             warn!(error = %e, "failed to write certificate");
                                             ok = false;
@@ -490,7 +562,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ok = false;
                                         }
                                         if let Err(e) =
-                                            tokio::fs::write(&ca_path, &resp.ca_pem).await
+                                            write_file_durable(&ca_path, &resp.ca_pem, 0o644).await
                                         {
                                             warn!(error = %e, "failed to write ca certificate");
                                             ok = false;
@@ -752,9 +824,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
+    // Fatality watchdog: a fatally terminated Core executor must fail the
+    // process promptly (≤500 ms, matching the core-native loop's cadence),
+    // not on the next 5 s tick — the authority would otherwise keep
+    // acknowledging operations that are never executed for up to 5 s.
+    let mut fatality_check = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
             _ = interval.tick() => {}
+            _ = fatality_check.tick() => {
+                // The health aggregation and telemetry paths have already
+                // marked the node Degraded and reported it; exit non-zero so
+                // the supervisor restarts the agent.
+                if core_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.executor_fatal())
+                {
+                    tracing::error!(
+                        "core journal executor terminated fatally — shutting down for supervisor restart"
+                    );
+                    supervisor.shutdown().await;
+                    if let Some(owner) = core_owner.take() {
+                        let _ = owner.shutdown().await;
+                    }
+                    return Err("core journal executor terminated fatally".into());
+                }
+                // Watchdog tick only: skip the 5 s body's heavy work.
+                continue;
+            }
             _ = sigterm.recv() => {
                 info!("received SIGTERM, shutting down gracefully");
                 supervisor.shutdown().await;
@@ -828,10 +925,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 (cert_path, key_path, ca_path)
                             {
                                 let write_result = async {
-                                    tokio::fs::write(&cert_path, &resp.certificate_pem).await?;
+                                    write_file_durable(
+                                        Path::new(&cert_path),
+                                        &resp.certificate_pem,
+                                        0o644,
+                                    )
+                                    .await?;
                                     write_private_file(Path::new(&key_path), &resp.private_key_pem)
                                         .await?;
-                                    tokio::fs::write(&ca_path, &resp.ca_pem).await?;
+                                    write_file_durable(Path::new(&ca_path), &resp.ca_pem, 0o644)
+                                        .await?;
                                     Ok::<(), std::io::Error>(())
                                 }
                                 .await;
@@ -1202,25 +1305,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ms.cp_disconnected_duration_ms = cp_snapshot.disconnected_duration_ms;
             ms.cp_consecutive_failures = cp_snapshot.consecutive_failures;
             ms.cp_total_deferred_messages = cp_snapshot.total_deferred_messages;
-        }
-
-        // A fatally terminated Core executor must fail the process: the
-        // authority would keep acknowledging operations that are never
-        // executed. The health aggregation and telemetry above have already
-        // marked the node Degraded and reported it; exit non-zero so the
-        // supervisor restarts the agent.
-        if core_owner
-            .as_ref()
-            .is_some_and(|owner| owner.executor_fatal())
-        {
-            tracing::error!(
-                "core journal executor terminated fatally — shutting down for supervisor restart"
-            );
-            supervisor.shutdown().await;
-            if let Some(owner) = core_owner.take() {
-                let _ = owner.shutdown().await;
-            }
-            return Err("core journal executor terminated fatally".into());
+            // Core journal health: emitted only when the core-managed owner
+            // exists (legacy mode has no journal poller — the metrics are
+            // absent, not zeroed).
+            ms.core_journal = core_owner.as_ref().map(|owner| {
+                chv_agent_core::metrics_server::CoreJournalMetrics {
+                    scan_failures_total: owner.journal_scan_failures(),
+                    healthy: owner.journal_scan_healthy() && !owner.executor_fatal(),
+                    inspect_required: owner.journal_inspect_required_count(),
+                }
+            });
         }
     }
 
@@ -1263,6 +1357,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_file_durable_publishes_content_and_leaves_no_temp_files() {
+        // Regression pin for the R1-review MAJOR: the first version of
+        // write_file_durable omitted `.write(true)`, so OpenOptions failed
+        // with InvalidInput before any file was created and EVERY
+        // enrollment/rotation write silently failed (the node would have
+        // re-enrolled with a fresh node_id on every boot). This test drives
+        // the real function so a recurrence fails CI instead of production.
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("agent.crt");
+
+        write_file_durable(&target, b"certificate-bytes", 0o644)
+            .await
+            .expect("durable write must succeed");
+        let persisted = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(persisted, b"certificate-bytes");
+
+        // The private-key variant must land owner-only.
+        let key = directory.path().join("agent.key");
+        write_private_file(&key, b"key-bytes").await.unwrap();
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // Overwrite (rotation) replaces the previous version atomically.
+        write_file_durable(&target, b"certificate-bytes-v2", 0o644)
+            .await
+            .unwrap();
+        let persisted = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(persisted, b"certificate-bytes-v2");
+
+        // No temp siblings are leaked after success.
+        let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp-"), "leaked temp file: {name}");
+        }
+    }
+
+    #[tokio::test]
     async fn core_native_http_create_survives_restart_and_excludes_second_instance() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
@@ -1290,6 +1422,69 @@ mod tests {
         assert!(response.contains("vm-1"));
         owner.shutdown().await.unwrap();
         assert!(!config.cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn core_native_concurrent_identical_creates_commit_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = core_config(&directory);
+        let owner = start_core_native(&config).await.unwrap();
+        let body = serde_json::json!({"request_id":"create-1","definition":{
+            "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
+            "compute":{"vcpus":1,"memory_bytes":1048576},"storage":[],"networks":[],
+            "requested_power_state":"stopped","observed_power_state":"unknown","resource_version":1
+        }}).to_string();
+        let request = format!("POST /v1/vms HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nIdempotency-Key: create-vm-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+
+        async fn send(socket: &std::path::Path, request: &str) -> String {
+            let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        }
+
+        // Two concurrent, byte-identical submissions race the acceptance
+        // path. The store's transactional idempotency resolution must let
+        // exactly one accept and turn the other into a replay of the same
+        // operation: never two operations, never a double creation, never
+        // a 5xx from a lost acceptance race.
+        let (first, second) = tokio::join!(
+            send(&config.core_api_socket_path, &request),
+            send(&config.core_api_socket_path, &request)
+        );
+        let mut dispositions = Vec::new();
+        for response in [&first, &second] {
+            assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+            let body: serde_json::Value =
+                serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            dispositions.push(
+                body["disposition"]
+                    .as_str()
+                    .expect("disposition in acceptance body")
+                    .to_owned(),
+            );
+        }
+        dispositions.sort();
+        assert_eq!(dispositions, vec!["accepted", "replay"]);
+
+        // Exactly one creation committed: the listing contains the VM once.
+        let listing = send(
+            &config.core_api_socket_path,
+            "GET /v1/vms HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(listing.starts_with("HTTP/1.1 200"), "{listing}");
+        let entries: serde_json::Value =
+            serde_json::from_str(listing.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let count = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["id"] == "vm-1")
+            .count();
+        assert_eq!(count, 1, "{entries}");
+        owner.shutdown().await.unwrap();
     }
 
     #[tokio::test]

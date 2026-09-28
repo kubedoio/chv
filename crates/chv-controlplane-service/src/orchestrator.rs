@@ -445,7 +445,7 @@ impl Orchestrator {
             self.require_node_schedulable(node_id).await?;
         }
 
-        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id);
+        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id)?;
         let mut client = self
             .node_client_pool
             .get_or_connect(node_id, &socket_path)
@@ -1138,7 +1138,7 @@ impl Orchestrator {
         })?;
 
         let kernel_path = if let Some(ref image_ref) = vm_row.image_ref {
-            self.resolve_kernel_path(image_ref)
+            self.resolve_kernel_path(image_ref)?
         } else {
             self.kernel_path.clone()
         };
@@ -1271,6 +1271,11 @@ impl Orchestrator {
         // and agent share a filesystem. In multi-node setups, the agent-side reconciler
         // handles missing images via backoff retry.
         let disk_seed_path = self.resolve_disk_seed_path(vm_row.image_ref.as_deref());
+        let disk_seed_path = match disk_seed_path {
+            Some(Err(error)) => return Err(error),
+            Some(Ok(path)) => Some(path),
+            None => None,
+        };
         if let Some(ref seed_path) = disk_seed_path {
             let path = std::path::Path::new(seed_path);
             if !path.exists() {
@@ -1303,7 +1308,7 @@ impl Orchestrator {
         })
     }
 
-    fn resolve_kernel_path(&self, image_ref: &str) -> String {
+    fn resolve_kernel_path(&self, image_ref: &str) -> Result<String, ChvError> {
         // For the first VM milestone, use a simple config-based mapping.
         // In production this would query an image registry.
         // If image_ref looks like a disk image path (absolute path or file:// URI),
@@ -1313,24 +1318,49 @@ impl Orchestrator {
             || image_ref.starts_with('/')
             || image_ref.starts_with("file://")
         {
-            self.kernel_path.clone()
-        } else {
-            format!("/var/lib/chv/kernels/{}", image_ref)
+            return Ok(self.kernel_path.clone());
         }
+        // A relative image_ref becomes a single path component under the
+        // kernels root: reject anything that could escape it (a ".."
+        // component in image_ref is an API-client-supplied path traversal,
+        // not an image name). `is_safe_path_component` (not the stricter
+        // `is_safe_id`) so tag-style names accepted before this boundary
+        // check existed — e.g. `image:latest` — keep working.
+        if !chv_common::is_safe_path_component(image_ref) {
+            return Err(ChvError::InvalidArgument {
+                field: "image_ref".to_string(),
+                reason: format!(
+                    "'{image_ref}' is not a safe image name (must be a single path component)"
+                ),
+            });
+        }
+        Ok(format!("/var/lib/chv/kernels/{image_ref}"))
     }
 
-    fn resolve_disk_seed_path(&self, image_ref: Option<&str>) -> Option<String> {
+    fn resolve_disk_seed_path(&self, image_ref: Option<&str>) -> Option<Result<String, ChvError>> {
         let image_ref = image_ref?.trim();
         if image_ref.is_empty() || image_ref == "default" {
             return None;
         }
+        // Absolute and file:// paths are the operator escape hatch and pass
+        // through verbatim; the node-side stord allowlist constrains what
+        // the agent will actually open. A RELATIVE image_ref is joined under
+        // the images root and must be a single safe component.
         if let Some(path) = image_ref.strip_prefix("file://") {
-            return Some(path.to_string());
+            return Some(Ok(path.to_string()));
         }
         if image_ref.starts_with('/') {
-            return Some(image_ref.to_string());
+            return Some(Ok(image_ref.to_string()));
         }
-        Some(format!("/var/lib/chv/images/{}", image_ref))
+        if !chv_common::is_safe_path_component(image_ref) {
+            return Some(Err(ChvError::InvalidArgument {
+                field: "image_ref".to_string(),
+                reason: format!(
+                    "'{image_ref}' is not a safe image name (must be a single path component)"
+                ),
+            }));
+        }
+        Some(Ok(format!("/var/lib/chv/images/{image_ref}")))
     }
 }
 

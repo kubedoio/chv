@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -111,7 +111,63 @@ pub async fn connect_pool(config: &ControlPlaneStoreConfig) -> Result<StorePool,
         });
     }
 
+    // The sqlite file is created with the process umask (typically 0644 for
+    // group/world read): tighten to owner-only. The `-wal` and `-shm`
+    // sidecars are tightened too — SQLite creates them on first write with
+    // the same umask, and the WAL carries committed data. Best-effort — a
+    // memory database, a missing file, or a permission problem must not
+    // fail startup, but the failure is logged so a misconfigured deployment
+    // is visible.
+    if let Some(path) = sqlite_file_path(&config.database_url) {
+        let mut targets = vec![path.clone()];
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        targets.push(wal.into());
+        let mut shm = path.into_os_string();
+        shm.push("-shm");
+        targets.push(shm.into());
+        for target in targets {
+            if !target.exists() {
+                continue;
+            }
+            if let Err(error) = tighten_file_mode(&target) {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "cannot tighten control-plane database file permissions"
+                );
+            }
+        }
+    }
+
     Ok(pool)
+}
+
+/// Extracts the on-disk database path from a `sqlite://` URL, if any
+/// (memory databases and URLs without a file component return `None`).
+fn sqlite_file_path(url: &str) -> Option<PathBuf> {
+    let stripped = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))?;
+    let stripped = stripped.split('?').next().unwrap_or("");
+    if stripped.is_empty() || stripped == ":memory:" {
+        return None;
+    }
+    Some(PathBuf::from(stripped))
+}
+
+#[cfg(unix)]
+fn tighten_file_mode(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() & !0o077);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn tighten_file_mode(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 pub fn migrations_path(config: Option<&ControlPlaneStoreConfig>) -> Cow<'_, Path> {
@@ -209,6 +265,36 @@ pub async fn run_migrations(
                 };
 
                 if has_pending {
+                    // The database runs in WAL mode: recent commits may only
+                    // exist in the `-wal` sidecar, which the file copy below
+                    // does not include. Checkpoint them into the main file
+                    // first so the backup is a complete snapshot; on failure
+                    // continue with a warning rather than skipping the
+                    // pre-migration backup entirely. The checkpoint returns a
+                    // result ROW (busy, log, checkpointed) rather than an
+                    // error when it cannot complete: read it and warn when
+                    // frames were left behind, instead of silently copying
+                    // a main file that misses recent commits.
+                    match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .fetch_one(pool)
+                        .await
+                    {
+                        Ok(row) => {
+                            let busy: i64 = row.try_get(0).unwrap_or(0);
+                            if busy != 0 {
+                                tracing::warn!(
+                                    busy,
+                                    "WAL checkpoint was busy before backup; backup may miss recent commits"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to checkpoint WAL before backup; backup may miss recent commits"
+                            );
+                        }
+                    }
                     let backup_dir = Path::new(BACKUP_DIR);
                     if let Err(e) = std::fs::create_dir_all(backup_dir) {
                         tracing::error!(

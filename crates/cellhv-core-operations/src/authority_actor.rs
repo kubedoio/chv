@@ -207,6 +207,14 @@ pub struct ExecutionHandle {
 }
 
 impl ExecutionHandle {
+    /// Reads one operation's journal entry. Read-only: used by the executor
+    /// to release failure quarantines once the ambiguous operation reached
+    /// a terminal status (`scan_ready`'s per-scan reconcile).
+    pub async fn operation(&self, id: OperationId) -> Result<OperationJournalEntry> {
+        let (reply, receive) = oneshot::channel();
+        AuthorityHandle::send(&self.sender, Request::Operation(id, reply), receive).await
+    }
+
     pub async fn claim_attempt(
         &self,
         id: OperationId,
@@ -405,27 +413,42 @@ impl Drop for AuthorityActorJoin {
             // Dropping an owner may happen on an async runtime worker. Transfer
             // the blocking join to a named reaper so queued SQLite work cannot
             // stall that worker. Explicit `join()` remains the observable path.
-            if let Err(error) = authority_reaper().send(task) {
-                let _ = error.0.join();
+            match authority_reaper() {
+                Some(reaper) => {
+                    if let Err(error) = reaper.send(task) {
+                        let _ = error.0.join();
+                    }
+                }
+                // No reaper thread could be started (thread/resource
+                // exhaustion): degrade to joining in place — a blocked
+                // dropper is better than a panic on a Drop path.
+                None => {
+                    let _ = task.join();
+                }
             }
         }
     }
 }
 
-fn authority_reaper() -> &'static std::sync::mpsc::Sender<thread::JoinHandle<()>> {
-    static REAPER: OnceLock<std::sync::mpsc::Sender<thread::JoinHandle<()>>> = OnceLock::new();
-    REAPER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<thread::JoinHandle<()>>();
-        thread::Builder::new()
-            .name("cellhv-core-authority-reaper".to_owned())
-            .spawn(move || {
-                while let Ok(task) = receiver.recv() {
-                    let _ = task.join();
-                }
-            })
-            .expect("cannot start Core authority reaper thread");
-        sender
-    })
+fn authority_reaper() -> Option<&'static std::sync::mpsc::Sender<thread::JoinHandle<()>>> {
+    static REAPER: OnceLock<Option<std::sync::mpsc::Sender<thread::JoinHandle<()>>>> =
+        OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel::<thread::JoinHandle<()>>();
+            thread::Builder::new()
+                .name("cellhv-core-authority-reaper".to_owned())
+                .spawn(move || {
+                    while let Ok(task) = receiver.recv() {
+                        let _ = task.join();
+                    }
+                })
+                .map(|_| sender)
+                // Starting the reaper is best-effort: on failure, Drops degrade
+                // to joining in place (see AuthorityActorJoin::drop).
+                .ok()
+        })
+        .as_ref()
 }
 
 #[cfg(test)]

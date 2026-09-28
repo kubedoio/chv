@@ -1318,3 +1318,204 @@ async fn armed_fault_runtime_parks_once_then_passes_through() {
     );
     stop(f).await;
 }
+
+/// Deterministic failure injector for the failure-quarantine release path:
+/// the first executed operation returns an invalid result (a `ResultInvalid`
+/// executor failure — the op stays `running` and is marked abandoned /
+/// InspectRequired), later operations succeed.
+struct FlippingResult {
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl CoreVmRuntime for FlippingResult {
+    async fn execute(
+        &self,
+        _: OperationJournalEntry,
+    ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Some(serde_json::Value::String("not-object".into())))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[test]
+fn reconcile_failures_releases_only_resolved_entries() {
+    let state = QuarantineState::default();
+    let vm = VmId::new("a").unwrap();
+    let resolved = OperationId::new("resolved").unwrap();
+    let interrupted = OperationId::new("interrupted").unwrap();
+    let claimable = OperationId::new("claimable").unwrap();
+    let unmarked = OperationId::new("unmarked").unwrap();
+    state.record_failure(vm.clone(), Some(resolved.clone()));
+    state.record_failure(vm.clone(), Some(interrupted.clone()));
+    state.record_failure(vm.clone(), Some(claimable.clone()));
+    state.record_failure(vm.clone(), Some(unmarked.clone()));
+    state.record_failure(VmId::new("b").unwrap(), None);
+    assert!(state.contains(&vm));
+    assert!(state.contains(&VmId::new("b").unwrap()));
+
+    let dispositions = HashMap::from([
+        (interrupted.clone(), RestartDisposition::InspectRequired),
+        (claimable.clone(), RestartDisposition::Ready),
+    ]);
+    let statuses = HashMap::from([
+        // Resolved while not being scanned: terminal in the journal.
+        (resolved.clone(), cellhv_core_types::OperationStatus::Failed),
+        // Unmarked `running` (abandonment marking failed): invisible to the
+        // incomplete snapshot, not terminal — must stay quarantined.
+        (
+            unmarked.clone(),
+            cellhv_core_types::OperationStatus::Running,
+        ),
+    ]);
+    state.reconcile_failures(&dispositions, &statuses);
+    // `interrupted`, `claimable` and `unmarked` keep VM "a" quarantined.
+    assert!(
+        state.contains(&vm),
+        "unresolved entries must keep the quarantine"
+    );
+    // The vm-only entry is never released in-process.
+    assert!(state.contains(&VmId::new("b").unwrap()));
+
+    // The interrupted op resolves (absent from the snapshot, terminal).
+    let dispositions = HashMap::from([(claimable.clone(), RestartDisposition::Ready)]);
+    let statuses = HashMap::from([
+        (resolved.clone(), cellhv_core_types::OperationStatus::Failed),
+        (
+            interrupted.clone(),
+            cellhv_core_types::OperationStatus::Failed,
+        ),
+        (
+            unmarked.clone(),
+            cellhv_core_types::OperationStatus::Running,
+        ),
+    ]);
+    state.reconcile_failures(&dispositions, &statuses);
+    assert!(state.contains(&vm), "claimable and unmarked entries remain");
+
+    // Same snapshot, but the unmarked op is now resolved too: only the
+    // claimable entry (ambiguous claim, op still Ready) remains.
+    let statuses = HashMap::from([(unmarked, cellhv_core_types::OperationStatus::Unsupported)]);
+    state.reconcile_failures(&dispositions, &statuses);
+    assert!(state.contains(&vm), "the claimable entry remains");
+
+    // POSITIVE release pin (the keep-side asserts above cannot distinguish
+    // a correct reconcile from one that never releases anything): VM "c"
+    // has exactly one failure entry, and once that op is terminal the VM
+    // must be RELEASED — contains() goes false.
+    let vm_c = VmId::new("c").unwrap();
+    let solo = OperationId::new("solo").unwrap();
+    state.record_failure(vm_c.clone(), Some(solo.clone()));
+    assert!(state.contains(&vm_c), "vm c starts quarantined");
+    state.reconcile_failures(
+        &HashMap::new(),
+        &HashMap::from([(solo, cellhv_core_types::OperationStatus::Succeeded)]),
+    );
+    assert!(
+        !state.contains(&vm_c),
+        "a fully resolved entry set must release the quarantine"
+    );
+}
+
+/// A VM failure-quarantined by an in-process ambiguous outcome is released
+/// when the interrupted operation is resolved in the journal, and the queued
+/// successor — dropped from the pending queue by the quarantine — is
+/// re-admitted and completes in the same process. Before the reconcile and
+/// scheduled-release fixes, both the sticky failure entry and the leaked
+/// admission id wedged the VM until a process restart.
+#[tokio::test]
+async fn resolution_releases_failure_quarantine_and_readmits_dropped_work() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority.submit(submit_start("a", "two")).await.unwrap();
+    let runtime = Arc::new(FlippingResult {
+        calls: AtomicUsize::new(0),
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 2, 4).unwrap();
+    let first = executor.scan_ready().await.unwrap();
+    assert_eq!(first.scheduled.len(), 2, "both operations are admitted");
+
+    // The first operation fails with an invalid result: it stays `running`
+    // (never finished), is marked abandoned → InspectRequired, and VM "a"
+    // is failure-quarantined. The same-VM successor waits in the pending
+    // queue and is dropped by the quarantine retain.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let blocked = loop {
+        let scan = executor.scan_ready().await.unwrap();
+        if scan.quarantined.contains(&OperationId::new("two").unwrap()) {
+            break scan;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the successor was never quarantined"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(blocked.quarantined, vec![OperationId::new("two").unwrap()]);
+    assert_eq!(
+        blocked.inspect_required,
+        vec![OperationId::new("one").unwrap()]
+    );
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+
+    // The operator resolves the interrupted operation as failed.
+    f.authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            false,
+            "invalid runtime result".to_owned(),
+        )
+        .await
+        .unwrap();
+
+    // The next scan releases the failure quarantine (the op is terminal in
+    // the journal) and re-admits the successor (its admission id was
+    // released when it was dropped from the pending queue).
+    let released = executor.scan_ready().await.unwrap();
+    assert!(released.quarantined.is_empty());
+    assert_eq!(released.scheduled, vec![OperationId::new("two").unwrap()]);
+
+    // The failure-event ring recorded the failure with full operator
+    // context (VM, operation, code): this is what the runtime-owner poller
+    // drains and logs at its boundary.
+    let events = executor.drain_failure_events();
+    assert_eq!(events.len(), 1, "exactly one failure event was recorded");
+    assert_eq!(events[0].vm_id, VmId::new("a").unwrap());
+    assert_eq!(
+        events[0].operation_id,
+        Some(OperationId::new("one").unwrap())
+    );
+    assert_eq!(events[0].code, ExecutionFailureCode::ResultInvalid);
+    assert!(
+        executor.drain_failure_events().is_empty(),
+        "drain is destructive"
+    );
+
+    let report = executor.shutdown().await.unwrap();
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure.code == ExecutionFailureCode::ResultInvalid));
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    let two = f
+        .authority
+        .operation(OperationId::new("two").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        two.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    let one = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        one.operation.status,
+        cellhv_core_types::OperationStatus::Failed
+    );
+    stop(f).await;
+}

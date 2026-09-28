@@ -27,6 +27,13 @@ pub enum ControlPlaneServiceError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// A node agent backend could not be reached (socket down, call timeout,
+    /// circuit breaker open). Distinct from [`Self::Internal`]: the request
+    /// was valid and the control plane itself is healthy — the documented
+    /// fallback is to retry later or resolve node-locally.
+    #[error("node agent unavailable: {0}")]
+    NodeUnavailable(String),
+
     #[error("stale generation: expected {expected}, received {received}")]
     StaleGeneration { expected: String, received: String },
 
@@ -78,6 +85,7 @@ impl From<ControlPlaneServiceError> for tonic::Status {
                 ))
             }
             ControlPlaneServiceError::Unsupported(msg) => Status::unimplemented(msg),
+            ControlPlaneServiceError::NodeUnavailable(msg) => Status::unavailable(msg),
             ControlPlaneServiceError::Store(ref e) => {
                 tracing::error!(error = %e, "store error");
                 Status::internal("internal error")

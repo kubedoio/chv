@@ -9,8 +9,8 @@ use cellhv_core_operations::{
     AttemptToken, ClaimResult, ExecutionHandle, OperationJournalEntry, RestartDisposition,
     TerminalOutcome,
 };
-use cellhv_core_types::{canonical_json, OperationId, VmId};
-use std::collections::{HashSet, VecDeque};
+use cellhv_core_types::{canonical_json, OperationId, OperationStatus, VmId};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -98,6 +98,8 @@ impl ExecutionFailureCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionFailure {
     pub operation_id: Option<OperationId>,
+    /// The VM the failed operation targeted (quarantine + operator context).
+    pub vm_id: VmId,
     pub code: ExecutionFailureCode,
 }
 
@@ -139,25 +141,79 @@ type TokenFactory = Arc<dyn Fn() -> AttemptToken + Send + Sync>;
 
 /// Failure containment for VMs, split by lifetime:
 ///
-/// - `failure` is sticky for the process lifetime: an ambiguous claim/finish
-///   must never be retried in-process (restart re-derives it from the
-///   journal).
+/// - `failure` is sticky: an ambiguous claim/finish must never be retried
+///   in-process. An entry is released only when its operation reached a
+///   terminal status in the journal (normally: the operator resolved the
+///   InspectRequired operation the abandonment marking produced) — the
+///   ambiguity is then decided and new work for the VM may run. Entries
+///   whose op is still claimable (`Ready`: the ambiguous claim never took)
+///   or invisible (`running` without a marker: the best-effort abandonment
+///   marking failed) stay quarantined until a process restart re-derives
+///   everything from the journal.
+/// - `sticky` holds vm-only entries (no resolvable operation): never
+///   released in-process.
 /// - `inspect` is re-derived from the journal on every scan: a VM is
 ///   restart-quarantined exactly while it has an unresolved `InspectRequired`
 ///   operation, so an operator resolution un-quarantines the VM on the next
 ///   scan instead of poisoning it for the process lifetime.
 #[derive(Default)]
 struct QuarantineState {
-    failure: Mutex<HashSet<VmId>>,
+    failure: Mutex<HashMap<VmId, Vec<OperationId>>>,
+    sticky: Mutex<HashSet<VmId>>,
     inspect: Mutex<HashSet<VmId>>,
+}
+
+/// One `QuarantineState` failure entry's release rule, evaluated by
+/// [`QuarantineState::reconcile_failures`] each scan: `dispositions` is the
+/// current incomplete-snapshot disposition per operation; `statuses` carries
+/// point-looked-up statuses for entries whose op is absent from that
+/// snapshot (a `running` op without the restart marker is excluded from the
+/// snapshot — see `OperationService::restart_operations`).
+fn failure_entry_keeps(
+    operation_id: &OperationId,
+    dispositions: &HashMap<OperationId, RestartDisposition>,
+    statuses: &HashMap<OperationId, OperationStatus>,
+) -> bool {
+    match dispositions.get(operation_id) {
+        // Still visibly interrupted: keep quarantining.
+        Some(RestartDisposition::InspectRequired) => true,
+        // The ambiguous claim never took and the op is claimable again: the
+        // ambiguity is unresolved and the op must not be retried
+        // in-process — keep until restart.
+        Some(RestartDisposition::Ready) => true,
+        // Terminal in the snapshot: released. (Defensive arm: the real
+        // snapshot source — `list_incomplete_execution_operations` — only
+        // carries `accepted`/`running` ops, so a Terminal disposition
+        // cannot appear today; the release path that actually fires is the
+        // `None` + terminal point-lookup below. Kept so a future snapshot
+        // source that includes terminal dispositions behaves correctly.)
+        Some(RestartDisposition::Terminal) => false,
+        // Absent from the incomplete snapshot: released only when the
+        // journal says the op reached a terminal status (the operator
+        // resolved it, or it finished while we were not scanning). A
+        // `running` op absent here is unmarked — the best-effort
+        // abandonment marking failed — and an unknown status is treated the
+        // same: keep until restart.
+        None => !matches!(
+            statuses.get(operation_id),
+            Some(
+                OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported
+            )
+        ),
+    }
 }
 
 impl QuarantineState {
     fn contains(&self, vm: &VmId) -> bool {
-        self.failure
+        self.sticky
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(vm)
+            || self
+                .failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(vm)
             || self
                 .inspect
                 .lock()
@@ -165,17 +221,59 @@ impl QuarantineState {
                 .contains(vm)
     }
 
-    fn record_failure(&self, vm: VmId) {
+    fn record_failure(&self, vm: VmId, operation_id: Option<OperationId>) {
+        match operation_id {
+            Some(operation_id) => {
+                let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+                let entries = failure.entry(vm).or_default();
+                if !entries.contains(&operation_id) {
+                    entries.push(operation_id);
+                }
+            }
+            None => {
+                self.sticky
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(vm);
+            }
+        }
+    }
+
+    /// Operation ids behind `failure` entries (for the per-scan status
+    /// pre-fetch of entries whose op left the incomplete snapshot).
+    fn failure_operation_ids(&self) -> Vec<OperationId> {
         self.failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(vm);
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// Releases `failure` entries whose operation reached a terminal status
+    /// in the journal. See [`failure_entry_keeps`] for the release rule.
+    fn reconcile_failures(
+        &self,
+        dispositions: &HashMap<OperationId, RestartDisposition>,
+        statuses: &HashMap<OperationId, OperationStatus>,
+    ) {
+        let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+        failure.retain(|_vm, entries| {
+            entries
+                .retain(|operation_id| failure_entry_keeps(operation_id, dispositions, statuses));
+            !entries.is_empty()
+        });
     }
 
     fn set_inspect(&self, vms: HashSet<VmId>) {
         *self.inspect.lock().unwrap_or_else(|e| e.into_inner()) = vms;
     }
 }
+
+/// Upper bound on the retained failure-event ring: a composition that never
+/// drains must not grow executor memory without limit.
+const MAX_FAILURE_EVENTS: usize = 256;
 
 /// Owns one bounded execution scheduler. Explicit shutdown is required to
 /// establish the executor-before-authority shutdown ordering contract.
@@ -189,6 +287,10 @@ pub struct JournalExecutor {
     token_factory: TokenFactory,
     fatality: Arc<Mutex<Option<ExecutorFatality>>>,
     task: Option<tokio::task::JoinHandle<ExecutionReport>>,
+    /// Bounded ring of recent in-process execution failures, drained by the
+    /// composition (runtime-owner) for logging/telemetry: this crate is
+    /// runtime-neutral and holds no logging facade (architecture guard).
+    failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>>,
 }
 
 impl JournalExecutor {
@@ -224,24 +326,32 @@ impl JournalExecutor {
         let quarantined = Arc::new(QuarantineState::default());
         let fatality: Arc<Mutex<Option<ExecutorFatality>>> = Arc::new(Mutex::new(None));
         let capacity = Arc::new(Semaphore::new(queue_capacity));
+        let scheduled: Arc<Mutex<HashSet<OperationId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
         let task = tokio::spawn(run_scheduler(
             receiver,
             execution.clone(),
             runtime,
             concurrency,
-            quarantined.clone(),
-            fatality.clone(),
+            SchedulerState {
+                scheduled: scheduled.clone(),
+                quarantined: quarantined.clone(),
+                fatality: fatality.clone(),
+                failure_events: Arc::clone(&failure_events),
+            },
         ));
         Ok(Self {
             sender: Some(sender),
             execution,
-            scheduled: Arc::new(Mutex::new(HashSet::new())),
+            scheduled,
             quarantined,
             capacity,
             scan_lock: tokio::sync::Mutex::new(()),
             token_factory,
             fatality,
             task: Some(task),
+            failure_events,
         })
     }
 
@@ -272,7 +382,9 @@ impl JournalExecutor {
         // lifetime of the node.
         let mut ready_ids: HashSet<OperationId> = HashSet::new();
         let mut inspect_vms: HashSet<VmId> = HashSet::new();
+        let mut dispositions: HashMap<OperationId, RestartDisposition> = HashMap::new();
         for restart in &restart_snapshot {
+            dispositions.insert(restart.entry.operation.id.clone(), restart.disposition);
             match restart.disposition {
                 RestartDisposition::Ready => {
                     ready_ids.insert(restart.entry.operation.id.clone());
@@ -286,6 +398,22 @@ impl JournalExecutor {
                 RestartDisposition::Terminal => {}
             }
         }
+        // Release failure quarantines whose operation reached a terminal
+        // status (normally: the operator resolved the InspectRequired
+        // operation). Entries whose op left the incomplete snapshot need a
+        // point lookup to distinguish "resolved" from "running without a
+        // marker" (the latter must stay quarantined — see
+        // failure_entry_keeps).
+        let mut statuses: HashMap<OperationId, OperationStatus> = HashMap::new();
+        for operation_id in self.quarantined.failure_operation_ids() {
+            if !dispositions.contains_key(&operation_id) {
+                if let Ok(entry) = self.execution.operation(operation_id.clone()).await {
+                    statuses.insert(operation_id, entry.operation.status);
+                }
+            }
+        }
+        self.quarantined
+            .reconcile_failures(&dispositions, &statuses);
         // Re-derive the restart quarantine from the current snapshot: a VM is
         // quarantined exactly while it has an unresolved InspectRequired
         // operation, so an operator resolution un-quarantines the VM on the
@@ -363,6 +491,17 @@ impl JournalExecutor {
             };
         }
         Ok(())
+    }
+
+    /// Drains and returns recent in-process execution failures (bounded
+    /// ring; see [`MAX_FAILURE_EVENTS`]). The composition logs these with
+    /// full context at its boundary — this crate holds no logging facade.
+    pub fn drain_failure_events(&self) -> Vec<ExecutionFailure> {
+        let mut events = self
+            .failure_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        events.drain(..).collect()
     }
 
     pub async fn shutdown(mut self) -> Result<ExecutionReport> {
@@ -443,24 +582,61 @@ impl Drop for JournalExecutor {
     }
 }
 
+/// Shared scheduler state handed to the background task (mirrors the
+/// `JournalExecutor` fields).
+struct SchedulerState {
+    scheduled: Arc<Mutex<HashSet<OperationId>>>,
+    quarantined: Arc<QuarantineState>,
+    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
+    failure_events: Arc<Mutex<VecDeque<ExecutionFailure>>>,
+}
+
 async fn run_scheduler(
     mut receiver: mpsc::Receiver<Work>,
     execution: ExecutionHandle,
     runtime: Arc<dyn CoreVmRuntime>,
     concurrency: usize,
-    quarantined: Arc<QuarantineState>,
-    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
+    state: SchedulerState,
 ) -> ExecutionReport {
+    let SchedulerState {
+        scheduled,
+        quarantined,
+        fatality,
+        failure_events,
+    } = state;
     let mut report = ExecutionReport::default();
     let mut pending = VecDeque::new();
     let mut active_vms = HashSet::new();
     let mut tasks = JoinSet::new();
     let mut task_owners = std::collections::HashMap::new();
+    // Task id → owning VM, so a task that panics (whose return value is
+    // lost) still reports the VM it was executing for.
+    let mut task_vms: std::collections::HashMap<tokio::task::Id, VmId> =
+        std::collections::HashMap::new();
     let mut ingress_closed = false;
 
     loop {
         while tasks.len() < concurrency {
-            pending.retain(|work: &Work| !quarantined.contains(&work.vm_id));
+            let mut dropped_by_quarantine = Vec::new();
+            pending.retain(|work: &Work| {
+                if quarantined.contains(&work.vm_id) {
+                    dropped_by_quarantine.push(work.operation_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            // A work dropped before its task ever started was never claimed,
+            // so it is safely re-admittable: release its admission record so
+            // a later scan (after the VM is un-quarantined) can schedule it
+            // again instead of skipping it forever behind the `scheduled`
+            // guard.
+            if !dropped_by_quarantine.is_empty() {
+                let mut scheduled = scheduled.lock().unwrap_or_else(|e| e.into_inner());
+                for operation_id in dropped_by_quarantine {
+                    scheduled.remove(&operation_id);
+                }
+            }
             let Some(index) = pending
                 .iter()
                 .position(|work: &Work| !active_vms.contains(&work.vm_id))
@@ -472,12 +648,14 @@ async fn run_scheduler(
             let execution = execution.clone();
             let runtime = runtime.clone();
             let operation_id = work.operation_id.clone();
+            let work_vm_id = work.vm_id.clone();
             let task = tasks.spawn(async move {
                 let vm_id = work.vm_id.clone();
                 let result = execute_one(work, execution, runtime).await;
                 (vm_id, result)
             });
             task_owners.insert(task.id(), operation_id);
+            task_vms.insert(task.id(), work_vm_id);
         }
 
         if ingress_closed && pending.is_empty() && tasks.is_empty() {
@@ -490,8 +668,16 @@ async fn run_scheduler(
                     match completed {
                         Ok((task_id, (vm_id, outcome))) => {
                             task_owners.remove(&task_id);
+                            task_vms.remove(&task_id);
                             active_vms.remove(&vm_id);
                             if let WorkOutcome::Failure(failure) = &outcome {
+                                // Every `Failure` outcome failure-quarantines
+                                // the VM (a claim replay is the idempotent-
+                                // success path and never reaches this arm):
+                                // an ambiguous claim/finish/result must not be
+                                // retried in-process. Released by
+                                // reconcile_failures once the operation
+                                // reaches a terminal status in the journal.
                                 if let Some(operation_id) = &failure.operation_id {
                                     // The operation may have been left `running`
                                     // (finishing it would guess a terminal
@@ -502,19 +688,50 @@ async fn run_scheduler(
                                     // operation stays unmarked and restart
                                     // classification covers it on the next boot.
                                     let code = failure.code.as_str().to_owned();
+                                    // Record the failure event for the
+                                    // composition to drain and log: the journal
+                                    // is the source of truth, but the operator
+                                    // needs the causal link (which operation,
+                                    // which failure code) at the moment it
+                                    // happens, not only via the next scan's
+                                    // inspect-required diff. Bounded ring: a
+                                    // wedged composition cannot grow memory.
+                                    {
+                                        let mut events = failure_events
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        events.push_back(failure.clone());
+                                        while events.len() > MAX_FAILURE_EVENTS {
+                                            events.pop_front();
+                                        }
+                                    }
                                     let _ = execution
                                         .mark_operation_abandoned(operation_id.clone(), code)
                                         .await;
                                 }
+                                // Failure-quarantine the VM against the
+                                // ambiguous operation.
+                                if outcome.quarantines() {
+                                    quarantined.record_failure(
+                                        vm_id,
+                                        failure.operation_id.clone(),
+                                    );
+                                }
                             }
-                            if outcome.quarantines() { quarantined.record_failure(vm_id); }
                             merge_outcome(&mut report, outcome);
                         }
                         Err(error) => {
                             let operation_id = task_owners.remove(&error.id());
+                            let vm_id = task_vms.remove(&error.id()).unwrap_or_else(|| {
+                                // A spawned task always has an owner entry;
+                                // fall back to the null VM rather than
+                                // panicking in the scheduler loop.
+                                VmId::new("vm-unknown").expect("fallback vm id is valid")
+                            });
                             let code = if error.is_cancelled() { ExecutionFailureCode::TaskCancelled } else { ExecutionFailureCode::TaskPanicked };
                             report.failures.push(ExecutionFailure {
                                 operation_id: operation_id.clone(),
+                                vm_id: vm_id.clone(),
                                 code,
                             });
                             // The containment below is the single-effector
@@ -556,9 +773,9 @@ enum WorkOutcome {
     Failure(ExecutionFailure),
 }
 impl WorkOutcome {
-    /// Whether this outcome must failure-quarantine the VM for the process
-    /// lifetime. A claim replay is the idempotent-success path (another
-    /// sender already holds this claim) and must not poison the VM.
+    /// Whether this outcome must failure-quarantine the VM. A claim replay
+    /// is the idempotent-success path (another sender already holds this
+    /// claim) and must not poison the VM.
     fn quarantines(&self) -> bool {
         matches!(self, Self::Failure(_))
     }
@@ -577,6 +794,7 @@ async fn execute_one(
         Err(_) => {
             return WorkOutcome::Failure(ExecutionFailure {
                 operation_id: Some(work.operation_id),
+                vm_id: work.vm_id.clone(),
                 code: ExecutionFailureCode::ClaimAmbiguous,
             })
         }
@@ -590,6 +808,7 @@ async fn execute_one(
         Ok(_) => {
             return WorkOutcome::Failure(ExecutionFailure {
                 operation_id: Some(work.operation_id),
+                vm_id: work.vm_id.clone(),
                 code: ExecutionFailureCode::ResultInvalid,
             })
         }
@@ -605,6 +824,7 @@ async fn execute_one(
         Ok(_) => WorkOutcome::AcquiredCompleted,
         Err(_) => WorkOutcome::Failure(ExecutionFailure {
             operation_id: Some(work.operation_id),
+            vm_id: work.vm_id,
             code: ExecutionFailureCode::FinishAmbiguous,
         }),
     }
