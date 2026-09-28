@@ -1,7 +1,7 @@
 # ADR-013 — Network Overlay (VXLAN + eBPF Policy)
 
 ## Status
-Accepted
+Accepted — partially superseded by ADR-021 (stretched-L2 VXLAN head-end replication over a WireGuard underlay): the `nolearning`/no-BUM-flooding datapath decision and the encryption non-goal are replaced. The eBPF policy role, proto surface, and migration/FDB coordination sections remain authoritative.
 
 ## Date
 2026-05-07
