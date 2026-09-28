@@ -257,7 +257,11 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
     Ok(definition)
 }
 
-fn parse_generation(raw: &str) -> Result<u64, ChvError> {
+/// Parses a legacy desired-state generation string. Shared by the direct
+/// mutation adapter and the desired-state dispatch shim so both boundaries
+/// enforce one canonical form: a positive decimal integer with no leading
+/// zeros, sign, or other non-canonical decoration.
+pub(crate) fn parse_generation(raw: &str) -> Result<u64, ChvError> {
     let value = raw.parse::<u64>().map_err(|_| ChvError::InvalidArgument {
         field: "desired_state_version".to_owned(),
         reason: "must be a canonical positive decimal integer".to_owned(),

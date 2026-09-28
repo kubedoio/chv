@@ -213,6 +213,42 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 .meta
                 .as_ref()
                 .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let frag = inner
+                .fragment
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing fragment"))?;
+            if frag.id != inner.vm_id || frag.kind != "vm" {
+                return Err(Status::invalid_argument(
+                    "fragment identity or kind mismatch",
+                ));
+            }
+            // The fragment's generation must agree with the task's: the
+            // control plane sets both from the same accept-time value, and
+            // the routing decision below must never arbitrate between two
+            // disagreeing inputs (a divergence is rejected, not averaged,
+            // guessed, or silently dropped).
+            if frag.generation != meta.desired_state_version {
+                return Err(Status::invalid_argument(
+                    "fragment generation must match desired_state_version",
+                ));
+            }
+            // Canonical generation parse BEFORE the stale gate, so a
+            // malformed generation is always InvalidArgument — never a
+            // stale-gate FailedPrecondition that depends on projection
+            // state. The same strict parse the adapter applies to direct
+            // mutations (no zero, no leading zeros, no signed or
+            // non-canonical forms); generations are control-plane i64
+            // sequence values, so anything above i64::MAX is out of range
+            // rather than an update task. The routing decision never
+            // guesses.
+            let generation =
+                crate::legacy_core_adapter::parse_generation(&meta.desired_state_version)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            if generation > i64::MAX as u64 {
+                return Err(Status::invalid_argument(
+                    "desired_state_version is out of range",
+                ));
+            }
             // Same stale-generation gate as the legacy branch, against the
             // projection (never the authority): a dispatch older than the
             // last projected outcome is rejected before Core sees it. A
@@ -223,20 +259,6 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
                     .map_err(|e| Status::failed_precondition(e.to_string()))?;
             }
-            let frag = inner
-                .fragment
-                .as_ref()
-                .ok_or_else(|| Status::invalid_argument("missing fragment"))?;
-            if frag.id != inner.vm_id || frag.kind != "vm" {
-                return Err(Status::invalid_argument(
-                    "fragment identity or kind mismatch",
-                ));
-            }
-            // Fail closed on anything but a positive integer: the routing
-            // decision below must never guess.
-            let generation: u64 = meta.desired_state_version.parse().map_err(|_| {
-                Status::invalid_argument("desired_state_version must be a positive integer")
-            })?;
             if generation != 1 {
                 // A spec update (resize carries the next generation, >= 2).
                 // Refused at this boundary BEFORE Core reserves any desired
@@ -246,7 +268,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 // cannot converge to. Resize-through-Core is tracked as
                 // deferred scope (#234).
                 return Err(Status::unimplemented(
-                    "desired-state VM updates (resize) are unsupported in core-managed mode until the executor implements UpdateVm",
+                    "desired-state VM updates (generations >= 2, e.g. resize) are unsupported in core-managed mode until the executor implements UpdateVm",
                 ));
             }
             let spec =
@@ -4424,6 +4446,11 @@ mod tests {
         fragment_id: &str,
         spec_json: &str,
     ) -> proto::ApplyVmDesiredStateRequest {
+        // The control plane's node client sets the fragment generation from
+        // the same accept-time task generation as the request meta; the
+        // fixture mirrors that invariant (the divergence test below breaks
+        // it deliberately).
+        let generation = meta.desired_state_version.clone();
         proto::ApplyVmDesiredStateRequest {
             meta: Some(meta),
             node_id: "node-1".to_string(),
@@ -4431,7 +4458,7 @@ mod tests {
             fragment: Some(proto::DesiredStateFragment {
                 id: fragment_id.to_string(),
                 kind: "vm".to_string(),
-                generation: "1".to_string(),
+                generation,
                 spec_json: spec_json.as_bytes().to_vec(),
                 policy_json: vec![],
                 updated_at: "2026-09-28T00:00:00Z".to_string(),
@@ -4521,8 +4548,7 @@ mod tests {
     async fn core_managed_desired_state_update_refused_before_core_reservation() {
         let (server, authority, _dir, _join) = shim_server().await;
         let spec = r#"{"name":"vm-new","cpus":2,"memory_bytes":2048,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
-        let mut request = desired_state_request(submit_meta("2"), "vm-new", "vm-new", spec);
-        request.fragment.as_mut().unwrap().generation = "2".to_string();
+        let request = desired_state_request(submit_meta("2"), "vm-new", "vm-new", spec);
 
         let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
             &server,
@@ -4544,26 +4570,81 @@ mod tests {
         assert!(vm.is_err(), "no Core state may be reserved by a refusal");
     }
 
-    /// The routing decision must never guess: a non-numeric generation is
-    /// rejected before the authority is touched (the disconnected handle
-    /// would surface as Unavailable if it were).
+    /// The routing decision must never guess: every non-canonical
+    /// generation — non-numeric, empty, zero, leading zeros, signed
+    /// forms, surrounding whitespace, or out of i64 range — is rejected
+    /// as InvalidArgument BEFORE the stale gate and the authority. The
+    /// cache is seeded so the VM is already in the projection: the code
+    /// must not depend on projection state (a malformed generation is
+    /// InvalidArgument whether or not a projection entry exists, never
+    /// a stale-gate FailedPrecondition).
     #[tokio::test]
     async fn core_managed_desired_state_rejects_unparseable_generation() {
         let mut server = test_server();
         server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        // Seed the projection so the stale-gate branch is live for this VM:
+        // the malformed-generation rejection must fire before it.
+        {
+            let mut cache = server.cache.lock().await;
+            cache.observe_generation("vm", "vm-x", "1");
+        }
         let spec = r#"{"name":"vm-x","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        for malformed in [
+            "not-a-number",
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            // i64::MAX + 1 and u64::MAX: generations are control-plane
+            // i64 sequence values; anything larger is out of range, not
+            // an update task.
+            "9223372036854775808",
+            "18446744073709551615",
+        ] {
+            let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+                &server,
+                Request::new(desired_state_request(
+                    test_meta(malformed),
+                    "vm-x",
+                    "vm-x",
+                    spec,
+                )),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "generation {malformed:?} must be rejected as invalid argument"
+            );
+        }
+    }
+
+    /// The fragment's generation must agree with the task's: a divergence
+    /// is malformed dispatch data (the control plane sets both from the
+    /// same accept-time value), rejected before any authority access.
+    #[tokio::test]
+    async fn core_managed_desired_state_rejects_fragment_generation_divergence() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let spec = r#"{"name":"vm-x","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let mut request = desired_state_request(test_meta("1"), "vm-x", "vm-x", spec);
+        request.fragment.as_mut().unwrap().generation = "5".to_string();
         let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
             &server,
-            Request::new(desired_state_request(
-                test_meta("not-a-number"),
-                "vm-x",
-                "vm-x",
-                spec,
-            )),
+            Request::new(request),
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.code(),
+            tonic::Code::InvalidArgument,
+            "a fragment/meta generation divergence must never be arbitrated or guessed"
+        );
     }
 
     /// A fragment whose identity disagrees with the request's VM id is
