@@ -6,7 +6,6 @@ pub mod fabric;
 pub mod firewall;
 pub mod handlers;
 pub mod link_monitor;
-pub mod reconcile;
 pub mod server;
 pub mod state;
 

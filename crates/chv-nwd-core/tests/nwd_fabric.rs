@@ -203,51 +203,6 @@ impl NetworkExecutor for FabricExecutor {
         Ok(())
     }
 
-    async fn create_vxlan_interface(
-        &self,
-        _namespace: &str,
-        _bridge_name: &str,
-        _vni: u32,
-        _vtep_ip: &str,
-        _vtep_port: u32,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn delete_vxlan_interface(&self, _namespace: &str, _vni: u32) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn add_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn delete_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn replace_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _new_vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
     async fn send_gratuitous_arp(
         &self,
         _namespace: &str,
@@ -255,26 +210,6 @@ impl NetworkExecutor for FabricExecutor {
         _vm_ip: &str,
     ) -> Result<(), ChvError> {
         Ok(())
-    }
-
-    async fn set_arp_suppression(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _enabled: bool,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn get_overlay_status(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-    ) -> Result<OverlayStatusInfo, ChvError> {
-        Ok(OverlayStatusInfo {
-            vxlan_interface_up: false,
-            fdb_entry_count: 0,
-        })
     }
 
     async fn apply_fabric_overlay(
@@ -577,6 +512,58 @@ async fn update_overlay_fabric_path_fences_and_updates_state() {
         .into_inner();
     assert_eq!(fenced.status, "error");
     assert_eq!(fenced.error_code, "STALE_GENERATION");
+}
+
+#[tokio::test]
+async fn update_overlay_without_fabric_plan_is_rejected_in_band() {
+    let executor = FabricExecutor::enabled();
+    let (socket, _dir) = spawn_server(executor.clone()).await;
+    let mut client = make_client(socket).await;
+
+    // Ensure a fabric-backed topology first so the network exists.
+    let ensure = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(fabric_topology_spec("net-nofab", 1)),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    // UpdateOverlay without a fabric plan is rejected in-band: the legacy
+    // nolearning VXLAN/FDB datapath was retired by ADR-021.
+    let update = client
+        .update_overlay(UpdateOverlayRequest {
+            network_id: "net-nofab".to_string(),
+            vni: 100,
+            vtep_endpoints: vec![],
+            fdb_entries: vec![],
+            fabric: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(update.result.as_ref().unwrap().status, "error");
+    assert_eq!(
+        update.result.as_ref().unwrap().error_code,
+        "INVALID_ARGUMENT"
+    );
+    assert!(
+        update
+            .result
+            .as_ref()
+            .unwrap()
+            .human_summary
+            .contains("ADR-021"),
+        "the rejection must name ADR-021, got: {}",
+        update.result.as_ref().unwrap().human_summary
+    );
+    assert_eq!(
+        executor.count("apply_fabric:"),
+        1,
+        "no fabric apply beyond the initial ensure"
+    );
 }
 
 #[tokio::test]

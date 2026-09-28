@@ -164,51 +164,6 @@ impl NetworkExecutor for MockExecutor {
         Ok(())
     }
 
-    async fn create_vxlan_interface(
-        &self,
-        _namespace: &str,
-        _bridge_name: &str,
-        _vni: u32,
-        _vtep_ip: &str,
-        _vtep_port: u32,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn delete_vxlan_interface(&self, _namespace: &str, _vni: u32) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn add_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn delete_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn replace_fdb_entry(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _mac_address: &str,
-        _new_vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
     async fn send_gratuitous_arp(
         &self,
         _namespace: &str,
@@ -216,26 +171,6 @@ impl NetworkExecutor for MockExecutor {
         _vm_ip: &str,
     ) -> Result<(), ChvError> {
         Ok(())
-    }
-
-    async fn set_arp_suppression(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-        _enabled: bool,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
-    async fn get_overlay_status(
-        &self,
-        _namespace: &str,
-        _vni: u32,
-    ) -> Result<OverlayStatusInfo, ChvError> {
-        Ok(OverlayStatusInfo {
-            vxlan_interface_up: false,
-            fdb_entry_count: 0,
-        })
     }
 }
 
@@ -410,59 +345,6 @@ impl NetworkExecutor for RecordingExecutor {
             .await
     }
 
-    async fn create_vxlan_interface(
-        &self,
-        namespace: &str,
-        bridge_name: &str,
-        vni: u32,
-        vtep_ip: &str,
-        vtep_port: u32,
-    ) -> Result<(), ChvError> {
-        MockExecutor
-            .create_vxlan_interface(namespace, bridge_name, vni, vtep_ip, vtep_port)
-            .await
-    }
-
-    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
-        MockExecutor.delete_vxlan_interface(namespace, vni).await
-    }
-
-    async fn add_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        MockExecutor
-            .add_fdb_entry(namespace, vni, mac_address, vtep_ip)
-            .await
-    }
-
-    async fn delete_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        MockExecutor
-            .delete_fdb_entry(namespace, vni, mac_address, vtep_ip)
-            .await
-    }
-
-    async fn replace_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        new_vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        MockExecutor
-            .replace_fdb_entry(namespace, vni, mac_address, new_vtep_ip)
-            .await
-    }
-
     async fn send_gratuitous_arp(
         &self,
         namespace: &str,
@@ -472,25 +354,6 @@ impl NetworkExecutor for RecordingExecutor {
         MockExecutor
             .send_gratuitous_arp(namespace, bridge_name, vm_ip)
             .await
-    }
-
-    async fn set_arp_suppression(
-        &self,
-        namespace: &str,
-        vni: u32,
-        enabled: bool,
-    ) -> Result<(), ChvError> {
-        MockExecutor
-            .set_arp_suppression(namespace, vni, enabled)
-            .await
-    }
-
-    async fn get_overlay_status(
-        &self,
-        namespace: &str,
-        vni: u32,
-    ) -> Result<OverlayStatusInfo, ChvError> {
-        MockExecutor.get_overlay_status(namespace, vni).await
     }
 }
 

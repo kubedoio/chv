@@ -1,6 +1,5 @@
 use crate::ebpf::{self, EbpfManager};
 use crate::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
-use crate::reconcile;
 use crate::state::{TopologyState, TopologyTable};
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
@@ -191,11 +190,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 fabric_plan_generation,
             }) => {
                 let vni = if spec.vni > 0 { Some(spec.vni) } else { None };
-                let peer_vteps: Vec<String> = spec
-                    .vtep_endpoints
-                    .iter()
-                    .map(|e| e.vtep_ip.clone())
-                    .collect();
                 let state = TopologyState {
                     network_id: spec.network_id.clone(),
                     tenant_id: spec.tenant_id.clone(),
@@ -205,7 +199,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     gateway_ip: spec.gateway_ip.clone(),
                     runtime_status: "ensured".to_string(),
                     vni,
-                    peer_vteps,
                     tenant_mtu,
                     fabric_plan_generation,
                 };
@@ -481,35 +474,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             )
             .await
         {
-            Ok(()) => {
-                // Clean up FDB entries for this VM's MAC across peer VTEPs
-                if !req.network_id.is_empty() && !req.vm_mac.is_empty() {
-                    if let Some(state) = self.topologies.get(&req.network_id) {
-                        if let Some(vni) = state.vni {
-                            for vtep_ip in &state.peer_vteps {
-                                if let Err(e) = self
-                                    .executor
-                                    .delete_fdb_entry(
-                                        &state.namespace_name,
-                                        vni,
-                                        &req.vm_mac,
-                                        vtep_ip,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        vm_mac = %req.vm_mac,
-                                        vtep_ip = %vtep_ip,
-                                        error = %e,
-                                        "failed to delete FDB entry on detach"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(Response::new(Self::ok_result()))
-            }
+            Ok(()) => Ok(Response::new(Self::ok_result())),
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
@@ -816,122 +781,77 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }));
         }
 
-        // Stretched-L2 fabric path (ADR-021): a fabric plan supersedes the
-        // legacy FDB reconciliation below. Generation fencing happens here
-        // (the handler owns the topology table); the executor applies,
-        // grafts the consumer veth into the tenant bridge, and returns the
-        // applied generation/MTU for state persistence.
-        if let Some(fabric_plan) = req.fabric.as_ref() {
-            if let Some(applied_gen) = state.fabric_plan_generation {
-                if fabric_plan.plan_generation < applied_gen {
-                    let e = ChvError::StaleGeneration {
-                        resource: "network".to_string(),
-                        id: req.network_id.clone(),
-                        expected: applied_gen.to_string(),
-                        got: fabric_plan.plan_generation.to_string(),
-                    };
-                    return Ok(Response::new(proto::UpdateOverlayResponse {
-                        result: Some(Self::err_result(&e)),
-                    }));
-                }
-            }
-
-            return match self
-                .executor
-                .apply_fabric_overlay(&req.network_id, req.vni, fabric_plan, &state.bridge_name)
-                .await
-            {
-                Ok(applied) => {
-                    let updated_state = TopologyState {
-                        vni: Some(req.vni),
-                        tenant_mtu: Some(applied.tenant_mtu),
-                        fabric_plan_generation: Some(applied.plan_generation),
-                        ..state.clone()
-                    };
-                    self.topologies.upsert(updated_state);
-                    // Re-assert the CHV firewall/NAT guard scope: the fabric
-                    // consumer veth just joined the tenant bridge (same
-                    // reasoning as NIC attach; fail closed).
-                    if let Err(e) = self.refresh_policy_scope(&state).await {
-                        return Ok(Response::new(proto::UpdateOverlayResponse {
-                            result: Some(Self::err_result(&e)),
-                        }));
-                    }
-                    info!(
-                        network_id = %req.network_id,
-                        vni = req.vni,
-                        plan_generation = applied.plan_generation,
-                        tenant_mtu = applied.tenant_mtu,
-                        "fabric overlay updated"
-                    );
-                    Ok(Response::new(proto::UpdateOverlayResponse {
-                        result: Some(Self::ok_result()),
-                    }))
-                }
-                Err(e) => Ok(Response::new(proto::UpdateOverlayResponse {
+        // Stretched-L2 fabric path (ADR-021): the legacy nolearning
+        // VXLAN/FDB datapath was retired; a fabric plan is required.
+        // Generation fencing happens here (the handler owns the topology
+        // table); the executor applies, grafts the consumer veth into the
+        // tenant bridge, and returns the applied generation/MTU for state
+        // persistence.
+        let fabric_plan = match req.fabric.as_ref() {
+            Some(plan) => plan,
+            None => {
+                let e = ChvError::InvalidArgument {
+                    field: "fabric".to_string(),
+                    reason: "the legacy nolearning VXLAN/FDB datapath was retired by ADR-021; \
+                            a fabric plan is required for overlay updates"
+                        .to_string(),
+                };
+                return Ok(Response::new(proto::UpdateOverlayResponse {
                     result: Some(Self::err_result(&e)),
-                })),
-            };
-        }
+                }));
+            }
+        };
 
-        // Sync explicit FDB entries for peer VTEPs (unicast MAC-to-VTEP mappings)
-        for fdb in &req.fdb_entries {
-            if let Err(e) = self
-                .executor
-                .add_fdb_entry(
-                    &state.namespace_name,
-                    req.vni,
-                    &fdb.mac_address,
-                    &fdb.vtep_ip,
-                )
-                .await
-            {
+        if let Some(applied_gen) = state.fabric_plan_generation {
+            if fabric_plan.plan_generation < applied_gen {
+                let e = ChvError::StaleGeneration {
+                    resource: "network".to_string(),
+                    id: req.network_id.clone(),
+                    expected: applied_gen.to_string(),
+                    got: fabric_plan.plan_generation.to_string(),
+                };
                 return Ok(Response::new(proto::UpdateOverlayResponse {
                     result: Some(Self::err_result(&e)),
                 }));
             }
         }
 
-        // Reconcile BUM traffic FDB entries: compute delta against previously known VTEPs
-        let new_vteps: Vec<String> = req
-            .vtep_endpoints
-            .iter()
-            .map(|e| e.vtep_ip.clone())
-            .collect();
-        let old_vteps = &state.peer_vteps;
-
-        if let Err(e) = reconcile::reconcile_fdb_entries(
-            self.executor.as_ref(),
-            &state.namespace_name,
-            req.vni,
-            old_vteps,
-            &new_vteps,
-        )
-        .await
+        return match self
+            .executor
+            .apply_fabric_overlay(&req.network_id, req.vni, fabric_plan, &state.bridge_name)
+            .await
         {
-            return Ok(Response::new(proto::UpdateOverlayResponse {
+            Ok(applied) => {
+                let updated_state = TopologyState {
+                    vni: Some(req.vni),
+                    tenant_mtu: Some(applied.tenant_mtu),
+                    fabric_plan_generation: Some(applied.plan_generation),
+                    ..state.clone()
+                };
+                self.topologies.upsert(updated_state);
+                // Re-assert the CHV firewall/NAT guard scope: the fabric
+                // consumer veth just joined the tenant bridge (same
+                // reasoning as NIC attach; fail closed).
+                if let Err(e) = self.refresh_policy_scope(&state).await {
+                    return Ok(Response::new(proto::UpdateOverlayResponse {
+                        result: Some(Self::err_result(&e)),
+                    }));
+                }
+                info!(
+                    network_id = %req.network_id,
+                    vni = req.vni,
+                    plan_generation = applied.plan_generation,
+                    tenant_mtu = applied.tenant_mtu,
+                    "fabric overlay updated"
+                );
+                Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::ok_result()),
+                }))
+            }
+            Err(e) => Ok(Response::new(proto::UpdateOverlayResponse {
                 result: Some(Self::err_result(&e)),
-            }));
-        }
-
-        // Update tracked peer VTEPs in topology state
-        let updated_state = TopologyState {
-            peer_vteps: new_vteps,
-            ..state.clone()
+            })),
         };
-        self.topologies.upsert(updated_state.clone());
-
-        info!(
-            network_id = %req.network_id,
-            vni = req.vni,
-            fdb_count = req.fdb_entries.len(),
-            vtep_count = req.vtep_endpoints.len(),
-            "overlay updated with FDB reconciliation"
-        );
-
-        Ok(Response::new(proto::UpdateOverlayResponse {
-            result: Some(Self::ok_result()),
-        }))
     }
 
     async fn send_gratuitous_arp(
@@ -1098,35 +1018,21 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         }
 
         // Fabric-backed topologies (ADR-021) report from the fabric
-        // provider; legacy nolearning VXLAN topologies keep the
-        // namespace-local query below.
-        if state.fabric_plan_generation.is_some() {
-            let status_info = match self.executor.fabric_overlay_status(&req.network_id).await {
-                Ok(s) => s,
-                Err(_) => OverlayStatusInfo {
+        // provider. The legacy nolearning VXLAN datapath is retired, so a
+        // topology without an applied fabric plan reports down.
+        let status_info = if state.fabric_plan_generation.is_some() {
+            self.executor
+                .fabric_overlay_status(&req.network_id)
+                .await
+                .unwrap_or(OverlayStatusInfo {
                     vxlan_interface_up: false,
                     fdb_entry_count: 0,
-                },
-            };
-            return Ok(Response::new(proto::OverlayStatus {
-                network_id: req.network_id,
-                vni,
-                vxlan_interface_up: status_info.vxlan_interface_up,
-                fdb_entry_count: status_info.fdb_entry_count,
-                ebpf_programs_loaded: self.ebpf.loaded_program_count(),
-            }));
-        }
-
-        let status_info: OverlayStatusInfo = match self
-            .executor
-            .get_overlay_status(&state.namespace_name, vni)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => OverlayStatusInfo {
+                })
+        } else {
+            OverlayStatusInfo {
                 vxlan_interface_up: false,
                 fdb_entry_count: 0,
-            },
+            }
         };
 
         Ok(Response::new(proto::OverlayStatus {

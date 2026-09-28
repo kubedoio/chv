@@ -4,7 +4,6 @@
 //! Handles rollback at each phase according to spec.
 
 use crate::node_client_pool::NodeClientPool;
-use crate::overlay::OverlayManager;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -378,7 +377,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
 ///
 /// Returns Ok(()) if migration completed successfully, Err if failed or rolled back.
 #[tracing::instrument(
-    skip(pool, node_client_pool, state, overlay_manager),
+    skip(pool, node_client_pool, state),
     fields(
         migration_id = %state.migration_id,
         vm_id = %state.vm_id,
@@ -391,7 +390,6 @@ pub async fn execute_migration(
     node_client_pool: &NodeClientPool,
     agent_socket_pattern: &str,
     state: &mut MigrationState,
-    overlay_manager: Option<&OverlayManager>,
 ) -> Result<(), ChvError> {
     info!(
         migration_id = %state.migration_id,
@@ -715,17 +713,11 @@ pub async fn execute_migration(
         // to prevent split-brain if crash occurs between the two operations.
         complete_migration_atomically(pool, state).await?;
 
-        // Best-effort: update overlay FDB entries and send gratuitous ARP
-        if let Some(overlay) = overlay_manager {
-            notify_overlay_after_migration(
-                pool,
-                overlay,
-                node_client_pool,
-                agent_socket_pattern,
-                state,
-            )
-            .await;
-        }
+        // Best-effort: send gratuitous ARP from the destination node so
+        // peers' ARP caches and the fabric's kernel MAC learning re-point
+        // to the VM's new location (ADR-021: correctness never depends on
+        // control-plane-pushed FDB entries).
+        notify_overlay_after_migration(pool, node_client_pool, agent_socket_pattern, state).await;
 
         Ok(())
     })
@@ -1572,18 +1564,16 @@ fn proto_phase_to_str(phase: i32) -> &'static str {
     }
 }
 
-/// VM NIC info needed for post-migration overlay update.
+/// VM NIC info needed for the post-migration gratuitous ARP.
 struct VmNicInfo {
     network_id: String,
-    mac_address: String,
     ip_address: String,
-    vni: i32,
 }
 
 /// Fetch all NICs for a VM that are on overlay networks (vni > 0).
 async fn get_vm_overlay_nics(pool: &StorePool, vm_id: &str) -> Result<Vec<VmNicInfo>, ChvError> {
-    let rows: Vec<(String, String, String, i32)> = sqlx::query_as(
-        r#"SELECT vn.network_id, vn.mac_address, vn.ip_address, COALESCE(n.vni, 0)
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"SELECT vn.network_id, vn.ip_address
            FROM vm_nic_desired_state vn
            JOIN networks n ON n.network_id = vn.network_id
            WHERE vn.vm_id = ? AND COALESCE(n.vni, 0) > 0
@@ -1598,24 +1588,24 @@ async fn get_vm_overlay_nics(pool: &StorePool, vm_id: &str) -> Result<Vec<VmNicI
 
     Ok(rows
         .into_iter()
-        .map(|(network_id, mac_address, ip_address, vni)| VmNicInfo {
+        .map(|(network_id, ip_address)| VmNicInfo {
             network_id,
-            mac_address,
             ip_address,
-            vni,
         })
         .collect())
 }
 
 /// Best-effort post-migration overlay notification.
 ///
-/// Re-points FDB entries on all peer nodes and sends gratuitous ARP from the
-/// destination node. Failures are logged as warnings but do not fail the
-/// migration — the overlay is eventually consistent and will reconcile on the
-/// next heartbeat cycle.
+/// Sends gratuitous ARP from the destination node for every overlay-backed
+/// NIC so peers' ARP caches and the fabric's kernel MAC learning re-point
+/// to the VM's new location. Per ADR-021 the control plane no longer
+/// re-points per-VM unicast FDB entries (the legacy datapath was retired);
+/// fabric plan re-dispatch on placement change is owned by the
+/// orchestrator's UpdateOverlay arm. Failures are logged as warnings but
+/// do not fail the migration.
 async fn notify_overlay_after_migration(
     pool: &StorePool,
-    overlay: &OverlayManager,
     node_client_pool: &NodeClientPool,
     agent_socket_pattern: &str,
     state: &MigrationState,
@@ -1643,29 +1633,9 @@ async fn notify_overlay_after_migration(
     for nic in &nics {
         let bridge_name = migration_bridge_name(&nic.network_id);
 
-        // 1. Re-point FDB entries on all peers
-        if let Err(e) = overlay
-            .on_vm_migrated(
-                &nic.network_id,
-                &nic.mac_address,
-                &nic.ip_address,
-                &state.dest_node_id,
-                &bridge_name,
-                nic.vni,
-                &state.operation_id,
-            )
-            .await
-        {
-            warn!(
-                migration_id = %state.migration_id,
-                vm_id = %state.vm_id,
-                network_id = %nic.network_id,
-                error = %e,
-                "post-migration overlay FDB update failed (best-effort)"
-            );
-        }
-
-        // 2. Send gratuitous ARP from the destination node
+        // Send gratuitous ARP from the destination node: the GARP is
+        // flooded across the fabric, and every peer's kernel MAC learning
+        // re-points the VM's MAC to its new VTEP.
         let dest_socket = match resolve_agent_socket(agent_socket_pattern, &state.dest_node_id) {
             Ok(socket) => socket,
             Err(e) => {

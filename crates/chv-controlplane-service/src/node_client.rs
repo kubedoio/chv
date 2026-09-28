@@ -1275,14 +1275,16 @@ impl NodeClient {
         result
     }
 
+    /// Dispatch an ADR-021 fabric plan to a node agent's UpdateOverlay RPC.
+    ///
+    /// The legacy pre-ADR-021 VTEP/FDB variants were retired; `fabric` is
+    /// required (nwd rejects a fabric-less UpdateOverlay in-band).
     #[allow(clippy::too_many_arguments)]
     pub async fn update_overlay(
         &mut self,
         node_id: &str,
         network_id: &str,
         vni: u32,
-        vtep_endpoints: Vec<proto::VtepEndpoint>,
-        fdb_entries: Vec<proto::FdbEntry>,
         operation_id: &str,
         requested_by: Option<&str>,
         fabric: Option<proto::FabricPlan>,
@@ -1299,8 +1301,9 @@ impl NodeClient {
             node_id: node_id.to_string(),
             network_id: network_id.to_string(),
             vni,
-            vtep_endpoints,
-            fdb_entries,
+            // Deprecated legacy fields (pre-ADR-021): never populated.
+            vtep_endpoints: Vec::new(),
+            fdb_entries: Vec::new(),
             fabric,
         };
         let method = "update_overlay";
