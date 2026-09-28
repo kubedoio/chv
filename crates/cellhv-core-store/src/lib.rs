@@ -4084,6 +4084,17 @@ mod tests {
             })
             .unwrap();
         assert_eq!(mappings, 0);
+        // Fault point 1 retry half: the rolled-back accept left nothing that
+        // blocks the caller's retry — after the injected fault is gone, the
+        // identical submission is accepted fresh (a crash before the accept
+        // commit is invisible to the next attempt).
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_event")
+            .unwrap();
+        let accepted = store.accept_operation(&failed).unwrap();
+        assert_eq!(accepted.disposition, Acceptance::Accepted);
+        assert_eq!(accepted.operation.status, OperationStatus::Accepted);
     }
 
     #[test]

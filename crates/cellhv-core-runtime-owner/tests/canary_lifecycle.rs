@@ -237,7 +237,9 @@ async fn canary_restart_after_provider_success_never_repeats_the_effect() {
         .submit(create_submission("vm-crash", "op-create"))
         .await
         .unwrap();
-    fault.reached.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("fault point must be reached");
     // The provider effect fully happened exactly once.
     assert!(adapter.vms.lock().unwrap().contains_key("vm-crash"));
     let log_after_first = controller.calls.lock().unwrap().clone();
@@ -292,6 +294,16 @@ async fn canary_restart_after_provider_success_never_repeats_the_effect() {
             .count(),
         1
     );
+    // Decisive no-re-execution proof: after the restarted poller has
+    // scanned, the interrupted operation is still `running` with its
+    // restart-interruption marker (a re-execution would have finished it).
+    let stuck = owner
+        .authority()
+        .operation(OperationId::new("op-create").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stuck.operation.status, OperationStatus::Running);
+    assert!(stuck.recovery_assessment.is_some());
 
     // The stuck operation is resolvable, and the honest disposition is
     // success (the effect did happen).
@@ -374,7 +386,34 @@ async fn canary_control_plane_restart_is_not_vm_identity_authority() {
     poll_terminal(&owner, "op-create").await;
     let log_after_create = controller.calls.lock().unwrap().clone();
 
-    // The "restarted" control plane replays the identical create (same
+    // Everything is terminal, so the graceful drain succeeds; the node
+    // restarts (the control plane's restart is represented by it re-sending
+    // requests from its lost in-memory view).
+    owner.shutdown().await.unwrap();
+    let runtime = Arc::new(CloudHypervisorCoreRuntime::new(
+        adapter.clone(),
+        controller.clone(),
+        directory.path().join("runtime"),
+    ));
+    let owner = CoreRuntimeOwner::start(
+        runtime,
+        StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("canary-idem-host".to_owned()), None)
+            .unwrap(),
+        &socket,
+        16,
+        Duration::from_secs(1),
+        JournalPollerConfig {
+            scan_interval: Duration::from_millis(40),
+            scan_timeout: Duration::from_secs(1),
+            drain_budget: Duration::from_secs(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    // The restarted control plane replays the identical create (same
     // idempotency scope, key, and content): it converges on the existing
     // operation instead of creating a second identity.
     let replayed = owner
@@ -400,5 +439,139 @@ async fn canary_control_plane_restart_is_not_vm_identity_authority() {
     );
     assert_eq!(controller.calls.lock().unwrap().clone(), log_after_create);
     assert_eq!(owner.authority().operations().await.unwrap().len(), 1);
+    owner.shutdown().await.unwrap();
+}
+
+/// M2.4 fault point 3 (during the provider effect): the create's resource
+/// effects complete (volumes opened+attached) and the process dies before
+/// the cloud-hypervisor create runs. The restarted composition must not
+/// repeat ANY provider effect for the stuck operation; the operator
+/// resolution records the honest outcome (the VM was never created); and
+/// the desired-state reservation is cleaned up by a successor delete so a
+/// fresh create converges end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn canary_crash_mid_effect_never_repeats_partial_effects() {
+    use cellhv_core_runtime_owner::{RuntimeOwnerError, RuntimeStageFailure};
+
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(&directory);
+    let socket = directory.path().join("core.sock");
+    let adapter = Arc::new(MockCloudHypervisorAdapter::default());
+    *adapter.park_create.lock().unwrap() = true;
+    let controller = Arc::new(MockHostResourceController::new());
+    let runtime = Arc::new(CloudHypervisorCoreRuntime::new(
+        adapter.clone(),
+        controller.clone(),
+        directory.path().join("runtime"),
+    ));
+    let owner = CoreRuntimeOwner::start(
+        runtime,
+        StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("canary-mid-host".to_owned()), None)
+            .unwrap(),
+        &socket,
+        16,
+        Duration::from_secs(1),
+        JournalPollerConfig {
+            scan_interval: Duration::from_millis(40),
+            scan_timeout: Duration::from_secs(1),
+            // Force-aborts the parked task: process death at the fault point.
+            drain_budget: Duration::from_millis(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    owner
+        .authority()
+        .submit(create_submission("vm-mid", "op-create"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), adapter.create_parked.notified())
+        .await
+        .expect("the mid-effect park must be reached");
+    // Mid-effect state: the controller side effects are done, the
+    // cloud-hypervisor VM does not exist.
+    let log_mid = controller.calls.lock().unwrap().clone();
+    assert!(is_subsequence(&log_mid, &["open:vol-0", "attach:vol-0"]));
+    assert!(!adapter.vms.lock().unwrap().contains_key("vm-mid"));
+
+    assert!(matches!(
+        owner.shutdown().await,
+        Err(RuntimeOwnerError::Shutdown(failures)) if failures
+            .iter()
+            .any(|failure| matches!(failure, RuntimeStageFailure::ExecutorDrainTimedOut { .. }))
+    ));
+
+    // Restart over the same journal: the stuck create must not re-execute
+    // — no additional controller effect and no hypervisor create.
+    let runtime = Arc::new(CloudHypervisorCoreRuntime::new(
+        adapter.clone(),
+        controller.clone(),
+        directory.path().join("runtime"),
+    ));
+    let owner = CoreRuntimeOwner::start(
+        runtime,
+        StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("canary-mid-host".to_owned()), None)
+            .unwrap(),
+        &socket,
+        16,
+        Duration::from_secs(1),
+        JournalPollerConfig {
+            scan_interval: Duration::from_millis(40),
+            scan_timeout: Duration::from_secs(1),
+            drain_budget: Duration::from_secs(1),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        controller.calls.lock().unwrap().clone(),
+        log_mid,
+        "no provider side effect may repeat after a mid-effect crash"
+    );
+    assert!(!adapter.vms.lock().unwrap().contains_key("vm-mid"));
+    // Decisive no-re-execution proof: the interrupted create is still
+    // `running` with its restart-interruption marker.
+    let stuck = owner
+        .authority()
+        .operation(OperationId::new("op-create").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stuck.operation.status, OperationStatus::Running);
+    assert!(stuck.recovery_assessment.is_some());
+
+    // The honest disposition is failure: the VM was never created.
+    owner
+        .authority()
+        .resolve_inspect_required(
+            OperationId::new("op-create").unwrap(),
+            false,
+            "hypervisor create never ran before the crash".to_owned(),
+        )
+        .await
+        .unwrap();
+
+    // The successor delete cleans up the desired-state reservation (the
+    // hypervisor never had the VM; the restarted runtime's side-effect
+    // handle map is empty — documented restart residual), and a fresh
+    // create with a new idempotency key converges end-to-end.
+    owner
+        .authority()
+        .submit(delete_submission("vm-mid", "op-del"))
+        .await
+        .unwrap();
+    poll_terminal(&owner, "op-del").await;
+    owner
+        .authority()
+        .submit(create_submission("vm-fresh", "op-create-2"))
+        .await
+        .unwrap();
+    poll_terminal(&owner, "op-create-2").await;
+    assert!(adapter.vms.lock().unwrap().contains_key("vm-fresh"));
     owner.shutdown().await.unwrap();
 }

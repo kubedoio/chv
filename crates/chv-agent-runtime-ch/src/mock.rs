@@ -164,6 +164,15 @@ pub struct MockCloudHypervisorAdapter {
     /// removing the VM, letting a test pin the drain-always behavior on a
     /// failed delete. Per-instance state; never a shared static.
     pub fail_delete: Arc<Mutex<bool>>,
+    /// When true, the next `create_vm` parks forever WITHOUT creating the
+    /// VM: a deterministic mid-effect crash window for the create lifecycle
+    /// (the controller has already opened+attached volumes; the
+    /// cloud-hypervisor create never happens). Consumed on use — one park
+    /// per set. Per-instance state; never a shared static.
+    pub park_create: Arc<Mutex<bool>>,
+    /// Fires when a `create_vm` call parks (the stored permit makes
+    /// `notified()` deterministic regardless of await ordering).
+    pub create_parked: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
@@ -173,6 +182,10 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         config: &VmConfig,
         _operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
+        if std::mem::take(&mut *self.park_create.lock().unwrap()) {
+            self.create_parked.notify_one();
+            std::future::pending::<()>().await;
+        }
         self.vms
             .lock()
             .unwrap()

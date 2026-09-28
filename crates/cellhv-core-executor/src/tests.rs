@@ -1048,7 +1048,9 @@ async fn fault_before_effect_never_reexecutes_after_restart_until_resolved() {
     let fault = FaultRuntime::park_at(FaultPoint::BeforeEffect, counting.clone());
     let executor = JournalExecutor::start(execution.clone(), fault.clone(), 1, 2).unwrap();
     executor.scan_ready().await.unwrap();
-    fault.reached.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("fault point must be reached");
     // Process death at the fault point: the parked task is aborted with the
     // composition; no claim or finish RPC happens after the window.
     executor.abort().await.unwrap();
@@ -1138,7 +1140,9 @@ async fn fault_after_effect_resolves_without_a_second_effect() {
     let fault = FaultRuntime::park_at(FaultPoint::AfterEffect, counting.clone());
     let executor = JournalExecutor::start(execution.clone(), fault.clone(), 1, 2).unwrap();
     executor.scan_ready().await.unwrap();
-    fault.reached.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("fault point must be reached");
     assert_eq!(
         counting.calls.load(Ordering::SeqCst),
         1,
@@ -1193,4 +1197,43 @@ async fn fault_after_effect_resolves_without_a_second_effect() {
     assert_eq!(counting.calls.load(Ordering::SeqCst), 2);
     authority.shutdown().await.unwrap();
     join.join().await.unwrap();
+}
+
+/// The disarm contract: a disarmed `FaultRuntime` is a pure pass-through —
+/// the wrapped effect executes to completion, `inner_completions` counts
+/// it, and `reached` never fires.
+#[tokio::test]
+async fn disarmed_fault_runtime_is_a_passthrough() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::AfterEffect, counting.clone());
+    fault.disarm();
+    let executor = JournalExecutor::start(f.execution.clone(), fault.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fault.inner_completions.load(Ordering::SeqCst), 1);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fault.reached.notified()
+        )
+        .await
+        .is_err(),
+        "a disarmed wrapper must never park"
+    );
+    let done = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        done.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    stop(f).await;
 }

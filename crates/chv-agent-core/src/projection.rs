@@ -738,7 +738,9 @@ mod tests {
         let executor =
             cellhv_core_executor::JournalExecutor::start(execution, wrapper, 1, 2).unwrap();
         executor.scan_ready().await.unwrap();
-        fault.reached.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+            .await
+            .expect("fault point must be reached");
         assert_eq!(
             stub.calls(),
             1,

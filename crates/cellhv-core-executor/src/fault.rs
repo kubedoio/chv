@@ -5,11 +5,11 @@
 //!
 //! | Fault point | Window | Injection |
 //! |---|---|---|
-//! | 1 | before durable acceptance | actor dropped-reply / SQLite `TEMP TRIGGER` abort (see `cellhv-core-operations` and `cellhv-core-store` tests) |
+//! | 1 | before durable acceptance | accept-transaction abort (`cellhv-core-store` tests: the whole accept — row, desired state, events, idempotency mapping — rolls back as ONE transaction and the identical submission retries fresh) / lost reply after the accept commit (`cellhv-core-operations` tests: the caller's identical replay converges) |
 //! | 2 | after acceptance + claim, before the provider effect | [`FaultRuntime`] at [`FaultPoint::BeforeEffect`] |
-//! | 3 | during the provider effect | `MockHostResourceController::new_with_fail` / `MockCloudHypervisorAdapter::fail_delete` (see `chv-agent-runtime-ch`) |
+//! | 3 | during the provider effect | `MockCloudHypervisorAdapter::park_create` in `chv-agent-runtime-ch` (the controller has opened+attached volumes; the cloud-hypervisor create parks — see the runtime-owner canary's mid-effect crash proof). For effect *failures* (in-process unwind, no crash), see `MockHostResourceController::new_with_fail` / `MockCloudHypervisorAdapter::fail_delete` |
 //! | 4 | after the provider effect, before the compatibility projection | [`FaultRuntime`] at [`FaultPoint::AfterEffect`] wrapped *inside* a projecting runtime |
-//! | 5 | after the effect (and projection), before terminal persistence | [`FaultRuntime`] at [`FaultPoint::AfterEffect`] as the outermost runtime |
+//! | 5 | after the effect (and the projection, when a projecting wrapper sits outside it), before terminal persistence | [`FaultRuntime`] at [`FaultPoint::AfterEffect`] as the outermost runtime |
 //!
 //! [`FaultRuntime`] parks the operation's executor task inside the chosen
 //! window. Parking — not failing — is the crash simulation: the composition
@@ -53,21 +53,27 @@ pub enum FaultPoint {
 /// fault point.
 ///
 /// Parked tasks never return; the test tears the composition down to
-/// simulate process death at that exact point. [`Self::disarm`] makes the
-/// wrapper a pass-through so a restarted composition (or successor
+/// simulate process death at that exact point. Each instance parks at most
+/// ONE operation (structurally: the first armed execute parks, later armed
+/// executes pass through) — a scenario that needs to park more than one
+/// operation at distinct moments must use separate instances. [`Self::disarm`]
+/// makes the wrapper a pass-through so a restarted composition (or successor
 /// operations in the same composition) can run to completion while
 /// [`Self::inner_completions`] keeps counting effects for no-double-effect
 /// assertions.
 ///
 /// [`Self::reached`] fires when the first armed park happens; the stored
 /// permit makes `notified()` deterministic regardless of await ordering.
-/// Scenarios that need to park more than one operation at distinct moments
-/// should use separate instances.
 pub struct FaultRuntime {
     point: FaultPoint,
     inner: Arc<dyn CoreVmRuntime>,
     /// When `false`, the wrapper is a pure pass-through.
     armed: AtomicBool,
+    /// Set by the first armed park: later armed executes pass through
+    /// instead of parking (single-park contract, structural rather than
+    /// advisory — a second park on one instance could never be awaited
+    /// deterministically with a single-permit `Notify`).
+    parked: AtomicBool,
     /// Notified (once) when an armed park happens.
     pub reached: Notify,
     /// Number of times the wrapped runtime completed an effect successfully.
@@ -81,6 +87,7 @@ impl FaultRuntime {
             point,
             inner,
             armed: AtomicBool::new(true),
+            parked: AtomicBool::new(false),
             reached: Notify::new(),
             inner_completions: AtomicUsize::new(0),
         })
@@ -92,8 +99,8 @@ impl FaultRuntime {
         self.armed.store(false, Ordering::SeqCst);
     }
 
-    fn armed(&self) -> bool {
-        self.armed.load(Ordering::SeqCst)
+    fn should_park(&self) -> bool {
+        self.armed.load(Ordering::SeqCst) && !self.parked.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -103,7 +110,7 @@ impl CoreVmRuntime for FaultRuntime {
         &self,
         operation: OperationJournalEntry,
     ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
-        if self.armed() && matches!(self.point, FaultPoint::BeforeEffect) {
+        if matches!(self.point, FaultPoint::BeforeEffect) && self.should_park() {
             self.reached.notify_one();
             // Crash window: claim is durable, effect never starts.
             std::future::pending::<()>().await;
@@ -112,7 +119,7 @@ impl CoreVmRuntime for FaultRuntime {
         // is injected by the mocks), not a crash window: propagate it.
         let outcome = self.inner.execute(operation).await?;
         self.inner_completions.fetch_add(1, Ordering::SeqCst);
-        if self.armed() {
+        if self.should_park() {
             self.reached.notify_one();
             // Crash window: the effect is done; projection (if any wraps
             // this) and terminal persistence have not run.
