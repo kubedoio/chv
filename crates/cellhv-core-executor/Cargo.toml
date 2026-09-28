@@ -12,6 +12,7 @@ cellhv-core-types = { path = "../cellhv-core-types" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

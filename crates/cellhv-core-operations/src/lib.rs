@@ -24,6 +24,10 @@ use std::path::Path;
 use thiserror::Error;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// Cap for journal listing replies (the listing returns the NEWEST
+/// operations, not all history): bounded memory and latency on long-lived
+/// nodes that retain terminal operations. Mirrors the /v1/events cap.
+pub const MAX_LISTED_OPERATIONS: u32 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AttemptToken(String);
@@ -377,7 +381,7 @@ impl OperationService {
     }
 
     pub fn operations(&self) -> Result<Vec<OperationJournalEntry>> {
-        Ok(self.store.list_operations()?)
+        Ok(self.store.list_operations(MAX_LISTED_OPERATIONS)?)
     }
 
     pub fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<OperationEvent>> {

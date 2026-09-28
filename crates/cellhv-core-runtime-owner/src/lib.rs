@@ -65,11 +65,14 @@ pub type Result<T> = std::result::Result<T, RuntimeOwnerError>;
 
 /// Monotonic journal-poller failure telemetry. The cumulative counter is for
 /// diagnostics; the consecutive counter is the current health signal (zero
-/// means the journal scanner is working right now).
+/// means the journal scanner is working right now). `inspect_required` is the
+/// current stuck-operation count (status `running` + recovery marker) for
+/// metrics/telemetry.
 #[derive(Debug, Default)]
 struct JournalScanStats {
     consecutive_failures: AtomicU64,
     total_failures: AtomicU64,
+    inspect_required: AtomicU64,
 }
 
 /// How the journal poller exited, surfaced through [`CoreRuntimeOwner::shutdown`].
@@ -298,6 +301,12 @@ impl CoreRuntimeOwner {
                                     journal_scan
                                         .consecutive_failures
                                         .store(0, Ordering::Relaxed);
+                                    journal_scan
+                                        .inspect_required
+                                        .store(
+                                            report.inspect_required.len() as u64,
+                                            Ordering::Relaxed,
+                                        );
                                     if report.inspect_required != last_inspect_required {
                                         // Debug formatting escapes identifier
                                         // content; the journal is the trust
@@ -408,6 +417,13 @@ impl CoreRuntimeOwner {
             .consecutive_failures
             .load(Ordering::Relaxed)
             == 0
+    }
+
+    /// Current number of stuck operations (status `running` with a recovery
+    /// marker — `InspectRequired`) awaiting operator resolution. Updated on
+    /// every successful journal scan.
+    pub fn journal_inspect_required_count(&self) -> u64 {
+        self.journal_scan.inspect_required.load(Ordering::Relaxed)
     }
 
     /// Whether the journal executor terminated fatally (a task failed

@@ -30,6 +30,8 @@ const RECOVERY_ASSESSMENT_MIGRATION_SQL: &str =
     include_str!("../migrations/0003_operation_recovery_assessments.sql");
 const OPERATION_REQUEST_METADATA_MIGRATION_SQL: &str =
     include_str!("../migrations/0004_operation_request_metadata.sql");
+const OPERATIONS_RECOVERY_INDEX_MIGRATION_SQL: &str =
+    include_str!("../migrations/0005_operations_recovery_index.sql");
 const MAX_RECOVERY_EVIDENCE_BYTES: usize = 16 * 1024;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -243,6 +245,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "operation_request_metadata",
         sql: OPERATION_REQUEST_METADATA_MIGRATION_SQL,
     },
+    Migration {
+        version: 5,
+        name: "operations_recovery_index",
+        sql: OPERATIONS_RECOVERY_INDEX_MIGRATION_SQL,
+    },
 ];
 
 pub struct CoreStore {
@@ -407,18 +414,44 @@ impl CoreStore {
     /// Atomically reserve a new file and initialize it. Parent directories
     /// must already exist; a pre-existing file is never opened or removed.
     pub fn create_new(path: &Path) -> Result<Self> {
-        let file = std::fs::OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    StoreError::AlreadyExists(path.to_path_buf())
-                } else {
-                    StoreError::Integrity(format!("cannot create {}: {error}", path.display()))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A crash or power loss during a previous `create_new`
+                // bootstrap can leave an empty scrap file (the whole
+                // bootstrap is one transaction — see `apply_migrations`):
+                // no committed schema, no authority state. Replace it and
+                // retry. Anything else keeps the never-clobber guarantee.
+                if !is_bootstrap_scrap(path) {
+                    return Err(StoreError::AlreadyExists(path.to_path_buf()));
                 }
-            })?;
+                remove_database_files(path).map_err(|cleanup| {
+                    StoreError::Integrity(format!(
+                        "cannot replace interrupted-bootstrap scrap {}: {cleanup}",
+                        path.display()
+                    ))
+                })?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .map_err(|error| {
+                        StoreError::Integrity(format!("cannot create {}: {error}", path.display()))
+                    })?
+            }
+            Err(error) => {
+                return Err(StoreError::Integrity(format!(
+                    "cannot create {}: {error}",
+                    path.display()
+                )))
+            }
+        };
         drop(file);
 
         let result = (|| {
@@ -434,7 +467,7 @@ impl CoreStore {
             Ok(Self { conn })
         })();
         if result.is_err() {
-            let _ = std::fs::remove_file(path);
+            let _ = remove_database_files(path);
         }
         result
     }
@@ -1258,14 +1291,19 @@ impl CoreStore {
         })
     }
 
-    pub fn list_operations(&self) -> Result<Vec<OperationJournalEntry>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT operation_id FROM operations ORDER BY accepted_at,operation_id")?;
+    /// Lists up to `limit` operations — the NEWEST `limit`, returned in
+    /// ascending `(accepted_at, operation_id)` order for stable output.
+    /// Bounded by design: the per-operation entry reads and every listing
+    /// reply must not grow with retained history on a long-lived node.
+    pub fn list_operations(&self, limit: u32) -> Result<Vec<OperationJournalEntry>> {
+        let mut statement = self.conn.prepare(
+            "SELECT operation_id FROM operations ORDER BY accepted_at DESC,operation_id DESC LIMIT ?1",
+        )?;
         let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map([limit], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         ids.iter()
+            .rev()
             .map(|id| read_operation_entry(&self.conn, id))
             .collect()
     }
@@ -1600,11 +1638,45 @@ fn apply_migrations_with_host(
     Ok(())
 }
 
+/// Read-only probe: is `path` a scrap left by an interrupted bootstrap?
+/// True only when the file carries NO committed schema (no user tables,
+/// `user_version` 0) — an empty or header-only database. Any real authority
+/// has migration-0001 tables and a nonzero `user_version`; unreadable or
+/// foreign content is NOT a scrap (fail closed: `create_new` then keeps its
+/// never-clobber error).
+fn is_bootstrap_scrap(path: &Path) -> bool {
+    let Ok(conn) = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    let user_version: std::result::Result<i64, _> =
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0));
+    match user_version {
+        Ok(0) => {}
+        _ => return false,
+    }
+    matches!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ),
+        Ok(0)
+    )
+}
+
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};"))?;
-    conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,schema_fingerprint TEXT NOT NULL,applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) STRICT;")?;
+    // The whole bootstrap is ONE transaction: a crash or power loss
+    // mid-bootstrap leaves a file with no committed schema — an empty scrap
+    // that `CoreStore::create_new` detects and replaces on the next attempt
+    // (see `is_bootstrap_scrap`) — instead of a half-bootstrapped ledger
+    // that neither opens nor re-creates.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};"))?;
+    tx.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,schema_fingerprint TEXT NOT NULL,applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) STRICT;")?;
     for migration in MIGRATIONS {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(migration.sql)?;
         tx.pragma_update(None, "user_version", migration.version)?;
         let fingerprint = schema_fingerprint(&tx)?;
@@ -1612,8 +1684,8 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
             "INSERT INTO schema_migrations (version,name,checksum,schema_fingerprint) VALUES (?1,?2,?3,?4)",
             params![migration.version, migration.name, checksum(migration.sql), fingerprint],
         )?;
-        tx.commit()?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -3341,7 +3413,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 4);
+        assert_eq!(user_version, MIGRATIONS.last().unwrap().version);
         let recovery_table: i64 = store
             .conn
             .query_row(
@@ -3444,7 +3516,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 4);
+        assert_eq!(user_version, MIGRATIONS.last().unwrap().version);
         for id in mixed {
             let entry = store
                 .operation_entry(&OperationId::new(id).unwrap())
@@ -3773,7 +3845,11 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 4, "repaired store must upgrade cleanly to v4");
+        assert_eq!(
+            user_version,
+            MIGRATIONS.last().unwrap().version,
+            "repaired store must upgrade cleanly to the latest schema"
+        );
         drop(directory);
     }
 
@@ -5136,5 +5212,61 @@ mod tests {
                 Err(StoreError::Integrity(_))
             ));
         }
+    }
+
+    #[test]
+    fn interrupted_bootstrap_scrap_is_replaced_not_bricked() {
+        // A crash or power loss during a previous `create_new` bootstrap
+        // leaves a file with no committed schema (the whole bootstrap is one
+        // transaction). The next attempt must replace the scrap instead of
+        // failing with AlreadyExists — the pre-fix behavior bricked startup
+        // until an operator deleted the file by hand.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        std::fs::write(&path, b"").unwrap();
+        let store = CoreStore::create_new(&path).unwrap();
+        drop(store);
+        // The replaced authority is complete and opens normally afterwards.
+        CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn create_new_never_replaces_a_bootstrapped_authority() {
+        // A file with committed tables is never a scrap: the never-clobber
+        // guarantee is preserved for real (including foreign) databases.
+        let (directory, path, store) = new_store();
+        drop(store);
+        assert!(matches!(
+            CoreStore::create_new(&path),
+            Err(StoreError::AlreadyExists(_))
+        ));
+        drop(directory);
+    }
+
+    #[test]
+    fn list_operations_returns_the_newest_bounded_window() {
+        let (_directory, _path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        for id in ["op-a", "op-b", "op-c"] {
+            let request = serde_json::json!({"op": id});
+            store
+                .conn
+                .execute(
+                    "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES (?1,'start_vm','vm-1',?2,?3,'accepted',0,3)",
+                    params![id, canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+                )
+                .unwrap();
+        }
+        // The bounded listing returns the NEWEST window in ascending order
+        // (accepted_at, operation_id) — never unbounded history.
+        let listed = store.list_operations(2).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry.operation.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["op-b", "op-c"]
+        );
+        assert_eq!(store.list_operations(1_000).unwrap().len(), 3);
     }
 }
