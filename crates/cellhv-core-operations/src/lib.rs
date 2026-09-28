@@ -285,6 +285,12 @@ impl OperationService {
         Ok(self.store.has_any_migration_state()?)
     }
 
+    /// Whether migration state exists from any source other than `source`
+    /// (see [`CoreStore::has_migration_state_other_than`]).
+    pub fn has_migration_state_other_than(&self, source: &str) -> Result<bool> {
+        Ok(self.store.has_migration_state_other_than(source)?)
+    }
+
     /// Creates an empty authority exclusively for a validated legacy import.
     /// Staged and published atomically (`create_new_staged`): a crash during
     /// bootstrap must leave the final path absent, not a scrap the next boot

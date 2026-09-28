@@ -130,6 +130,11 @@ async fn start_core_managed(
     };
     let activated =
         cellhv_core_startup::StartupTransaction::begin(&paths)?.activate(configured_seed, None)?;
+    // Refuse ineligible authorities BEFORE any pre-start work mutates
+    // on-disk state: the startup rebuild below persists a rebuilt cache,
+    // and it must not clobber the live cache of an authority the runtime
+    // owner is about to refuse (foreign migration provenance).
+    cellhv_core_runtime_owner::validate_activation(&activated)?;
     // M2.2b startup rebuild: seed NodeCache's VM axis from the Core store's
     // authoritative VM list BEFORE the executor poller starts, so a
     // crash-recovery operation can never race the rebuild (a projection that
@@ -138,12 +143,30 @@ async fn start_core_managed(
     // failure we warn and continue: the Reconciler and the legacy desired-state
     // RPCs have no mutation surface in core-managed mode (M2.3), so a stale
     // compatibility cache cannot silently launch a second authority.
+    //
+    // Divergence guard: when the live cache references VMs the authority
+    // does not know (a stale projection or a restored legacy cache that
+    // activation did not import — the Core database wins by design), the
+    // rebuild would DESTROY the only surviving record of those VMs.
+    // Refuse to overwrite it and leave operator inspection possible.
+    // (The decision itself is `NodeCache::unadopted_cache_vm_ids`, unit
+    // tested in chv-agent-core.)
     match activated.service().vms() {
         Ok(rebuild_vms) => {
             let mut cache = cache.lock().await;
-            cache.rebuild_from_core(&rebuild_vms);
-            if let Err(e) = cache.save(&cache_path).await {
-                warn!(error = %e, "core startup rebuild: failed to persist rebuilt NodeCache");
+            let unadopted = cache.unadopted_cache_vm_ids(&rebuild_vms);
+            if !unadopted.is_empty() {
+                warn!(
+                    unadopted = ?unadopted,
+                    "live NodeCache references VMs the Core authority does not know \
+                     (stale projection or restored legacy cache was NOT imported); \
+                     refusing to overwrite the on-disk cache — Core remains authoritative"
+                );
+            } else {
+                cache.rebuild_from_core(&rebuild_vms);
+                if let Err(e) = cache.save(&cache_path).await {
+                    warn!(error = %e, "core startup rebuild: failed to persist rebuilt NodeCache");
+                }
             }
         }
         Err(e) => {
