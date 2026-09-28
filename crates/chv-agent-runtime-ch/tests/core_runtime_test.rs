@@ -15,6 +15,7 @@ use cellhv_core_types::{
 };
 use chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime;
 use chv_agent_runtime_ch::mock::{MockCloudHypervisorAdapter, MockHostResourceController};
+use chv_hypervisor_api::resources::{vm_api_socket, vm_config_file, vm_pid_file};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -501,6 +502,84 @@ async fn create_then_restart_delete_without_state() {
 }
 
 #[tokio::test]
+async fn delete_after_force_stop_is_idempotent() {
+    // Run 8d of the M2.5 qualification: the force-stop path removes the
+    // adapter's map entry (pre-existing force-stop semantics), so a delete
+    // issued afterwards finds no runtime entry and the adapter reports
+    // NotFound. The VM exists at the authority and its runtime dir is on
+    // disk — the delete must complete the adapter-owned artifact cleanup
+    // itself and succeed, not fail NOT_FOUND on every retry.
+    let h = harness(None);
+    let vm_id = "vm-force";
+
+    // The force-stopped state: no adapter entry (the force path removed it),
+    // but the runtime dir with the adapter's artifacts and the
+    // storage-layer volume backing.
+    let vm_dir = vm_dir_path(&h, vm_id);
+    std::fs::create_dir_all(&vm_dir).expect("vm dir");
+    std::fs::write(vm_pid_file(&vm_dir), "12345").expect("pid file");
+    std::fs::write(vm_config_file(&vm_dir), "{}").expect("persisted config");
+    std::fs::write(vm_api_socket(&vm_dir), b"").expect("api socket file");
+    std::fs::write(vm_dir.join("vol-0.img"), b"disk").expect("volume backing");
+
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del-force",
+            envelope(delete),
+        ))
+        .await;
+    assert!(
+        result.is_ok(),
+        "delete after force stop must succeed: {result:?}"
+    );
+    assert!(!vm_pid_file(&vm_dir).exists(), "pid file must be removed");
+    assert!(
+        !vm_config_file(&vm_dir).exists(),
+        "persisted config must be removed"
+    );
+    assert!(
+        !vm_api_socket(&vm_dir).exists(),
+        "api socket must be removed"
+    );
+    assert!(
+        vm_dir.join("vol-0.img").exists(),
+        "storage-layer files must survive the runtime delete"
+    );
+}
+
+#[tokio::test]
+async fn delete_without_runtime_dir_stays_not_found() {
+    // No adapter entry AND no runtime dir: the VM never ran on this node.
+    // NotFound must surface — a delete misrouted to the wrong node must
+    // not be silently swallowed as an idempotent success.
+    let h = harness(None);
+    let vm_id = "vm-never";
+
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del-never",
+            envelope(delete),
+        ))
+        .await;
+    assert!(
+        matches!(result, Err(RuntimeFailure::NotFound)),
+        "delete without any runtime footprint must stay NotFound, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn start_stop_reboot_passthrough() {
     let h = harness(None);
     let vm_id = "vm-e";
@@ -762,8 +841,8 @@ async fn delete_drains_side_effects_when_adapter_delete_fails() {
         ))
         .await;
     assert!(
-        matches!(result, Err(RuntimeFailure::NotFound)),
-        "failed hypervisor delete must surface NotFound (mapped from ChvError::NotFound), got {result:?}"
+        matches!(result, Err(RuntimeFailure::Internal)),
+        "failed hypervisor delete must surface the effect failure (mapped from ChvError::Internal via the fail_delete knob), got {result:?}"
     );
     // The VM was NOT removed by the mock (delete failed).
     assert!(

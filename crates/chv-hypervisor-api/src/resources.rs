@@ -60,6 +60,25 @@ pub fn vm_api_socket(vm_dir: &Path) -> PathBuf {
     vm_dir.join("vm.sock")
 }
 
+/// The VMM pid file for a VM runtime directory (`ch.pid`).
+///
+/// Written by the process adapter at spawn/adoption time and removed by the
+/// delete path. Shared so the adapter's own cleanup and the Core runtime's
+/// orphaned-artifact cleanup (delete after a force stop) cannot drift.
+pub fn vm_pid_file(vm_dir: &Path) -> PathBuf {
+    vm_dir.join("ch.pid")
+}
+
+/// The persisted creation payload for a VM runtime directory
+/// (`vm-config.json`).
+///
+/// Written by the process adapter at create time; the re-spawn and adoption
+/// paths rebuild from it. Removed by the delete path (same shared-layout
+/// rationale as [`vm_pid_file`]).
+pub fn vm_config_file(vm_dir: &Path) -> PathBuf {
+    vm_dir.join("vm-config.json")
+}
+
 /// Legacy-compatible NIC attachment identifier: `{vm_id}-{network_id}`.
 ///
 /// This exactly matches `cellhv_nodecache_migration::legacy_network_attachment_id`

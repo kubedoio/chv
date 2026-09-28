@@ -171,9 +171,11 @@ impl HostResourceController for MockHostResourceController {
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
     pub vms: Arc<Mutex<HashMap<String, VmConfig>>>,
-    /// When true, `delete_vm` fails deterministically (as `NotFound`) without
-    /// removing the VM, letting a test pin the drain-always behavior on a
-    /// failed delete. Per-instance state; never a shared static.
+    /// When true, `delete_vm` fails deterministically (as a generic
+    /// `Internal` effect failure) without removing the VM, letting a test
+    /// pin the drain-always behavior on a failed delete. Per-instance
+    /// state; never a shared static. (`NotFound` is reserved for the real
+    /// adapter's no-runtime-entry semantics — see `delete_vm`.)
     pub fail_delete: Arc<Mutex<bool>>,
     /// When true, the next `create_vm` parks forever WITHOUT creating the
     /// VM: a deterministic mid-effect crash window for the create lifecycle
@@ -219,12 +221,20 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
 
     async fn delete_vm(&self, vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
         if *self.fail_delete.lock().unwrap() {
+            return Err(ChvError::Internal {
+                reason: "forced delete failure (fail_delete knob)".to_string(),
+            });
+        }
+        // Model the real process adapter: a delete for a VM with no runtime
+        // entry (force-stopped, or already deleted) is NotFound. The
+        // idempotency policy for that case belongs to the Core runtime's
+        // delete arm, which owns the runtime-dir layout.
+        if self.vms.lock().unwrap().remove(vm_id).is_none() {
             return Err(ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
             });
         }
-        self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
 
