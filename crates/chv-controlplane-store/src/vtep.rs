@@ -15,7 +15,34 @@ pub struct VtepEntry {
     pub vtep_ip: String,
     pub vtep_port: i32,
     pub updated_at: String,
+    /// WireGuard public key (base64) reported by the node (ADR-021).
+    pub public_key: Option<String>,
+    /// `host:port` of the node's WireGuard listener; NULL until node
+    /// underlay addressing is wired up (planner fails closed on NULL).
+    pub underlay_endpoint: Option<String>,
+    /// Fabric transport IP allocated from 100.100.0.0/16 (ADR-021 §6).
+    pub fabric_ip: Option<String>,
+    /// Measured underlay MTU; NULL when the node has not measured it.
+    pub underlay_mtu: Option<i64>,
 }
+
+/// A node's fabric identity, as seen by the plan compiler. Every field is
+/// optional at the store level so a partially-registered peer is visible
+/// (and rejectable) instead of silently dropped from the flood list.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct FabricPeerRecord {
+    pub node_id: String,
+    pub public_key: Option<String>,
+    pub underlay_endpoint: Option<String>,
+    pub fabric_ip: Option<String>,
+    pub underlay_mtu: Option<i64>,
+}
+
+/// Fabric transport addresses are allocated from 100.100.0.0/16 (ADR-021
+/// §6). Host range: 100.100.0.1 ..= 100.100.255.254.
+const FABRIC_IP_NETWORK_BASE: u32 = (100 << 24) | (100 << 16);
+const FABRIC_IP_FIRST: u32 = FABRIC_IP_NETWORK_BASE + 1;
+const FABRIC_IP_LAST: u32 = FABRIC_IP_NETWORK_BASE + 65_534;
 
 impl VtepRepository {
     pub fn new(pool: StorePool) -> Self {
@@ -52,7 +79,9 @@ impl VtepRepository {
     /// Get a single VTEP entry for a node.
     pub async fn get_vtep(&self, node_id: &str) -> Result<VtepEntry, StoreError> {
         sqlx::query_as::<_, VtepEntry>(
-            "SELECT node_id, vtep_ip, vtep_port, updated_at FROM vtep_registry WHERE node_id = ?",
+            r#"SELECT node_id, vtep_ip, vtep_port, updated_at,
+                      public_key, underlay_endpoint, fabric_ip, underlay_mtu
+               FROM vtep_registry WHERE node_id = ?"#,
         )
         .bind(node_id)
         .fetch_optional(&self.pool)
@@ -63,6 +92,22 @@ impl VtepRepository {
         })
     }
 
+    /// Get a node's fabric identity (public key, endpoint, transport IP,
+    /// underlay MTU). `Ok(None)` when the node has no registry row at all.
+    pub async fn get_fabric_identity(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<FabricPeerRecord>, StoreError> {
+        let record = sqlx::query_as::<_, FabricPeerRecord>(
+            r#"SELECT node_id, public_key, underlay_endpoint, fabric_ip, underlay_mtu
+               FROM vtep_registry WHERE node_id = ?"#,
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(record)
+    }
+
     /// Get VTEPs for all nodes that have VMs on a given network.
     /// This joins vtep_registry with vm placements that are attached to the network.
     pub async fn get_vteps_for_network(
@@ -70,7 +115,8 @@ impl VtepRepository {
         network_id: &str,
     ) -> Result<Vec<VtepEntry>, StoreError> {
         let entries = sqlx::query_as::<_, VtepEntry>(
-            r#"SELECT DISTINCT vr.node_id, vr.vtep_ip, vr.vtep_port, vr.updated_at
+            r#"SELECT DISTINCT vr.node_id, vr.vtep_ip, vr.vtep_port, vr.updated_at,
+                      vr.public_key, vr.underlay_endpoint, vr.fabric_ip, vr.underlay_mtu
                FROM vtep_registry vr
                INNER JOIN vm_desired_state vds ON vds.target_node_id = vr.node_id
                INNER JOIN vm_nic_desired_state vnds ON vnds.vm_id = vds.vm_id
@@ -80,6 +126,118 @@ impl VtepRepository {
         .fetch_all(&self.pool)
         .await?;
         Ok(entries)
+    }
+
+    /// Get the fabric identities of every node hosting a VM NIC on the
+    /// given network — the bounded flood list of ADR-021 §10. Rows with a
+    /// missing public key / endpoint / fabric IP are returned as-is (with
+    /// `None` fields) so the plan compiler can fail closed naming the node
+    /// instead of silently shrinking the flood list.
+    pub async fn get_fabric_peers_for_network(
+        &self,
+        network_id: &str,
+    ) -> Result<Vec<FabricPeerRecord>, StoreError> {
+        let peers = sqlx::query_as::<_, FabricPeerRecord>(
+            r#"SELECT DISTINCT vr.node_id, vr.public_key, vr.underlay_endpoint,
+                      vr.fabric_ip, vr.underlay_mtu
+               FROM vtep_registry vr
+               INNER JOIN vm_desired_state vds ON vds.target_node_id = vr.node_id
+               INNER JOIN vm_nic_desired_state vnds ON vnds.vm_id = vds.vm_id
+               WHERE vnds.network_id = ?"#,
+        )
+        .bind(network_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(peers)
+    }
+
+    /// Register or update a node's fabric identity (ADR-021 §5): upserts
+    /// the WireGuard public key and measured underlay MTU into
+    /// `vtep_registry` and, on first registration, allocates the node's
+    /// fabric transport IP from 100.100.0.0/16.
+    ///
+    /// `underlay_mtu == 0` (the proto default for "not measured") is stored
+    /// as NULL. `underlay_endpoint` is only overwritten when `Some`, so a
+    /// later identity re-report without an endpoint never erases one
+    /// registered by a more specific path.
+    pub async fn register_fabric_identity(
+        &self,
+        node_id: &str,
+        public_key: &str,
+        underlay_mtu: u32,
+        underlay_endpoint: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let underlay_mtu = if underlay_mtu == 0 {
+            None
+        } else {
+            Some(i64::from(underlay_mtu))
+        };
+
+        let mut tx = self.pool.begin().await?;
+
+        // A node without a legacy VTEP row still gets a registry row so the
+        // identity is durable; vtep_ip keeps the empty-string sentinel the
+        // legacy column requires (NOT NULL) until the fabric path populates
+        // fabric_ip below.
+        sqlx::query(
+            r#"INSERT INTO vtep_registry (node_id, vtep_ip, vtep_port, public_key, underlay_mtu, underlay_endpoint, updated_at)
+               VALUES (?, '', 4789, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(node_id) DO UPDATE SET
+                   public_key = excluded.public_key,
+                   underlay_mtu = excluded.underlay_mtu,
+                   underlay_endpoint = COALESCE(excluded.underlay_endpoint, vtep_registry.underlay_endpoint),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"#,
+        )
+        .bind(node_id)
+        .bind(public_key)
+        .bind(underlay_mtu)
+        .bind(underlay_endpoint)
+        .execute(&mut *tx)
+        .await?;
+
+        // Allocate the fabric transport IP exactly once per node.
+        let existing: Option<Option<String>> =
+            sqlx::query_scalar("SELECT fabric_ip FROM vtep_registry WHERE node_id = ?")
+                .bind(node_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if existing.flatten().is_none() {
+            let fabric_ip = Self::next_free_fabric_ip(&mut tx).await?;
+            sqlx::query("UPDATE vtep_registry SET fabric_ip = ? WHERE node_id = ?")
+                .bind(&fabric_ip)
+                .bind(node_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Pick the lowest free fabric transport address in 100.100.0.0/16.
+    /// Must run inside the caller's transaction so concurrent registrations
+    /// cannot observe the same free address.
+    async fn next_free_fabric_ip(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<String, StoreError> {
+        let used: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT fabric_ip FROM vtep_registry WHERE fabric_ip IS NOT NULL")
+                .fetch_all(&mut **tx)
+                .await?;
+        let mut used_set = std::collections::HashSet::new();
+        for ip in used.into_iter().flatten() {
+            if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+                used_set.insert(u32::from(addr));
+            }
+        }
+        for candidate in FABRIC_IP_FIRST..=FABRIC_IP_LAST {
+            if !used_set.contains(&candidate) {
+                return Ok(std::net::Ipv4Addr::from(candidate).to_string());
+            }
+        }
+        Err(StoreError::InvalidConfiguration {
+            reason: "fabric transport address space 100.100.0.0/16 exhausted".to_string(),
+        })
     }
 
     /// Allocate the next free VNI for a network.
@@ -133,10 +291,15 @@ impl VtepRepository {
         }
 
         sqlx::query(
-            r#"INSERT INTO vni_allocations (vni, network_id, allocated_at)
-               VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"#,
+            r#"INSERT INTO vni_allocations (vni, network_id, allocated_at, binding_generation)
+               VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                       COALESCE(
+                           (SELECT MAX(binding_generation) FROM vni_allocations WHERE network_id = ?),
+                           0
+                       ) + 1)"#,
         )
         .bind(vni)
+        .bind(network_id)
         .bind(network_id)
         .execute(&mut *tx)
         .await?;
@@ -182,5 +345,20 @@ impl VtepRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(vni)
+    }
+
+    /// Get the binding generation of a network's active VNI allocation
+    /// (ADR-021 §8). `Ok(None)` when the network has no active allocation.
+    pub async fn get_binding_generation(
+        &self,
+        network_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT binding_generation FROM vni_allocations WHERE network_id = ? AND released_at IS NULL",
+        )
+        .bind(network_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(generation)
     }
 }

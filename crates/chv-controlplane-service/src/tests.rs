@@ -476,6 +476,120 @@ async fn test_enrollment_extended_inventory_persistence() {
 }
 
 #[tokio::test]
+async fn test_enrollment_registers_fabric_identity() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service =
+        EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
+
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES (?, false)")
+        .bind("a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let request = proto::EnrollmentRequest {
+        bootstrap_token: "123".into(),
+        inventory: Some(proto::NodeInventory {
+            node_id: "node-fab-1".into(),
+            hostname: "host-fab-1".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
+            labels: std::collections::HashMap::new(),
+            vtep_ip: String::new(),
+            wireguard_public_key: "pub-key-material-base64".into(),
+            underlay_mtu: 1500,
+        }),
+        versions: Some(proto::ServiceVersions {
+            node_id: "node-fab-1".into(),
+            chv_agent_version: "1.0.0".into(),
+            chv_stord_version: "1.0.0".into(),
+            chv_nwd_version: "1.0.0".into(),
+            cloud_hypervisor_version: "40.0.0".into(),
+            host_bundle_version: "1.2.3".into(),
+        }),
+    };
+
+    service
+        .enroll_node(request)
+        .await
+        .expect("enrollment with fabric identity must succeed");
+
+    // The identity row exists with the public key, measured MTU, an
+    // allocated fabric IP, and the legacy-column sentinel values.
+    let identity = VtepRepository::new(pool.clone())
+        .get_fabric_identity("node-fab-1")
+        .await
+        .unwrap()
+        .expect("fabric identity must be registered");
+    assert_eq!(
+        identity.public_key.as_deref(),
+        Some("pub-key-material-base64")
+    );
+    assert_eq!(identity.underlay_mtu, Some(1500));
+    assert_eq!(identity.fabric_ip.as_deref(), Some("100.100.0.1"));
+    assert_eq!(
+        identity.underlay_endpoint, None,
+        "endpoint arrives in a follow-up"
+    );
+
+    // The periodic inventory re-report updates the identity in place and
+    // keeps the allocated fabric IP (key rotation convergence, ADR-021 §5).
+    let inventory_service = crate::inventory::InventoryServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        VtepRepository::new(pool.clone()),
+    );
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        proto::ReportNodeInventoryRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: "op-inv-1".into(),
+                requested_by: "test".into(),
+                target_node_id: "node-fab-1".into(),
+                desired_state_version: "1".into(),
+                request_unix_ms: 1000,
+            }),
+            inventory: Some(proto::NodeInventory {
+                node_id: "node-fab-1".into(),
+                hostname: "host-fab-1".into(),
+                architecture: "x86_64".into(),
+                cpu_threads: 8,
+                memory_bytes: 16 * 1024 * 1024 * 1024,
+                storage_classes: vec![],
+                network_capabilities: vec![],
+                hypervisor_capabilities: vec![],
+                labels: std::collections::HashMap::new(),
+                vtep_ip: String::new(),
+                wireguard_public_key: "pub-key-rotated".into(),
+                underlay_mtu: 0,
+            }),
+        },
+    )
+    .await
+    .expect("periodic inventory with fabric identity must succeed");
+
+    let identity = VtepRepository::new(pool)
+        .get_fabric_identity("node-fab-1")
+        .await
+        .unwrap()
+        .expect("identity must survive re-report");
+    assert_eq!(identity.public_key.as_deref(), Some("pub-key-rotated"));
+    assert_eq!(
+        identity.underlay_mtu, None,
+        "unmeasured MTU (0) stores NULL"
+    );
+    assert_eq!(identity.fabric_ip.as_deref(), Some("100.100.0.1"));
+}
+
+#[tokio::test]
 async fn test_rotate_certificate_missing_node() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();

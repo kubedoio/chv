@@ -53,7 +53,7 @@ pub use observed_state::{
     VmObservedStateInput, VolumeObservedStateInput,
 };
 pub use operations::{OperationCreateInput, OperationRepository, OperationStatusUpdateInput};
-pub use vtep::{VtepEntry, VtepRepository};
+pub use vtep::{FabricPeerRecord, VtepEntry, VtepRepository};
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;

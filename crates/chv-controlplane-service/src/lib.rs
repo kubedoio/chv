@@ -8,6 +8,7 @@ mod container;
 pub mod convergence_metrics;
 mod enrollment;
 mod error;
+mod fabric_planner;
 mod inventory;
 mod lifecycle;
 pub mod migration;
@@ -31,6 +32,7 @@ pub use enrollment::{
     EnrollmentServiceImplementation, IssuedCertificate,
 };
 pub use error::ControlPlaneServiceError;
+pub use fabric_planner::{CompiledFabricPlan, FabricPlanner};
 pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
 pub use migration_reaper::MigrationReaper;

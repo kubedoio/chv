@@ -343,7 +343,8 @@ pub async fn build_service(
         cert_issuer,
         vtep_repo.clone(),
     );
-    let inventory_service = InventoryServiceImplementation::new(node_repo.clone());
+    let inventory_service =
+        InventoryServiceImplementation::new(node_repo.clone(), vtep_repo.clone());
     let telemetry_service = TelemetryServiceImplementation::new(
         node_repo.clone(),
         observed_state_repo.clone(),

@@ -1515,3 +1515,536 @@ async fn test_wait_for_convergence_honors_cancel_flag() {
         "error must identify operator cancel; got: {err_str}"
     );
 }
+
+// =============================================================================
+// 9.5 — ADR-021 fabric dispatch (Phase 3): planner → per-node fan-out
+// =============================================================================
+
+mod fabric_dispatch {
+    use super::*;
+    use chv_controlplane_store::EventRepository;
+    use std::sync::{Arc, Mutex};
+
+    /// Mock agent-side LifecycleService served over UDS: captures
+    /// `UpdateOverlay` requests and fails closed (unimplemented) on every
+    /// other RPC — the same mock style as the daemon-client mocks in
+    /// chv-agent-core.
+    #[derive(Clone, Default)]
+    struct MockFabricAgent {
+        overlay_requests: Arc<Mutex<Vec<proto::UpdateOverlayRequest>>>,
+    }
+
+    #[tonic::async_trait]
+    impl proto::lifecycle_service_server::LifecycleService for MockFabricAgent {
+        async fn update_overlay(
+            &self,
+            request: tonic::Request<proto::UpdateOverlayRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            self.overlay_requests
+                .lock()
+                .unwrap()
+                .push(request.into_inner());
+            Ok(tonic::Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: String::new(),
+                    status: "OK".into(),
+                    node_observed_generation: String::new(),
+                    error_code: String::new(),
+                    human_summary: "fabric plan applied".into(),
+                }),
+            }))
+        }
+
+        async fn create_vm(
+            &self,
+            _request: tonic::Request<proto::CreateVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn start_vm(
+            &self,
+            _request: tonic::Request<proto::StartVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn stop_vm(
+            &self,
+            _request: tonic::Request<proto::StopVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn reboot_vm(
+            &self,
+            _request: tonic::Request<proto::RebootVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn delete_vm(
+            &self,
+            _request: tonic::Request<proto::DeleteVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_vm(
+            &self,
+            _request: tonic::Request<proto::ResizeVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn pause_vm(
+            &self,
+            _request: tonic::Request<proto::PauseVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resume_vm(
+            &self,
+            _request: tonic::Request<proto::ResumeVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn power_button_vm(
+            &self,
+            _request: tonic::Request<proto::PowerButtonVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn attach_volume(
+            &self,
+            _request: tonic::Request<proto::AttachVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn detach_volume(
+            &self,
+            _request: tonic::Request<proto::DetachVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_volume(
+            &self,
+            _request: tonic::Request<proto::ResizeVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn snapshot_volume(
+            &self,
+            _request: tonic::Request<proto::SnapshotVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn restore_volume(
+            &self,
+            _request: tonic::Request<proto::RestoreVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn delete_volume_snapshot(
+            &self,
+            _request: tonic::Request<proto::DeleteVolumeSnapshotRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn clone_volume(
+            &self,
+            _request: tonic::Request<proto::CloneVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn add_disk(
+            &self,
+            _request: tonic::Request<proto::AddDiskRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn remove_device(
+            &self,
+            _request: tonic::Request<proto::RemoveDeviceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn add_net(
+            &self,
+            _request: tonic::Request<proto::AddNetRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_disk(
+            &self,
+            _request: tonic::Request<proto::ResizeDiskRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn snapshot_vm(
+            &self,
+            _request: tonic::Request<proto::SnapshotVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn restore_snapshot(
+            &self,
+            _request: tonic::Request<proto::RestoreSnapshotRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn coredump_vm(
+            &self,
+            _request: tonic::Request<proto::CoredumpVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn ping_vmm(
+            &self,
+            _request: tonic::Request<proto::PingVmmRequest>,
+        ) -> Result<tonic::Response<proto::PingVmmResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn pause_node_scheduling(
+            &self,
+            _request: tonic::Request<proto::PauseNodeSchedulingRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resume_node_scheduling(
+            &self,
+            _request: tonic::Request<proto::ResumeNodeSchedulingRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn drain_node(
+            &self,
+            _request: tonic::Request<proto::DrainNodeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn enter_maintenance(
+            &self,
+            _request: tonic::Request<proto::EnterMaintenanceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn exit_maintenance(
+            &self,
+            _request: tonic::Request<proto::ExitMaintenanceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn start_network(
+            &self,
+            _request: tonic::Request<proto::StartNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn stop_network(
+            &self,
+            _request: tonic::Request<proto::StopNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn restart_network(
+            &self,
+            _request: tonic::Request<proto::RestartNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn migrate_vm(
+            &self,
+            _request: tonic::Request<proto::MigrateVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _request: tonic::Request<proto::SendGratuitousArpRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resolve_inspect_required_operation(
+            &self,
+            _request: tonic::Request<proto::ResolveInspectRequiredOperationRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    /// Seed a two-node fabric cluster: identities, endpoints (via direct SQL,
+    /// the way the follow-up underlay-addressing wiring will), and VM
+    /// placements on a vxlan network with desired generation 7.
+    async fn seed_fabric_cluster(cluster: &TestCluster) {
+        cluster
+            .create_vm_on_node(
+                "vm-fab-a",
+                "node-a",
+                "net-fabric",
+                "aa:bb:cc:dd:ee:11",
+                1_073_741_824,
+            )
+            .await;
+        cluster
+            .create_vm_on_node(
+                "vm-fab-b",
+                "node-b",
+                "net-fabric",
+                "aa:bb:cc:dd:ee:12",
+                1_073_741_824,
+            )
+            .await;
+        sqlx::query("UPDATE networks SET overlay_type = 'vxlan' WHERE network_id = 'net-fabric'")
+            .execute(&cluster.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE network_desired_state SET desired_generation = 7 WHERE network_id = 'net-fabric'",
+        )
+        .execute(&cluster.pool)
+        .await
+        .unwrap();
+
+        cluster
+            .vtep_repo
+            .register_fabric_identity(
+                "node-a",
+                "pub-aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                1500,
+                None,
+            )
+            .await
+            .unwrap();
+        cluster
+            .vtep_repo
+            .register_fabric_identity(
+                "node-b",
+                "pub-bBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        for (node, endpoint) in [("node-a", "10.0.0.1:65001"), ("node-b", "10.0.0.2:65001")] {
+            sqlx::query("UPDATE vtep_registry SET underlay_endpoint = ? WHERE node_id = ?")
+                .bind(endpoint)
+                .bind(node)
+                .execute(&cluster.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Serve a mock agent on a UDS socket per node matching `pattern`.
+    fn spawn_mock_agents(pattern: &str, agent: MockFabricAgent, nodes: &[&str]) {
+        for node in nodes {
+            let socket = pattern.replace("{node_id}", node);
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service =
+                proto::lifecycle_service_server::LifecycleServiceServer::new(agent.clone());
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn update_overlay_dispatch_fans_out_per_node_fabric_plans() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        seed_fabric_cluster(&cluster).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockFabricAgent::default();
+        spawn_mock_agents(&pattern, agent.clone(), &["node-a", "node-b"]);
+
+        // Journal the UpdateOverlay operation through the lifecycle service
+        // (the same path the API/BFF trigger takes).
+        let event_repo = EventRepository::new(cluster.pool.clone());
+        let lifecycle = crate::lifecycle::LifecycleServiceImplementation::new(
+            cluster.node_repo.clone(),
+            cluster.operation_repo.clone(),
+            event_repo,
+            cluster.desired_state_repo.clone(),
+        );
+        let ack = crate::lifecycle::LifecycleService::update_overlay(
+            &lifecycle,
+            proto::UpdateOverlayRequest {
+                meta: Some(proto::RequestMeta {
+                    operation_id: String::new(),
+                    requested_by: "test".into(),
+                    target_node_id: "node-a".into(),
+                    desired_state_version: "1".into(),
+                    request_unix_ms: 0,
+                }),
+                node_id: "node-a".into(),
+                network_id: "net-fabric".into(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                fdb_entries: vec![],
+                fabric: None,
+            },
+        )
+        .await
+        .expect("journaling UpdateOverlay must succeed");
+        let operation_id = ack.result.expect("ack meta").operation_id;
+        assert!(!operation_id.is_empty(), "operation id must be assigned");
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                .bind(&operation_id)
+                .fetch_one(&cluster.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "Accepted", "journalled operation starts Accepted");
+
+        // Dispatch through the orchestrator (claim → compile → fan-out).
+        let node_pool = NodeClientPool::new();
+        let overlay_manager = OverlayManager::new(
+            cluster.vtep_repo.clone(),
+            node_pool.clone(),
+            pattern.clone(),
+        );
+        let orchestrator = crate::orchestrator::Orchestrator::new(
+            cluster.pool.clone(),
+            cluster.operation_repo.clone(),
+            pattern.clone(),
+            "/tmp/vmlinux".to_string(),
+            "/tmp/firmware".to_string(),
+            node_pool,
+            crate::convergence_metrics::new_shared(),
+        )
+        .with_overlay_manager(overlay_manager);
+
+        orchestrator
+            .dispatch_update_overlay(&operation_id, "net-fabric")
+            .await
+            .expect("fabric dispatch must succeed");
+
+        // Both participating nodes received their own per-node fabric plan.
+        let requests = agent.overlay_requests.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            2,
+            "one UpdateOverlay per participating node"
+        );
+
+        let by_node: std::collections::HashMap<&str, &proto::UpdateOverlayRequest> =
+            requests.iter().map(|r| (r.node_id.as_str(), r)).collect();
+
+        for (node, other, other_key, other_endpoint) in [
+            (
+                "node-a",
+                "node-b",
+                "pub-bBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                "10.0.0.2:65001",
+            ),
+            (
+                "node-b",
+                "node-a",
+                "pub-aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "10.0.0.1:65001",
+            ),
+        ] {
+            let req = by_node[node];
+            let plan = req
+                .fabric
+                .as_ref()
+                .unwrap_or_else(|| panic!("{node} must receive a fabric plan"));
+            assert_eq!(plan.local_host_id, node);
+            assert_eq!(plan.fabric_domain_id, "chv-default");
+            assert_eq!(plan.plan_generation, 7);
+            assert_eq!(plan.binding_generation, 1);
+            assert_eq!(req.vni, plan_vni(&requests), "vni consistent across nodes");
+            // MTU: only node-a measured (1500) -> tenant 1390, fabric 1440.
+            assert_eq!(plan.tenant_mtu, 1390);
+            assert_eq!(plan.fabric_mtu, 1440);
+            // Generation fencing: the request carries the plan generation.
+            assert_eq!(
+                req.meta.as_ref().unwrap().desired_state_version,
+                "7",
+                "desired_state_version must fence on plan_generation"
+            );
+            // Bounded flood list: the other participant, never self.
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].node_id, other);
+            assert_eq!(plan.peers[0].public_key, other_key);
+            assert_eq!(plan.peers[0].underlay_endpoint, other_endpoint);
+        }
+
+        // The operation completed successfully.
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                .bind(&operation_id)
+                .fetch_one(&cluster.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "Succeeded");
+    }
+
+    fn plan_vni(requests: &[proto::UpdateOverlayRequest]) -> u32 {
+        requests.first().expect("at least one request").vni
+    }
+
+    #[tokio::test]
+    async fn update_overlay_dispatch_fails_closed_without_overlay_manager() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        seed_fabric_cluster(&cluster).await;
+
+        let orchestrator = crate::orchestrator::Orchestrator::new(
+            cluster.pool.clone(),
+            cluster.operation_repo.clone(),
+            "/nonexistent/agent-{node_id}.sock".to_string(),
+            "/tmp/vmlinux".to_string(),
+            "/tmp/firmware".to_string(),
+            NodeClientPool::new(),
+            crate::convergence_metrics::new_shared(),
+        );
+
+        let err = orchestrator
+            .dispatch_update_overlay("op-fab-x", "net-fabric")
+            .await
+            .expect_err("dispatch without overlay manager must fail");
+        assert!(err.to_string().contains("overlay manager"), "got: {err}");
+    }
+}
