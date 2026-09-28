@@ -355,12 +355,31 @@ pub struct StorageAttachmentRef {
     pub attachment_id: String,
     pub storage_ref: String,
     pub read_only: bool,
+    /// Provisioning hint for executors that create-on-open the backing
+    /// volume (e.g. stord local volumes): the volume's size. Absent means
+    /// the referenced storage must already exist at its configured size.
+    pub size_bytes: Option<u64>,
+    /// Provisioning hint: seed the volume's content from this image path on
+    /// first open. Absent means no seeding.
+    pub seed_from: Option<String>,
 }
 
 impl StorageAttachmentRef {
     pub fn validate(&self) -> Result<(), ChvError> {
         require_safe_id(&self.attachment_id, "storage.attachment_id")?;
-        require_safe_id(&self.storage_ref, "storage.storage_ref")
+        require_safe_id(&self.storage_ref, "storage.storage_ref")?;
+        if let Some(size_bytes) = self.size_bytes {
+            if size_bytes == 0 {
+                return Err(ChvError::InvalidArgument {
+                    field: "storage.size_bytes".to_string(),
+                    reason: "must be greater than zero when present".to_string(),
+                });
+            }
+        }
+        if let Some(seed_from) = &self.seed_from {
+            require_non_empty("storage.seed_from", seed_from)?;
+        }
+        Ok(())
     }
 }
 
@@ -370,6 +389,10 @@ struct RawStorageAttachmentRef {
     attachment_id: String,
     storage_ref: String,
     read_only: bool,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    seed_from: Option<String>,
 }
 
 impl TryFrom<RawStorageAttachmentRef> for StorageAttachmentRef {
@@ -380,6 +403,8 @@ impl TryFrom<RawStorageAttachmentRef> for StorageAttachmentRef {
             attachment_id: raw.attachment_id,
             storage_ref: raw.storage_ref,
             read_only: raw.read_only,
+            size_bytes: raw.size_bytes,
+            seed_from: raw.seed_from,
         };
         value.validate()?;
         Ok(value)
@@ -392,6 +417,21 @@ pub struct NetworkAttachmentRef {
     pub attachment_id: String,
     pub network_ref: String,
     pub mac_address: Option<String>,
+    /// Per-NIC addressing for networks with control-plane-assigned addresses
+    /// (internal IPAM). Absent means the executor's topology defaults apply.
+    pub addressing: Option<NicAddressing>,
+}
+
+/// Addressing assigned by the control plane for one NIC: the VM's address in
+/// the network, the network's CIDR, and its gateway. Empty strings mean
+/// "unassigned" and are preserved verbatim — executors treat them as the
+/// legacy specs do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NicAddressing {
+    pub ip_address: String,
+    pub cidr: String,
+    pub gateway: String,
 }
 
 impl NetworkAttachmentRef {
@@ -400,6 +440,9 @@ impl NetworkAttachmentRef {
         require_safe_id(&self.network_ref, "network.network_ref")?;
         if let Some(mac_address) = &self.mac_address {
             require_non_empty("network.mac_address", mac_address)?;
+        }
+        if let Some(addressing) = &self.addressing {
+            require_non_empty("network.addressing.ip_address", &addressing.ip_address)?;
         }
         Ok(())
     }
@@ -411,6 +454,8 @@ struct RawNetworkAttachmentRef {
     attachment_id: String,
     network_ref: String,
     mac_address: Option<String>,
+    #[serde(default)]
+    addressing: Option<NicAddressing>,
 }
 
 impl TryFrom<RawNetworkAttachmentRef> for NetworkAttachmentRef {
@@ -421,6 +466,7 @@ impl TryFrom<RawNetworkAttachmentRef> for NetworkAttachmentRef {
             attachment_id: raw.attachment_id,
             network_ref: raw.network_ref,
             mac_address: raw.mac_address,
+            addressing: raw.addressing,
         };
         value.validate()?;
         Ok(value)
@@ -439,6 +485,38 @@ pub struct VmDefinition {
     pub requested_power_state: RequestedPowerState,
     pub observed_power_state: ObservedPowerState,
     pub resource_version: ResourceVersion,
+    /// Cloud-init userdata for first boot, carried verbatim for the runtime.
+    pub cloud_init_userdata: Option<String>,
+    /// Hypervisor tuning flags carried verbatim for the runtime (the Core
+    /// mirror of the legacy `HypervisorOverrides`; validation lives at the
+    /// legacy boundary that produces it).
+    pub hypervisor_tuning: Option<HypervisorTuning>,
+}
+
+/// Core-owned mirror of the legacy hypervisor override surface. Every field
+/// is optional in the legacy sense: absent means "use the runtime's
+/// default". Translated 1:1 at the legacy adapter boundary so the durable
+/// journal payload stays typed and self-describing (no untyped blobs, no
+/// silently dropped legacy fields).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HypervisorTuning {
+    pub cpu_nested: Option<bool>,
+    pub cpu_amx: Option<bool>,
+    pub cpu_kvm_hyperv: Option<bool>,
+    pub memory_mergeable: Option<bool>,
+    pub memory_hugepages: Option<bool>,
+    pub memory_shared: Option<bool>,
+    pub memory_prefault: Option<bool>,
+    pub iommu: Option<bool>,
+    pub rng_src: Option<String>,
+    pub watchdog: Option<bool>,
+    pub landlock_enable: Option<bool>,
+    pub serial_mode: Option<String>,
+    pub console_mode: Option<String>,
+    pub pvpanic: Option<bool>,
+    pub tpm_type: Option<String>,
+    pub tpm_socket_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -453,6 +531,10 @@ struct RawVmDefinition {
     requested_power_state: RequestedPowerState,
     observed_power_state: ObservedPowerState,
     resource_version: ResourceVersion,
+    #[serde(default)]
+    cloud_init_userdata: Option<String>,
+    #[serde(default)]
+    hypervisor_tuning: Option<HypervisorTuning>,
 }
 
 impl TryFrom<RawVmDefinition> for VmDefinition {
@@ -469,6 +551,8 @@ impl TryFrom<RawVmDefinition> for VmDefinition {
             requested_power_state: raw.requested_power_state,
             observed_power_state: raw.observed_power_state,
             resource_version: raw.resource_version,
+            cloud_init_userdata: raw.cloud_init_userdata,
+            hypervisor_tuning: raw.hypervisor_tuning,
         };
         value.validate()?;
         Ok(value)
@@ -855,15 +939,73 @@ mod tests {
                 attachment_id: "disk-0".to_string(),
                 storage_ref: "volume-1".to_string(),
                 read_only: false,
+                size_bytes: None,
+                seed_from: None,
             }],
             networks: vec![],
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: ResourceVersion::new(1).unwrap(),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         };
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: VmDefinition = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, definition);
+    }
+
+    #[test]
+    fn vm_definition_round_trips_provisioning_and_tuning_fields() {
+        // Journals written before these fields existed deserialize with them
+        // absent (covered by the fixtures above); this pins the carried
+        // shape: sizing/seed on the attachment, addressing on the NIC, and
+        // userdata/tuning on the definition all survive a round trip.
+        let definition = VmDefinition {
+            id: VmId::new("vm-1").unwrap(),
+            name: "test".to_string(),
+            boot: BootSpec::new("kernel-ref").unwrap(),
+            compute: ComputeSpec::new(2, 1_073_741_824).unwrap(),
+            storage: vec![StorageAttachmentRef {
+                attachment_id: "disk-0".to_string(),
+                storage_ref: "volume-1".to_string(),
+                read_only: false,
+                size_bytes: Some(10_737_418_240),
+                seed_from: Some("/var/lib/chv/images/ubuntu.img".to_string()),
+            }],
+            networks: vec![NetworkAttachmentRef {
+                attachment_id: "nic-0".to_string(),
+                network_ref: "network-1".to_string(),
+                mac_address: None,
+                addressing: Some(NicAddressing {
+                    ip_address: "10.200.0.47".to_string(),
+                    cidr: "10.200.0.0/24".to_string(),
+                    gateway: "10.200.0.1".to_string(),
+                }),
+            }],
+            requested_power_state: RequestedPowerState::Stopped,
+            observed_power_state: ObservedPowerState::Unknown,
+            resource_version: ResourceVersion::new(1).unwrap(),
+            cloud_init_userdata: Some("#cloud-config".to_string()),
+            hypervisor_tuning: Some(HypervisorTuning {
+                cpu_nested: Some(true),
+                rng_src: Some("/dev/hwrng".to_string()),
+                ..Default::default()
+            }),
+        };
+        let encoded = serde_json::to_string(&definition).unwrap();
+        let decoded: VmDefinition = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, definition);
+        // Invalid values fail validation, not just serialization.
+        let mut zero_sized = definition.clone();
+        zero_sized.storage[0].size_bytes = Some(0);
+        assert!(zero_sized.validate().is_err());
+        let mut empty_ip = definition.clone();
+        empty_ip.networks[0].addressing = Some(NicAddressing {
+            ip_address: String::new(),
+            cidr: "10.200.0.0/24".to_string(),
+            gateway: "10.200.0.1".to_string(),
+        });
+        assert!(empty_ip.validate().is_err());
     }
 
     #[test]
@@ -913,6 +1055,7 @@ mod tests {
             attachment_id: "device-0".to_owned(),
             network_ref: "network".to_owned(),
             mac_address: None,
+            addressing: None,
         });
         assert!(definition.validate().is_err());
         assert!(

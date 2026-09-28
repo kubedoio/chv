@@ -673,27 +673,40 @@ impl NodeCache {
             cellhv_core_types::RequestedPowerState::Running => "Running",
             cellhv_core_types::RequestedPowerState::Stopped => "Stopped",
         };
+        // The projected legacy spec mirrors every Core-modeled field so a
+        // rebuild → re-import round trip is lossless. `to_value` on this
+        // plain struct is infallible (primitive/String fields only).
+        let hypervisor_overrides = def
+            .hypervisor_tuning
+            .as_ref()
+            .map(serde_json::to_value)
+            .and_then(Result::ok);
         let spec = serde_json::json!({
             "name": def.name.clone(),
             "cpus": def.compute.vcpus,
             "memory_bytes": def.compute.memory_bytes,
             "kernel_path": def.boot.kernel.clone(),
             "firmware_path": def.boot.firmware.clone(),
+            "disk_seed_path": def.boot.initial_disk.clone(),
             "disks": def.storage.iter().map(|storage| serde_json::json!({
                 "volume_id": storage.storage_ref.clone(),
                 "read_only": storage.read_only,
+                "size_bytes": storage.size_bytes,
             })).collect::<Vec<_>>(),
-            "nics": def.networks.iter().map(|network| serde_json::json!({
-                "network_id": network.network_ref.clone(),
-                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
-                "ip_address": "",
-                "tap_name": "",
-                "cidr": chv_hypervisor_api::resources::DEFAULT_NIC_CIDR,
-                "gateway": "",
-            })).collect::<Vec<_>>(),
+            "nics": def.networks.iter().map(|network| {
+                let addressing = network.addressing.as_ref();
+                serde_json::json!({
+                    "network_id": network.network_ref.clone(),
+                    "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
+                    "ip_address": addressing.map(|a| a.ip_address.clone()).unwrap_or_default(),
+                    "tap_name": "",
+                    "cidr": addressing.map(|a| a.cidr.clone()).unwrap_or_else(|| chv_hypervisor_api::resources::DEFAULT_NIC_CIDR.to_string()),
+                    "gateway": addressing.map(|a| a.gateway.clone()).unwrap_or_default(),
+                })
+            }).collect::<Vec<_>>(),
             "desired_state": desired_state,
-            "cloud_init_userdata": None::<String>,
-            "hypervisor_overrides": None::<String>,
+            "cloud_init_userdata": def.cloud_init_userdata.clone(),
+            "hypervisor_overrides": hypervisor_overrides,
         });
         let generation = def.resource_version.get().to_string();
         self.store_fragment(
@@ -837,15 +850,20 @@ mod tests {
                 attachment_id: "vol-0".to_string(),
                 storage_ref: "vol-0".to_string(),
                 read_only: false,
+                size_bytes: None,
+                seed_from: None,
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: Some("02:00:00:00:00:01".to_string()),
+                addressing: None,
             }],
             requested_power_state: RequestedPowerState::Running,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: ResourceVersion::new(3).unwrap(),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         }
     }
 
@@ -907,11 +925,13 @@ mod tests {
                 attachment_id: "nic-0".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: None,
+                addressing: None,
             },
             NetworkAttachmentRef {
                 attachment_id: "nic-1".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: None,
+                addressing: None,
             },
         ];
         let mut cache = NodeCache::new("node-1");
@@ -939,6 +959,7 @@ mod tests {
             attachment_id: "nic-1".to_string(),
             network_ref: "net-1".to_string(),
             mac_address: None,
+            addressing: None,
         }];
         let mut cache = NodeCache::new("node-1");
         cache.project_vm(&def, "core-rebuild".to_string(), "core".to_string());

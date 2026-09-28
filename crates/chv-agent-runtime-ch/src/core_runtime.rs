@@ -50,6 +50,35 @@ use tracing::warn;
 /// `chv-hypervisor-api` dependency, so this tiny rule is duplicated here
 /// DELIBERATELY: even a pre-journaled row that never passed the authority gate
 /// must not become an fs-mutation primitive through this runtime.
+/// Translate the Core hypervisor tuning mirror back into the legacy override
+/// surface for the hypervisor-facing `VmConfig`, field for field. Field parity
+/// with `cellhv_core_types::HypervisorTuning` is pinned by
+/// `tuning_to_legacy_pins_field_parity_with_core_mirror` below: adding a field
+/// to either side without mirroring it fails that test (the fixture is a fully
+/// populated struct literal, so the compiler forces it).
+fn tuning_to_legacy(
+    tuning: &cellhv_core_types::HypervisorTuning,
+) -> chv_common::hypervisor::HypervisorOverrides {
+    chv_common::hypervisor::HypervisorOverrides {
+        cpu_nested: tuning.cpu_nested,
+        cpu_amx: tuning.cpu_amx,
+        cpu_kvm_hyperv: tuning.cpu_kvm_hyperv,
+        memory_mergeable: tuning.memory_mergeable,
+        memory_hugepages: tuning.memory_hugepages,
+        memory_shared: tuning.memory_shared,
+        memory_prefault: tuning.memory_prefault,
+        iommu: tuning.iommu,
+        rng_src: tuning.rng_src.clone(),
+        watchdog: tuning.watchdog,
+        landlock_enable: tuning.landlock_enable,
+        serial_mode: tuning.serial_mode.clone(),
+        console_mode: tuning.console_mode.clone(),
+        pvpanic: tuning.pvpanic,
+        tpm_type: tuning.tpm_type.clone(),
+        tpm_socket_path: tuning.tpm_socket_path.clone(),
+    }
+}
+
 fn is_safe_resource_id(value: &str) -> bool {
     !value.is_empty()
         && !value.contains('/')
@@ -243,12 +272,8 @@ impl CloudHypervisorCoreRuntime {
             disks,
             nics,
             api_socket_path: vm_api_socket(&vm_dir),
-            // M2.2a residual: the Core create request does not yet carry
-            // cloud-init userdata or hypervisor overrides (VmDefinition has no
-            // such fields). We leave them None rather than inventing values;
-            // the legacy map path refuses them too (legacy_core_adapter.rs).
-            cloud_init_userdata: None,
-            hypervisor_overrides: None,
+            cloud_init_userdata: definition.cloud_init_userdata.clone(),
+            hypervisor_overrides: definition.hypervisor_tuning.as_ref().map(tuning_to_legacy),
         };
 
         if let Err(e) = self.adapter.create_vm(&config, Some(op_id)).await {
@@ -293,17 +318,28 @@ impl CloudHypervisorCoreRuntime {
     ) -> Result<(), ChvError> {
         let volume_id = storage.storage_ref.as_str();
         let locator = vm_dir.join(format!("{volume_id}.img"));
-        // M2.2a residual: disk sizing/seed options (size_bytes/seed_from) live
-        // in the legacy VmSpec and are not yet modeled in the Core
-        // StorageAttachmentRef, so we pass no open options here. Do NOT
-        // fabricate options.
+        // Provisioning hints from the Core definition (mirroring the legacy
+        // reconcile path): size and seed apply on first open; stord ignores
+        // them for an already-provisioned volume.
+        let mut open_options = HashMap::new();
+        if let Some(size_bytes) = storage.size_bytes {
+            open_options.insert("size_bytes".to_string(), size_bytes.to_string());
+        }
+        if let Some(seed_from) = storage
+            .seed_from
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            open_options.insert("seed_from".to_string(), seed_from.to_string());
+        }
         let (_volume_id, handle, _export_path) = self
             .resources
             .open_volume(
                 volume_id,
                 "local",
                 &locator.to_string_lossy(),
-                HashMap::new(),
+                open_options,
                 Some(op_id),
             )
             .await?;
@@ -341,24 +377,38 @@ impl CloudHypervisorCoreRuntime {
         let network_id = network.network_ref.as_str();
         let nid = nic_id(vm_id, network_id);
         let bridge = bridge_name_for_network(network_id);
-        // M2.2a residual: the Core create request has no per-NIC cidr/gateway/
-        // ip, so topology always uses the shared default CIDR and an empty
-        // gateway, and the NIC is created with an empty IP address.
+        // Addressing assigned by the control plane (internal IPAM) is carried
+        // on the attachment; absent fields fall back to the topology default.
+        let (ip_address, cidr, gateway) = match &network.addressing {
+            Some(addressing) => (
+                addressing.ip_address.clone(),
+                addressing.cidr.clone(),
+                addressing.gateway.clone(),
+            ),
+            None => (String::new(), DEFAULT_NIC_CIDR.to_string(), String::new()),
+        };
         self.resources
-            .ensure_network_topology(network_id, &bridge, DEFAULT_NIC_CIDR, "", Some(op_id))
+            .ensure_network_topology(network_id, &bridge, &cidr, &gateway, Some(op_id))
             .await?;
         let mac_address = network.mac_address.clone().unwrap_or_default();
         let (_namespace_handle, tap_handle) = self
             .resources
-            .attach_vm_nic(&nid, vm_id, network_id, &mac_address, "", Some(op_id))
+            .attach_vm_nic(
+                &nid,
+                vm_id,
+                network_id,
+                &mac_address,
+                &ip_address,
+                Some(op_id),
+            )
             .await?;
         nics.push(VmNicConfig {
             network_id: network_id.to_string(),
             mac_address,
-            ip_address: String::new(),
+            ip_address,
             tap_name: tap_handle,
-            cidr: DEFAULT_NIC_CIDR.to_string(),
-            gateway: String::new(),
+            cidr,
+            gateway,
         });
         attached.push(nid);
         Ok(())
@@ -570,6 +620,55 @@ impl CoreVmRuntime for CloudHypervisorCoreRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuning_to_legacy_pins_field_parity_with_core_mirror() {
+        // Fully populated on BOTH sides so the compiler forces this fixture
+        // to grow whenever either struct gains a field; every assertion then
+        // fails until the converter mirrors it. Distinctive non-default
+        // values make a dropped or swapped field visible.
+        let tuning = cellhv_core_types::HypervisorTuning {
+            cpu_nested: Some(true),
+            cpu_amx: Some(true),
+            cpu_kvm_hyperv: Some(true),
+            memory_mergeable: Some(true),
+            memory_hugepages: Some(true),
+            memory_shared: Some(true),
+            memory_prefault: Some(true),
+            iommu: Some(true),
+            rng_src: Some("/dev/hwrng".to_string()),
+            watchdog: Some(true),
+            landlock_enable: Some(true),
+            serial_mode: Some("File".to_string()),
+            console_mode: Some("Pty".to_string()),
+            pvpanic: Some(true),
+            tpm_type: Some("swtpm".to_string()),
+            tpm_socket_path: Some("/run/tpm.sock".to_string()),
+        };
+        let overrides = tuning_to_legacy(&tuning);
+        assert_eq!(overrides.cpu_nested, Some(true));
+        assert_eq!(overrides.cpu_amx, Some(true));
+        assert_eq!(overrides.cpu_kvm_hyperv, Some(true));
+        assert_eq!(overrides.memory_mergeable, Some(true));
+        assert_eq!(overrides.memory_hugepages, Some(true));
+        assert_eq!(overrides.memory_shared, Some(true));
+        assert_eq!(overrides.memory_prefault, Some(true));
+        assert_eq!(overrides.iommu, Some(true));
+        assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
+        assert_eq!(overrides.watchdog, Some(true));
+        assert_eq!(overrides.landlock_enable, Some(true));
+        assert_eq!(overrides.serial_mode.as_deref(), Some("File"));
+        assert_eq!(overrides.console_mode.as_deref(), Some("Pty"));
+        assert_eq!(overrides.pvpanic, Some(true));
+        assert_eq!(overrides.tpm_type.as_deref(), Some("swtpm"));
+        assert_eq!(overrides.tpm_socket_path.as_deref(), Some("/run/tpm.sock"));
+        // And the empty mirror stays empty.
+        let empty = tuning_to_legacy(&cellhv_core_types::HypervisorTuning::default());
+        assert_eq!(
+            empty,
+            chv_common::hypervisor::HypervisorOverrides::default()
+        );
+    }
 
     #[test]
     fn is_safe_resource_id_rejects_path_components_and_dots() {

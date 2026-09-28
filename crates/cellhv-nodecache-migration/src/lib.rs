@@ -168,16 +168,20 @@ fn convert_vm(
     spec: LegacyVmSpec,
     observed: Option<&LegacyAttachments>,
 ) -> Result<VmDefinition> {
-    if spec.cloud_init_userdata.is_some() {
-        return Err(unsupported(&format!(
-            "vm_fragments.{id}.spec_json.cloud_init_userdata"
-        )));
-    }
-    if spec.hypervisor_overrides.is_some() {
-        return Err(unsupported(&format!(
-            "vm_fragments.{id}.spec_json.hypervisor_overrides"
-        )));
-    }
+    // Legacy fields Core does not model are still rejected explicitly —
+    // never silently dropped. Cloud-init userdata and the hypervisor
+    // override surface ARE modeled now (VmDefinition carries them) and are
+    // translated below.
+    let hypervisor_tuning = spec
+        .hypervisor_overrides
+        .map(|value| {
+            serde_json::from_value::<cellhv_core_types::HypervisorTuning>(value).map_err(|error| {
+                unsupported(&format!(
+                    "vm_fragments.{id}.spec_json.hypervisor_overrides: {error}"
+                ))
+            })
+        })
+        .transpose()?;
     let requested_power_state = match spec.desired_state.as_str() {
         "Running" => RequestedPowerState::Running,
         "Stopped" => RequestedPowerState::Stopped,
@@ -188,36 +192,45 @@ fn convert_vm(
         }
     };
     let mut storage = Vec::new();
-    for disk in spec.disks {
-        if disk.size_bytes.is_some() {
-            return Err(unsupported(&format!(
-                "vm_fragments.{id}.spec_json.disks.size_bytes"
-            )));
-        }
+    for (index, disk) in spec.disks.into_iter().enumerate() {
         nonempty("disk.volume_id", &disk.volume_id)?;
         storage.push(StorageAttachmentRef {
             attachment_id: legacy_storage_attachment_id(&disk.volume_id),
             storage_ref: disk.volume_id,
             read_only: disk.read_only,
+            size_bytes: disk.size_bytes,
+            // The legacy seed path is per-VM and applies to the boot disk.
+            seed_from: if index == 0 {
+                spec.disk_seed_path.clone()
+            } else {
+                None
+            },
         });
     }
     let mut networks = Vec::new();
     for (index, nic) in spec.nics.into_iter().enumerate() {
-        if !nic.ip_address.is_empty()
-            || !nic.tap_name.is_empty()
-            || !nic.cidr.is_empty()
-            || !nic.gateway.is_empty()
-        {
+        if !nic.tap_name.is_empty() {
             return Err(unsupported(&format!(
-                "vm_fragments.{id}.spec_json.nics[{index}].runtime_network_fields"
+                "vm_fragments.{id}.spec_json.nics[{index}].tap_name"
             )));
         }
         nonempty("nic.network_id", &nic.network_id)?;
         nonempty("nic.mac_address", &nic.mac_address)?;
+        let addressing =
+            if nic.ip_address.is_empty() && nic.cidr.is_empty() && nic.gateway.is_empty() {
+                None
+            } else {
+                Some(cellhv_core_types::NicAddressing {
+                    ip_address: nic.ip_address,
+                    cidr: nic.cidr,
+                    gateway: nic.gateway,
+                })
+            };
         networks.push(NetworkAttachmentRef {
             attachment_id: legacy_network_attachment_id(id, &nic.network_id),
             network_ref: nic.network_id,
             mac_address: Some(nic.mac_address),
+            addressing,
         });
     }
     validate_attachment_projection(id, &storage, &networks, observed)?;
@@ -236,6 +249,8 @@ fn convert_vm(
         requested_power_state,
         observed_power_state: ObservedPowerState::Unknown,
         resource_version: version,
+        cloud_init_userdata: spec.cloud_init_userdata,
+        hypervisor_tuning,
     };
     definition
         .validate()
@@ -553,8 +568,84 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        spec["cloud_init_userdata"] = json!("do not drop me");
         value["vm_fragments"]["vm-a"]["generation"] = json!("1");
+
+        // Modeled legacy fields are carried, not dropped: cloud-init
+        // userdata now translates into the Core definition.
+        spec["cloud_init_userdata"] = json!("do not drop me");
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let carried = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            carried.definitions()[0].cloud_init_userdata.as_deref(),
+            Some("do not drop me")
+        );
+
+        // Unmodeled legacy fields still fail closed instead of being
+        // dropped: tap configuration is runtime-owned.
+        spec["nics"] = json!([{
+            "network_id":"net-0", "mac_address":"02:00:00:00:00:01",
+            "ip_address":"", "tap_name":"tap-leftover",
+            "cidr":"", "gateway":""
+        }]);
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        assert!(matches!(
+            plan(&serde_json::to_vec(&value).unwrap()),
+            Err(MigrationError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn modeled_legacy_fields_translate_losslessly() {
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        spec["disk_seed_path"] = json!("/var/lib/chv/images/ubuntu.img");
+        spec["disks"] =
+            json!([{"volume_id":"vol-a", "read_only":false, "size_bytes":10_737_418_240_u64}]);
+        spec["nics"] = json!([{
+            "network_id":"net-0", "mac_address":"02:00:00:00:00:01",
+            "ip_address":"10.200.0.47", "tap_name":"",
+            "cidr":"10.200.0.0/24", "gateway":"10.200.0.1"
+        }]);
+        spec["hypervisor_overrides"] = json!({"cpu_nested": true, "rng_src": "/dev/hwrng"});
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let import = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let definition = &import.definitions()[0];
+
+        assert_eq!(
+            definition.boot.initial_disk.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(definition.storage[0].size_bytes, Some(10_737_418_240));
+        // The per-VM legacy seed path seeds the boot disk attachment.
+        assert_eq!(
+            definition.storage[0].seed_from.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        let addressing = definition.networks[0]
+            .addressing
+            .as_ref()
+            .expect("addressing must be carried");
+        assert_eq!(addressing.ip_address, "10.200.0.47");
+        assert_eq!(addressing.cidr, "10.200.0.0/24");
+        assert_eq!(addressing.gateway, "10.200.0.1");
+        let tuning = definition
+            .hypervisor_tuning
+            .as_ref()
+            .expect("tuning must be carried");
+        assert_eq!(tuning.cpu_nested, Some(true));
+        assert_eq!(tuning.rng_src.as_deref(), Some("/dev/hwrng"));
+
+        // An override key the Core mirror does not know is still rejected,
+        // never silently dropped.
+        spec["hypervisor_overrides"] = json!({"made_up_flag": true});
         value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
         assert!(matches!(
             plan(&serde_json::to_vec(&value).unwrap()),

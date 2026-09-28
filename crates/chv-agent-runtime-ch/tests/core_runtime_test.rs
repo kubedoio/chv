@@ -26,6 +26,8 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
             attachment_id: format!("vol-{i}"),
             storage_ref: format!("vol-{i}"),
             read_only: false,
+            size_bytes: None,
+            seed_from: None,
         })
         .collect();
     let networks = (0..nnics)
@@ -33,6 +35,7 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
             attachment_id: format!("{vm_id}-net{i}"),
             network_ref: format!("net-{i}"),
             mac_address: Some(format!("02:00:00:00:00:{i:02x}")),
+            addressing: None,
         })
         .collect();
     VmDefinition {
@@ -45,6 +48,8 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
         requested_power_state: RequestedPowerState::Stopped,
         observed_power_state: ObservedPowerState::Unknown,
         resource_version: ResourceVersion::new(1).expect("version"),
+        cloud_init_userdata: None,
+        hypervisor_tuning: None,
     }
 }
 
@@ -188,7 +193,19 @@ async fn create_vm_performs_full_side_effects() {
     assert_eq!(config.nics[0].tap_name, "tap-vm-a-net-0");
     assert_eq!(config.nics[0].mac_address, "02:00:00:00:00:00");
     assert_eq!(config.nics[0].cidr, "10.0.0.0/24");
+    // Without control-plane addressing the NIC stays unassigned and the
+    // gateway empty (topology defaults), and no tuning/userdata is invented.
+    assert_eq!(config.nics[0].ip_address, "");
+    assert_eq!(config.nics[0].gateway, "");
+    assert_eq!(config.cloud_init_userdata, None);
+    assert_eq!(config.hypervisor_overrides, None);
     drop(vms);
+    // No provisioning hints on the definition: both volumes open bare.
+    let options = h.controller.open_options.lock().expect("options lock");
+    assert_eq!(options.len(), 2, "two opens");
+    assert!(options[0].1.is_empty(), "no hints on vol-0: {options:?}");
+    assert!(options[1].1.is_empty(), "no hints on vol-1: {options:?}");
+    drop(options);
 
     // VM runtime dir exists with mode 0o775.
     let vm_dir = vm_dir_path(&h, vm_id);
@@ -198,6 +215,75 @@ async fn create_vm_performs_full_side_effects() {
         0o775,
         "vm dir must be 0o775"
     );
+}
+
+#[tokio::test]
+async fn create_vm_carries_provisioning_hints_addressing_and_tuning() {
+    let h = harness(None);
+    let vm_id = "vm-tuned";
+    let mut def = definition(vm_id, 2, 1);
+    // Boot disk: sized + seeded; second disk: pre-provisioned (no hints).
+    def.storage[0].size_bytes = Some(10_737_418_240);
+    def.storage[0].seed_from = Some("/var/lib/chv/images/ubuntu.img".to_string());
+    def.networks[0].addressing = Some(cellhv_core_types::NicAddressing {
+        ip_address: "10.200.0.47".to_string(),
+        cidr: "10.200.0.0/24".to_string(),
+        gateway: "10.200.0.1".to_string(),
+    });
+    def.cloud_init_userdata = Some("#cloud-config".to_string());
+    def.hypervisor_tuning = Some(cellhv_core_types::HypervisorTuning {
+        cpu_nested: Some(true),
+        rng_src: Some("/dev/hwrng".to_string()),
+        ..Default::default()
+    });
+    let command = MutationCommand::CreateVm { definition: def };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-tuned",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+
+    // Provisioning hints reach the storage layer exactly once, on the boot
+    // disk; the pre-provisioned second disk opens without options.
+    let options = h
+        .controller
+        .open_options
+        .lock()
+        .expect("options lock")
+        .clone();
+    assert_eq!(options.len(), 2, "two opens: {options:?}");
+    assert_eq!(options[0].0, "vol-0");
+    assert_eq!(
+        options[0].1.get("size_bytes").map(String::as_str),
+        Some("10737418240")
+    );
+    assert_eq!(
+        options[0].1.get("seed_from").map(String::as_str),
+        Some("/var/lib/chv/images/ubuntu.img")
+    );
+    assert_eq!(options[1].0, "vol-1");
+    assert!(options[1].1.is_empty(), "no hints on vol-1: {options:?}");
+
+    // Addressing and tuning reach the hypervisor config verbatim.
+    let vms = h.adapter.vms.lock().expect("vms lock");
+    let config = vms
+        .get(vm_id)
+        .expect("vm must be present in the adapter map");
+    assert_eq!(config.nics[0].ip_address, "10.200.0.47");
+    assert_eq!(config.nics[0].cidr, "10.200.0.0/24");
+    assert_eq!(config.nics[0].gateway, "10.200.0.1");
+    assert_eq!(config.cloud_init_userdata.as_deref(), Some("#cloud-config"));
+    let overrides = config
+        .hypervisor_overrides
+        .as_ref()
+        .expect("tuning must reach the hypervisor config");
+    assert_eq!(overrides.cpu_nested, Some(true));
+    assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
 }
 
 #[tokio::test]
@@ -445,6 +531,8 @@ async fn update_attach_detach_are_unsupported() {
                     attachment_id: "vol-x".to_string(),
                     storage_ref: "vol-x".to_string(),
                     read_only: false,
+                    size_bytes: None,
+                    seed_from: None,
                 },
             },
         ),
@@ -463,6 +551,7 @@ async fn update_attach_detach_are_unsupported() {
                     attachment_id: format!("{vm_id}-netx"),
                     network_ref: "net-x".to_string(),
                     mac_address: None,
+                    addressing: None,
                 },
             },
         ),
