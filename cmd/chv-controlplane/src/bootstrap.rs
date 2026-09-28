@@ -250,12 +250,23 @@ pub async fn build_service(
     let topology_repo = chv_controlplane_store::TopologyRepository::new(pool.clone());
     let vtep_repo = VtepRepository::new(pool.clone());
 
-    let lifecycle_service = Arc::new(LifecycleServiceImplementation::new(
-        node_repo.clone(),
-        operation_repo.clone(),
-        event_repo.clone(),
-        desired_state_repo.clone(),
-    ));
+    // Created before the service implementations: shared by the lifecycle
+    // service's operator relays (resolve-inspect-required), the overlay
+    // manager, and the orchestrator.
+    let node_client_pool = NodeClientPool::new();
+
+    let lifecycle_service = Arc::new(
+        LifecycleServiceImplementation::new(
+            node_repo.clone(),
+            operation_repo.clone(),
+            event_repo.clone(),
+            desired_state_repo.clone(),
+        )
+        .with_node_egress(
+            node_client_pool.clone(),
+            config.agent_socket_pattern.clone(),
+        ),
+    );
 
     let bff_state = chv_webui_bff::AppState {
         pool: pool.clone(),
@@ -383,8 +394,6 @@ pub async fn build_service(
         http_join_handle,
         shutdown_rx.clone(),
     );
-
-    let node_client_pool = NodeClientPool::new();
 
     let overlay_manager = chv_controlplane_service::OverlayManager::new(
         vtep_repo.clone(),

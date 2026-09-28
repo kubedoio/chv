@@ -3087,3 +3087,125 @@ async fn test_logout_clears_session_cookie() {
     assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
     assert!(set_cookie.contains("SameSite=Strict"), "got: {set_cookie}");
 }
+
+// ---------------------------------------------------------------------------
+// resolve_inspect_required_operation relay (operator egress to the agent)
+// ---------------------------------------------------------------------------
+
+async fn resolve_relay_service() -> (LifecycleServiceImplementation, proto::RequestMeta) {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-resolve-1', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let service = LifecycleServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        DesiredStateRepository::new(pool.clone()),
+    );
+    let meta = proto::RequestMeta {
+        operation_id: String::new(),
+        requested_by: "operator".into(),
+        target_node_id: "node-resolve-1".into(),
+        desired_state_version: String::new(),
+        request_unix_ms: 1,
+    };
+    (service, meta)
+}
+
+fn resolve_request(meta: &proto::RequestMeta) -> proto::ResolveInspectRequiredOperationRequest {
+    proto::ResolveInspectRequiredOperationRequest {
+        meta: Some(meta.clone()),
+        vm_id: "vm-1".into(),
+        operation_id: "op-1".into(),
+        disposition: "failed".into(),
+        note: "inspected: effect never started".into(),
+    }
+}
+
+#[tokio::test]
+async fn resolve_relay_fails_closed_without_node_egress() {
+    let (service, meta) = resolve_relay_service().await;
+    let result =
+        LifecycleService::resolve_inspect_required_operation(&service, resolve_request(&meta))
+            .await;
+    assert!(matches!(
+        result,
+        Err(ControlPlaneServiceError::Unsupported(_))
+    ));
+}
+
+#[tokio::test]
+async fn resolve_relay_validates_payload_before_egress() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-resolve-2', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Egress is wired to a socket that does not exist: any request that
+    // passes validation must fail by ATTEMPTING the relay (connection
+    // error), proving validation happens first and the relay happens at
+    // all.
+    let socket_dir = tempfile::tempdir().unwrap();
+    let service = LifecycleServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        DesiredStateRepository::new(pool.clone()),
+    )
+    .with_node_egress(
+        NodeClientPool::new(),
+        socket_dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .display()
+            .to_string(),
+    );
+    let meta = proto::RequestMeta {
+        operation_id: String::new(),
+        requested_by: "operator".into(),
+        target_node_id: "node-resolve-2".into(),
+        desired_state_version: String::new(),
+        request_unix_ms: 1,
+    };
+
+    // Missing meta → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.meta = None;
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // Empty operation_id → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.operation_id = "  ".into();
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // Bad disposition → invalid argument, no relay.
+    let mut request = resolve_request(&meta);
+    request.disposition = "maybe".into();
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
+    // Valid payload → the relay is attempted (connection to the node's
+    // agent socket fails with an internal error naming the node).
+    let result =
+        LifecycleService::resolve_inspect_required_operation(&service, resolve_request(&meta))
+            .await;
+    match result {
+        Err(ControlPlaneServiceError::Internal(reason)) => {
+            assert!(reason.contains("node-resolve-2"), "got: {reason}");
+        }
+        other => panic!("expected internal relay error, got {other:?}"),
+    }
+}

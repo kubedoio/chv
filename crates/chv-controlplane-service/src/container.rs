@@ -229,11 +229,13 @@ impl ControlPlaneService {
                 make_intercept(),
             );
 
-        let lifecycle_server = proto::lifecycle_service_server::LifecycleServiceServer::new(
-            crate::server::LifecycleServer::new(Arc::new(
-                self.components.lifecycle_service.clone(),
-            )),
-        );
+        let lifecycle_server =
+            proto::lifecycle_service_server::LifecycleServiceServer::with_interceptor(
+                crate::server::LifecycleServer::new(Arc::new(
+                    self.components.lifecycle_service.clone(),
+                )),
+                make_intercept(),
+            );
 
         if self.runtime.tls_config().is_some() {
             info!(?addr, "starting gRPC server with TLS");

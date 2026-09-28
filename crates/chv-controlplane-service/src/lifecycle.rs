@@ -204,6 +204,18 @@ pub struct LifecycleServiceImplementation {
     operation_repo: OperationRepository,
     event_repo: EventRepository,
     desired_state_repo: DesiredStateRepository,
+    /// Node egress for operator relays (resolve-inspect-required): the
+    /// client pool plus the agent socket pattern used to reach a node.
+    /// Absent in unit-test constructions — the relay then fails closed
+    /// with `Unsupported` instead of silently mis-relaying.
+    node_egress: Option<NodeEgress>,
+}
+
+/// Control-plane → agent egress for operator relays.
+#[derive(Clone)]
+struct NodeEgress {
+    pool: crate::node_client_pool::NodeClientPool,
+    agent_socket_pattern: String,
 }
 
 impl LifecycleServiceImplementation {
@@ -218,7 +230,22 @@ impl LifecycleServiceImplementation {
             operation_repo,
             event_repo,
             desired_state_repo,
+            node_egress: None,
         }
+    }
+
+    /// Wires the control-plane → agent egress used to relay operator
+    /// actions (resolve-inspect-required) to the owning node's agent.
+    pub fn with_node_egress(
+        mut self,
+        pool: crate::node_client_pool::NodeClientPool,
+        agent_socket_pattern: String,
+    ) -> Self {
+        self.node_egress = Some(NodeEgress {
+            pool,
+            agent_socket_pattern,
+        });
+        self
     }
 
     fn now_ms() -> i64 {
@@ -1714,19 +1741,67 @@ impl LifecycleService for LifecycleServiceImplementation {
         Ok(Self::ok_ack(&operation_id, "send gratuitous arp accepted"))
     }
 
-    /// Fail-closed: the control plane is a desired-state authority and holds
-    /// no direct agent-call path for journal mutation. Resolving an
-    /// inspect-required operation terminal-persists state in the node's core
-    /// journal, so it must be issued against the owning agent's
-    /// LifecycleService (or the node's local Core API).
+    /// Operator relay: forwards the terminal resolution of a
+    /// restart-interrupted (`InspectRequired`) operation to the owning
+    /// agent's core journal. The control plane stays a desired-state
+    /// authority — it does not journal on the node's behalf; the agent
+    /// validates the payload and terminal-persists (see the agent's
+    /// `resolve_inspect_required_operation`). The target node is
+    /// `meta.target_node_id` (the request has no separate node_id field:
+    /// the operation already belongs to exactly one node).
     async fn resolve_inspect_required_operation(
         &self,
-        _request: proto::ResolveInspectRequiredOperationRequest,
+        request: proto::ResolveInspectRequiredOperationRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
-        Err(ControlPlaneServiceError::Unsupported(
-            "resolve_inspect_required_operation is a node-scoped operator action; \
-             issue it against the owning agent"
-                .into(),
-        ))
+        let egress = self.node_egress.as_ref().ok_or_else(|| {
+            ControlPlaneServiceError::Unsupported(
+                "resolve_inspect_required_operation relay is not configured on this control plane"
+                    .into(),
+            )
+        })?;
+        let meta = self.meta_from_request(request.meta.clone())?;
+        let node_id = Self::parse_node_id(meta.target_node_id.clone())?;
+        if request.operation_id.trim().is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "operation_id is required".into(),
+            ));
+        }
+        // Fail fast on the disposition shape; the agent validates the rest
+        // (note presence, length, control characters) at the journal
+        // boundary.
+        match request.disposition.as_str() {
+            "succeeded" | "failed" => {}
+            other => {
+                return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                    "disposition must be \"succeeded\" or \"failed\", got {other:?}"
+                )))
+            }
+        }
+        let socket_path =
+            crate::migration::resolve_agent_socket(&egress.agent_socket_pattern, node_id.as_str());
+        let mut client = egress
+            .pool
+            .get_or_connect(node_id.as_str(), &socket_path)
+            .await
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!(
+                    "cannot reach agent for node {node_id}: {e}"
+                ))
+            })?;
+        client
+            .resolve_inspect_required_operation(
+                node_id.as_str(),
+                &request.vm_id,
+                &request.operation_id,
+                &request.disposition,
+                &request.note,
+                Some(&meta.requested_by),
+            )
+            .await
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!(
+                    "agent resolve_inspect_required_operation failed: {e}"
+                ))
+            })
     }
 }

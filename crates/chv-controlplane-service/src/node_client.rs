@@ -671,6 +671,52 @@ impl NodeClient {
         result
     }
 
+    /// Relays the operator's terminal resolution of a restart-interrupted
+    /// (`InspectRequired`) operation to the owning agent's core journal.
+    /// Pure relay: the agent validates disposition/note and owns the
+    /// terminal persistence; the control plane stays a desired-state
+    /// authority.
+    pub async fn resolve_inspect_required_operation(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        operation_id: &str,
+        disposition: &str,
+        note: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::ResolveInspectRequiredOperationRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: String::new(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            vm_id: vm_id.to_string(),
+            operation_id: operation_id.to_string(),
+            disposition: disposition.to_string(),
+            note: note.to_string(),
+        };
+        let method = "resolve_inspect_required_operation";
+        let span = tracing::info_span!("resolve_inspect_required_operation", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .resolve_inspect_required_operation(req)
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn detach_volume(
         &mut self,
