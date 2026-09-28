@@ -560,48 +560,6 @@ impl ProcessCloudHypervisorAdapter {
         None
     }
 
-    /// Forces the read side of the VM's stored serial connection shut.
-    ///
-    /// cloud-hypervisor v43's serial manager registers the accepted
-    /// connection with its epoll loop via `into_raw_fd()` and never closes
-    /// that descriptor (serial_manager.rs, accept path), so when
-    /// `vm.reboot` tears the old VM down the serial-manager thread exits
-    /// but the accepted connection stays open with neither data nor EOF —
-    /// the reader is parked on a zombie. `shutdown(2)` acts on the open
-    /// file description, not a single descriptor, so it wakes EVERY
-    /// blocked reader on the connection (the broadcaster's dup included):
-    /// the broadcaster observes EOF and its self-heal reconnects to the
-    /// listener `vm.reboot` already re-bound at the same path, swapping
-    /// the stored endpoint and streaming the new boot. Callers must only
-    /// invoke this after a successful `vm.reboot`, when the replacement
-    /// listener is guaranteed to exist.
-    ///
-    /// Socket transport only: the pty transport has no socket to shut
-    /// down (its reboot behavior — broadcaster exit on EIO — is a
-    /// recorded follow-up). Best-effort: a failure means the connection
-    /// was already gone, which the broadcaster's own EOF handling covers.
-    async fn force_serial_read_shutdown(&self, vm_id: &str) {
-        let vms = self.vms.read().await;
-        let Some(proc) = vms.get(vm_id) else {
-            return;
-        };
-        if !matches!(proc.serial_transport, SerialTransport::Socket(_)) {
-            return;
-        }
-        // Instant kernel operation on the open file description; the read
-        // guard is only held across this synchronous call.
-        if let Err(e) = nix::sys::socket::shutdown(
-            proc.console_io.as_raw_fd(),
-            nix::sys::socket::Shutdown::Read,
-        ) {
-            warn!(
-                vm_id = %vm_id,
-                error = %e,
-                "serial read-side shutdown after vm.reboot failed"
-            );
-        }
-    }
-
     /// Duplicates a console fd for a secondary consumer (broadcaster,
     /// console server). The dup inherits the source fd's blocking mode —
     /// a property of the open file description — while FD_CLOEXEC is
@@ -1515,15 +1473,62 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
+        // Snapshot the pre-reboot console connection BEFORE the API call.
+        // cloud-hypervisor v43's vm.reboot tears the VM down and re-creates
+        // it, re-binding the serial listener at the same path — but the OLD
+        // accepted connection is orphaned without EOF: the serial manager's
+        // accept path hands its descriptor to epoll via `into_raw_fd()` and
+        // never closes it, so the broadcaster parked on it would never wake.
+        // The forced EOF must land on exactly this connection — the one
+        // that predates the reboot — not on whatever a concurrent heal may
+        // have swapped into the map meanwhile, so a dup is taken up front:
+        // it pins the open file description, making the raw fd impossible
+        // to recycle under us. Socket transport only (the pty transport
+        // has no socket to shut down; its reboot behavior is a recorded
+        // follow-up).
+        let pre_reboot_console: Option<OwnedFd> = {
+            let vms = self.vms.read().await;
+            match vms.get(vm_id) {
+                Some(proc) if matches!(proc.serial_transport, SerialTransport::Socket(_)) => {
+                    Self::dup_cloexec(&proc.console_io).ok()
+                }
+                _ => None,
+            }
+        };
+
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
+        if status == 0 {
+            warn!(
+                vm_id = %vm_id,
+                "unparseable response from vm.reboot; serial connection not rotated"
+            );
+            return Ok(());
+        }
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vm.reboot");
             return Ok(());
         }
-        // A successful vm.reboot replaced the guest behind us; rotate the
-        // serial connection so console capture follows the new boot (see
-        // `force_serial_read_shutdown`).
-        self.force_serial_read_shutdown(vm_id).await;
+        // A successful vm.reboot re-bound the listener; rotate the pinned
+        // connection. shutdown(2) acts on the open file description, so it
+        // wakes every blocked reader on it (the broadcaster's dup
+        // included): the broadcaster observes EOF and its self-heal
+        // reconnects to the re-bound listener, swapping the stored
+        // endpoint and streaming the new boot. Bytes still queued in the
+        // kernel receive buffer are discarded — acceptable: the old guest
+        // is mid-teardown anyway. Best-effort: a failure means the
+        // connection was already gone, which the broadcaster's own EOF
+        // handling covers.
+        if let Some(fd) = pre_reboot_console {
+            if let Err(e) =
+                nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Read)
+            {
+                warn!(
+                    vm_id = %vm_id,
+                    error = %e,
+                    "serial read-side shutdown after vm.reboot failed"
+                );
+            }
+        }
         Ok(())
     }
 
