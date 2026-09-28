@@ -649,5 +649,8 @@ fn valid_result(result: &Option<serde_json::Value>) -> bool {
     walk(value, 0, &mut 0)
 }
 
+pub mod fault;
+pub use fault::{FaultPoint, FaultRuntime};
+
 #[cfg(test)]
 mod tests;

@@ -1024,3 +1024,297 @@ fn claim_replay_outcome_is_counted_and_never_poisons_the_vm() {
     assert_eq!(report.claim_replays, 1);
     assert!(report.failures.is_empty());
 }
+
+// --- M2.4 fault-injection matrix: deterministic crash windows ---
+
+/// Fault point 2 (after the claim, before the provider effect): simulated
+/// process death at the window leaves the operation durably `running` with
+/// an attempt token and no side effect; a restarted composition classifies
+/// it `InspectRequired`, never re-executes it, and an operator resolution
+/// unblocks the successor.
+#[tokio::test]
+async fn fault_before_effect_never_reexecutes_after_restart_until_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("core.db");
+    let store = CoreStore::create_new(&path).unwrap();
+    let (authority, execution, join) =
+        AuthorityActor::spawn_with_execution(OperationService::new(store), 32).unwrap();
+    authority.submit(submit("a", "one")).await.unwrap();
+
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::BeforeEffect, counting.clone());
+    let executor = JournalExecutor::start(execution.clone(), fault.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("fault point must be reached");
+    // Process death at the fault point: the parked task is aborted with the
+    // composition; no claim or finish RPC happens after the window.
+    executor.abort().await.unwrap();
+    authority.shutdown().await.unwrap();
+    join.join().await.unwrap();
+    assert_eq!(
+        counting.calls.load(Ordering::SeqCst),
+        0,
+        "the effect must not have started at fault point 2"
+    );
+
+    // Restart: a fresh composition over the same journal classifies the
+    // interrupted claim before any new claim can exist.
+    let store = CoreStore::open_existing(&path).unwrap();
+    let (authority, execution, join) =
+        AuthorityActor::spawn_with_execution(OperationService::new(store), 32).unwrap();
+    execution.classify_restart_interrupted().await.unwrap();
+    let restart = execution.restart_operations().await.unwrap();
+    assert_eq!(restart.len(), 1);
+    assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
+
+    // The restarted executor must not execute the stuck operation.
+    let executor = JournalExecutor::start(execution.clone(), counting.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    assert_eq!(
+        counting.calls.load(Ordering::SeqCst),
+        0,
+        "an InspectRequired operation must never be re-executed"
+    );
+
+    // Operator resolution: the effect never ran, so the honest disposition
+    // is failure. The stuck operation terminal-persists.
+    authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            false,
+            "effect never started at fault point 2".to_owned(),
+        )
+        .await
+        .unwrap();
+    let resolved = authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.operation.status,
+        cellhv_core_types::OperationStatus::Failed
+    );
+
+    // The successor on the same VM now executes exactly once. Graceful
+    // shutdown drains the scheduled work to terminal persistence before
+    // the assertion (scheduling is asynchronous).
+    authority.submit(submit_start("a", "two")).await.unwrap();
+    executor.scan_ready().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+    let successor = authority
+        .operation(OperationId::new("two").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        successor.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    authority.shutdown().await.unwrap();
+    join.join().await.unwrap();
+}
+
+/// Fault point 5 (after the provider effect, before terminal persistence):
+/// simulated process death at the window leaves the effect done and the
+/// operation `running`; the restarted composition never launches the effect
+/// a second time, and the operator resolution records the outcome the
+/// effect already had.
+#[tokio::test]
+async fn fault_after_effect_resolves_without_a_second_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("core.db");
+    let store = CoreStore::create_new(&path).unwrap();
+    let (authority, execution, join) =
+        AuthorityActor::spawn_with_execution(OperationService::new(store), 32).unwrap();
+    authority.submit(submit("a", "one")).await.unwrap();
+
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::AfterEffect, counting.clone());
+    let executor = JournalExecutor::start(execution.clone(), fault.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("fault point must be reached");
+    assert_eq!(
+        counting.calls.load(Ordering::SeqCst),
+        1,
+        "the effect completed before the fault point"
+    );
+    executor.abort().await.unwrap();
+    authority.shutdown().await.unwrap();
+    join.join().await.unwrap();
+
+    // Restart over the same journal: the completed-but-unpersisted effect
+    // must not be re-executed.
+    let store = CoreStore::open_existing(&path).unwrap();
+    let (authority, execution, join) =
+        AuthorityActor::spawn_with_execution(OperationService::new(store), 32).unwrap();
+    execution.classify_restart_interrupted().await.unwrap();
+    let restart = execution.restart_operations().await.unwrap();
+    assert_eq!(restart.len(), 1);
+    assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
+
+    let executor = JournalExecutor::start(execution.clone(), counting.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    assert_eq!(
+        counting.calls.load(Ordering::SeqCst),
+        1,
+        "no second effect after restart: the journal, not runtime state, fences re-execution"
+    );
+
+    // Operator resolution: the effect did happen (calls == 1), so the
+    // honest disposition is success.
+    authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            true,
+            "effect completed before fault point 5".to_owned(),
+        )
+        .await
+        .unwrap();
+    let resolved = authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+
+    // A successor on the same VM executes exactly once more (drained to
+    // terminal before the assertion).
+    authority.submit(submit_start("a", "two")).await.unwrap();
+    executor.scan_ready().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 2);
+    authority.shutdown().await.unwrap();
+    join.join().await.unwrap();
+}
+
+/// The disarm contract: a disarmed `FaultRuntime` is a pure pass-through —
+/// the wrapped effect executes to completion, `inner_completions` counts
+/// it, and `reached` never fires.
+#[tokio::test]
+async fn disarmed_fault_runtime_is_a_passthrough() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::AfterEffect, counting.clone());
+    fault.disarm();
+    let executor = JournalExecutor::start(f.execution.clone(), fault.clone(), 1, 2).unwrap();
+    executor.scan_ready().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fault.inner_completions.load(Ordering::SeqCst), 1);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fault.reached.notified()
+        )
+        .await
+        .is_err(),
+        "a disarmed wrapper must never park"
+    );
+    let done = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        done.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    stop(f).await;
+}
+
+/// The single-park contract: after the first armed park, a second
+/// operation flowing through the SAME armed wrapper passes through and
+/// executes — later armed executes are deterministic pass-throughs, never
+/// unawaitable second parks.
+#[tokio::test]
+async fn armed_fault_runtime_parks_once_then_passes_through() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority.submit(submit("b", "two")).await.unwrap();
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::BeforeEffect, counting.clone());
+    let executor = JournalExecutor::start(f.execution.clone(), fault.clone(), 2, 4).unwrap();
+    executor.scan_ready().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("the first operation through the wrapper must park");
+    // Whichever operation parked first, the other (different VM, so not
+    // serialized behind the parked one) executes through the same armed
+    // wrapper and finishes. Its terminal status is the authoritative
+    // signal that the pass-through ran to completion.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let one = f
+            .authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap();
+        let two = f
+            .authority
+            .operation(OperationId::new("two").unwrap())
+            .await
+            .unwrap();
+        let one_done = one.operation.status == cellhv_core_types::OperationStatus::Succeeded;
+        let two_done = two.operation.status == cellhv_core_types::OperationStatus::Succeeded;
+        if one_done || two_done {
+            assert_ne!(one_done, two_done, "only one operation may pass through");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pass-through operation never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // The parked task never completes: only the abort path tears down.
+    executor.abort().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fault.inner_completions.load(Ordering::SeqCst), 1);
+    let one = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    let two = f
+        .authority
+        .operation(OperationId::new("two").unwrap())
+        .await
+        .unwrap();
+    let statuses = [one.operation.status, two.operation.status];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == cellhv_core_types::OperationStatus::Succeeded)
+            .count(),
+        1,
+        "exactly one operation passed through and finished"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == cellhv_core_types::OperationStatus::Running)
+            .count(),
+        1,
+        "exactly one operation stayed parked (running with its claim fence)"
+    );
+    stop(f).await;
+}
