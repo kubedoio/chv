@@ -609,12 +609,13 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
 /// helper guarantees such validation errors are reported to legacy clients as
 /// `invalid_argument` instead of a 500 for *every* lifecycle handler — not
 /// just the ones that happen to carry the `Invalid` arm inline.
-fn map_submit_error(e: cellhv_core_operations::AuthorityActorError) -> Status {
+fn map_authority_error(e: cellhv_core_operations::AuthorityActorError) -> Status {
     match e {
         cellhv_core_operations::AuthorityActorError::Service(err) => match err.class() {
             cellhv_core_operations::ErrorClass::Invalid => {
                 Status::invalid_argument(err.to_string())
             }
+            cellhv_core_operations::ErrorClass::NotFound => Status::not_found(err.to_string()),
             cellhv_core_operations::ErrorClass::Conflict => Status::already_exists(err.to_string()),
             cellhv_core_operations::ErrorClass::Precondition => {
                 Status::failed_precondition(err.to_string())
@@ -622,6 +623,29 @@ fn map_submit_error(e: cellhv_core_operations::AuthorityActorError) -> Status {
             _ => Status::internal(err.to_string()),
         },
         _ => Status::internal(e.to_string()),
+    }
+}
+
+/// Resolves the current core-journal version of a VM for an expected-version
+/// CAS. A VM unknown to the core journal is a `not_found`; any other authority
+/// failure is `unavailable` — never a silently guessed version 1, which would
+/// turn an authority outage into a misleading stale-version rejection.
+async fn authority_vm_version_or_status(
+    authority: &cellhv_core_operations::AuthorityHandle,
+    vm_id: cellhv_core_types::VmId,
+) -> Result<cellhv_core_types::ResourceVersion, Status> {
+    match authority.vm(vm_id.clone()).await {
+        Ok(vm) => Ok(vm.resource_version),
+        Err(cellhv_core_operations::AuthorityActorError::Service(err))
+            if err.class() == cellhv_core_operations::ErrorClass::NotFound =>
+        {
+            Err(Status::not_found(format!(
+                "vm {vm_id} is not known to the core journal"
+            )))
+        }
+        Err(error) => Err(Status::unavailable(format!(
+            "core authority unavailable: {error}"
+        ))),
     }
 }
 
@@ -666,7 +690,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(map_submit_error)?;
+                .map_err(map_authority_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -861,11 +885,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             };
             let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let expected_version = authority
-                .vm(vm_id)
-                .await
-                .map(|vm| vm.resource_version)
-                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let expected_version = authority_vm_version_or_status(authority, vm_id).await?;
             let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
                 &legacy_meta,
                 &meta.target_node_id,
@@ -878,7 +898,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(map_submit_error)?;
+                .map_err(map_authority_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -946,11 +966,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             };
             let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let expected_version = authority
-                .vm(vm_id)
-                .await
-                .map(|vm| vm.resource_version)
-                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let expected_version = authority_vm_version_or_status(authority, vm_id).await?;
             let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
                 &legacy_meta,
                 &meta.target_node_id,
@@ -964,7 +980,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(map_submit_error)?;
+                .map_err(map_authority_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -1022,11 +1038,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             };
             let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let expected_version = authority
-                .vm(vm_id)
-                .await
-                .map(|vm| vm.resource_version)
-                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let expected_version = authority_vm_version_or_status(authority, vm_id).await?;
             let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
                 &legacy_meta,
                 &meta.target_node_id,
@@ -1040,7 +1052,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(map_submit_error)?;
+                .map_err(map_authority_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -1094,11 +1106,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             };
             let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let expected_version = authority
-                .vm(vm_id)
-                .await
-                .map(|vm| vm.resource_version)
-                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let expected_version = authority_vm_version_or_status(authority, vm_id).await?;
             let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
                 &legacy_meta,
                 &meta.target_node_id,
@@ -1112,7 +1120,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(map_submit_error)?;
+                .map_err(map_authority_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -2576,6 +2584,77 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    async fn resolve_inspect_required_operation(
+        &self,
+        req: Request<proto::ResolveInspectRequiredOperationRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        // Inverse gate to the legacy-effectors fail-closed rule: this is the
+        // operator egress for core-journal recovery and only exists in
+        // core-managed mode.
+        let authority = self.core_authority.as_ref().ok_or_else(|| {
+            Status::unimplemented(
+                "resolve_inspect_required_operation is only available in core-managed mode",
+            )
+        })?;
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let operation_id = cellhv_core_types::OperationId::new(&inner.operation_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let succeeded = match inner.disposition.as_str() {
+            "succeeded" => true,
+            "failed" => false,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "disposition must be \"succeeded\" or \"failed\", got {other:?}"
+                )))
+            }
+        };
+        let note = inner.note.trim();
+        if note.is_empty() {
+            return Err(Status::invalid_argument(
+                "resolution note is required (operator inspection evidence)",
+            ));
+        }
+        // The store bounds the whole recovery-evidence record at 16 KiB;
+        // reject oversized notes as client input instead of surfacing the
+        // store bound as an internal error.
+        if note.len() > 8_000 {
+            return Err(Status::invalid_argument(
+                "resolution note must be at most 8000 bytes",
+            ));
+        }
+        let resolved = authority
+            .resolve_inspect_required(operation_id, succeeded, note.to_owned())
+            .await
+            .map_err(map_authority_error)?;
+        // Audit trail: the resolution terminal-persists a stuck operation;
+        // record who decided what, with the journal's own identifiers as the
+        // authoritative reference.
+        tracing::info!(
+            operation_id = %resolved.entry.operation.id,
+            vm_id = %resolved.entry.operation.vm_id,
+            requested_vm_id = %vm_id,
+            succeeded,
+            note,
+            requested_by = %meta.requested_by,
+            "operator resolved inspect-required operation"
+        );
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                error_code: "".to_string(),
+                human_summary: format!("{:?}", resolved.disposition),
+            }),
+        }))
+    }
+
     async fn send_gratuitous_arp(
         &self,
         req: Request<proto::SendGratuitousArpRequest>,
@@ -3748,6 +3827,88 @@ mod tests {
                 "{name} must stay core-routed (not gated) in core-managed mode"
             );
         }
+    }
+
+    /// The inspect-required resolution egress is the inverse gate: it only
+    /// exists in core-managed mode and must fail closed (`Unimplemented`) for
+    /// legacy-only agents.
+    #[tokio::test]
+    async fn legacy_mode_resolve_inspect_required_fails_closed() {
+        let server = test_server();
+        let resp =
+            proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+                &server,
+                Request::new(proto::ResolveInspectRequiredOperationRequest::default()),
+            )
+            .await;
+        assert_eq!(
+            resp.unwrap_err().code(),
+            tonic::Code::Unimplemented,
+            "resolve_inspect_required_operation must fail closed in legacy-only mode"
+        );
+    }
+
+    /// The resolution egress parses its payload strictly before touching the
+    /// authority: unknown dispositions, empty notes, and empty identifiers
+    /// are `InvalidArgument`, never a guessed resolution. A well-formed
+    /// request reaches the authority instead of being rejected locally.
+    #[tokio::test]
+    async fn resolve_inspect_required_validates_payload_strictly() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let request = |vm_id: &str, operation_id: &str, disposition: &str, note: &str| {
+            proto::ResolveInspectRequiredOperationRequest {
+                meta: Some(test_meta("9")),
+                vm_id: vm_id.to_string(),
+                operation_id: operation_id.to_string(),
+                disposition: disposition.to_string(),
+                note: note.to_string(),
+            }
+        };
+        for (label, req) in [
+            (
+                "unknown disposition",
+                request("vm-1", "op-1", "maybe", "operator inspected"),
+            ),
+            ("empty note", request("vm-1", "op-1", "succeeded", "   ")),
+            (
+                "empty vm_id",
+                request("", "op-1", "succeeded", "operator inspected"),
+            ),
+            (
+                "empty operation_id",
+                request("vm-1", "", "failed", "operator inspected"),
+            ),
+        ] {
+            let resp =
+                proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+                    &server,
+                    Request::new(req),
+                )
+                .await;
+            assert_eq!(
+                resp.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "{label} must be rejected before the authority is touched"
+            );
+        }
+        let resp =
+            proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+                &server,
+                Request::new(request("vm-1", "op-1", "failed", "operator inspected")),
+            )
+            .await;
+        let err = resp.unwrap_err();
+        assert_ne!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "well-formed resolve requests must reach the authority"
+        );
+        assert_ne!(
+            err.code(),
+            tonic::Code::Unimplemented,
+            "resolve must stay core-routed in core-managed mode"
+        );
     }
 
     /// Node-operator state transitions (drain/maintenance/scheduling) are not

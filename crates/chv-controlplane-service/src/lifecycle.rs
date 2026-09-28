@@ -187,6 +187,15 @@ pub trait LifecycleService: Send + Sync {
         &self,
         request: proto::SendGratuitousArpRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    /// Node-scoped operator egress for restart-interrupted
+    /// (InspectRequired) core-journal operations. Not routed through the
+    /// control plane: the terminal-persisting resolution must be issued
+    /// against the owning agent's LifecycleService (or the node's Core API).
+    async fn resolve_inspect_required_operation(
+        &self,
+        request: proto::ResolveInspectRequiredOperationRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -1703,5 +1712,21 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.accept_operation(&operation_id).await?;
 
         Ok(Self::ok_ack(&operation_id, "send gratuitous arp accepted"))
+    }
+
+    /// Fail-closed: the control plane is a desired-state authority and holds
+    /// no direct agent-call path for journal mutation. Resolving an
+    /// inspect-required operation terminal-persists state in the node's core
+    /// journal, so it must be issued against the owning agent's
+    /// LifecycleService (or the node's local Core API).
+    async fn resolve_inspect_required_operation(
+        &self,
+        _request: proto::ResolveInspectRequiredOperationRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        Err(ControlPlaneServiceError::Unsupported(
+            "resolve_inspect_required_operation is a node-scoped operator action; \
+             issue it against the owning agent"
+                .into(),
+        ))
     }
 }

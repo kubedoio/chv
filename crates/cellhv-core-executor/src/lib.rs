@@ -62,6 +62,8 @@ pub enum ExecutorError {
     Join(#[from] JoinError),
     #[error("executor drain exceeded {budget:?}; in-flight tasks were cancelled")]
     DrainTimedOut { budget: Duration },
+    #[error("executor terminated after a task failure: {fatality:?}")]
+    Fatal { fatality: ExecutorFatality },
 }
 
 pub type Result<T> = std::result::Result<T, ExecutorError>;
@@ -77,10 +79,37 @@ pub enum ExecutionFailureCode {
     VmQuarantined,
 }
 
+impl ExecutionFailureCode {
+    /// Stable wire string recorded in recovery evidence when the executor
+    /// abandons an operation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClaimAmbiguous => "CLAIM_AMBIGUOUS",
+            Self::ClaimReplay => "CLAIM_REPLAY",
+            Self::FinishAmbiguous => "FINISH_AMBIGUOUS",
+            Self::ResultInvalid => "RESULT_INVALID",
+            Self::TaskPanicked => "TASK_PANICKED",
+            Self::TaskCancelled => "TASK_CANCELLED",
+            Self::VmQuarantined => "VM_QUARANTINED",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionFailure {
     pub operation_id: Option<OperationId>,
     pub code: ExecutionFailureCode,
+}
+
+/// Why the executor terminated and can no longer execute anything: a task
+/// failed catastrophically (panic or cancellation) and the scheduler closed
+/// ingress for every VM. Surfaced through [`ExecutorError::Fatal`] so the
+/// composition fails the process for supervisor restart instead of silently
+/// not executing while the authority keeps accepting operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorFatality {
+    pub code: ExecutionFailureCode,
+    pub operation_id: Option<OperationId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,16 +137,57 @@ struct Work {
 
 type TokenFactory = Arc<dyn Fn() -> AttemptToken + Send + Sync>;
 
+/// Failure containment for VMs, split by lifetime:
+///
+/// - `failure` is sticky for the process lifetime: an ambiguous claim/finish
+///   must never be retried in-process (restart re-derives it from the
+///   journal).
+/// - `inspect` is re-derived from the journal on every scan: a VM is
+///   restart-quarantined exactly while it has an unresolved `InspectRequired`
+///   operation, so an operator resolution un-quarantines the VM on the next
+///   scan instead of poisoning it for the process lifetime.
+#[derive(Default)]
+struct QuarantineState {
+    failure: Mutex<HashSet<VmId>>,
+    inspect: Mutex<HashSet<VmId>>,
+}
+
+impl QuarantineState {
+    fn contains(&self, vm: &VmId) -> bool {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(vm)
+            || self
+                .inspect
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(vm)
+    }
+
+    fn record_failure(&self, vm: VmId) {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(vm);
+    }
+
+    fn set_inspect(&self, vms: HashSet<VmId>) {
+        *self.inspect.lock().unwrap_or_else(|e| e.into_inner()) = vms;
+    }
+}
+
 /// Owns one bounded execution scheduler. Explicit shutdown is required to
 /// establish the executor-before-authority shutdown ordering contract.
 pub struct JournalExecutor {
     sender: Option<mpsc::Sender<Work>>,
     execution: ExecutionHandle,
     scheduled: Arc<Mutex<HashSet<OperationId>>>,
-    quarantined_vms: Arc<Mutex<HashSet<VmId>>>,
+    quarantined: Arc<QuarantineState>,
     capacity: Arc<Semaphore>,
     scan_lock: tokio::sync::Mutex<()>,
     token_factory: TokenFactory,
+    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
     task: Option<tokio::task::JoinHandle<ExecutionReport>>,
 }
 
@@ -151,29 +221,42 @@ impl JournalExecutor {
             return Err(ExecutorError::InvalidQueueCapacity);
         }
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let quarantined_vms = Arc::new(Mutex::new(HashSet::new()));
+        let quarantined = Arc::new(QuarantineState::default());
+        let fatality: Arc<Mutex<Option<ExecutorFatality>>> = Arc::new(Mutex::new(None));
         let capacity = Arc::new(Semaphore::new(queue_capacity));
         let task = tokio::spawn(run_scheduler(
             receiver,
             execution.clone(),
             runtime,
             concurrency,
-            quarantined_vms.clone(),
+            quarantined.clone(),
+            fatality.clone(),
         ));
         Ok(Self {
             sender: Some(sender),
             execution,
             scheduled: Arc::new(Mutex::new(HashSet::new())),
-            quarantined_vms,
+            quarantined,
             capacity,
             scan_lock: tokio::sync::Mutex::new(()),
             token_factory,
+            fatality,
             task: Some(task),
         })
     }
 
     /// Scans the durable journal in authority order. This is the only ingress.
     pub async fn scan_ready(&self) -> Result<RestartScheduleReport> {
+        // A terminated scheduler is fatal, not retryable: every later scan
+        // would fail while the authority keeps accepting operations.
+        if let Some(fatality) = self
+            .fatality
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Err(ExecutorError::Fatal { fatality });
+        }
         let _scan = self.scan_lock.lock().await;
         let mut report = RestartScheduleReport::default();
         let restart_snapshot = self.execution.restart_operations().await?;
@@ -188,16 +271,14 @@ impl JournalExecutor {
         // production poller would grow `scheduled` unboundedly over the
         // lifetime of the node.
         let mut ready_ids: HashSet<OperationId> = HashSet::new();
+        let mut inspect_vms: HashSet<VmId> = HashSet::new();
         for restart in &restart_snapshot {
             match restart.disposition {
                 RestartDisposition::Ready => {
                     ready_ids.insert(restart.entry.operation.id.clone());
                 }
                 RestartDisposition::InspectRequired => {
-                    self.quarantined_vms
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(restart.entry.operation.vm_id.clone());
+                    inspect_vms.insert(restart.entry.operation.vm_id.clone());
                     report
                         .inspect_required
                         .push(restart.entry.operation.id.clone());
@@ -205,17 +286,19 @@ impl JournalExecutor {
                 RestartDisposition::Terminal => {}
             }
         }
+        // Re-derive the restart quarantine from the current snapshot: a VM is
+        // quarantined exactly while it has an unresolved InspectRequired
+        // operation, so an operator resolution un-quarantines the VM on the
+        // next scan. (An in-flight operation of the live process is not
+        // classified InspectRequired — see OperationService::restart_operations
+        // — so this cannot quarantine a VM whose operation is executing.)
+        self.quarantined.set_inspect(inspect_vms);
         for restart in restart_snapshot {
             match restart.disposition {
                 RestartDisposition::Ready => {
                     let id = restart.entry.operation.id.clone();
                     let vm_id = restart.entry.operation.vm_id;
-                    if self
-                        .quarantined_vms
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&vm_id)
-                    {
+                    if self.quarantined.contains(&vm_id) {
                         report.quarantined.push(id);
                         continue;
                     }
@@ -238,7 +321,7 @@ impl JournalExecutor {
                     report.scheduled.push(id);
                 }
                 RestartDisposition::InspectRequired => {
-                    // Quarantined in the complete first pass.
+                    // Quarantined via set_inspect in the first pass.
                 }
                 RestartDisposition::Terminal => {}
             }
@@ -364,7 +447,8 @@ async fn run_scheduler(
     execution: ExecutionHandle,
     runtime: Arc<dyn CoreVmRuntime>,
     concurrency: usize,
-    quarantined_vms: Arc<Mutex<HashSet<VmId>>>,
+    quarantined: Arc<QuarantineState>,
+    fatality: Arc<Mutex<Option<ExecutorFatality>>>,
 ) -> ExecutionReport {
     let mut report = ExecutionReport::default();
     let mut pending = VecDeque::new();
@@ -375,12 +459,7 @@ async fn run_scheduler(
 
     loop {
         while tasks.len() < concurrency {
-            pending.retain(|work: &Work| {
-                !quarantined_vms
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&work.vm_id)
-            });
+            pending.retain(|work: &Work| !quarantined.contains(&work.vm_id));
             let Some(index) = pending
                 .iter()
                 .position(|work: &Work| !active_vms.contains(&work.vm_id))
@@ -411,15 +490,46 @@ async fn run_scheduler(
                         Ok((task_id, (vm_id, outcome))) => {
                             task_owners.remove(&task_id);
                             active_vms.remove(&vm_id);
-                            if outcome.quarantines() { quarantined_vms.lock().unwrap_or_else(|e| e.into_inner()).insert(vm_id); }
+                            if let WorkOutcome::Failure(failure) = &outcome {
+                                if let Some(operation_id) = &failure.operation_id {
+                                    // The operation may have been left `running`
+                                    // (finishing it would guess a terminal
+                                    // outcome): mark it abandoned so it becomes
+                                    // InspectRequired — visible and resolvable —
+                                    // without waiting for a restart. Best-effort:
+                                    // when the authority is unavailable the
+                                    // operation stays unmarked and restart
+                                    // classification covers it on the next boot.
+                                    let code = failure.code.as_str().to_owned();
+                                    let _ = execution
+                                        .mark_operation_abandoned(operation_id.clone(), code)
+                                        .await;
+                                }
+                            }
+                            if outcome.quarantines() { quarantined.record_failure(vm_id); }
                             merge_outcome(&mut report, outcome);
                         }
                         Err(error) => {
                             let operation_id = task_owners.remove(&error.id());
+                            let code = if error.is_cancelled() { ExecutionFailureCode::TaskCancelled } else { ExecutionFailureCode::TaskPanicked };
                             report.failures.push(ExecutionFailure {
-                                operation_id,
-                                code: if error.is_cancelled() { ExecutionFailureCode::TaskCancelled } else { ExecutionFailureCode::TaskPanicked },
+                                operation_id: operation_id.clone(),
+                                code,
                             });
+                            // The containment below is the single-effector
+                            // invariant (no further claim/finish after a task
+                            // failed catastrophically), but it must not be
+                            // *silent*: record the fatality — first cause wins,
+                            // the abort cascade only appends to the report — so
+                            // scan_ready fails the composition instead of
+                            // leaving a healthy-looking authority that executes
+                            // nothing.
+                            {
+                                let mut slot = fatality.lock().unwrap_or_else(|e| e.into_inner());
+                                if slot.is_none() {
+                                    *slot = Some(ExecutorFatality { code, operation_id });
+                                }
+                            }
                             receiver.close();
                             ingress_closed = true;
                             pending.clear();
@@ -441,12 +551,15 @@ async fn run_scheduler(
 
 enum WorkOutcome {
     AcquiredCompleted,
-    ClaimReplay(OperationId),
+    ClaimReplay,
     Failure(ExecutionFailure),
 }
 impl WorkOutcome {
+    /// Whether this outcome must failure-quarantine the VM for the process
+    /// lifetime. A claim replay is the idempotent-success path (another
+    /// sender already holds this claim) and must not poison the VM.
     fn quarantines(&self) -> bool {
-        !matches!(self, Self::AcquiredCompleted)
+        matches!(self, Self::Failure(_))
     }
 }
 
@@ -469,7 +582,7 @@ async fn execute_one(
     };
     let entry = match claimed {
         ClaimResult::Acquired(entry) => entry,
-        ClaimResult::Replay(_) => return WorkOutcome::ClaimReplay(work.operation_id),
+        ClaimResult::Replay(_) => return WorkOutcome::ClaimReplay,
     };
     let terminal = match runtime.execute(entry).await {
         Ok(result) if valid_result(&result) => TerminalOutcome::Succeeded(result),
@@ -502,12 +615,10 @@ fn merge_outcome(report: &mut ExecutionReport, outcome: WorkOutcome) {
             report.acquired += 1;
             report.completed += 1;
         }
-        WorkOutcome::ClaimReplay(operation_id) => {
+        WorkOutcome::ClaimReplay => {
+            // Idempotent no-op success: the claim is already held. Counted,
+            // never reported as a failure, never quarantine-worthy.
             report.claim_replays += 1;
-            report.failures.push(ExecutionFailure {
-                operation_id: Some(operation_id),
-                code: ExecutionFailureCode::ClaimReplay,
-            });
         }
         WorkOutcome::Failure(failure) => report.failures.push(failure),
     }

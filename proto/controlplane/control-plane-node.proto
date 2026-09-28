@@ -487,6 +487,12 @@ service LifecycleService {
   rpc MigrateVm(MigrateVmRequest) returns (AckResponse);
   rpc UpdateOverlay(UpdateOverlayRequest) returns (AckResponse);
   rpc SendGratuitousArp(SendGratuitousArpRequest) returns (AckResponse);
+  // Operator egress for restart-interrupted (InspectRequired) operations.
+  // Core-managed nodes only: the resolution terminal-persists the operation
+  // in the core journal after explicit inspection. `operation_id` identifies
+  // the journal operation to resolve (see Core API /v1/operations).
+  rpc ResolveInspectRequiredOperation(ResolveInspectRequiredOperationRequest)
+    returns (AckResponse);
 }
 
 service TelemetryService {
@@ -568,4 +574,16 @@ message SendGratuitousArpRequest {
   string network_id = 3;
   string vm_ip = 4;
   string bridge_name = 5;
+}
+
+message ResolveInspectRequiredOperationRequest {
+  RequestMeta meta = 1;
+  // Informational context for the audit record; `operation_id` is the
+  // authoritative key and is discovered via Core API /v1/operations.
+  string vm_id = 2;
+  string operation_id = 3;
+  // Terminal outcome of the operator inspection: "succeeded" or "failed".
+  string disposition = 4;
+  // Required operator inspection evidence recorded in the journal.
+  string note = 5;
 }

@@ -12,7 +12,7 @@ use cellhv_core_startup::{
     ActivatedStore, ActivationKind, ActivationProvenance, RuntimeAuthorityGuard,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -156,6 +156,12 @@ pub struct CoreRuntimeOwner {
     poller: Option<tokio::task::JoinHandle<PollerExit>>,
     stop_tx: Option<tokio::sync::watch::Sender<()>>,
     journal_scan: std::sync::Arc<JournalScanStats>,
+    /// Set when the journal executor terminated fatally (a task failed
+    /// catastrophically and the scheduler closed ingress for every VM).
+    /// Composition must observe this and fail the process for supervisor
+    /// restart: the authority would otherwise keep accepting operations that
+    /// are never executed.
+    executor_fatal: std::sync::Arc<AtomicBool>,
     kind: ActivationKind,
     provenance: ActivationProvenance,
     runtime_guard: Option<RuntimeAuthorityGuard>,
@@ -170,7 +176,7 @@ impl CoreRuntimeOwner {
         drain_timeout: Duration,
         poller: JournalPollerConfig,
     ) -> Result<Self> {
-        let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
+        let (mut service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         // Fail-closed on nonsensical timings: in release builds a zero
         // scan_interval would spin at max rate, a zero scan_timeout would mark
         // the journal permanently unhealthy, and a zero drain budget would
@@ -183,6 +189,25 @@ impl CoreRuntimeOwner {
             return Err(RuntimeOwnerError::InvalidPollerConfig(poller));
         }
         validate_native_only(kind, &provenance)?;
+        // Restart classification: durably mark every operation still
+        // `running` as restart-interrupted (`InspectRequired`). This must
+        // happen before the actor is spawned and the executor can claim:
+        // afterwards, `running` without the marker means in flight in this
+        // process. A classification failure fails startup closed — an
+        // unclassifiable journal must not be executed against.
+        let interrupted = service
+            .classify_restart_interrupted_operations()
+            .map_err(|error| RuntimeOwnerError::RecoveryStartup {
+                primary: error.to_string(),
+                cleanup: Vec::new(),
+            })?;
+        if !interrupted.is_empty() {
+            tracing::warn!(
+                count = interrupted.len(),
+                operations = ?interrupted,
+                "restart classification marked running operations InspectRequired"
+            );
+        }
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
         let execution = authority.execution_handle();
 
@@ -245,8 +270,10 @@ impl CoreRuntimeOwner {
         // of per-tick log spam.
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
         let journal_scan = std::sync::Arc::new(JournalScanStats::default());
+        let executor_fatal = std::sync::Arc::new(AtomicBool::new(false));
         let poller = tokio::spawn({
             let journal_scan = std::sync::Arc::clone(&journal_scan);
+            let executor_fatal = std::sync::Arc::clone(&executor_fatal);
             async move {
                 let JournalPollerConfig {
                     scan_interval,
@@ -266,13 +293,34 @@ impl CoreRuntimeOwner {
                                         .consecutive_failures
                                         .store(0, Ordering::Relaxed);
                                 }
-                                Ok(Err(error)) => record_scan_failure(
-                                    &journal_scan,
-                                    &mut consecutive_failures,
-                                    delay,
-                                    scan_timeout,
-                                    Some(&error),
-                                ),
+                                Ok(Err(error)) => {
+                                    if matches!(
+                                        error,
+                                        cellhv_core_executor::ExecutorError::Fatal { .. }
+                                            | cellhv_core_executor::ExecutorError::Closed
+                                    ) {
+                                        // The scheduler task is gone (a task
+                                        // failed catastrophically, or ingress
+                                        // closed without a recorded cause).
+                                        // Scanning can never succeed again:
+                                        // fail loud, stop the poller, and let
+                                        // the composition exit the process
+                                        // for supervisor restart.
+                                        tracing::error!(
+                                            error = %error,
+                                            "core journal executor terminated; failing the runtime owner"
+                                        );
+                                        executor_fatal.store(true, Ordering::Release);
+                                        break;
+                                    }
+                                    record_scan_failure(
+                                        &journal_scan,
+                                        &mut consecutive_failures,
+                                        delay,
+                                        scan_timeout,
+                                        Some(&error),
+                                    )
+                                }
                                 Err(_elapsed) => record_scan_failure(
                                     &journal_scan,
                                     &mut consecutive_failures,
@@ -300,6 +348,7 @@ impl CoreRuntimeOwner {
             poller: Some(poller),
             stop_tx: Some(stop_tx),
             journal_scan,
+            executor_fatal,
             kind,
             provenance,
             runtime_guard: Some(runtime_guard),
@@ -343,6 +392,16 @@ impl CoreRuntimeOwner {
             .consecutive_failures
             .load(Ordering::Relaxed)
             == 0
+    }
+
+    /// Whether the journal executor terminated fatally (a task failed
+    /// catastrophically and the scheduler closed ingress for every VM).
+    ///
+    /// Composition must poll this and fail the process for supervisor
+    /// restart: after a fatal termination the authority keeps accepting
+    /// operations that are never executed.
+    pub fn executor_fatal(&self) -> bool {
+        self.executor_fatal.load(Ordering::Acquire)
     }
 
     /// Stops the listener first, then the actor, and releases the runtime lease
@@ -457,9 +516,13 @@ fn validate_native_only(kind: ActivationKind, provenance: &ActivationProvenance)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cellhv_core_operations::OperationService;
+    use cellhv_core_operations::{MutationCommand, OperationService, SubmitMutation};
     use cellhv_core_startup::{StartupPaths, StartupTransaction};
-    use cellhv_core_types::{HostId, HostIdentity, OperationStatus, ResourceVersion};
+    use cellhv_core_types::{
+        BootSpec, ComputeSpec, HostId, HostIdentity, IdempotencyKey, ObservedPowerState,
+        OperationId, OperationRequestMetadata, OperationStatus, RequestedPowerState,
+        ResourceVersion, VmDefinition, VmId,
+    };
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -632,6 +695,214 @@ mod tests {
         assert!(request(&socket, "/v1/host")
             .await
             .contains("recovered-host"));
+        owner.shutdown().await.unwrap();
+    }
+
+    fn submission(vm: &str, op: &str) -> SubmitMutation {
+        SubmitMutation {
+            operation_id: OperationId::new(op).unwrap(),
+            idempotency_scope: "test".into(),
+            idempotency_key: IdempotencyKey::new(op).unwrap(),
+            expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
+            command: MutationCommand::CreateVm {
+                definition: VmDefinition {
+                    id: VmId::new(vm).unwrap(),
+                    name: vm.into(),
+                    boot: BootSpec::new("/kernel").unwrap(),
+                    compute: ComputeSpec::new(1, 128).unwrap(),
+                    storage: vec![],
+                    networks: vec![],
+                    requested_power_state: RequestedPowerState::Stopped,
+                    observed_power_state: ObservedPowerState::Unknown,
+                    resource_version: ResourceVersion::new(1).unwrap(),
+                },
+            },
+        }
+    }
+
+    struct CountingRuntime {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl cellhv_core_executor::CoreVmRuntime for CountingRuntime {
+        async fn execute(
+            &self,
+            _operation: cellhv_core_operations::OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_restart_classifies_running_operation_and_resolution_unblocks() {
+        struct NeverCompletes;
+        #[async_trait::async_trait]
+        impl cellhv_core_executor::CoreVmRuntime for NeverCompletes {
+            async fn execute(
+                &self,
+                _operation: cellhv_core_operations::OperationJournalEntry,
+            ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure>
+            {
+                std::future::pending().await
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        // First process: accept one operation and lose it mid-flight to a
+        // drain timeout (fail-closed: left `running`, claimed by a dead
+        // process).
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(NeverCompletes),
+            fresh(&paths, "restart-host"),
+            &socket,
+            16,
+            Duration::from_secs(1),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(20),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_millis(1),
+            },
+        )
+        .await
+        .unwrap();
+        let one = OperationId::new("one").unwrap();
+        owner
+            .authority()
+            .submit(submission("a", "one"))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let operation = owner.authority().operation(one.clone()).await.unwrap();
+            if operation.operation.status == OperationStatus::Running {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "operation never reached running"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(matches!(
+            owner.shutdown().await,
+            Err(RuntimeOwnerError::Shutdown(failures))
+                if failures.iter().any(|failure| matches!(
+                    failure,
+                    RuntimeStageFailure::ExecutorDrainTimedOut { .. }
+                ))
+        ));
+
+        // Second process: startup classification marks the stuck operation
+        // InspectRequired before any claim, so it is never re-executed ...
+        let activated = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("restart-host".to_owned()), None)
+            .unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(CountingRuntime {
+                calls: calls.clone(),
+            }),
+            activated,
+            &socket,
+            16,
+            Duration::from_secs(1),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(20),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // ... and the operator resolution egress proves the marker exists.
+        let resolved = owner
+            .authority()
+            .resolve_inspect_required(one.clone(), true, "operator verified".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(resolved.entry.operation.status, OperationStatus::Succeeded);
+        // Successor work on a different VM executes normally afterwards.
+        let two = OperationId::new("two").unwrap();
+        owner
+            .authority()
+            .submit(submission("b", "two"))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let operation = owner.authority().operation(two.clone()).await.unwrap();
+            if operation.operation.status == OperationStatus::Succeeded {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "successor operation never executed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_panic_fails_the_owner_for_supervisor_restart() {
+        struct Panics;
+        #[async_trait::async_trait]
+        impl cellhv_core_executor::CoreVmRuntime for Panics {
+            async fn execute(
+                &self,
+                _operation: cellhv_core_operations::OperationJournalEntry,
+            ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure>
+            {
+                panic!("runtime task panicked");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(Panics),
+            fresh(&paths, "panic-host"),
+            &socket,
+            16,
+            Duration::from_secs(1),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(20),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        owner
+            .authority()
+            .submit(submission("a", "one"))
+            .await
+            .unwrap();
+        // The poller surfaces the fatal termination through the owner so the
+        // composition can exit for supervisor restart, instead of silently
+        // disabling the executor while the authority keeps accepting.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !owner.executor_fatal() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "executor fatality was never surfaced"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         owner.shutdown().await.unwrap();
     }
 

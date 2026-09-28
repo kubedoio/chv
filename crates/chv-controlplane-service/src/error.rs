@@ -30,6 +30,12 @@ pub enum ControlPlaneServiceError {
     #[error("stale generation: expected {expected}, received {received}")]
     StaleGeneration { expected: String, received: String },
 
+    /// The requested RPC is a node-scoped operator action and is not routed
+    /// through the control plane (fail closed with a greppable message
+    /// instead of a half-implemented forward).
+    #[error("unsupported on the control plane: {0}")]
+    Unsupported(String),
+
     /// The build requested `CHV_ALLOW_INSECURE=1` (insecure peer-identity mode)
     /// but was not compiled with the `dev` Cargo feature. This is a typed,
     /// non-panicking startup failure — a production build must never run with
@@ -71,6 +77,7 @@ impl From<ControlPlaneServiceError> for tonic::Status {
                     "stale generation: expected {expected}, received {received}"
                 ))
             }
+            ControlPlaneServiceError::Unsupported(msg) => Status::unimplemented(msg),
             ControlPlaneServiceError::Store(ref e) => {
                 tracing::error!(error = %e, "store error");
                 Status::internal("internal error")
@@ -92,5 +99,22 @@ impl From<ControlPlaneServiceError> for tonic::Status {
                 Status::internal("internal error")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Node-scoped operator RPCs (e.g. resolve_inspect_required_operation)
+    /// fail closed on the control plane and must surface as gRPC
+    /// `Unimplemented`, never as an internal error.
+    #[test]
+    fn unsupported_maps_to_tonic_unimplemented() {
+        let status = tonic::Status::from(ControlPlaneServiceError::Unsupported(
+            "resolve_inspect_required_operation is a node-scoped operator action".into(),
+        ));
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        assert!(status.message().contains("node-scoped"));
     }
 }

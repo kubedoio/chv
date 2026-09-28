@@ -118,6 +118,14 @@ fn log_backoff_skip(vm_id: &str, failures: u32) {
     }
 }
 
+/// Desired state ("Running"/"Stopped") recorded in a VM fragment, or `None`
+/// when the fragment's spec cannot be decoded or parsed.
+fn fragment_desired_state(fragment: &crate::cache::DesiredStateFragment) -> Option<String> {
+    let raw = std::str::from_utf8(&fragment.spec_json).ok()?;
+    let spec = crate::spec::VmSpec::from_json(raw).ok()?;
+    Some(spec.desired_state)
+}
+
 impl Reconciler {
     /// Construct a legacy-mode Reconciler with the FULL legacy provider-mutation
     /// surface. This is the ONLY mutation-capable public constructor, and it is
@@ -193,6 +201,60 @@ impl Reconciler {
     /// `reconcile_*` methods (first-statement gated) in legacy mode.
     pub fn vm_runtime(&self) -> &VmRuntime {
         &self.vm_runtime
+    }
+
+    /// VMs to report in node telemetry. Legacy mode reports the live
+    /// `VmRuntime` records its reconcile loop maintains. Observe-only
+    /// (core-managed) mode derives the report set from the NodeCache
+    /// fragments the Core projection maintains — `VmRuntime` is never
+    /// populated in that mode (the Core runtime is the sole effector), so
+    /// telemetry would otherwise report an empty node while VMs execute.
+    ///
+    /// Residual: the observe-only report carries the fragment's *desired*
+    /// state as `runtime_status`; observed power state for core-managed VMs
+    /// is not projected and remains a documented gap.
+    pub async fn reported_vms(&self) -> Vec<crate::vm_runtime::VmRecord> {
+        if self.mutation.is_some() {
+            return self.vm_runtime.list().await;
+        }
+        let cache = self.cache.lock().await;
+        cache
+            .vm_fragments
+            .iter()
+            .filter_map(|(vm_id, fragment)| {
+                let raw = match std::str::from_utf8(&fragment.spec_json) {
+                    Ok(raw) => raw,
+                    Err(error) => {
+                        warn!(
+                            vm_id = %vm_id,
+                            %error,
+                            "failed to decode vm_fragment spec_json for telemetry"
+                        );
+                        return None;
+                    }
+                };
+                let spec = match crate::spec::VmSpec::from_json(raw) {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        warn!(
+                            vm_id = %vm_id,
+                            %error,
+                            "failed to parse vm_fragment spec_json for telemetry"
+                        );
+                        return None;
+                    }
+                };
+                Some(crate::vm_runtime::VmRecord {
+                    vm_id: vm_id.clone(),
+                    observed_generation: fragment.generation.clone(),
+                    runtime_status: spec.desired_state,
+                    last_error: None,
+                    consecutive_failures: 0,
+                    cpus: spec.cpus,
+                    memory_bytes: spec.memory_bytes,
+                })
+            })
+            .collect()
     }
 
     pub async fn transition_state(&self, to: NodeState) -> Result<NodeState, ChvError> {
@@ -367,15 +429,31 @@ impl Reconciler {
                 }
             }
             NodeState::Draining => {
-                // Evacuate running VMs by requesting migration to the control plane.
-                let running_vms: Vec<String> = self
-                    .vm_runtime
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|r| r.runtime_status == "Running" || r.runtime_status == "Created")
-                    .map(|r| r.vm_id)
-                    .collect();
+                // Evacuate running VMs by requesting migration to the control
+                // plane. Observe-only (core-managed): the NodeCache fragments
+                // the Core projection maintains are the drain-blocking set —
+                // `VmRuntime` is never populated in that mode, so the legacy
+                // list would report an empty node while VMs are desired
+                // Running.
+                let running_vms: Vec<String> = if self.mutation.is_some() {
+                    self.vm_runtime
+                        .list()
+                        .await
+                        .into_iter()
+                        .filter(|r| r.runtime_status == "Running" || r.runtime_status == "Created")
+                        .map(|r| r.vm_id)
+                        .collect()
+                } else {
+                    let cache = self.cache.lock().await;
+                    cache
+                        .vm_fragments
+                        .iter()
+                        .filter(|(_, fragment)| {
+                            fragment_desired_state(fragment).is_some_and(|state| state == "Running")
+                        })
+                        .map(|(vm_id, _)| vm_id.clone())
+                        .collect()
+                };
 
                 if running_vms.is_empty() && self.migration_registry.is_empty() {
                     // All VMs evacuated and no in-flight disk migrations — safe to Maintenance
@@ -385,6 +463,17 @@ impl Reconciler {
                     );
                     self.drain_requested_vms.clear();
                     self.transition_state(NodeState::Maintenance).await?;
+                } else if self.mutation.is_none() {
+                    // Observe-only fail-closed: the Core runtime is the sole
+                    // effector, so this Reconciler must not request
+                    // migrations. The drain stays blocked until the control
+                    // plane (sole writer of desired state) re-homes the
+                    // desired-Running VMs.
+                    warn!(
+                        remaining_vms = running_vms.len(),
+                        operation_id = %operation_id,
+                        "drain blocked on core-managed desired-Running VMs; the control plane must re-home them"
+                    );
                 } else {
                     // Request migration for each running VM via control plane event,
                     // but only if we haven't already requested it.
@@ -2024,6 +2113,113 @@ mod tests {
         let cache = cache.lock().await;
         let frag = cache.get_fragment("vm", "vm-1").unwrap();
         assert_eq!(frag.updated_by, "cp");
+    }
+
+    #[tokio::test]
+    async fn observe_only_drain_blocks_on_desired_running_fragment() {
+        // test_cache's vm-1 fragment omits desired_state, which defaults to
+        // Running: the Core projection is the drain-blocking set. The
+        // observe-only Reconciler must hold the node in Draining (fail
+        // closed) and must not enqueue migration events — the Core runtime
+        // is the sole effector and re-homing is the control plane's call.
+        let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
+        {
+            let mut c = cache.lock().await;
+            c.transition_node_state(NodeState::Draining).unwrap();
+        }
+        let mut rec = Reconciler::new_observe_only(
+            cache.clone(),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        for _ in 0..2 {
+            assert!(rec.run_once().await.is_ok());
+            assert_eq!(rec.current_state().await, NodeState::Draining);
+        }
+        let cache = cache.lock().await;
+        assert!(
+            cache.pending_control_plane.is_empty(),
+            "observe-only drain must not request migrations"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_only_drain_completes_when_no_desired_running_vms() {
+        // With every fragment desired-Stopped there is nothing to evacuate:
+        // the drain gate must complete to Maintenance on cache evidence
+        // alone (VmRuntime is never populated in observe-only mode).
+        let mut cache = test_cache();
+        cache
+            .vm_fragments
+            .get_mut("vm-1")
+            .unwrap()
+            .spec_json = br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[],"desired_state":"Stopped"}"#.to_vec();
+        let cache = Arc::new(tokio::sync::Mutex::new(cache));
+        {
+            let mut c = cache.lock().await;
+            c.transition_node_state(NodeState::Draining).unwrap();
+        }
+        let mut rec = Reconciler::new_observe_only(
+            cache.clone(),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        assert!(rec.run_once().await.is_ok());
+        assert_eq!(rec.current_state().await, NodeState::Maintenance);
+    }
+
+    #[tokio::test]
+    async fn reported_vms_derive_from_fragments_in_observe_only_mode() {
+        // Observe-only telemetry reports the Core projection's fragments
+        // (desired state as runtime_status — documented residual); legacy
+        // mode reports the VmRuntime records its reconcile loop maintains.
+        let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
+        let rec = Reconciler::new_observe_only(
+            cache.clone(),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        let vms = rec.reported_vms().await;
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0].vm_id, "vm-1");
+        assert_eq!(vms[0].runtime_status, "Running");
+        assert_eq!(vms[0].observed_generation, "1");
+        assert_eq!(vms[0].cpus, 1);
+        assert_eq!(vms[0].memory_bytes, 1024);
+        assert!(vms[0].last_error.is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut legacy_cache = test_cache();
+        legacy_cache.node_state = "Bootstrapping".to_string();
+        let legacy = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(legacy_cache)),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        // The legacy VmRuntime map starts empty (populated only by its own
+        // reconcile loop), so the legacy arm reports nothing here.
+        assert!(legacy.reported_vms().await.is_empty());
     }
 
     #[tokio::test]

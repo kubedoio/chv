@@ -341,6 +341,37 @@ mod tests {
         assert!(matches!(err, PeerIdentityError::InvalidCertificate(_)));
     }
 
+    /// x509-parser 0.18 behavior lock: a malformed SAN GeneralName (here a
+    /// DNSName entry carrying non-UTF-8 bytes, which decodes as
+    /// `GeneralName::Invalid`) must not prevent node_id derivation from the
+    /// valid DNS entry in the same extension.
+    #[test]
+    fn malformed_san_entry_does_not_hide_valid_dns_name() {
+        use rcgen::{CertificateParams, CustomExtension, DistinguishedName, DnType, IsCa, KeyPair};
+
+        // DER: SEQUENCE OF GeneralName {
+        //   [2] "\xFF\xFE"        <- DNSName with invalid UTF-8 (malformed)
+        //   [2] "node-dns-san"    <- valid DNSName
+        // }
+        let mut san = vec![0x30, 0x12, 0x82, 0x02, 0xFF, 0xFE, 0x82, 0x0C];
+        san.extend_from_slice(b"node-dns-san");
+        assert_eq!(san[1] as usize, san.len() - 2, "DER length header");
+
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "node-cn-fallback");
+        params
+            .custom_extensions
+            .push(CustomExtension::from_oid_content(&[2, 5, 29, 17], san));
+        params.is_ca = IsCa::NoCa;
+        let key = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let got = parse_node_id_from_der(cert.der()).expect("parse");
+        assert_eq!(got.as_str(), "node-dns-san");
+    }
+
     /// Documents the compile-time invariant: production builds (no `dev` feature)
     /// must never have the `dev` feature enabled.
     #[test]
