@@ -19,6 +19,13 @@ PERSISTENT_SENTINEL="/var/lib/chv/test-persistent-state-sentinel"
 CONFIG_SENTINEL="/etc/chv/test-config-sentinel"
 CONFIG_MARKER="# CHV-LIFECYCLE-TEST-MARKER"
 
+# Package format under test ("deb" or "rpm"); set by the sourcing driver
+# before this file is sourced. rpm and dpkg differ on how a modified
+# managed config file survives package REMOVAL: dpkg keeps modified
+# conffiles at their original path, while `rpm -e` removes managed config
+# files and backs up a modified %config(noreplace) file as `.rpmsave`.
+PKG_FORMAT="${PKG_FORMAT:-deb}"
+
 # ---------------------------------------------------------------------------
 # Create sentinel state
 # ---------------------------------------------------------------------------
@@ -60,6 +67,18 @@ verify_sentinels_present() {
     if [[ -f /etc/chv/controlplane.toml ]]; then
         if grep -q "$CONFIG_MARKER" /etc/chv/controlplane.toml; then
             pass "Config marker preserved in /etc/chv/controlplane.toml"
+        elif [[ "$PKG_FORMAT" == "rpm" ]] \
+            && [[ -f /etc/chv/controlplane.toml.rpmsave ]] \
+            && grep -q "$CONFIG_MARKER" /etc/chv/controlplane.toml.rpmsave; then
+            # rpm erase semantics: `rpm -e` removes managed config files,
+            # backing up a modified %config(noreplace) file as .rpmsave;
+            # a reinstall then writes the packaged default. The operator's
+            # edit surviving in the backup is the rpm-side guarantee —
+            # staying at the original path across remove->reinstall is a
+            # dpkg-only behavior.
+            pass "Config marker preserved in controlplane.toml.rpmsave (rpm erase backup)"
+        elif [[ "$PKG_FORMAT" == "rpm" ]]; then
+            error "Config marker lost: not at /etc/chv/controlplane.toml and no .rpmsave backup — verify the rpm marks it %config(noreplace)"
         else
             error "Config marker lost from /etc/chv/controlplane.toml"
         fi

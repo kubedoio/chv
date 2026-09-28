@@ -95,6 +95,7 @@ for img in $IMAGES; do
     # Build the test script that runs inside the container
     TEST_SCRIPT="$(cat <<'EOF'
 set -euo pipefail
+export PKG_FORMAT=deb
 source /lifecycle-common.sh
 
 info "--- Step 1: Fresh install ---"

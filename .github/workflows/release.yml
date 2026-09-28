@@ -43,7 +43,16 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-22.04 (glibc 2.35) so dynamically-linked binaries run on
+    # the oldest distro in our smoke matrix (debian:12 ships glibc 2.36).
+    # ubuntu-latest currently maps to ubuntu-24.04 (glibc 2.39); binaries
+    # built there fail to load on debian:12 with "GLIBC_2.3X not found",
+    # which the smoke test surfaces as a silent abort during --version checks.
+    # Same pin as package-pr.yml. The downstream package/release jobs do not
+    # execute these binaries on the runner host (smoke and lifecycle tests
+    # run inside Docker containers), so they keep ubuntu-latest.
+    # See docs/release/release-implementation-checklist.md (CI matrix item).
+    runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       pkg_version: ${{ steps.version.outputs.pkg_version }}
@@ -118,7 +127,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        # Pinned to a recent protoc (>= 3.15) so proto3 optional fields work
+        # without --experimental_allow_proto3_optional. Ubuntu 22.04's apt
+        # package ships protoc 3.12, which predates that flag becoming
+        # default. The arduino/setup-protoc action installs an official
+        # protobuf release binary into the runner toolchain.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Rust workspace (release)
         run: cargo build --workspace --release
@@ -204,6 +221,21 @@ jobs:
         with:
           name: ui-build
           path: ui/build/
+
+      - name: Restore binary executable permissions
+        # actions/upload-artifact does not preserve file permission bits:
+        # the downloaded binaries arrive 0644, get packaged non-executable,
+        # and the smoke tests catch it as "Permission denied" (exit 126) —
+        # the failure every prior Release run died on (June 2 run included).
+        # Restore +x before packaging. The PR/nightly packaging workflows
+        # build and package in the same job (no artifact round-trip) and are
+        # unaffected.
+        run: |
+          chmod +x target/release/chvctl \
+                  target/release/chv-agent \
+                  target/release/chv-controlplane \
+                  target/release/chv-nwd \
+                  target/release/chv-stord
 
       - name: Install packaging tools
         run: |
