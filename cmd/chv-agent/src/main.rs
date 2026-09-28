@@ -55,7 +55,13 @@ async fn write_file_durable(path: &Path, contents: &[u8], mode: u32) -> std::io:
     })?;
     let temp = std::path::PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
     let write = async {
+        // `.write(true)` is required: OpenOptions defaults to read-only
+        // access, and create/truncate without write access fails at the
+        // library level with InvalidInput before any file is created (a
+        // defect the R1 review caught in the first version of this
+        // function — every enrollment/rotation write silently failed).
         let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
             .mode(mode)
             .create(true)
             .truncate(true)
@@ -73,11 +79,32 @@ async fn write_file_durable(path: &Path, contents: &[u8], mode: u32) -> std::io:
             return Err(error);
         }
     }
-    tokio::fs::rename(&temp, path).await?;
+    if let Err(error) = tokio::fs::rename(&temp, path).await {
+        // The publish did not happen: clean up the temp sibling so a
+        // transient failure does not leak *.tmp-{pid} files.
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error);
+    }
     // Persist the rename itself: fsync the parent directory (O_RDONLY is
-    // sufficient for a directory fsync on Linux).
-    let directory = tokio::fs::File::open(parent).await?;
-    directory.sync_all().await?;
+    // sufficient for a directory fsync on Linux). Best-effort by
+    // necessity — the rename has already committed, so the target IS
+    // updated; returning an error here would make callers report the
+    // material as unwritten while it exists on disk (enrollment would
+    // refuse to mark itself complete). A failed dir-fsync weakens the
+    // crash-durability guarantee to that of a plain rename; log loudly.
+    let dir_fsync = async {
+        let directory = tokio::fs::File::open(parent).await?;
+        directory.sync_all().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    if let Err(error) = dir_fsync {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "published file but failed to fsync parent directory (crash durability weakened)"
+        );
+    }
     Ok(())
 }
 
@@ -1327,6 +1354,44 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn write_file_durable_publishes_content_and_leaves_no_temp_files() {
+        // Regression pin for the R1-review MAJOR: the first version of
+        // write_file_durable omitted `.write(true)`, so OpenOptions failed
+        // with InvalidInput before any file was created and EVERY
+        // enrollment/rotation write silently failed (the node would have
+        // re-enrolled with a fresh node_id on every boot). This test drives
+        // the real function so a recurrence fails CI instead of production.
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("agent.crt");
+
+        write_file_durable(&target, b"certificate-bytes", 0o644)
+            .await
+            .expect("durable write must succeed");
+        let persisted = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(persisted, b"certificate-bytes");
+
+        // The private-key variant must land owner-only.
+        let key = directory.path().join("agent.key");
+        write_private_file(&key, b"key-bytes").await.unwrap();
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // Overwrite (rotation) replaces the previous version atomically.
+        write_file_durable(&target, b"certificate-bytes-v2", 0o644)
+            .await
+            .unwrap();
+        let persisted = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(persisted, b"certificate-bytes-v2");
+
+        // No temp siblings are leaked after success.
+        let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp-"), "leaked temp file: {name}");
+        }
     }
 
     #[tokio::test]
