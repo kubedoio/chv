@@ -196,15 +196,120 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         req: Request<proto::ApplyVmDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        // M2.2b single-writer enforcement: in core-managed mode the NodeCache VM
-        // axis is a projection of Core execution only. Accepting a legacy
-        // desired-state write here would be a second writer behind the
-        // projection, so fail closed (the control plane must route through the
-        // Core authority instead).
-        if self.core_authority.is_some() {
-            return Err(Status::unimplemented(
-                "apply_vm_desired_state is unsupported in core-managed mode",
-            ));
+        // M2.5 dispatch shim: in core-managed mode the NodeCache VM axis is
+        // a projection of Core execution only, so this legacy desired-state
+        // dispatch never writes the cache directly — it routes through the
+        // Core authority BEFORE any provider side effect, exactly like the
+        // direct lifecycle RPCs. The control plane dispatches both creates
+        // and resizes through this entry point; the task's target
+        // generation (fixed at accept, retried verbatim) selects the Core
+        // command: 1 = CreateVm, anything higher is a spec update.
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            if !chv_common::is_safe_id(&inner.vm_id) {
+                return Err(Status::invalid_argument("invalid vm_id"));
+            }
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let frag = inner
+                .fragment
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing fragment"))?;
+            if frag.id != inner.vm_id || frag.kind != "vm" {
+                return Err(Status::invalid_argument(
+                    "fragment identity or kind mismatch",
+                ));
+            }
+            // The fragment's generation must agree with the task's: the
+            // control plane sets both from the same accept-time value, and
+            // the routing decision below must never arbitrate between two
+            // disagreeing inputs (a divergence is rejected, not averaged,
+            // guessed, or silently dropped).
+            if frag.generation != meta.desired_state_version {
+                return Err(Status::invalid_argument(
+                    "fragment generation must match desired_state_version",
+                ));
+            }
+            // Canonical generation parse BEFORE the stale gate, so a
+            // malformed generation is always InvalidArgument — never a
+            // stale-gate FailedPrecondition that depends on projection
+            // state. The same strict parse the adapter applies to direct
+            // mutations (no zero, no leading zeros, no signed or
+            // non-canonical forms); generations are control-plane i64
+            // sequence values, so anything above i64::MAX is out of range
+            // rather than an update task. The routing decision never
+            // guesses.
+            let generation =
+                crate::legacy_core_adapter::parse_generation(&meta.desired_state_version)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            if generation > i64::MAX as u64 {
+                return Err(Status::invalid_argument(
+                    "desired_state_version is out of range",
+                ));
+            }
+            // Same stale-generation gate as the legacy branch, against the
+            // projection (never the authority): a dispatch older than the
+            // last projected outcome is rejected before Core sees it. A
+            // create retry lands equal to the projection (both "1") and
+            // passes; Core's idempotency journal then replays it.
+            {
+                let cache = self.cache.lock().await;
+                ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            }
+            if generation != 1 {
+                // A spec update (resize carries the next generation, >= 2).
+                // Refused at this boundary BEFORE Core reserves any desired
+                // state: the Core executor does not implement UpdateVm
+                // (OperationKind::UpdateVm is Unsupported there), so
+                // accepting it would journal a definition the runtime
+                // cannot converge to. Resize-through-Core is tracked as
+                // deferred scope (#234).
+                return Err(Status::unimplemented(
+                    "desired-state VM updates (generations >= 2, e.g. resize) are unsupported in core-managed mode until the executor implements UpdateVm",
+                ));
+            }
+            let spec =
+                crate::spec::VmSpec::from_json(std::str::from_utf8(&frag.spec_json).unwrap_or(""))
+                    .map_err(|e| {
+                        Status::invalid_argument(format!("invalid fragment spec_json: {}", e))
+                    })?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Create {
+                    vm_id: inner.vm_id.clone(),
+                    spec: Box::new(spec),
+                },
+                // A generation-1 task targets a VM Core has never accepted;
+                // the create submission pins expected version 1 (validated
+                // by Core; a duplicate create surfaces as already_exists).
+                cellhv_core_types::ResourceVersion::new(1)
+                    .expect("resource version 1 is representable"),
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(map_authority_error)?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
         }
         let inner = req.into_inner();
         if !chv_common::is_safe_id(&inner.vm_id) {
@@ -3773,14 +3878,12 @@ mod tests {
         server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
 
         // ReconcileService desired-state / network-lifecycle surface.
+        // (apply_vm_desired_state is no longer a blanket refusal: since the
+        // M2.5 dispatch shim it Core-routes generation-1 creates — its
+        // fail-closed behavior is pinned by the dedicated shim tests.)
         let node = proto::reconcile_service_server::ReconcileService::apply_node_desired_state(
             &server,
             Request::new(proto::ApplyNodeDesiredStateRequest::default()),
-        )
-        .await;
-        let vm = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
-            &server,
-            Request::new(proto::ApplyVmDesiredStateRequest::default()),
         )
         .await;
         let net = proto::lifecycle_service_server::LifecycleService::start_network(
@@ -3788,11 +3891,7 @@ mod tests {
             Request::new(proto::StartNetworkRequest::default()),
         )
         .await;
-        for (name, result) in [
-            ("apply_node_desired_state", node),
-            ("apply_vm_desired_state", vm),
-            ("start_network", net),
-        ] {
+        for (name, result) in [("apply_node_desired_state", node), ("start_network", net)] {
             assert_eq!(
                 result.unwrap_err().code(),
                 tonic::Code::Unimplemented,
@@ -4115,7 +4214,16 @@ mod tests {
             Request::new(proto::StartVmRequest::default()),
         )
         .await;
-        for (name, result) in [("create_vm", create), ("start_vm", start)] {
+        let desired = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(proto::ApplyVmDesiredStateRequest::default()),
+        )
+        .await;
+        for (name, result) in [
+            ("create_vm", create),
+            ("start_vm", start),
+            ("apply_vm_desired_state", desired),
+        ] {
             let err = result.unwrap_err();
             assert_ne!(
                 err.code(),
@@ -4298,6 +4406,293 @@ mod tests {
         );
         authority.shutdown().await.unwrap();
         join.join().await.unwrap();
+    }
+
+    /// Shared fixture for the desired-state shim tests: a real authority over
+    /// a real Core journal (execution is not driven — submit-time behavior is
+    /// what the shim owns). The returned guards keep the journal directory
+    /// and actor alive for the test's duration; dropping them shuts the
+    /// actor down gracefully.
+    async fn shim_server() -> (
+        AgentServer,
+        cellhv_core_operations::AuthorityHandle,
+        tempfile::TempDir,
+        cellhv_core_operations::AuthorityActorJoin,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        // The store requires the fresh Core parent to be an euid-owned 0700
+        // directory; tempdir's mode depends on the host umask, so pin it
+        // explicitly (same pattern as the cellhv-core-store test suite).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = cellhv_core_types::HostIdentity {
+            id: cellhv_core_types::HostId::new("agent-server-test-host").unwrap(),
+            resource_version: cellhv_core_types::ResourceVersion::new(1).unwrap(),
+        };
+        let service = cellhv_core_operations::OperationService::create_new(
+            &dir.path().join("core.db"),
+            &host,
+        )
+        .unwrap();
+        let (authority, join) = cellhv_core_operations::AuthorityActor::spawn(service, 16).unwrap();
+        let mut server = test_server();
+        server.core_authority = Some(authority.clone());
+        (server, authority, dir, join)
+    }
+
+    fn desired_state_request(
+        meta: proto::RequestMeta,
+        vm_id: &str,
+        fragment_id: &str,
+        spec_json: &str,
+    ) -> proto::ApplyVmDesiredStateRequest {
+        // The control plane's node client sets the fragment generation from
+        // the same accept-time task generation as the request meta; the
+        // fixture mirrors that invariant (the divergence test below breaks
+        // it deliberately).
+        let generation = meta.desired_state_version.clone();
+        proto::ApplyVmDesiredStateRequest {
+            meta: Some(meta),
+            node_id: "node-1".to_string(),
+            vm_id: vm_id.to_string(),
+            fragment: Some(proto::DesiredStateFragment {
+                id: fragment_id.to_string(),
+                kind: "vm".to_string(),
+                generation,
+                spec_json: spec_json.as_bytes().to_vec(),
+                policy_json: vec![],
+                updated_at: "2026-09-28T00:00:00Z".to_string(),
+                updated_by: "cp".to_string(),
+            }),
+        }
+    }
+
+    /// Like [`test_meta`] but with a real timestamp: submissions (unlike
+    /// version probes) validate request metadata, which requires
+    /// `request_unix_ms > 0`.
+    fn submit_meta(desired_state_version: &str) -> proto::RequestMeta {
+        proto::RequestMeta {
+            request_unix_ms: 1_759_000_000_000,
+            ..test_meta(desired_state_version)
+        }
+    }
+
+    /// The M2.5 dispatch shim: a generation-1 desired-state dispatch (the
+    /// control plane's create) routes through the Core authority. The VM
+    /// lands in the Core journal at version 1, the NodeCache VM axis is
+    /// NOT written directly (it stays a projection of Core execution), and
+    /// a verbatim retry of the same operation replays idempotently instead
+    /// of double-creating.
+    #[tokio::test]
+    async fn core_managed_desired_state_create_routes_through_core() {
+        let (server, authority, _dir, _join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let make_request = || desired_state_request(submit_meta("1"), "vm-new", "vm-new", spec);
+
+        let resp = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(make_request()),
+        )
+        .await
+        .expect("generation-1 create dispatch must be accepted");
+        let result = resp.into_inner().result.unwrap();
+        assert_eq!(result.status, "ok");
+        assert!(result.human_summary.contains("Accepted"));
+
+        // The authority journal holds the VM at version 1.
+        let vm = authority
+            .vm(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .expect("VM must exist in the Core journal");
+        assert_eq!(vm.resource_version.get(), 1);
+
+        // The NodeCache was not written: the VM axis is projection-only in
+        // core-managed mode.
+        assert!(
+            server
+                .cache
+                .lock()
+                .await
+                .get_fragment("vm", "vm-new")
+                .is_none(),
+            "the shim must never write the cache directly"
+        );
+
+        // A verbatim retry (same operation id and generation — the control
+        // plane retries the same row) replays instead of double-creating.
+        let replay = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(make_request()),
+        )
+        .await
+        .expect("create retry must replay, not fail");
+        let replay_result = replay.into_inner().result.unwrap();
+        assert_eq!(replay_result.status, "ok");
+        assert!(
+            replay_result.human_summary.contains("Replay"),
+            "retry must surface the replay disposition, got {:?}",
+            replay_result.human_summary
+        );
+        let vm_after = authority
+            .vm(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(vm_after.resource_version.get(), 1);
+    }
+
+    /// A spec update (resize carries generation >= 2) is refused at the
+    /// shim boundary BEFORE Core reserves any desired state: the Core
+    /// executor does not implement UpdateVm, so accepting it would journal
+    /// a definition the runtime cannot converge to.
+    #[tokio::test]
+    async fn core_managed_desired_state_update_refused_before_core_reservation() {
+        let (server, authority, _dir, _join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":2,"memory_bytes":2048,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let request = desired_state_request(submit_meta("2"), "vm-new", "vm-new", spec);
+
+        let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(request),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            tonic::Code::Unimplemented,
+            "spec updates must fail closed with an explicit refusal"
+        );
+
+        // Nothing was reserved in Core: the VM is still unknown to the
+        // journal (no desired state, no version bump).
+        let vm = authority
+            .vm(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await;
+        assert!(vm.is_err(), "no Core state may be reserved by a refusal");
+    }
+
+    /// The routing decision must never guess: every non-canonical
+    /// generation — non-numeric, empty, zero, leading zeros, signed
+    /// forms, surrounding whitespace, or out of i64 range — is rejected
+    /// as InvalidArgument BEFORE the stale gate and the authority. The
+    /// cache is seeded so the VM is already in the projection: the code
+    /// must not depend on projection state (a malformed generation is
+    /// InvalidArgument whether or not a projection entry exists, never
+    /// a stale-gate FailedPrecondition).
+    #[tokio::test]
+    async fn core_managed_desired_state_rejects_unparseable_generation() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        // Seed the projection so the stale-gate branch is live for this VM:
+        // the malformed-generation rejection must fire before it.
+        {
+            let mut cache = server.cache.lock().await;
+            cache.observe_generation("vm", "vm-x", "1");
+        }
+        let spec = r#"{"name":"vm-x","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        for malformed in [
+            "not-a-number",
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            // i64::MAX + 1 and u64::MAX: generations are control-plane
+            // i64 sequence values; anything larger is out of range, not
+            // an update task.
+            "9223372036854775808",
+            "18446744073709551615",
+        ] {
+            let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+                &server,
+                Request::new(desired_state_request(
+                    test_meta(malformed),
+                    "vm-x",
+                    "vm-x",
+                    spec,
+                )),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "generation {malformed:?} must be rejected as invalid argument"
+            );
+        }
+    }
+
+    /// The fragment's generation must agree with the task's: a divergence
+    /// is malformed dispatch data (the control plane sets both from the
+    /// same accept-time value), rejected before any authority access.
+    #[tokio::test]
+    async fn core_managed_desired_state_rejects_fragment_generation_divergence() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let spec = r#"{"name":"vm-x","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let mut request = desired_state_request(test_meta("1"), "vm-x", "vm-x", spec);
+        request.fragment.as_mut().unwrap().generation = "5".to_string();
+        let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(request),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            tonic::Code::InvalidArgument,
+            "a fragment/meta generation divergence must never be arbitrated or guessed"
+        );
+    }
+
+    /// A fragment whose identity disagrees with the request's VM id is
+    /// malformed dispatch data, rejected before any authority access.
+    #[tokio::test]
+    async fn core_managed_desired_state_rejects_fragment_identity_mismatch() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let spec = r#"{"name":"vm-x","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                test_meta("1"),
+                "vm-x",
+                "some-other-vm",
+                spec,
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// The same stale-generation gate as the legacy branch: a dispatch
+    /// older than the last projected outcome is rejected before Core sees
+    /// it (the disconnected handle would surface as Unavailable if the
+    /// submission were attempted).
+    #[tokio::test]
+    async fn core_managed_desired_state_rejects_stale_generation() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        {
+            let mut cache = server.cache.lock().await;
+            cache.observe_generation("vm", "vm-old", "5");
+        }
+        let spec = r#"{"name":"vm-old","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                test_meta("3"),
+                "vm-old",
+                "vm-old",
+                spec,
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 
     /// Node-operator state transitions (drain/maintenance/scheduling) are not
