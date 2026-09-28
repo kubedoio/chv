@@ -285,6 +285,12 @@ impl Reconciler {
             state = %state.as_str(),
             "reconcile tick"
         );
+        // Leaving Draining without completing (e.g. an operator cancel)
+        // must re-arm the drain-blocked warning: a later re-entry with an
+        // unchanged remaining count must still log its first warning.
+        if state != NodeState::Draining {
+            self.drain_block_logged = None;
+        }
 
         match state {
             NodeState::Discovered => {
@@ -2141,6 +2147,41 @@ mod tests {
         // closed) and must not enqueue migration events — the Core runtime
         // is the sole effector and re-homing is the control plane's call.
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
+        {
+            let mut c = cache.lock().await;
+            c.transition_node_state(NodeState::Draining).unwrap();
+        }
+        let mut rec = Reconciler::new_observe_only(
+            cache.clone(),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        for _ in 0..2 {
+            assert!(rec.run_once().await.is_ok());
+            assert_eq!(rec.current_state().await, NodeState::Draining);
+        }
+        let cache = cache.lock().await;
+        assert!(
+            cache.pending_control_plane.is_empty(),
+            "observe-only drain must not request migrations"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_only_drain_blocks_on_undecodable_fragment() {
+        // Fail-closed pin: a fragment whose desired state cannot be decoded
+        // blocks the drain. Under the previous filter (only a decoded
+        // desired-Running fragment blocks) this corrupt fragment would be
+        // silently evacuated and the node would enter Maintenance while the
+        // VM's desired state is unknown.
+        let mut cache = test_cache();
+        cache.vm_fragments.get_mut("vm-1").unwrap().spec_json = b"not-json{\xff".to_vec();
+        let cache = Arc::new(tokio::sync::Mutex::new(cache));
         {
             let mut c = cache.lock().await;
             c.transition_node_state(NodeState::Draining).unwrap();

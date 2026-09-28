@@ -2628,10 +2628,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             ));
         }
         // Control characters are rejected outright: each one serializes as
-        // a six-byte \u escape in the evidence record, so they are the only
-        // way a note could expand past the 8000-byte bound into the store's
-        // 16 KiB record limit — and they have no place in a single-line
-        // audit record (log injection).
+        // an escape sequence (up to six bytes for a \u escape) in the
+        // evidence record, so they are the only way a note could expand
+        // past the 8000-byte bound into the store's 16 KiB record limit —
+        // and they have no place in a single-line audit record (log
+        // injection).
         if note.chars().any(|c| c.is_control()) {
             return Err(Status::invalid_argument(
                 "resolution note must not contain control characters",
@@ -2644,6 +2645,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         if requested_by.is_empty() {
             return Err(Status::invalid_argument(
                 "requested_by is required (resolution audit identity)",
+            ));
+        }
+        // Same injection boundary as the note: the audit line carries this
+        // identity and must stay single-line.
+        if requested_by.chars().any(|c| c.is_control()) {
+            return Err(Status::invalid_argument(
+                "requested_by must not contain control characters",
             ));
         }
         let resolved = authority
@@ -2659,7 +2667,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             requested_vm_id = %vm_id,
             succeeded,
             note,
-            requested_by = %meta.requested_by,
+            requested_by,
             "operator resolved inspect-required operation"
         );
         Ok(Response::new(proto::AckResponse {
@@ -3943,31 +3951,37 @@ mod tests {
     }
 
     /// The audit identity is payload too: a resolution without a
-    /// `requested_by` identity must be rejected before the authority is
-    /// touched (the terminal audit record would be unattributable).
+    /// `requested_by` identity — blank, or carrying control characters that
+    /// could inject into the single-line audit record — must be rejected
+    /// before the authority is touched.
     #[tokio::test]
     async fn resolve_inspect_required_requires_audit_identity() {
         let mut server = test_server();
         server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
-        let mut req = proto::ResolveInspectRequiredOperationRequest {
+        let base = || proto::ResolveInspectRequiredOperationRequest {
             meta: Some(test_meta("9")),
             vm_id: "vm-1".to_string(),
             operation_id: "op-1".to_string(),
             disposition: "succeeded".to_string(),
             note: "operator inspected".to_string(),
         };
-        req.meta.as_mut().unwrap().requested_by = "   ".to_string();
-        let resp =
-            proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+        for (label, requested_by) in [
+            ("blank requested_by", "   "),
+            ("control characters", "cp\ninjected"),
+        ] {
+            let mut req = base();
+            req.meta.as_mut().unwrap().requested_by = requested_by.to_string();
+            let resp = proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
                 &server,
                 Request::new(req),
             )
             .await;
-        assert_eq!(
-            resp.unwrap_err().code(),
-            tonic::Code::InvalidArgument,
-            "blank requested_by must be rejected before the authority is touched"
-        );
+            assert_eq!(
+                resp.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "{label} must be rejected before the authority is touched"
+            );
+        }
     }
 
     /// End-to-end with a real authority over a real journal: the
