@@ -33,7 +33,7 @@ CHV adopts a **stretched-L2 fabric**: kernel VXLAN with **head-end replication (
 
 ### 2. Underlay — WireGuard mesh
 
-- One WireGuard interface per host (`chv-wg`), created inside a dedicated **fabric network namespace** (`chv-fabric`), reachable from the host namespace via a veth pair plus MASQUERADE/DNAT rules (pattern proven in the o3k fabric provider). Interface names are generated deterministically by the shared provider from the configured `chv` name prefix.
+- One WireGuard interface per host (`chv-wg`), created inside a dedicated **fabric network namespace** (`chv-fabric`), reachable from the host namespace via a veth pair plus MASQUERADE/DNAT rules (pattern proven in the o3k fabric provider — **this underlay mechanism was later falsified and replaced; see the Postmortem addendum below**). Interface names are generated deterministically by the shared provider from the configured `chv` name prefix.
 - One keypair per host. The private key is provisioned at **node enrollment** (delivered over the existing mTLS enrollment channel), stored mode 0600 under the nwd state root, never logged, never present in plans, protocol messages, or CP state, and survives fabric teardown so peer public keys stay valid.
 - Peer configuration: `wg set chv-wg peer <pubkey> endpoint <underlay_ip:port> allowed-ips <peer_fabric_ip>/32`. AllowedIPs carry **only the peer's fabric transport address** — never tenant prefixes. The control plane distributes peer identities (`host_id`, `public_key`, `underlay_endpoint`, `fabric_ip`, MTU) as part of the VTEP registry.
 - WireGuard listen port: configurable, default **65001** (the shared Kubedo fabric convention, matching the o3k fabric and the `o3kio/fabric` provider default); a port conflict fails closed (no random fallback); peers consume the advertised endpoint, never assume the remote port equals the local one.
@@ -97,3 +97,49 @@ Cons:
 - **ADR-012** (disk-migration-precopy): live migration depends on this fabric for network continuity (FDB re-point + gratuitous ARP)
 - Issue kubedoio/chv#270 and the o3k P11 edge-fabric analysis (SPEC-0028/0029, ADR-0168/0171/0172) informed the underlay, key-management, and execution-discipline decisions
 - **Shared implementation**: [o3kio/fabric](https://github.com/o3kio/fabric) (`fabric-plan`/`fabric-linux`/`fabric-conformance`, contract `fabric-provider-v1.md`), the one provider codebase consumed by both `chv-nwd` and o3k's `o3k-network`; its normative counterparts are o3k [ADR-0186](https://github.com/o3kio/o3k/blob/main/docs/adr/ADR-0186-stretched-l2-edge-fabric-vxlan-her.md) and [SPEC-0049](https://github.com/o3kio/o3k/blob/main/docs/specs/SPEC-0049-stretched-l2-edge-fabric-v3.md)
+
+## Postmortem addendum (2026-09-28, fabric v0.1.2): the NAT underlay was falsified
+
+The original underlay described above — steering the WG transport through
+a veth into the fabric netns with `PREROUTING DNAT` (inbound) and
+`POSTROUTING MASQUERADE` (outbound) — carried two production races that
+the fabric repo's privileged multi-host evidence gate root-caused:
+
+1. **DNAT black-holes NEW inbound flows.** A WireGuard interface's UDP
+   socket binds in its *creating* namespace and never follows
+   `ip link set netns` (kernel-verified on 6.8: `creating_net` is
+   immutable). A wg created in the root ns and moved into the fabric ns
+   keeps its socket in the root ns while the DNAT rewrites every NEW
+   inbound flow into the fabric ns, where nothing listens. Pairs survived
+   only behind conntrack reply-tuple shields — an intermittent,
+   timing-dependent dead-pair flake (≈1-in-3 in evidence loops).
+2. **MASQUERADE remaps the source port under simultaneous initiation.**
+   For a same-port peer pair, the outbound MASQ flow's reply tuple always
+   equals the peer's inbound DNAT entry's orig tuple; conntrack requires
+   global tuple uniqueness, so simultaneous initiation remaps one side's
+   source port and the peer's WireGuard roams to a port the DNAT rule
+   does not steer (≈1-in-10 dead pairs). No iptables formulation avoids
+   this.
+
+**Resolution (fabric v0.1.2, "design F"):** the NAT machinery is removed
+entirely. The wg interface is created in the **root** namespace and then
+moved into the fabric namespace — so its UDP socket (bound in the
+creating namespace) lives in the root ns: outbound rides normal host
+routing, inbound is delivered directly to the root-ns listener. There is
+no NAT state left to race. Everything tenant-facing (VXLAN, HER, bridge,
+tenant ns) remains fully namespaced; the transport socket is root-ns, as
+it de-facto was in every released version. The provider verifies the
+placement at runtime on every apply (a three-way `ss -uln` discriminator:
+fabric-ns listener + quiet root ns → heal; listeners in both namespaces →
+fail closed unattributable, nothing deleted) and migrates legacy
+v0.1.0/v0.1.1 hosts via tolerant exact-spec cleanup on apply.
+
+Full postmortem, kernel references, and migration semantics:
+`o3kio/fabric` contract §3.10 + CHANGELOG at tag
+[v0.1.2](https://github.com/o3kio/fabric/releases/tag/v0.1.2). Evidence
+scope, honestly stated: the multi-host gate (three privileged containers
+on one kernel — real handshakes, real ARP/MAC learning, encrypted-underlay
+capture, 10/10 acceptance loop) proves the datapath and lifecycle; it is
+not a substitute for cross-machine runs over real networks, which remain
+the production gate. One-fabric-per-WG-port-per-host is a documented
+design-F limitation; CHV runs one fabric per host.
