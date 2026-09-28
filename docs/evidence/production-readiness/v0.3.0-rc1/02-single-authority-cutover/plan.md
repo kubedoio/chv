@@ -164,6 +164,21 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   structurally unreachable in core-managed.
   > **Status: COMPLETE.** Merged `ef1f9330` (PR #261, evidence
   > `m2.3-observe-only-reconciler.md`). M2.3 done; M2.4 is next.
+- **Inter-milestone: hardening sweep R1.** A comprehensive review of post-M2.3
+  main (8-round adversarial loop, three lenses + process/consumer/spec lenses)
+  triaged 15 findings (3 MAJOR: permanent post-restart quarantine of in-flight
+  operations, silent executor death, blind core-managed telemetry) and landed
+  restart-interruption markers (`running` + marker = `InspectRequired`,
+  discoverable via `/v1/operations` `recovery_assessment` and resolvable via
+  the node-scoped agent RPC), executor fatality with non-zero process exit,
+  honest core-managed telemetry (`health_status: "Unknown"`, fail-closed
+  observe-only drain with `drain_blocked` alert), BFF observed-known counting
+  and fail-closed snapshot restore, and spec/doc alignment (operation-model,
+  recovery-assessment-journal, journal-executor, authority-actor,
+  ARCHITECTURE, agent-spec, failure-matrix, OPERATIONS runbook). Legacy mode
+  untouched (M2.3 decision preserved).
+  > **Status: COMPLETE.** Merged `4e3ae1f5` (PR #269, evidence
+  > `hardening-r1-sweep.md`). M2.4 remains next.
 - **M2.4 — Fault-injection + concurrency/replay matrix.** Deterministic fault
   points: (1) before durable acceptance; (2) after acceptance, before provider
   effect; (3) during/after provider effect; (4) before compatibility projection
