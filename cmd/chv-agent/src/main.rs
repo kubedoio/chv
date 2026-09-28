@@ -173,9 +173,32 @@ async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error:
     let mut sigint = signal(SignalKind::interrupt())?;
     let owner = start_core_native(config).await?;
     info!(socket = %owner.socket_path().display(), "core-native authority ready");
-    tokio::select! {
-        _ = sigterm.recv() => info!("received SIGTERM, shutting down core-native authority"),
-        _ = sigint.recv() => info!("received SIGINT, shutting down core-native authority"),
+    let mut fatality_check = tokio::time::interval(Duration::from_millis(500));
+    fatality_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, shutting down core-native authority");
+                break;
+            }
+            _ = sigint.recv() => {
+                info!("received SIGINT, shutting down core-native authority");
+                break;
+            }
+            _ = fatality_check.tick() => {
+                // A fatally terminated executor must fail the process: the
+                // authority would keep acknowledging operations that are
+                // never executed. Exit non-zero so the supervisor restarts
+                // the agent.
+                if owner.executor_fatal() {
+                    tracing::error!(
+                        "core journal executor terminated fatally — exiting for supervisor restart"
+                    );
+                    owner.shutdown().await?;
+                    return Err("core journal executor terminated fatally".into());
+                }
+            }
+        }
     }
     owner.shutdown().await?;
     Ok(())
@@ -748,7 +771,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!("agent gRPC server exited unexpectedly — shutting down");
                 supervisor.shutdown().await;
                 if let Some(owner) = core_owner.take() { let _ = owner.shutdown().await; }
-                break;
+                // Exit non-zero: the systemd unit uses Restart=on-failure,
+                // and in core-managed mode this process is the sole Core
+                // authority — a clean exit here would strand the node with
+                // no supervisor recovery (mirrors the executor-fatal path).
+                return Err("agent gRPC server exited unexpectedly".into());
             }
         }
 
@@ -849,8 +876,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(owner) = &core_owner {
             // A wedged Core journal must not silently pass for a healthy node:
             // accepted operations would stop executing while the API keeps
-            // acknowledging them.
-            health.update_core_journal(owner.journal_scan_healthy());
+            // acknowledging them. A fatal executor termination is included
+            // here even though the poller stopped scanning at that point.
+            health.update_core_journal(owner.journal_scan_healthy() && !owner.executor_fatal());
         }
 
         let current_state = reconciler.current_state().await;
@@ -987,13 +1015,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
-        for vm in reconciler.vm_runtime().list().await {
+        for vm in reconciler.reported_vms().await {
             let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
                 runtime_status: vm.runtime_status.clone(),
                 observed_generation: vm.observed_generation.clone(),
-                health_status: "Healthy".to_string(),
+                // Core-managed telemetry reports the Core projection
+                // (desired state) as runtime_status — a documented residual
+                // — so observed health is genuinely not known here, and a
+                // stuck (inspect-required) VM must not be reported Healthy.
+                // Legacy reports keep their historical value.
+                health_status: if core_owner.is_some() {
+                    "Unknown"
+                } else {
+                    "Healthy"
+                }
+                .to_string(),
                 last_error: vm.last_error.unwrap_or_default(),
                 reported_unix_ms: now_unix_ms(),
                 cpu_percent: 0.0,
@@ -1155,7 +1193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ms = metrics_state.lock().await;
             ms.node_id = cache.lock().await.node_id.clone();
             ms.node_state = reconciler.current_state().await.as_str().to_string();
-            ms.vm_count = reconciler.vm_runtime().list().await.len();
+            ms.vm_count = reconciler.reported_vms().await.len();
             ms.tick_count = tick_count;
             ms.reconcile_failures = consecutive_reconcile_failures;
             ms.health_failures = consecutive_health_failures;
@@ -1164,6 +1202,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ms.cp_disconnected_duration_ms = cp_snapshot.disconnected_duration_ms;
             ms.cp_consecutive_failures = cp_snapshot.consecutive_failures;
             ms.cp_total_deferred_messages = cp_snapshot.total_deferred_messages;
+        }
+
+        // A fatally terminated Core executor must fail the process: the
+        // authority would keep acknowledging operations that are never
+        // executed. The health aggregation and telemetry above have already
+        // marked the node Degraded and reported it; exit non-zero so the
+        // supervisor restarts the agent.
+        if core_owner
+            .as_ref()
+            .is_some_and(|owner| owner.executor_fatal())
+        {
+            tracing::error!(
+                "core journal executor terminated fatally — shutting down for supervisor restart"
+            );
+            supervisor.shutdown().await;
+            if let Some(owner) = core_owner.take() {
+                let _ = owner.shutdown().await;
+            }
+            return Err("core journal executor terminated fatally".into());
         }
     }
 

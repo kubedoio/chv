@@ -40,8 +40,15 @@ explicit shutdown and `join()` so thread failure remains observable.
 
 ## Exposed Operations
 
-The actor exposes durable mutation submission and read-only host, VM,
-operation, event, and restart inspection. It intentionally does not expose
+The actor exposes durable mutation submission, the destructive-recovery
+capabilities — `ExecutionHandle::classify_restart_interrupted` and
+`mark_operation_abandoned` on the executor domain, and
+`AuthorityHandle::resolve_inspect_required` on the handle surface (the
+runtime owner additionally calls the service-level
+`OperationService::classify_restart_interrupted_operations` once at startup,
+before the actor is spawned) — each gated by the store's marker and token
+fences — and read-only host, VM, operation, event, and restart inspection. It
+intentionally does not expose
 `claim_attempt` or `finish`: those belong to a later bounded executor slice and
 would create an accidental runtime execution boundary here.
 

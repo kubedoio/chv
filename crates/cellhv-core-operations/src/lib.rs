@@ -430,18 +430,99 @@ impl OperationService {
     }
 
     pub(crate) fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
-        self.store
-            .list_incomplete_execution_operations()?
-            .into_iter()
-            .map(|record| {
-                let operation_id = record.entry.operation.id.clone();
-                Ok(RestartOperation {
-                    disposition: classify_restart(&record.entry.operation),
-                    entry: record.entry,
-                    recovery_assessment: self.store.latest_recovery_assessment(&operation_id)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()
+        let mut operations = Vec::new();
+        for record in self.store.list_incomplete_execution_operations()? {
+            let operation_id = record.entry.operation.id.clone();
+            let recovery_assessment = self.store.latest_recovery_assessment(&operation_id)?;
+            let disposition = match record.entry.operation.status {
+                OperationStatus::Accepted => RestartDisposition::Ready,
+                // A `running` operation is only restart-pending when it
+                // carries the durable restart-interruption marker (written
+                // once by `classify_restart_interrupted_operations` at
+                // composition start, before the executor can claim). Without
+                // the marker the operation was claimed by the live executor
+                // of this process and must not be re-classified: treating an
+                // in-flight operation as `InspectRequired` would quarantine
+                // its VM for the process lifetime.
+                OperationStatus::Running => {
+                    if recovery_assessment.is_some() {
+                        RestartDisposition::InspectRequired
+                    } else {
+                        continue;
+                    }
+                }
+                OperationStatus::Succeeded
+                | OperationStatus::Failed
+                | OperationStatus::Unsupported => RestartDisposition::Terminal,
+            };
+            operations.push(RestartOperation {
+                disposition,
+                entry: record.entry,
+                recovery_assessment,
+            });
+        }
+        Ok(operations)
+    }
+
+    /// Durably marks every operation still `running` at process start as
+    /// restart-interrupted — the `InspectRequired` marker.
+    ///
+    /// Composition must call this exactly once, before the executor starts
+    /// claiming: afterwards, `running` + marker means stuck
+    /// (`InspectRequired`), `running` without marker means in flight in this
+    /// process. Idempotent across crash-loop restarts.
+    pub fn classify_restart_interrupted_operations(&mut self) -> Result<Vec<OperationId>> {
+        let evidence = serde_json::json!({"source": "restart-classification"});
+        Ok(self
+            .store
+            .classify_running_operations_interrupted(&evidence)?)
+    }
+
+    /// Durably marks one operation abandoned by this process's executor
+    /// (claimed, execution failed ambiguously, deliberately left `running`).
+    /// Makes the operation `InspectRequired` immediately; no-op when the
+    /// operation is no longer `running`.
+    pub fn mark_operation_abandoned(&mut self, id: &OperationId, code: &str) -> Result<bool> {
+        Ok(self.store.mark_operation_abandoned(id, code)?)
+    }
+
+    /// Resolves one restart-interrupted (`InspectRequired`) operation after
+    /// explicit operator inspection: terminal-persists the operation and
+    /// records the resolution as recovery evidence.
+    ///
+    /// Destructive-recovery capability: the store fails closed unless the
+    /// operation still carries the restart-interruption marker and its stored
+    /// attempt token fences the transition. `succeeded` selects the terminal
+    /// outcome (`Succeeded` when the operator verified the provider effect
+    /// happened or is acceptable; `Failed` otherwise); `note` is recorded as
+    /// resolution evidence.
+    pub fn resolve_inspect_required(
+        &mut self,
+        id: &OperationId,
+        succeeded: bool,
+        note: &str,
+    ) -> Result<CompletionResult> {
+        let evidence = serde_json::json!({"source": "operator-resolution", "note": note});
+        let status = if succeeded {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        };
+        let payload = if succeeded {
+            None
+        } else {
+            Some(serde_json::json!({"code": "OPERATOR_RESOLUTION", "note": note}))
+        };
+        let completed =
+            self.store
+                .resolve_interrupted_operation(id, status, payload.as_ref(), &evidence)?;
+        Ok(CompletionResult {
+            disposition: match completed.disposition {
+                cellhv_core_store::CompletionDisposition::Applied => CompletionDisposition::Applied,
+                cellhv_core_store::CompletionDisposition::Replay => CompletionDisposition::Replay,
+            },
+            entry: completed.entry,
+        })
     }
 
     #[allow(dead_code)] // Compiler-inaccessible outside this production-unwired crate.
@@ -608,16 +689,6 @@ impl OperationService {
                     power_desired(&self.store, vm_id, expected, RequestedPowerState::Running)?;
                 Ok(Some(current))
             }
-        }
-    }
-}
-
-pub fn classify_restart(operation: &Operation) -> RestartDisposition {
-    match operation.status {
-        OperationStatus::Accepted => RestartDisposition::Ready,
-        OperationStatus::Running => RestartDisposition::InspectRequired,
-        OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported => {
-            RestartDisposition::Terminal
         }
     }
 }
@@ -1174,30 +1245,64 @@ mod tests {
     }
 
     #[test]
-    fn restart_classification_covers_retry_boundaries() {
-        let mut operation = Operation {
-            id: OperationId::new("op").unwrap(),
-            kind: OperationKind::StartVm,
-            vm_id: VmId::new("vm").unwrap(),
-            status: OperationStatus::Accepted,
-            request_fingerprint: "fingerprint".to_owned(),
-            attempt_count: 0,
-            max_attempts: 3,
-        };
-        assert_eq!(classify_restart(&operation), RestartDisposition::Ready);
-        operation.status = OperationStatus::Running;
-        operation.attempt_count = 2;
-        assert_eq!(
-            classify_restart(&operation),
-            RestartDisposition::InspectRequired
+    fn restart_operations_requires_marker_for_running_inspect() {
+        // Contract pin for the restart-marker semantics: a `running`
+        // operation WITHOUT the durable marker is in flight in the live
+        // process and must be excluded from the restart snapshot (its VM
+        // must not be quarantined by the executor scan); WITH the marker —
+        // written once by startup classification before the executor can
+        // claim — it is InspectRequired and carries its recovery
+        // assessment for operator resolution.
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new("op-1").unwrap();
+        let token = AttemptToken::new("attempt-1").unwrap();
+        service.claim_attempt(&id, &token).unwrap();
+        let pending = service.restart_operations().unwrap();
+        assert!(
+            pending.is_empty(),
+            "unmarked running operation is in flight in this process and must be excluded"
         );
-        operation.attempt_count = 3;
-        assert_eq!(
-            classify_restart(&operation),
-            RestartDisposition::InspectRequired
+        // Operator-discovery surface (Core API /v1/operations is served from
+        // these entries): an in-flight operation is `Running` with NO
+        // recovery assessment — byte-distinct from a stuck one.
+        let in_flight = service.operations().unwrap();
+        let entry = in_flight
+            .iter()
+            .find(|e| e.operation.id.as_str() == "op-1")
+            .unwrap();
+        assert_eq!(entry.operation.status, OperationStatus::Running);
+        assert!(
+            entry.recovery_assessment.is_none(),
+            "in-flight operations carry no recovery marker"
         );
-        operation.status = OperationStatus::Succeeded;
-        assert_eq!(classify_restart(&operation), RestartDisposition::Terminal);
+        let classified = service.classify_restart_interrupted_operations().unwrap();
+        assert_eq!(classified.len(), 1);
+        let pending = service.restart_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].disposition, RestartDisposition::InspectRequired);
+        assert!(pending[0].recovery_assessment.is_some());
+        // After classification the entry surface flips: `Running` +
+        // recovery assessment = InspectRequired (stuck, resolvable).
+        let stuck = service.operations().unwrap();
+        let entry = stuck
+            .iter()
+            .find(|e| e.operation.id.as_str() == "op-1")
+            .unwrap();
+        let assessment = entry
+            .recovery_assessment
+            .as_ref()
+            .expect("classified operation must carry its recovery marker");
+        assert!(!assessment.evidence_fingerprint.is_empty());
     }
 
     #[test]

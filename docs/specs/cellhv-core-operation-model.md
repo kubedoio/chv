@@ -155,12 +155,27 @@ On restart, the store returns only accepted and running operations in stable
 | Durable state | Classification | Meaning |
 |---|---|---|
 | accepted | `Ready` | no attempt was claimed |
-| running | `InspectRequired` | ownership inspection must resolve the active attempt; direct execution is forbidden |
+| running without a recovery-assessment marker | *(excluded)* | in flight in the live process; claimed by this process's executor and never re-classified |
+| running with a recovery-assessment marker | `InspectRequired` | the owning process is gone; operator inspection must resolve the operation |
 | any terminal state | `Terminal` | classifier result for an explicitly supplied operation; terminal rows are omitted from the incomplete list |
 
+The recovery-assessment marker is the durable boundary between "in flight
+here" and "stuck". Composition writes it exactly once at process start
+(`classify_restart_interrupted_operations`, before the executor can claim) and
+when the executor abandons an ambiguous claim or finish; re-running startup
+classification with identical evidence is idempotent across crash loops. The
+journal entry surface (`/v1/operations`) carries the latest assessment, so
+operators discover stuck operations as `running` **plus** a recovery
+assessment, distinct from in-flight operations.
+
 Classification does not itself retry, inspect runtime reality, mark failure,
-or assume whether a prior side effect occurred. Re-adoption and ambiguous
-outcome policy belong to Phase C recovery and must use ownership evidence.
+or assume whether a prior side effect occurred. Resolution of an
+`InspectRequired` operation is a destructive-recovery transition
+(`resolve_inspect_required`): it terminal-persists the operation under the
+stored attempt token, is replay-idempotent by evidence fingerprint, and is
+exposed to operators through the agent's node-scoped gRPC surface.
+Re-adoption and ambiguous-outcome retry policy belong to Phase C recovery and
+must use ownership evidence.
 The restart projection does not expose the opaque active token. The store uses
 it only inside token-fenced execution and assessment transactions; transport
 handles, restart records, events, and ordinary operation responses do not

@@ -78,6 +78,7 @@ fn entry(
         result: None,
         error: None,
         request_metadata: None,
+        recovery_assessment: None,
     }
 }
 

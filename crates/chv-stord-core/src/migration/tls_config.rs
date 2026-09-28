@@ -333,6 +333,20 @@ mod tests {
         assert!(cfg.ca_pem == a, "CA PEM must be preserved");
     }
 
+    /// x509-parser 0.18 behavior lock: the PEM reader ignores lines that are
+    /// not valid UTF-8 in the comment section before BEGIN (some provisioning
+    /// tools emit them). A certificate PEM carrying such a comment must still
+    /// load and validate.
+    #[test]
+    fn enabled_cert_pem_with_non_utf8_comment_loads() {
+        let (cert, key, ca) = matching_pair("node-a");
+        let mut commented = b"# provisioning note: \xFF\xFE\xf0\x28\x8c\x28\n".to_vec();
+        commented.extend_from_slice(&cert);
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&commented, &key, &ca);
+        load_migration_tls(true, Some(&cp), Some(&kp), Some(&ap), Some("stord-peer"))
+            .expect("PEM with a non-UTF-8 comment line must load");
+    }
+
     #[test]
     fn enabled_mismatched_keypair_fails() {
         let (c, k, a) = mismatched_pair("node-a");

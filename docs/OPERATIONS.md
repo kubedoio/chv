@@ -326,6 +326,48 @@ openssl s_client -connect <PEER_IP>:8444 \
   -CAfile /etc/chv/certs/ca.pem
 ```
 
+### Stuck Operations After Agent Crash (InspectRequired)
+
+When the agent process dies while a Core operation is in flight, the next
+startup durably marks that operation **InspectRequired** and quarantines its
+VM: the executor will not touch the VM again until an operator resolves the
+operation. This is fail-closed — the side effect may or may not have happened.
+
+**Recognize it:**
+
+- Agent log at startup: `restart classification marked running operations InspectRequired`
+- Scan-time log on any change: `journal scan: inspect-required operations changed`
+- Node-local Core API:
+  ```bash
+  curl -s --unix-socket /run/chv/core/core-v1.sock http://localhost/v1/operations
+  ```
+  Stuck operations are `status: "running"` **plus** a `recovery_assessment`
+  field; in-flight operations are `running` without it.
+
+**Resolve it** (on the node; the control plane deliberately cannot):
+
+```bash
+grpcurl -unix /run/chv/agent/api.sock \
+  chv.controlplane.node.v1.LifecycleService/ResolveInspectRequiredOperation \
+  -d '{
+    "meta": {
+      "operation_id": "resolve-<operation_id>",
+      "requested_by": "operator-name"
+    },
+    "operation_id": "<from /v1/operations>",
+    "vm_id": "<the operation's vm_id>",
+    "disposition": "succeeded",
+    "note": "VM is running and healthy; start completed before the crash"
+  }'
+```
+
+Use `"disposition": "succeeded"` when the real-world state matches the
+operation's intent (e.g. the VM is actually running after a stuck start), and
+`"failed"` when it does not. The resolution terminal-persists the operation
+under its original attempt token, is replay-idempotent (safe to retry), and
+the VM is un-quarantined on the next executor scan. The note must state what
+was observed and how it was verified — it is recorded in the journal.
+
 ---
 
 ## Maintenance Windows
@@ -348,8 +390,14 @@ curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
 
 **What happens:**
 1. Node transitions to `Draining` — scheduling is paused immediately
-2. Agent reconcile loop issues migration requests for each running VM
-3. VMs are live-migrated to other `TenantReady` nodes
+2. Agent reconcile loop issues migration requests for each running VM.
+   **Core-managed mode:** the agent is observe-only and issues **no**
+   migration requests — the control plane must re-home the VMs. While any
+   desired-Running VM (or an undecodable fragment) remains, the agent blocks
+   the `Maintenance` transition and raises a `drain_blocked` control-plane
+   alert (on change, not per tick).
+3. VMs are live-migrated to other `TenantReady` nodes (legacy mode), or
+   re-homed by the control plane (core-managed mode)
 4. When all VMs are evacuated, node transitions to `Maintenance` automatically
 5. Perform maintenance (kernel update, hardware swap, etc.)
 6. Restart agent: `sudo systemctl start chv-agent`

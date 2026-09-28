@@ -56,6 +56,23 @@ async fn stop(f: Fixture) {
     f.authority.shutdown().await.unwrap();
     f.join.join().await.unwrap();
 }
+fn submit_start(vm: &str, op: &str) -> SubmitMutation {
+    SubmitMutation {
+        operation_id: OperationId::new(op).unwrap(),
+        idempotency_scope: "test".into(),
+        idempotency_key: IdempotencyKey::new(op).unwrap(),
+        expected_vm_version: ResourceVersion::new(1).unwrap(),
+        metadata: OperationRequestMetadata {
+            requested_by: "test-requester".to_owned(),
+            external_operation_id: "external-test".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: None,
+        },
+        command: MutationCommand::StartVm {
+            vm_id: VmId::new(vm).unwrap(),
+        },
+    }
+}
 struct Counting {
     calls: AtomicUsize,
     result: Option<serde_json::Value>,
@@ -104,6 +121,9 @@ async fn replay_quarantines_later_same_vm_work() {
         )
         .await
         .unwrap();
+    // Production startup durably marks running operations as
+    // restart-interrupted before the executor can claim.
+    f.execution.classify_restart_interrupted().await.unwrap();
     let runtime = Arc::new(Counting {
         calls: AtomicUsize::new(0),
         result: None,
@@ -156,6 +176,9 @@ async fn claim_ambiguity_quarantines_queued_successor() {
         )
         .await
         .unwrap();
+    // Production startup durably marks running operations as
+    // restart-interrupted before the executor can claim.
+    f.execution.classify_restart_interrupted().await.unwrap();
     let runtime = Arc::new(Counting {
         calls: AtomicUsize::new(0),
         result: None,
@@ -318,6 +341,9 @@ async fn abort_leaves_claimed_inspect_required_and_queued_accepted() {
     executor.scan_ready().await.unwrap();
     runtime.entered.notified().await;
     executor.abort().await.unwrap();
+    // A restart classifies the aborted (still-running) claim as
+    // InspectRequired before the next executor can claim.
+    f.execution.classify_restart_interrupted().await.unwrap();
     let restart = f.execution.restart_operations().await.unwrap();
     assert_eq!(
         restart
@@ -446,6 +472,8 @@ async fn panic_aborts_active_peer_and_never_launches_pending_work() {
         .iter()
         .any(|x| x.code == ExecutionFailureCode::TaskPanicked));
     assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    // A restart classifies the panic-abandoned claims as InspectRequired.
+    f.execution.classify_restart_interrupted().await.unwrap();
     let restart = f.execution.restart_operations().await.unwrap();
     assert_eq!(
         restart
@@ -494,6 +522,9 @@ async fn complete_snapshot_quarantines_before_capacity_admission() {
         )
         .await
         .unwrap();
+    // Production startup durably marks running operations as
+    // restart-interrupted before the executor can claim.
+    f.execution.classify_restart_interrupted().await.unwrap();
     let runtime = Arc::new(Counting {
         calls: AtomicUsize::new(0),
         result: Some(serde_json::json!({"ok":true})),
@@ -526,6 +557,166 @@ async fn concurrent_scans_admit_one_copy_without_false_quarantine() {
         .await
         .unwrap();
     assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn in_flight_operation_is_not_reclassified_inspect_required() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority.submit(submit_start("a", "two")).await.unwrap();
+    let runtime = Arc::new(Blocking {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 2).unwrap();
+    let first = executor.scan_ready().await.unwrap();
+    assert_eq!(first.scheduled.len(), 2);
+    runtime.entered.notified().await;
+    // While "one" is claimed and executing, the always-on poller must not
+    // re-classify it as InspectRequired: doing so would quarantine VM "a" for
+    // the process lifetime and drop the already-queued successor work.
+    let second = executor.scan_ready().await.unwrap();
+    assert!(second.inspect_required.is_empty());
+    assert!(second.quarantined.is_empty());
+    assert!(second.scheduled.is_empty());
+    runtime.release.add_permits(2);
+    let report = executor.shutdown().await.unwrap();
+    assert_eq!(report.acquired, 2);
+    assert_eq!(report.completed, 2);
+    assert!(report.failures.is_empty());
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    // Both operations are terminal: nothing is left inspect-required.
+    assert!(f.execution.restart_operations().await.unwrap().is_empty());
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn resolved_inspect_required_unquarantines_vm() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority.submit(submit_start("a", "two")).await.unwrap();
+    f.execution
+        .claim_attempt(
+            OperationId::new("one").unwrap(),
+            AttemptToken::new("prior").unwrap(),
+        )
+        .await
+        .unwrap();
+    // Resolution fails closed without the restart-interruption marker.
+    assert!(f
+        .authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            true,
+            "premature".to_owned()
+        )
+        .await
+        .is_err());
+    f.execution.classify_restart_interrupted().await.unwrap();
+    // Classification is idempotent across crash-loop restarts.
+    assert!(f
+        .execution
+        .classify_restart_interrupted()
+        .await
+        .unwrap()
+        .is_empty());
+    let runtime = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: Some(serde_json::json!({"ok":true})),
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 2).unwrap();
+    let blocked = executor.scan_ready().await.unwrap();
+    assert_eq!(
+        blocked.inspect_required,
+        vec![OperationId::new("one").unwrap()]
+    );
+    assert_eq!(blocked.quarantined, vec![OperationId::new("two").unwrap()]);
+    // Operator inspection resolves the stuck operation as Succeeded.
+    let resolved = f
+        .authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            true,
+            "operator verified".to_owned(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.disposition,
+        cellhv_core_operations::CompletionDisposition::Applied
+    );
+    assert_eq!(
+        resolved.entry.operation.status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    // The next scan un-quarantines VM "a" and admits the successor.
+    let scan = executor.scan_ready().await.unwrap();
+    assert_eq!(scan.scheduled, vec![OperationId::new("two").unwrap()]);
+    assert!(scan.quarantined.is_empty());
+    assert!(scan.inspect_required.is_empty());
+    executor.shutdown().await.unwrap();
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    // Resolving again with the same evidence is an idempotent replay.
+    let replay = f
+        .authority
+        .resolve_inspect_required(
+            OperationId::new("one").unwrap(),
+            true,
+            "operator verified".to_owned(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.disposition,
+        cellhv_core_operations::CompletionDisposition::Replay
+    );
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn task_panic_is_fatal_and_sticky() {
+    struct Panicking;
+    #[async_trait]
+    impl CoreVmRuntime for Panicking {
+        async fn execute(
+            &self,
+            _: OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
+            panic!("task panic payload");
+        }
+    }
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    let executor = JournalExecutor::start(f.execution.clone(), Arc::new(Panicking), 1, 1).unwrap();
+    executor.scan_ready().await.unwrap();
+    // The fatal termination is surfaced by every later scan instead of
+    // silently disabling the executor while the authority keeps accepting.
+    let mut fatal = None;
+    for _ in 0..500 {
+        match executor.scan_ready().await {
+            Err(ExecutorError::Fatal { fatality }) => {
+                fatal = Some(fatality);
+                break;
+            }
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            Err(other) => panic!("expected fatal termination, got {other:?}"),
+        }
+    }
+    let fatal = fatal.expect("executor did not report fatal termination");
+    assert_eq!(fatal.code, ExecutionFailureCode::TaskPanicked);
+    assert_eq!(fatal.operation_id, Some(OperationId::new("one").unwrap()));
+    // Sticky: the executor never recovers within the process lifetime.
+    assert!(matches!(
+        executor.scan_ready().await,
+        Err(ExecutorError::Fatal { .. })
+    ));
+    let report = executor.shutdown().await.unwrap();
+    assert!(report
+        .failures
+        .iter()
+        .any(|x| x.code == ExecutionFailureCode::TaskPanicked));
     stop(f).await;
 }
 
@@ -815,4 +1006,21 @@ async fn scheduled_bookkeeping_is_bounded_after_completion() {
         .await
         .unwrap();
     stop(f).await;
+}
+
+#[test]
+fn claim_replay_outcome_is_counted_and_never_poisons_the_vm() {
+    // Contract pin for the R1 fix: a claim replay is the idempotent-success
+    // path. It must not be a failure, must not failure-quarantine the VM
+    // (the old rule "anything but AcquiredCompleted quarantines" would
+    // poison a VM whose claim is merely shared), and must only bump the
+    // claim_replays counter. Under restart-marker semantics the executor
+    // only claims Accepted operations, so this unit pin is the regression
+    // guard for the outcome arm.
+    let outcome = WorkOutcome::ClaimReplay;
+    assert!(!outcome.quarantines());
+    let mut report = ExecutionReport::default();
+    merge_outcome(&mut report, WorkOutcome::ClaimReplay);
+    assert_eq!(report.claim_replays, 1);
+    assert!(report.failures.is_empty());
 }

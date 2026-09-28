@@ -15,15 +15,19 @@ pub async fn get_metrics(
         .await
         .unwrap_or(0);
 
+    // Only observed-known states are counted: core-managed agents report
+    // the desired state as runtime_status with health "Unknown" (observed
+    // power state is not reported yet), so counting by runtime_status
+    // alone would present desired-Running as running workloads.
     let vm_running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running'",
+        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running' AND COALESCE(health_status, 'Unknown') != 'Unknown'",
     )
     .fetch_one(&state.pool)
     .await
     .unwrap_or(0);
 
     let vm_stopped: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Stopped'",
+        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Stopped' AND COALESCE(health_status, 'Unknown') != 'Unknown'",
     )
     .fetch_one(&state.pool)
     .await
@@ -67,7 +71,7 @@ pub async fn get_metrics(
             GROUP BY vm_id
         ) latest ON m.vm_id = latest.vm_id AND m.collected_at = latest.latest
         JOIN vms v ON v.vm_id = m.vm_id
-        JOIN vm_observed_state s ON s.vm_id = m.vm_id AND s.runtime_status = 'Running'
+        JOIN vm_observed_state s ON s.vm_id = m.vm_id AND s.runtime_status = 'Running' AND COALESCE(s.health_status, 'Unknown') != 'Unknown'
         ORDER BY m.memory_bytes_used DESC
         LIMIT 10
         "#,

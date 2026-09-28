@@ -27,6 +27,7 @@ CORE_MANIFESTS = (
     "crates/cellhv-core-operations/Cargo.toml",
     "crates/cellhv-core-executor/Cargo.toml",
     "crates/cellhv-core-runtime-ownership/Cargo.toml",
+    "crates/cellhv-core-runtime-owner/Cargo.toml",
     "crates/cellhv-core-recovery/Cargo.toml",
     "crates/cellhv-core-api/Cargo.toml",
     "crates/cellhv-nodecache-migration/Cargo.toml",
@@ -61,6 +62,7 @@ CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
 CORE_EXECUTOR_PACKAGE = "cellhv-core-executor"
 CORE_RUNTIME_OWNERSHIP_PACKAGE = "cellhv-core-runtime-ownership"
+CORE_RUNTIME_OWNER_PACKAGE = "cellhv-core-runtime-owner"
 CORE_RECOVERY_PACKAGE = "cellhv-core-recovery"
 LINUX_OBSERVATION_OWNER = Path("crates/chv-agent-runtime-ch")
 LINUX_OBSERVATION_MODULE = Path("crates/chv-agent-runtime-ch/src/lib.rs")
@@ -105,6 +107,19 @@ RECOVERY_ALLOWED_DEPENDENCIES = {
     "cellhv-core-runtime-ownership",
     "serde_json",
     "thiserror",
+}
+# The composition crate owns the executor, the Core API listener, and the
+# authority actor: it may depend on the Core surface and tokio/tracing, and
+# nothing else (no hypervisor runtime, no storage, no agent-plane crates —
+# those belong behind the CoreVmRuntime/ActivatedStore traits it consumes).
+RUNTIME_OWNER_ALLOWED_DEPENDENCIES = {
+    "cellhv-core-api",
+    "cellhv-core-executor",
+    "cellhv-core-operations",
+    "cellhv-core-startup",
+    "thiserror",
+    "tokio",
+    "tracing",
 }
 OPERATION_AUTHORITY_DECLARATION = re.compile(
     r"\b(?:struct|enum|trait|type)\s+"
@@ -289,6 +304,15 @@ def check(root: Path) -> list[str]:
         errors.append(
             f"{CORE_EXECUTOR_PACKAGE}: dependency boundary forbids "
             f"{unexpected_executor_dependencies}"
+        )
+    unexpected_runtime_owner_dependencies = sorted(
+        dependency_graph.get(CORE_RUNTIME_OWNER_PACKAGE, set())
+        - RUNTIME_OWNER_ALLOWED_DEPENDENCIES
+    )
+    if unexpected_runtime_owner_dependencies:
+        errors.append(
+            f"{CORE_RUNTIME_OWNER_PACKAGE}: dependency boundary forbids "
+            f"{unexpected_runtime_owner_dependencies}"
         )
     unexpected_ownership_dependencies = sorted(
         dependency_graph.get(CORE_RUNTIME_OWNERSHIP_PACKAGE, set())

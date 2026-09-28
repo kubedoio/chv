@@ -114,6 +114,14 @@ pub struct OperationJournalEntry {
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
     pub request_metadata: Option<OperationRequestMetadata>,
+    /// Latest recovery assessment for this operation, present exactly when
+    /// the operation carries the durable restart-interruption marker (or an
+    /// abandonment/assessment record). This is the operator-discovery
+    /// surface: `status == Running` + this field means InspectRequired
+    /// (stuck, resolvable via the agent resolve RPC), while `Running`
+    /// without it is in flight in the live process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_assessment: Option<RecoveryAssessmentRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +153,7 @@ pub struct CompletedOperation {
     pub entry: OperationJournalEntry,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RecoveryClassification {
     OwnershipMatched,
     OwnedAliveSocketUnavailable,
@@ -156,14 +164,14 @@ pub enum RecoveryClassification {
     CorruptOwnership,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RecoveryDisposition {
     OwnershipMatchedPendingControl,
     ExitedPendingPolicy,
     Quarantined,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RecoveryAssessmentRecord {
     pub revision: u64,
     pub classification: RecoveryClassification,
@@ -946,6 +954,307 @@ impl CoreStore {
         Ok(RecordedRecoveryAssessment {
             disposition: AssessmentDisposition::Applied,
             record: record.record,
+        })
+    }
+
+    /// Durably marks every operation still `running` as restart-interrupted,
+    /// using each operation's stored attempt token.
+    ///
+    /// This is the durable marker that distinguishes a *stuck* operation (its
+    /// owning process is gone; the store was reopened by this process) from an
+    /// operation in flight in the *current* process: after this call,
+    /// `running` + marker means `InspectRequired`, while `running` without a
+    /// marker can only have been claimed by the live executor of this process.
+    /// Composition must run this exactly once, before the executor starts
+    /// claiming. The evidence is deliberately stable so crash-loop restarts
+    /// are idempotent: re-running with identical evidence is a no-op for
+    /// already-marked operations.
+    pub fn classify_running_operations_interrupted(
+        &mut self,
+        evidence: &serde_json::Value,
+    ) -> Result<Vec<OperationId>> {
+        if !evidence.is_object() {
+            return Err(StoreError::InvalidDomain(
+                "restart classification evidence must be a JSON object".to_owned(),
+            ));
+        }
+        let evidence_json = canonical_json(evidence)?;
+        if evidence_json.len() > MAX_RECOVERY_EVIDENCE_BYTES {
+            return Err(StoreError::InvalidDomain(
+                "restart classification evidence exceeds 16 KiB".to_owned(),
+            ));
+        }
+        let evidence_fingerprint = format!("{:x}", Sha256::digest(evidence_json.as_bytes()));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = tx.prepare(
+            "SELECT operation_id,active_attempt_token FROM operations WHERE status='running' ORDER BY accepted_at,operation_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut classified = Vec::new();
+        for (operation_id, active_token) in rows {
+            let attempt_token = active_token.ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "running operation {operation_id} has no active attempt token"
+                ))
+            })?;
+            validate_attempt_token(&attempt_token)?;
+            if read_recovery_assessment_by_fingerprint(
+                &tx,
+                &operation_id,
+                &attempt_token,
+                &evidence_fingerprint,
+            )?
+            .is_some()
+            {
+                continue;
+            }
+            let latest = read_latest_recovery_assessment(&tx, &operation_id)?;
+            let revision = latest.as_ref().map_or(0, |stored| stored.record.revision);
+            let revision = revision.checked_add(1).ok_or_else(|| {
+                StoreError::InvalidDomain("recovery revision overflow".to_owned())
+            })?;
+            validate_recovery_mapping(
+                RecoveryClassification::ExitedOwned,
+                RecoveryDisposition::ExitedPendingPolicy,
+            )?;
+            tx.execute(
+                "INSERT INTO operation_recovery_assessments (operation_id,revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![operation_id, i64::try_from(revision).map_err(|_| StoreError::InvalidDomain("recovery revision exceeds SQLite range".to_owned()))?, attempt_token, recovery_classification_text(RecoveryClassification::ExitedOwned), recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy), evidence_fingerprint, evidence_json],
+            )?;
+            let operation = read_operation(&tx, &operation_id)?;
+            tx.execute(
+                "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,'operation.recovery_assessed',?4)",
+                params![format!("{}:recovery-assessed:{revision}", operation_id), operation_id, operation.vm_id.as_str(), canonical_json(&serde_json::json!({"revision":revision,"classification":recovery_classification_text(RecoveryClassification::ExitedOwned),"disposition":recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy),"evidence_fingerprint":evidence_fingerprint}))?],
+            )?;
+            classified.push(
+                OperationId::new(operation_id)
+                    .map_err(|error| StoreError::InvalidDomain(error.to_string()))?,
+            );
+        }
+        tx.commit()?;
+        Ok(classified)
+    }
+
+    /// Durably marks one operation abandoned by the executor of this process:
+    /// it was claimed, execution failed ambiguously (invalid result, ambiguous
+    /// claim or finish), and it is deliberately left `running` because
+    /// finishing it would guess a terminal outcome.
+    ///
+    /// The marker makes the operation `InspectRequired` — visible to the
+    /// restart snapshot and resolvable by operator inspection — immediately,
+    /// without waiting for a process restart. No-op when the operation is no
+    /// longer `running` (for example an ambiguous finish whose write actually
+    /// landed). Returns whether the operation now carries this marker.
+    pub fn mark_operation_abandoned(&mut self, id: &OperationId, code: &str) -> Result<bool> {
+        let evidence = serde_json::json!({"source": "executor-abandonment", "code": code});
+        let evidence_json = canonical_json(&evidence)?;
+        if evidence_json.len() > MAX_RECOVERY_EVIDENCE_BYTES {
+            return Err(StoreError::InvalidDomain(
+                "abandonment evidence exceeds 16 KiB".to_owned(),
+            ));
+        }
+        let evidence_fingerprint = format!("{:x}", Sha256::digest(evidence_json.as_bytes()));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current_status, active_token): (String, Option<String>) = tx
+            .query_row(
+                "SELECT status,active_attempt_token FROM operations WHERE operation_id=?1",
+                [id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                kind: "operation",
+                id: id.to_string(),
+            })?;
+        if current_status != "running" {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let attempt_token = active_token.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "running operation {id} has no active attempt token"
+            ))
+        })?;
+        validate_attempt_token(&attempt_token)?;
+        if read_recovery_assessment_by_fingerprint(
+            &tx,
+            id.as_str(),
+            &attempt_token,
+            &evidence_fingerprint,
+        )?
+        .is_some()
+        {
+            tx.commit()?;
+            return Ok(true);
+        }
+        let latest = read_latest_recovery_assessment(&tx, id.as_str())?;
+        let revision = latest.as_ref().map_or(0, |stored| stored.record.revision);
+        let revision = revision
+            .checked_add(1)
+            .ok_or_else(|| StoreError::InvalidDomain("recovery revision overflow".to_owned()))?;
+        validate_recovery_mapping(
+            RecoveryClassification::ExitedOwned,
+            RecoveryDisposition::ExitedPendingPolicy,
+        )?;
+        tx.execute(
+            "INSERT INTO operation_recovery_assessments (operation_id,revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![id.as_str(), i64::try_from(revision).map_err(|_| StoreError::InvalidDomain("recovery revision exceeds SQLite range".to_owned()))?, attempt_token, recovery_classification_text(RecoveryClassification::ExitedOwned), recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy), evidence_fingerprint, evidence_json],
+        )?;
+        let operation = read_operation(&tx, id.as_str())?;
+        tx.execute(
+            "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,'operation.recovery_assessed',?4)",
+            params![format!("{}:recovery-assessed:{revision}", id.as_str()), id.as_str(), operation.vm_id.as_str(), canonical_json(&serde_json::json!({"revision":revision,"classification":recovery_classification_text(RecoveryClassification::ExitedOwned),"disposition":recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy),"evidence_fingerprint":evidence_fingerprint}))?],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Terminal-persists one restart-interrupted (`InspectRequired`)
+    /// operation after explicit operator inspection, recording the resolution
+    /// as recovery evidence.
+    ///
+    /// Fail-closed: the operation must carry the restart-interruption marker
+    /// (latest assessment `ExitedOwned`/`ExitedPendingPolicy`), the stored
+    /// attempt token fences the transition, and only `Succeeded`/`Failed` are
+    /// valid resolution outcomes. An idempotent retry of an already-applied
+    /// resolution returns [`CompletionDisposition::Replay`].
+    pub fn resolve_interrupted_operation(
+        &mut self,
+        id: &OperationId,
+        status: OperationStatus,
+        payload: Option<&serde_json::Value>,
+        evidence: &serde_json::Value,
+    ) -> Result<CompletedOperation> {
+        if !matches!(status, OperationStatus::Succeeded | OperationStatus::Failed) {
+            return Err(StoreError::InvalidDomain(
+                "resolution outcome must be Succeeded or Failed".to_owned(),
+            ));
+        }
+        let error_payload = match status {
+            OperationStatus::Failed => Some(payload.ok_or_else(|| {
+                StoreError::InvalidDomain("failed resolution requires an error payload".to_owned())
+            })?),
+            OperationStatus::Succeeded => None,
+            _ => unreachable!("status validated above"),
+        };
+        if !evidence.is_object() {
+            return Err(StoreError::InvalidDomain(
+                "resolution evidence must be a JSON object".to_owned(),
+            ));
+        }
+        let evidence_json = canonical_json(evidence)?;
+        if evidence_json.len() > MAX_RECOVERY_EVIDENCE_BYTES {
+            return Err(StoreError::InvalidDomain(
+                "resolution evidence exceeds 16 KiB".to_owned(),
+            ));
+        }
+        let result = match status {
+            OperationStatus::Succeeded => payload.map(canonical_json).transpose()?,
+            _ => None,
+        };
+        let error = error_payload.map(canonical_json).transpose()?;
+        let evidence_fingerprint = format!("{:x}", Sha256::digest(evidence_json.as_bytes()));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current_status, active_token, completed_token): (String, Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT status,active_attempt_token,completed_attempt_token FROM operations WHERE operation_id=?1",
+                [id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                kind: "operation",
+                id: id.to_string(),
+            })?;
+        // The interruption marker is mandatory even for an idempotent retry:
+        // a normally-completed operation is never resolvable, and a resolved
+        // operation keeps its marker as the latest assessment.
+        let marker = read_latest_recovery_assessment(&tx, id.as_str())?.ok_or_else(|| {
+            StoreError::Conflict {
+                kind: "operation",
+                id: format!("{id} (no restart-interruption marker)"),
+            }
+        })?;
+        if marker.record.classification != RecoveryClassification::ExitedOwned
+            || marker.record.disposition != RecoveryDisposition::ExitedPendingPolicy
+        {
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: format!("{id} (latest assessment is not resolvable)"),
+            });
+        }
+        if current_status != "running" {
+            // Idempotent retry: this operation was already resolved.
+            if current_status == operation_status_text(status)
+                && completed_token.is_some()
+                && read_recovery_assessment_by_fingerprint(
+                    &tx,
+                    id.as_str(),
+                    completed_token.as_deref().unwrap_or_default(),
+                    &evidence_fingerprint,
+                )?
+                .is_some()
+            {
+                tx.commit()?;
+                return Ok(CompletedOperation {
+                    disposition: CompletionDisposition::Replay,
+                    entry: self.operation_entry(id)?,
+                });
+            }
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: id.to_string(),
+            });
+        }
+        let attempt_token = active_token.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "running operation {id} has no active attempt token"
+            ))
+        })?;
+        validate_attempt_token(&attempt_token)?;
+        let revision =
+            marker.record.revision.checked_add(1).ok_or_else(|| {
+                StoreError::InvalidDomain("recovery revision overflow".to_owned())
+            })?;
+        validate_recovery_mapping(
+            RecoveryClassification::ExitedOwned,
+            RecoveryDisposition::ExitedPendingPolicy,
+        )?;
+        tx.execute(
+            "INSERT INTO operation_recovery_assessments (operation_id,revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![id.as_str(), i64::try_from(revision).map_err(|_| StoreError::InvalidDomain("recovery revision exceeds SQLite range".to_owned()))?, attempt_token, recovery_classification_text(RecoveryClassification::ExitedOwned), recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy), evidence_fingerprint, evidence_json],
+        )?;
+        let operation = read_operation(&tx, id.as_str())?;
+        let changed = tx.execute(
+            "UPDATE operations SET status=?1,result_json=?2,error_json=?3,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),active_attempt_token=NULL,completed_attempt_token=?5 WHERE operation_id=?4 AND status='running' AND active_attempt_token=?5",
+            params![operation_status_text(status), result, error, id.as_str(), attempt_token],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: id.to_string(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,?4,?5)",
+            params![format!("{}:terminal", id.as_str()), id.as_str(), operation.vm_id.as_str(), format!("operation.{}", operation_status_text(status)), canonical_json(&serde_json::json!({"status":operation_status_text(status)}))?],
+        )?;
+        let entry = read_operation_entry(&tx, id.as_str())?;
+        tx.commit()?;
+        Ok(CompletedOperation {
+            disposition: CompletionDisposition::Applied,
+            entry,
         })
     }
 
@@ -2666,6 +2975,10 @@ fn read_operation_entry(conn: &Connection, id: &str) -> Result<OperationJournalE
             .map(|value| serde_json::from_str(&value))
             .transpose()?,
         request_metadata,
+        // Operator-discovery surface: carry the latest recovery
+        // assessment (restart-interruption marker, abandonment, or
+        // resolution history) on every journal entry read.
+        recovery_assessment: read_latest_recovery_assessment(conn, id.as_str())?.map(|s| s.record),
     };
     let outcome_valid = match entry.operation.status {
         OperationStatus::Accepted | OperationStatus::Running => {

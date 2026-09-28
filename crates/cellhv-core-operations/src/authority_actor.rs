@@ -55,6 +55,9 @@ enum Request {
         Box<TerminalOutcome>,
         Reply<CompletionResult>,
     ),
+    ResolveInspectRequired(OperationId, bool, String, Reply<CompletionResult>),
+    ClassifyRestartInterrupted(Reply<Vec<OperationId>>),
+    MarkOperationAbandoned(OperationId, String, Reply<bool>),
     Shutdown(oneshot::Sender<()>),
     #[cfg(test)]
     Gate(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>),
@@ -157,8 +160,29 @@ impl AuthorityHandle {
             .map_err(AuthorityActorError::Service)
     }
 
-    /// Queue-ordered shutdown. Requests accepted before this message finish;
-    /// later sends fail once the actor processes it.
+    /// Resolves one restart-interrupted (`InspectRequired`) operation after
+    /// operator inspection. Destructive-recovery capability: the store fails
+    /// closed without the restart-interruption marker; composition decides
+    /// who may invoke it.
+    pub async fn resolve_inspect_required(
+        &self,
+        id: OperationId,
+        succeeded: bool,
+        note: String,
+    ) -> Result<CompletionResult> {
+        let (reply, receive) = oneshot::channel();
+        Self::send(
+            &self.sender,
+            Request::ResolveInspectRequired(id, succeeded, note, reply),
+            receive,
+        )
+        .await
+    }
+
+    /// Queue-ordered shutdown. Requests already popped and processed finish;
+    /// requests still queued behind this message are rejected with
+    /// `Unavailable` (their callers resolve ambiguity by replaying the same
+    /// idempotency key); later sends fail once the actor processes it.
     pub async fn shutdown(&self) -> Result<()> {
         let (reply, receive) = oneshot::channel();
         self.sender
@@ -216,6 +240,39 @@ impl ExecutionHandle {
     pub async fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
         let (reply, receive) = oneshot::channel();
         AuthorityHandle::send(&self.sender, Request::RestartOperations(reply), receive).await
+    }
+
+    /// Durably marks all `running` operations as restart-interrupted — the
+    /// marker that distinguishes a stuck operation from one in flight in this
+    /// process.
+    ///
+    /// Executor-domain recovery capability: composition must call this
+    /// exactly once, after the actor starts and **before the executor starts
+    /// claiming**. Afterwards, `running` without a marker means in flight in
+    /// this process; calling this later would misclassify live operations as
+    /// stuck.
+    pub async fn classify_restart_interrupted(&self) -> Result<Vec<OperationId>> {
+        let (reply, receive) = oneshot::channel();
+        AuthorityHandle::send(
+            &self.sender,
+            Request::ClassifyRestartInterrupted(reply),
+            receive,
+        )
+        .await
+    }
+
+    /// Durably marks one operation abandoned by this process's executor
+    /// (claimed, execution failed ambiguously, deliberately left `running`),
+    /// making it `InspectRequired` immediately. No-op when the operation is
+    /// no longer `running`.
+    pub async fn mark_operation_abandoned(&self, id: OperationId, code: String) -> Result<bool> {
+        let (reply, receive) = oneshot::channel();
+        AuthorityHandle::send(
+            &self.sender,
+            Request::MarkOperationAbandoned(id, code, reply),
+            receive,
+        )
+        .await
     }
 }
 
@@ -282,6 +339,16 @@ impl AuthorityActor {
                         }
                         Request::Finish(id, attempt_token, outcome, reply) => {
                             let _ = reply.send(service.finish(&id, &attempt_token, *outcome));
+                        }
+                        Request::ResolveInspectRequired(id, succeeded, note, reply) => {
+                            let _ =
+                                reply.send(service.resolve_inspect_required(&id, succeeded, &note));
+                        }
+                        Request::ClassifyRestartInterrupted(reply) => {
+                            let _ = reply.send(service.classify_restart_interrupted_operations());
+                        }
+                        Request::MarkOperationAbandoned(id, code, reply) => {
+                            let _ = reply.send(service.mark_operation_abandoned(&id, &code));
                         }
                         Request::Shutdown(reply) => {
                             receiver.close();
@@ -707,6 +774,17 @@ mod tests {
             1,
         )
         .unwrap();
+        // Production composition classifies running operations as
+        // restart-interrupted right after the actor restarts, before any
+        // executor can claim.
+        assert_eq!(
+            execution
+                .classify_restart_interrupted()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let restart = execution.restart_operations().await.unwrap();
         assert_eq!(restart.len(), 1);
         assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);

@@ -278,6 +278,25 @@ class ArchitectureGuardTests(unittest.TestCase):
             errors = GUARD.check(root)
             self.assertTrue(any("cellhv-core-executor: dependency boundary" in error for error in errors))
 
+    def test_runtime_owner_cannot_depend_on_hypervisor_or_agent_crates(self):
+        for dependency in ("chv-agent-runtime-ch", "chv-agent-core"):
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.copy_baseline(root)
+                path = root / "crates/cellhv-core-runtime-owner/Cargo.toml"
+                text = path.read_text().replace(
+                    "[dependencies]\n",
+                    f'[dependencies]\n{dependency} = {{ path = "../{dependency}" }}\n',
+                    1,
+                )
+                path.write_text(text, encoding="utf-8")
+                self.assertTrue(
+                    any(
+                        "cellhv-core-runtime-owner: dependency boundary forbids" in error
+                        for error in GUARD.check(root)
+                    )
+                )
+
     def test_runtime_ownership_cannot_depend_on_cloud_hypervisor_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

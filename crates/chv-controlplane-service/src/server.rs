@@ -846,6 +846,21 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
+
+    async fn resolve_inspect_required_operation(
+        &self,
+        request: Request<proto::ResolveInspectRequiredOperationRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("resolve_inspect_required_operation", op_id = %op_id.escape_debug());
+        let resp = self
+            .service
+            .resolve_inspect_required_operation(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
 }
 
 pub struct ReconcileServer {
