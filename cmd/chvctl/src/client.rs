@@ -7,6 +7,7 @@ pub enum CliError {
     Http(String),
     Api { status: u16, message: String },
     Parse(String),
+    Io(String),
 }
 
 impl fmt::Display for CliError {
@@ -17,6 +18,7 @@ impl fmt::Display for CliError {
                 write!(f, "API error (HTTP {status}): {message}")
             }
             CliError::Parse(msg) => write!(f, "Parse error: {msg}"),
+            CliError::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
 }
