@@ -24,7 +24,7 @@ pub async fn execute(
         TaskCommands::List => {
             let resp = client.post("/v1/tasks", &json!({})).await?;
             let items = resp
-                .get("tasks")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();

@@ -35,7 +35,7 @@ pub async fn execute(
         NetworkCommands::List => {
             let resp = client.post("/v1/networks", &json!({})).await?;
             let items = resp
-                .get("networks")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
