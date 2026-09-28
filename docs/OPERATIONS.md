@@ -67,6 +67,20 @@ curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_connected
 curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_disconnected_duration_ms
 ```
 
+Core journal health (core-managed and core-native authority modes only; the
+families are absent in legacy mode):
+
+```
+# Current count of InspectRequired operations awaiting operator resolution
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_journal_inspect_required
+
+# 1 = the journal scanner is healthy, 0 = wedged/failing
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_journal_healthy
+
+# Cumulative failed journal scans since agent start
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_journal_scan_failures_total
+```
+
 #### Partition / Autonomy Metrics
 
 When an agent loses control-plane connectivity, it enters autonomous mode:
@@ -337,6 +351,9 @@ operation. This is fail-closed — the side effect may or may not have happened.
 
 - Agent log at startup: `restart classification marked running operations InspectRequired`
 - Scan-time log on any change: `journal scan: inspect-required operations changed`
+- Agent metrics (`curl -s http://127.0.0.1:9901/metrics`, core-managed/native
+  modes only): `chv_agent_journal_inspect_required` (current stuck count),
+  `chv_agent_journal_healthy` (0 while the journal scanner is wedged)
 - Node-local Core API:
   ```bash
   curl -s --unix-socket /run/chv/core/core-v1.sock http://localhost/v1/operations
@@ -344,7 +361,8 @@ operation. This is fail-closed — the side effect may or may not have happened.
   Stuck operations are `status: "running"` **plus** a `recovery_assessment`
   field; in-flight operations are `running` without it.
 
-**Resolve it** (on the node; the control plane deliberately cannot):
+**Resolve it** — two equivalent paths. Node-local (works even when the
+control plane cannot reach the node):
 
 ```bash
 grpcurl -unix /run/chv/agent/api.sock \
@@ -353,6 +371,26 @@ grpcurl -unix /run/chv/agent/api.sock \
     "meta": {
       "operation_id": "resolve-<operation_id>",
       "requested_by": "operator-name"
+    },
+    "operation_id": "<from /v1/operations>",
+    "vm_id": "<the operation's vm_id>",
+    "disposition": "succeeded",
+    "note": "VM is running and healthy; start completed before the crash"
+  }'
+```
+
+Or via the control plane's relay (fleet-wide: no node login required; the
+control plane forwards to the owning agent, which validates and
+terminal-persists). The target node goes in `meta.target_node_id`:
+
+```bash
+grpcurl -insecure 127.0.0.1:8443 \
+  chv.controlplane.node.v1.LifecycleService/ResolveInspectRequiredOperation \
+  -d '{
+    "meta": {
+      "operation_id": "resolve-<operation_id>",
+      "requested_by": "operator-name",
+      "target_node_id": "<owning node id>"
     },
     "operation_id": "<from /v1/operations>",
     "vm_id": "<the operation's vm_id>",

@@ -1,6 +1,6 @@
 # CellHV Core Authority Actor
 
-Status: Phase B library slice; not wired into production.
+Status: Production wiring (core-managed and core-native authority modes). Every production path that opens Core state composes the actor; the legacy NodeCache path does not.
 
 ## Boundary
 

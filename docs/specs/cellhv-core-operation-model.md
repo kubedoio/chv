@@ -1,7 +1,7 @@
 # CellHV Core Operation Model
 
-**Status:** Proposed  
-**Date:** 2026-07-21  
+**Status:** Implemented and production-wired (core-managed and core-native authority modes)  
+**Date:** 2026-07-21 (status updated 2026-09-28)  
 **Authority:** ADR-016 and ADR-017  
 **Phase:** B, slice 2 - transport-neutral mutation application service
 

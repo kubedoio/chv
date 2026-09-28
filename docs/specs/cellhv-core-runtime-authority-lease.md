@@ -1,6 +1,6 @@
 # CellHV Core Runtime Authority Lease
 
-Status: Phase B library primitive; not wired into production.
+Status: Production wiring (held by `CoreRuntimeOwner` for the lifetime of every core-managed or core-native `chv-agent`).
 
 ## Purpose
 
