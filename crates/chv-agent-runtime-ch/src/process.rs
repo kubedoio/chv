@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Child;
 use tracing::{info, warn};
 
+use crate::core_runtime::is_safe_resource_id;
+
 /// RAII guard that records VM lifecycle RED metrics when it drops.
 ///
 /// - `chv_vm_ops_total{op, result}` counter — `result` is `"ok"` or `"err"`
@@ -138,9 +140,170 @@ enum SerialTransport {
     Pty,
 }
 
+/// The cloud-hypervisor process backing a tracked VM.
+///
+/// Normally the agent owns the process end-to-end (`Owned`). After an
+/// agent restart, a still-running VMM is a re-parented orphan with no
+/// `Child` handle: it is tracked by pid (`Adopted`) and every signal is
+/// guarded by a `/proc/<pid>/cmdline` re-validation against the VM's
+/// api-socket path so a recycled pid can never be killed by mistake.
+/// A dead VMM is not an error state: cloud-hypervisor v43 exits with
+/// the guest (the VMM control loop's Exit dispatch runs `vmm_shutdown`),
+/// so a stopped VM's entry legitimately points at an exited process —
+/// `start_vm` re-spawns it from the persisted creation payload.
+enum VmmChild {
+    Owned(Child),
+    Adopted(u32),
+}
+
+/// Deterministic liveness for the re-spawn decision: `prove_exited`
+/// distinguishes a proven-exited process from a proven-live one instead of
+/// `has_exited`'s safe-but-lossy "errors mean gone" default — a re-spawn
+/// may never run while any doubt remains that the old VMM is dead, or two
+/// VMMs would own one VM (and one disk).
+enum Liveness {
+    Alive,
+    Exited,
+    Unknown(String),
+}
+
+impl VmmChild {
+    /// Best-effort SIGKILL. For an adopted pid this re-validates the
+    /// process identity first and refuses to signal a mismatching (e.g.
+    /// recycled) pid rather than risk killing an unrelated process. An
+    /// `Owned` child is our own spawn — no identity doubt, `expected_exe`
+    /// is unused for it.
+    fn kill(&mut self, api_socket: &Path, expected_exe: Option<&std::ffi::OsStr>) {
+        match self {
+            VmmChild::Owned(child) => {
+                let _ = child.start_kill();
+            }
+            VmmChild::Adopted(pid) => {
+                if !pid_is_cloud_hypervisor(*pid, api_socket, expected_exe) {
+                    warn!(
+                        pid = pid,
+                        socket = %api_socket.display(),
+                        "refusing to signal adopted pid: identity mismatch or process gone"
+                    );
+                    return;
+                }
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(*pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+
+    /// Waits for the process to be gone. `Owned` reaps the child; an
+    /// adopted orphan is parented to init and reaped there, so this only
+    /// polls `/proc` (bounded — a SIGKILLed VMM disappears promptly, and
+    /// a hung wait must not pin the caller forever).
+    async fn wait(&mut self) {
+        match self {
+            VmmChild::Owned(child) => {
+                let _ = child.wait().await;
+            }
+            VmmChild::Adopted(pid) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if !pid_exists(*pid) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    /// Strict liveness for the re-spawn decision. Unlike a lossy
+    /// "errors mean gone" default, probe errors surface as `Unknown`:
+    /// `start_vm` refuses to re-spawn on `Unknown` rather than risk a
+    /// second VMM on the same disk. An `Adopted` pid that is alive but no
+    /// longer proves our identity (recycled) counts as exited — it is not
+    /// ours to boot against, and re-spawn takes over the runtime dir.
+    fn prove_exited(&mut self, api_socket: &Path) -> Liveness {
+        match self {
+            VmmChild::Owned(child) => match child.try_wait() {
+                Ok(Some(_)) => Liveness::Exited,
+                Ok(None) => Liveness::Alive,
+                Err(e) => Liveness::Unknown(e.to_string()),
+            },
+            VmmChild::Adopted(pid) => {
+                if !pid_exists(*pid) {
+                    Liveness::Exited
+                } else if pid_is_cloud_hypervisor(*pid, api_socket, None) {
+                    Liveness::Alive
+                } else {
+                    Liveness::Exited
+                }
+            }
+        }
+    }
+}
+
+/// Reads `/proc/<pid>/cmdline` (NUL-separated) as a space-joined string.
+fn proc_cmdline(pid: u32) -> Option<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|raw| String::from_utf8_lossy(&raw).replace('\0', " "))
+}
+
+/// Whether `/proc/<pid>` shows a live process — liveness for adopted
+/// orphans. A zombie or dead process has already exited; it only lingers
+/// in /proc until its parent reaps it, so it counts as gone. Malformed
+/// stat data also counts as gone (the safe default for lifecycle paths).
+fn pid_exists(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(_) => return false,
+    };
+    // The state field follows the comm field in parentheses, and comm can
+    // itself contain spaces and parentheses — parse after the LAST ')'.
+    let Some((_, tail)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    match tail.split_whitespace().next() {
+        Some(state) => state != "Z" && state != "X",
+        None => false,
+    }
+}
+
+/// Identity check for an adopted VMM pid: the process must exist, its
+/// command line must reference both the api-socket flag and this VM's
+/// socket path (unique per VM), and — when an expected executable name is
+/// given — `/proc/<pid>/exe` must resolve to it. The exe cross-check
+/// closes the argv-spoofing hole on the SIGKILL authorization path: a
+/// crafted argv alone must never be enough to be signalled. Failure to
+/// read either `/proc` file counts as unproven identity (false).
+fn pid_is_cloud_hypervisor(
+    pid: u32,
+    api_socket: &Path,
+    expected_exe: Option<&std::ffi::OsStr>,
+) -> bool {
+    let Some(cmdline) = proc_cmdline(pid) else {
+        return false;
+    };
+    let socket_path = api_socket.to_string_lossy();
+    if !(cmdline.contains("--api-socket") && cmdline.contains(socket_path.as_ref())) {
+        return false;
+    }
+    if let Some(expected) = expected_exe {
+        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(exe) => {
+                if exe.file_name() != Some(expected) {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 struct VmProcess {
     api_socket: std::path::PathBuf,
-    child: Child,
+    child: VmmChild,
     /// Guest serial-console I/O fd — a unix-stream socket connected to
     /// cloud-hypervisor's serial listener (default Socket transport) or the
     /// pty slave under explicit Pty tuning. Guest output is read (via the
@@ -158,6 +321,26 @@ struct VmProcess {
 pub struct ProcessCloudHypervisorAdapter {
     chv_binary: std::path::PathBuf,
     vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
+    /// Per-VM lifecycle serialization. Core-managed mode already
+    /// single-flights operations per VM in the executor, but legacy-mode
+    /// callers (gRPC handlers, the reconciler) do not, and even core mode
+    /// must survive a rare liveness-probe error without forking a VM:
+    /// two concurrent lifecycle ops on one VM (notably two `start`s over
+    /// an exited VMM) must never both re-spawn a process for it. Entries
+    /// are never removed — dropping a key while an operation still holds
+    /// its mutex would let a fresh key bypass that holder's serialization.
+    lifecycle_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Console.log write mode. `Fresh` (create) truncates — a new VM
+/// instance starts a clean log. `Append` (VMM re-spawn, adoption)
+/// preserves prior history: the stop path already truncates by design,
+/// so appending after a stop starts clean, while a crash leaves boot
+/// history worth keeping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConsoleLogMode {
+    Fresh,
+    Append,
 }
 
 impl ProcessCloudHypervisorAdapter {
@@ -165,7 +348,76 @@ impl ProcessCloudHypervisorAdapter {
         Self {
             chv_binary: chv_binary.into(),
             vms: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The per-VM lifecycle mutex (see `lifecycle_locks`). Lifecycle ops
+    /// hold it for their whole duration; see the field doc for why keys
+    /// are never removed.
+    fn vm_op_lock(&self, vm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .lifecycle_locks
+            .lock()
+            .expect("lifecycle lock map poisoned");
+        locks
+            .entry(vm_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// The executable name this adapter's VMMs must prove when an adopted
+    /// pid is identity-checked (see `pid_is_cloud_hypervisor`).
+    fn expected_vmm_exe(&self) -> Option<&std::ffi::OsStr> {
+        self.chv_binary.file_name()
+    }
+
+    /// Refuses a create that would run a second VMM for a VM id whose
+    /// runtime dir already hosts a live one — unlinking its sockets and
+    /// spawning another process would fork the VM (two VMMs, one disk).
+    /// Liveness is proven two ways, covering both a pidfile-identifiable
+    /// VMM (the normal post-restart case: legacy-mode reconcilers
+    /// re-create desired VMs after an agent restart while the adopted
+    /// orphan still runs) and a pidfile-less VMM whose api socket still
+    /// answers.
+    async fn ensure_no_live_vmm(&self, config: &VmConfig) -> Result<(), ChvError> {
+        if let Some(vm_dir) = config.api_socket_path.parent() {
+            if let Ok(raw) = std::fs::read_to_string(vm_dir.join("ch.pid")) {
+                if let Ok(pid) = raw.trim().parse::<u32>() {
+                    if pid_is_cloud_hypervisor(
+                        pid,
+                        &config.api_socket_path,
+                        self.expected_vmm_exe(),
+                    ) {
+                        return Err(ChvError::Internal {
+                            reason: format!(
+                                "cannot create vm {}: a cloud-hypervisor for this vm is already running (pid {pid}); stop and delete it first (an agent restart re-adopts it)",
+                                config.vm_id
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        if config.api_socket_path.exists() {
+            // The socket file exists. A stale file (SIGKILLed VMM) must be
+            // removable or the new bind fails — but a LIVE socket answers
+            // vm.info, meaning a VMM without a pidfile is running: refuse
+            // rather than fork it.
+            if Self::ch_api_request(&config.api_socket_path, "GET", "/api/v1/vm.info", None)
+                .await
+                .is_ok()
+            {
+                return Err(ChvError::Internal {
+                    reason: format!(
+                        "cannot create vm {}: its api socket {} is answered by a running cloud-hypervisor (no pidfile); stop and delete it first",
+                        config.vm_id,
+                        config.api_socket_path.display()
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     async fn wait_for_socket(socket: &Path, timeout: std::time::Duration) -> Result<(), ChvError> {
@@ -717,6 +969,64 @@ impl ProcessCloudHypervisorAdapter {
         Ok(pty_master)
     }
 
+    /// Spawns the console.log persistence task: subscribes to the VM's
+    /// console fan-out channel and writes output to `log_path`, capped at
+    /// [`CONSOLE_LOG_MAX_BYTES`] with wraparound (in-memory scrollback keeps
+    /// the recent tail either way). The task ends when every sender for the
+    /// channel drops — i.e. when the VM entry (and its broadcaster) are
+    /// replaced or removed.
+    fn spawn_console_log_writer(
+        vm_id: &str,
+        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+        log_path: std::path::PathBuf,
+        mode: ConsoleLogMode,
+    ) {
+        let vm_id_log = vm_id.to_string();
+        let mut pty_rx_log = pty_tx.subscribe();
+        tokio::spawn(async move {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.create(true);
+            match mode {
+                ConsoleLogMode::Fresh => {
+                    options.truncate(true).write(true);
+                }
+                ConsoleLogMode::Append => {
+                    options.append(true);
+                }
+            }
+            let log_file = options.open(&log_path).await;
+            let mut writer = match log_file {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
+                    return;
+                }
+            };
+            let mut written: u64 = 0;
+            loop {
+                match pty_rx_log.recv().await {
+                    Ok(data) => {
+                        if written + data.len() as u64 > CONSOLE_LOG_MAX_BYTES {
+                            // Safety cap: truncate and continue. In-memory scrollback
+                            // preserves the last 256 KiB so recent output is still
+                            // visible via WebSocket.
+                            let _ = writer.set_len(0).await;
+                            let _ = writer.seek(SeekFrom::Start(0)).await;
+                            written = 0;
+                        }
+                        if writer.write_all(&data).await.is_ok() {
+                            written += data.len() as u64;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // If lagged, just continue reading
+                    }
+                }
+            }
+        });
+    }
+
     /// Spawns the console broadcaster for a VM: reads guest serial output
     /// from the console fd and fans it out to the scrollback buffer and
     /// subscribers. For the Socket transport the broadcaster is
@@ -798,6 +1108,21 @@ impl ProcessCloudHypervisorAdapter {
                                 let mut map = vms.write().await;
                                 match map.get_mut(&vm_id) {
                                     Some(proc) => {
+                                        // Supersede check: a VMM re-spawn or
+                                        // re-adoption replaces the map entry
+                                        // (fresh channel, fresh broadcaster).
+                                        // If this entry's channel is no
+                                        // longer ours, a replacement
+                                        // broadcaster owns the console now —
+                                        // exit instead of swapping endpoints
+                                        // under it. This also drops the last
+                                        // Sender of the old channel, so the
+                                        // old console.log writer observes
+                                        // Closed and exits (no duplicate
+                                        // appends).
+                                        if !proc.pty_tx.same_channel(&pty_tx) {
+                                            break;
+                                        }
                                         proc.console_io = fresh;
                                     }
                                     None => break,
@@ -814,6 +1139,186 @@ impl ProcessCloudHypervisorAdapter {
             }
             tracing::debug!(vm_id = %vm_id, "pty broadcaster exited");
         });
+    }
+
+    /// Re-spawns the cloud-hypervisor process for a tracked VM whose VMM
+    /// has exited, then re-creates and boots the VM from the payload
+    /// persisted at create time. cloud-hypervisor v43 exits with the
+    /// guest (VMM control-loop Exit dispatch → `vmm_shutdown`), so a
+    /// start after a graceful stop has no daemon to `vm.boot` against —
+    /// the start contract ("make the VM running") is honored by
+    /// rebuilding the process. Mirrors `create_vm`'s post-spawn tail:
+    /// fail-closed child guard, fresh console endpoint, fresh fan-out
+    /// channel; console.log is APPENDED (the stop path already truncated
+    /// it by design, and a crash leaves boot history worth keeping).
+    async fn respawn_vmm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let (api_socket, serial_transport) = {
+            let vms = self.vms.read().await;
+            let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            (proc.api_socket.clone(), proc.serial_transport.clone())
+        };
+        let vm_dir = api_socket
+            .parent()
+            .expect("api socket path must have a parent directory")
+            .to_path_buf();
+
+        // Stale sockets from an unclean VMM death would fail both binds
+        // (api socket, serial listener). Only ever files this adapter
+        // owns.
+        let _ = tokio::fs::remove_file(&api_socket).await;
+        let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
+
+        let config_path = vm_dir.join("vm-config.json");
+        let body = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+            ChvError::Internal {
+                reason: format!(
+                    "cannot restart vm {}: no persisted cloud-hypervisor config at {} ({}); re-create the VM",
+                    vm_id,
+                    config_path.display(),
+                    e
+                ),
+            }
+        })?;
+
+        let mut cmd = tokio::process::Command::new(&self.chv_binary);
+        cmd.arg("--api-socket").arg(&api_socket);
+        cmd.stdout(Stdio::null());
+        let stderr_log_path = vm_dir.join("cloud-hypervisor.stderr.log");
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log_path)
+        {
+            Ok(f) => {
+                cmd.stderr(Stdio::from(f));
+            }
+            Err(_) => {
+                cmd.stderr(Stdio::null());
+            }
+        }
+
+        info!(
+            vm_id = %vm_id,
+            socket = %api_socket.display(),
+            binary = %self.chv_binary.display(),
+            op = operation_id.unwrap_or("-"),
+            "re-spawning cloud-hypervisor for stopped vm"
+        );
+        let child = cmd.spawn().map_err(|e| ChvError::Io {
+            path: self.chv_binary.to_string_lossy().to_string(),
+            source: e,
+        })?;
+        // Same cancellation discipline as create_vm: the armed guard
+        // SIGKILLs the child if this future is dropped before the map
+        // hand-off.
+        let mut child = ChildGuard::new(child);
+        if let Some(pid) = child.id() {
+            let _ = std::fs::write(vm_dir.join("ch.pid"), format!("{pid}"));
+        }
+
+        if let Err(e) = Self::wait_for_socket(&api_socket, std::time::Duration::from_secs(10)).await
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "failed to re-start cloud-hypervisor for vm {}: {} stderr: {}",
+                    vm_id, e, stderr_hint
+                ),
+            });
+        }
+        if let Ok(Some(exit_status)) = child.try_wait() {
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "cloud-hypervisor exited immediately for vm {} re-spawn with {}: {}",
+                    vm_id, exit_status, stderr_hint
+                ),
+            });
+        }
+
+        let (create_status, create_body) =
+            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.create", Some(&body))
+                .await?;
+        if create_status != 200 && create_status != 204 {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "vm.create returned status {} for vm {} re-spawn: {}",
+                    create_status, vm_id, create_body
+                ),
+            });
+        }
+
+        // Fresh console endpoint on the new VMM. Socket transport
+        // reconnects to the listener vm.create just bound; Pty transport
+        // opens the new pty slave reported by vm.info. Both fail closed
+        // (the child is killed) exactly like the create path.
+        let console_io: OwnedFd = match &serial_transport {
+            SerialTransport::Socket(path) => {
+                Self::connect_serial_socket(path, &mut child, vm_id, operation_id).await?
+            }
+            SerialTransport::Pty => {
+                Self::open_serial_pty(&api_socket, &mut child, vm_id, operation_id).await?
+            }
+        };
+
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_fd = Self::dup_cloexec(&console_io).ok();
+        // Claim capture alive only when a broadcaster will actually run.
+        let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
+
+        // Hand-off under the write lock with no intervening await, then
+        // swap the entry: the replaced entry's fan-out channel closes
+        // (the old console.log writer and any lingering broadcaster exit),
+        // and lifecycle ownership moves to the new child.
+        let mut map = self.vms.write().await;
+        let child = child.disarm();
+        map.insert(
+            vm_id.to_string(),
+            VmProcess {
+                api_socket: api_socket.clone(),
+                child: VmmChild::Owned(child),
+                console_io,
+                serial_transport: serial_transport.clone(),
+                pty_tx: pty_tx.clone(),
+                pty_scrollback: pty_scrollback.clone(),
+                broadcaster_alive: broadcaster_alive.clone(),
+                last_cpu_seconds: 0.0,
+                last_cpu_at: None,
+            },
+        );
+        drop(map);
+
+        if let Some(broadcaster_fd) = broadcaster_fd {
+            Self::spawn_pty_broadcaster(
+                self.vms.clone(),
+                vm_id.to_string(),
+                broadcaster_fd,
+                serial_transport,
+                pty_tx.clone(),
+                pty_scrollback.clone(),
+                broadcaster_alive,
+            );
+        }
+        Self::spawn_console_log_writer(
+            vm_id,
+            &pty_tx,
+            vm_dir.join("console.log"),
+            ConsoleLogMode::Append,
+        );
+
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
+        if status != 200 && status != 204 {
+            warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success after re-spawn (VM may have auto-booted)");
+        }
+        Ok(())
     }
 }
 
@@ -845,12 +1350,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
         let mut __guard = VmOpGuard::new("create");
+        // Serialize with the other lifecycle ops for this VM (see
+        // `lifecycle_locks`): a concurrent stop/delete/start while this
+        // create runs must not interleave process spawns and socket
+        // cleanups for the same runtime dir.
+        let _lifecycle = self.vm_op_lock(&config.vm_id).lock_owned().await;
         if !std::path::Path::new("/dev/kvm").exists() {
             return Err(ChvError::Internal {
                 reason: "Host does not have KVM capability (/dev/kvm missing). VMs require hardware virtualization.".into(),
             });
         }
         self.validate_vm_config(config)?;
+        self.ensure_no_live_vmm(config).await?;
         if config.api_socket_path.exists() {
             tokio::fs::remove_file(&config.api_socket_path)
                 .await
@@ -858,6 +1369,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     path: config.api_socket_path.to_string_lossy().to_string(),
                     source: e,
                 })?;
+        }
+        // A SIGKILLed VMM leaves its serial socket file behind (clean exit
+        // removes it); a stale file would make cloud-hypervisor's
+        // `vm.create` listener bind fail with EADDRINUSE. Best-effort: the
+        // file can only exist when no live VMM owns it.
+        if let Some(vm_dir) = config.api_socket_path.parent() {
+            let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
         }
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
@@ -912,57 +1430,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 warn!(error = %e, path = %stderr_log_path.display(), "failed to open stderr log, falling back to null");
                 cmd.stderr(Stdio::null());
             }
-        }
-
-        info!(
-            vm_id = %config.vm_id,
-            socket = %config.api_socket_path.display(),
-            binary = %self.chv_binary.display(),
-            op = operation_id.unwrap_or("-"),
-            "spawning cloud-hypervisor"
-        );
-
-        let child = cmd.spawn().map_err(|e| ChvError::Io {
-            path: self.chv_binary.to_string_lossy().to_string(),
-            source: e,
-        })?;
-        // Close the orphan window: `child` is not yet registered in the vm
-        // process map, and several awaits separate this spawn from the
-        // registration. If an async cancellation (e.g. the core executor's
-        // bounded-drain abort) drops this future mid-way, the child must not
-        // survive as an unaccounted VMM — the armed `ChildGuard` SIGKILLs it.
-        // It is disarmed immediately before the child is handed to the vm
-        // process map, which then owns lifecycle.
-        let mut child = ChildGuard::new(child);
-
-        if let Err(e) =
-            Self::wait_for_socket(&config.api_socket_path, std::time::Duration::from_secs(10)).await
-        {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let stderr_hint = read_stderr_tail(&stderr_log_path);
-            warn!(
-                vm_id = %config.vm_id,
-                stderr = %stderr_hint,
-                "cloud-hypervisor failed to create api socket within 10s"
-            );
-            return Err(ChvError::Internal {
-                reason: format!(
-                    "failed to start cloud-hypervisor for vm {}: {} stderr: {}",
-                    config.vm_id, e, stderr_hint
-                ),
-            });
-        }
-
-        if let Ok(Some(exit_status)) = child.try_wait() {
-            let stderr_hint = read_stderr_tail(&stderr_log_path);
-            let _ = tokio::fs::remove_file(&config.api_socket_path).await;
-            return Err(ChvError::Internal {
-                reason: format!(
-                    "cloud-hypervisor exited immediately for vm {} with {}: {}",
-                    config.vm_id, exit_status, stderr_hint
-                ),
-            });
         }
 
         // Build VM config JSON and create VM via REST API (supports multiple disks)
@@ -1103,6 +1570,81 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         let body = vm_config_json.to_string();
+
+        info!(
+            vm_id = %config.vm_id,
+            socket = %config.api_socket_path.display(),
+            binary = %self.chv_binary.display(),
+            op = operation_id.unwrap_or("-"),
+            "spawning cloud-hypervisor"
+        );
+
+        let child = cmd.spawn().map_err(|e| ChvError::Io {
+            path: self.chv_binary.to_string_lossy().to_string(),
+            source: e,
+        })?;
+        // Close the orphan window: `child` is not yet registered in the vm
+        // process map, and several awaits separate this spawn from the
+        // registration. If an async cancellation (e.g. the core executor's
+        // bounded-drain abort) drops this future mid-way, the child must not
+        // survive as an unaccounted VMM — the armed `ChildGuard` SIGKILLs it.
+        // It is disarmed immediately before the child is handed to the vm
+        // process map, which then owns lifecycle.
+        let mut child = ChildGuard::new(child);
+
+        // Persist BOTH the VMM pid and the exact vm.create payload BEFORE
+        // any await toward the API: the window between spawn and create
+        // success is precisely where an agent crash would otherwise strand
+        // a VM that adoption can see but start can never re-create (the
+        // payload is what `respawn_vmm` needs). Writing the pid before the
+        // VM exists trades a small, manageable misclassification — a crash
+        // between spawn and vm.create adopts a live VMM with no VM inside,
+        // where stop treats it as stopped and delete reaps it by identity —
+        // for full coverage of the much larger window. Both writes are
+        // best-effort with a warning: without the pidfile, adoption of
+        // this VM is skipped; without the config, a later start degrades
+        // to a clear re-create-required error.
+        if let Some(pid) = child.id() {
+            let _ = std::fs::write(vm_runtime_dir.join("ch.pid"), format!("{pid}"));
+        }
+        if let Err(e) = std::fs::write(vm_runtime_dir.join("vm-config.json"), &body) {
+            warn!(
+                vm_id = %config.vm_id,
+                error = %e,
+                "failed to persist vm-config.json; vm restart after a VMM exit will require re-create"
+            );
+        }
+
+        if let Err(e) =
+            Self::wait_for_socket(&config.api_socket_path, std::time::Duration::from_secs(10)).await
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
+            warn!(
+                vm_id = %config.vm_id,
+                stderr = %stderr_hint,
+                "cloud-hypervisor failed to create api socket within 10s"
+            );
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "failed to start cloud-hypervisor for vm {}: {} stderr: {}",
+                    config.vm_id, e, stderr_hint
+                ),
+            });
+        }
+
+        if let Ok(Some(exit_status)) = child.try_wait() {
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
+            let _ = tokio::fs::remove_file(&config.api_socket_path).await;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "cloud-hypervisor exited immediately for vm {} with {}: {}",
+                    config.vm_id, exit_status, stderr_hint
+                ),
+            });
+        }
+
         let (create_status, create_body) = Self::ch_api_request_with_body(
             &config.api_socket_path,
             "PUT",
@@ -1150,7 +1692,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        let broadcaster_alive = Arc::new(AtomicBool::new(true));
         let serial_transport = if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
             SerialTransport::Socket(serial_socket_path.clone())
         } else {
@@ -1160,6 +1701,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Duplicate the descriptor for the broadcaster while retaining the
         // owned console descriptor for the VM process map.
         let broadcaster_fd = Self::dup_cloexec(&console_io).ok();
+        // Claim capture alive only when a broadcaster will actually run.
+        let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
 
         // Acquire the vm-process-map lock while the guard is still armed so a
         // cancellation landing on this await still SIGKILLs the child; then
@@ -1173,7 +1716,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             config.vm_id.clone(),
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
-                child,
+                child: VmmChild::Owned(child),
                 // The guest serial-console I/O fd: a unix-stream socket to
                 // cloud-hypervisor's serial listener by default (Socket
                 // transport), or the pty slave under explicit Pty tuning.
@@ -1202,46 +1745,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         // Subscribe to broadcast channel and persist to console.log
-        let log_path = vm_runtime_dir.join("console.log");
-        let vm_id_log = config.vm_id.clone();
-        let mut pty_rx_log = pty_tx.subscribe();
-        tokio::spawn(async move {
-            let log_file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&log_path)
-                .await;
-            let mut writer = match log_file {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
-                    return;
-                }
-            };
-            let mut written: u64 = 0;
-            loop {
-                match pty_rx_log.recv().await {
-                    Ok(data) => {
-                        if written + data.len() as u64 > CONSOLE_LOG_MAX_BYTES {
-                            // Safety cap: truncate and continue. In-memory scrollback
-                            // preserves the last 256 KiB so recent output is still
-                            // visible via WebSocket.
-                            let _ = writer.set_len(0).await;
-                            let _ = writer.seek(SeekFrom::Start(0)).await;
-                            written = 0;
-                        }
-                        if writer.write_all(&data).await.is_ok() {
-                            written += data.len() as u64;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // If lagged, just continue reading
-                    }
-                }
-            }
-        });
+        Self::spawn_console_log_writer(
+            &config.vm_id,
+            &pty_tx,
+            vm_runtime_dir.join("console.log"),
+            ConsoleLogMode::Fresh,
+        );
 
         __guard.succeeded = true;
         Ok(config.vm_id.clone())
@@ -1249,6 +1758,49 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("start");
+        // Serialize with the other lifecycle ops for this VM (see
+        // `lifecycle_locks`): two concurrent starts over an exited VMM
+        // must never both re-spawn a process for it.
+        let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
+
+        // cloud-hypervisor v43 exits when the guest exits (VMM control
+        // loop Exit dispatch → vmm_shutdown), so a start after a graceful
+        // stop — or any guest-side poweroff — has no daemon to boot
+        // against. The start contract is "make the VM running": re-spawn
+        // the VMM and re-create the VM from the payload persisted at
+        // create time instead of failing on a dead api socket. Liveness
+        // is proven, not assumed: an indeterminate probe result refuses
+        // the re-spawn (a second VMM on one disk is never acceptable)
+        // with an error the caller can retry.
+        let liveness = {
+            let mut vms = self.vms.write().await;
+            let Some(proc) = vms.get_mut(vm_id) else {
+                return Err(ChvError::NotFound {
+                    resource: "vm".to_string(),
+                    id: vm_id.to_string(),
+                });
+            };
+            let api_socket = proc.api_socket.clone();
+            proc.child.prove_exited(&api_socket)
+        };
+        match liveness {
+            Liveness::Exited => {
+                info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "vmm process exited, re-spawning");
+                self.respawn_vmm(vm_id, operation_id).await?;
+                __guard.succeeded = true;
+                return Ok(());
+            }
+            Liveness::Unknown(e) => {
+                warn!(vm_id = %vm_id, error = %e, "cannot determine vmm liveness; refusing to re-spawn");
+                return Err(ChvError::Internal {
+                    reason: format!(
+                        "cannot determine whether the cloud-hypervisor process for vm {vm_id} is still running ({e}); refusing to re-spawn — retry the operation"
+                    ),
+                });
+            }
+            Liveness::Alive => {}
+        }
+
         let (api_socket, serial_transport, pty_tx, pty_scrollback, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
@@ -1324,6 +1876,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("stop");
+        // Serialize with the other lifecycle ops for this VM (see
+        // `lifecycle_locks`).
+        let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
         let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
@@ -1340,8 +1895,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     sb.clear();
                 }
                 let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
-                let _ = proc.child.start_kill();
-                let _ = proc.child.try_wait();
+                proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
+                // Reap before dropping the entry: the agent is the parent
+                // of an Owned child, and an unreaped exit would linger as
+                // a zombie for the agent's lifetime.
+                proc.child.wait().await;
                 log_path
             } else {
                 None
@@ -1351,13 +1909,17 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop");
             }
         } else {
-            // Graceful stop: ask the VM to shut down but keep the VMM daemon
-            // alive so a subsequent vm.boot can restart it. Do NOT call
-            // vmm.shutdown — that would kill the daemon and require a full
-            // vm.create + vm.boot sequence to start again.
-            // Graceful stop: send ACPI power button so the guest OS can shut
-            // itself down cleanly. Then poll vm.info for up to 10s waiting for
-            // the VM to reach a non-running terminal state (Shutdown or Created).
+            // Graceful stop: send the ACPI power button so the guest OS can
+            // shut itself down cleanly. cloud-hypervisor v43 exits WITH the
+            // guest (the VMM control loop's Exit dispatch runs vmm_shutdown),
+            // so once the guest reaches Shutdown the VMM process is gone —
+            // there is no daemon to keep alive. The VmProcess entry
+            // deliberately STAYS in the map (with its exited child) so a
+            // later start re-spawns the VMM and re-creates the VM from the
+            // payload persisted at create time (see `respawn_vmm`), and
+            // stop/delete remain idempotent against the dead process. Poll
+            // vm.info for up to 10s waiting for a non-running terminal state
+            // (Shutdown or Created).
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await;
             // Poll vm.info for up to 10s waiting for the VM to reach a
             // non-running terminal state (Shutdown or Created).
@@ -1395,8 +1957,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         sb.clear();
                     }
                     let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
-                    let _ = proc.child.start_kill();
-                    let _ = proc.child.try_wait();
+                    proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
+                    // Reap before dropping the entry (zombie prevention).
+                    proc.child.wait().await;
                     log_path
                 } else {
                     None
@@ -1451,6 +2014,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("delete");
+        // Serialize with the other lifecycle ops for this VM (see
+        // `lifecycle_locks`).
+        let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
         let mut proc = {
             let mut map = self.vms.write().await;
             map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
@@ -1461,14 +2027,24 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "deleting vm");
 
-        let _ = proc.child.start_kill();
-        let _ = proc.child.wait().await;
+        proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
+        proc.child.wait().await;
+        // Remove the runtime artifacts this adapter owns: the api socket,
+        // the pid file and the persisted creation payload. Disk images and
+        // the VM directory itself belong to the storage/authority layers.
         let _ = tokio::fs::remove_file(&proc.api_socket).await;
+        if let Some(vm_dir) = proc.api_socket.parent() {
+            let _ = tokio::fs::remove_file(vm_dir.join("ch.pid")).await;
+            let _ = tokio::fs::remove_file(vm_dir.join("vm-config.json")).await;
+        }
         __guard.succeeded = true;
         Ok(())
     }
 
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        // Serialize with the other lifecycle ops for this VM (see
+        // `lifecycle_locks`).
+        let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
         let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
@@ -2189,13 +2765,218 @@ impl AdoptedVmHandle {
 }
 
 impl ProcessCloudHypervisorAdapter {
-    pub async fn adopt_running_vms(&self, _runtime_root: &std::path::Path) -> Result<(), ChvError> {
-        // - Discover canonical runtime directories.
-        // - Validate OwnerMarkerV1 ownership marker, PID, /proc/<pid>/stat start time, boot ID, executable identity, UID/GID, cgroup identity, socket inode, and peer credentials.
-        // - Probe Cloud Hypervisor API and prove no conflicting candidate exists.
-        // - Fail-closed classification of owned, foreign, ambiguous, stale, and missing processes.
-        // - Adopt exact matches without requiring the original Tokio Child handle.
+    /// Rebuilds the in-memory VM map from on-disk runtime state after an
+    /// agent restart.
+    ///
+    /// The map is agent-process state; the VMMs it describes are not. A
+    /// restart while VMs are running leaves re-parented orphans the new
+    /// agent cannot see — every lifecycle op then fails with NotFound
+    /// while the VMs keep running (proven by M2.5 qualification run 7:
+    /// the post-restart stop and delete both failed this way). This scan
+    /// rebuilds one entry per `{runtime_root}/vms/<vm_id>/` directory:
+    ///
+    /// - liveness and identity come from the persisted `ch.pid` plus a
+    ///   `/proc/<pid>/cmdline` re-validation against the VM's api-socket
+    ///   path (`pid_is_cloud_hypervisor`) — pid recycling can never
+    ///   redirect a kill;
+    /// - a live orphan gets its serial console re-attached (Socket
+    ///   transport: reconnect to the listener the orphan still serves;
+    ///   the broadcaster and console.log writer resume in append mode,
+    ///   preserving pre-restart history) and is tracked as
+    ///   [`VmmChild::Adopted`];
+    /// - a dead VMM (cloud-hypervisor v43 exits with the guest) still
+    ///   gets an entry — stop/delete are then idempotent and the next
+    ///   start re-spawns from the persisted payload;
+    /// - entries without a parseable `ch.pid` are skipped with a warning
+    ///   (ops on them keep today's NotFound semantics rather than
+    ///   guessing at process identity);
+    /// - Pty-transport VMs are adopted for lifecycle only: the console
+    ///   endpoint cannot be re-derived without a live `vm.info` and is a
+    ///   recorded follow-up.
+    ///
+    /// Failures are per-directory (warn + skip); only an unreadable base
+    /// directory fails the call.
+    pub async fn adopt_running_vms(&self, runtime_root: &std::path::Path) -> Result<(), ChvError> {
+        let vms_base = runtime_root.join("vms");
+        let entries = match std::fs::read_dir(&vms_base) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No VMs have ever been created on this node.
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(ChvError::Io {
+                    path: vms_base.to_string_lossy().to_string(),
+                    source: e,
+                });
+            }
+        };
+
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let vm_id = entry.file_name().to_string_lossy().to_string();
+            // Layer-B path-safety: the directory name becomes a map key
+            // and (via start) a re-spawn source; never build entries for
+            // ids the authority layer would reject.
+            if !is_safe_resource_id(&vm_id) {
+                warn!(vm_id = %vm_id, "skipping vm runtime dir with unsafe id during adoption");
+                continue;
+            }
+            let vm_dir = entry.path();
+            let api_socket = vm_dir.join("vm.sock");
+
+            // Never adopt over a tracked entry: a second adoption pass
+            // (or a split-brain peer agent on the same runtime root) must
+            // not replace an Owned child with an Adopted pid — dropping
+            // the Child would orphan a VMM this agent is responsible for
+            // reaping.
+            if self.vms.read().await.contains_key(&vm_id) {
+                warn!(
+                    vm_id = %vm_id,
+                    "skipping adoption: vm is already tracked by this agent"
+                );
+                continue;
+            }
+
+            let pid = std::fs::read_to_string(vm_dir.join("ch.pid"))
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok());
+            let Some(pid) = pid else {
+                warn!(
+                    vm_id = %vm_id,
+                    "skipping vm runtime dir without a parseable ch.pid during adoption"
+                );
+                continue;
+            };
+
+            let vmm_alive = pid_is_cloud_hypervisor(pid, &api_socket, self.expected_vmm_exe());
+            let serial_sock = vm_dir.join("serial.sock");
+            let serial_transport = if serial_sock.exists() {
+                SerialTransport::Socket(serial_sock)
+            } else {
+                SerialTransport::Pty
+            };
+
+            // Re-attach the console only for a live VMM on the Socket
+            // transport; anything else gets the EOF placeholder (an
+            // honest "no console" endpoint — the broadcaster, if ever
+            // spawned on it, exits immediately).
+            let (console_io, console_live) = if vmm_alive {
+                match &serial_transport {
+                    SerialTransport::Socket(path) => {
+                        match Self::connect_serial_socket_once(path).await {
+                            Ok(fd) => (fd, true),
+                            Err(e) => {
+                                warn!(
+                                    vm_id = %vm_id,
+                                    error = %e,
+                                    "serial re-attach failed during adoption; console capture stays down"
+                                );
+                                (Self::eof_placeholder_fd(), false)
+                            }
+                        }
+                    }
+                    SerialTransport::Pty => (Self::eof_placeholder_fd(), false),
+                }
+            } else {
+                (Self::eof_placeholder_fd(), false)
+            };
+
+            let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+            let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+            // Take the broadcaster's endpoint BEFORE the entry consumes
+            // console_io, so the map never needs to be re-read on the
+            // just-inserted entry. Capture is only claimed alive when the
+            // dup (and with it the broadcaster spawn) actually happens.
+            let broadcaster_fd = if console_live {
+                Self::dup_cloexec(&console_io).ok()
+            } else {
+                None
+            };
+            let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
+
+            {
+                let mut map = self.vms.write().await;
+                map.insert(
+                    vm_id.clone(),
+                    VmProcess {
+                        api_socket: api_socket.clone(),
+                        child: VmmChild::Adopted(pid),
+                        console_io,
+                        serial_transport: serial_transport.clone(),
+                        pty_tx: pty_tx.clone(),
+                        pty_scrollback: pty_scrollback.clone(),
+                        broadcaster_alive: broadcaster_alive.clone(),
+                        last_cpu_seconds: 0.0,
+                        last_cpu_at: None,
+                    },
+                );
+            }
+
+            if let Some(broadcaster_fd) = broadcaster_fd {
+                Self::spawn_pty_broadcaster(
+                    self.vms.clone(),
+                    vm_id.clone(),
+                    broadcaster_fd,
+                    serial_transport,
+                    pty_tx.clone(),
+                    pty_scrollback.clone(),
+                    broadcaster_alive,
+                );
+                Self::spawn_console_log_writer(
+                    &vm_id,
+                    &pty_tx,
+                    vm_dir.join("console.log"),
+                    ConsoleLogMode::Append,
+                );
+                info!(
+                    vm_id = %vm_id,
+                    pid = pid,
+                    "adopted running vm after agent restart; console capture resumed"
+                );
+            } else if vmm_alive {
+                info!(
+                    vm_id = %vm_id,
+                    pid = pid,
+                    "adopted running vm after agent restart (console not re-attached)"
+                );
+            } else {
+                info!(
+                    vm_id = %vm_id,
+                    "adopted stopped vm runtime dir after agent restart"
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// A read-only fd whose reads return EOF immediately — the
+    /// placeholder console endpoint for adopted entries with no live
+    /// connection. Lifecycle paths see an honest "no console" state
+    /// instead of a guessed-at endpoint. Reachability notes: `reboot_vm`'s
+    /// forced rotation can never touch it (rotation happens only after a
+    /// 2xx `vm.reboot`, which a dead VMM's missing api socket can never
+    /// answer), and console keystrokes written to it fail with EPIPE —
+    /// an honest error for a VM whose console is down.
+    fn eof_placeholder_fd() -> OwnedFd {
+        match nix::unistd::pipe() {
+            // Dropping the write end makes the read end return EOF.
+            Ok((read_end, write_end)) => {
+                drop(write_end);
+                read_end
+            }
+            Err(_) => {
+                // /dev/null reads EOF forever — the last-resort stand-in.
+                std::fs::File::open("/dev/null")
+                    .expect("/dev/null must open")
+                    .into()
+            }
+        }
     }
 }
 
@@ -2206,6 +2987,7 @@ mod tests {
     use super::ProcessCloudHypervisorAdapter;
     use super::SerialTransport;
     use super::VmProcess;
+    use super::VmmChild;
     use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig};
     use chv_common::hypervisor::HypervisorOverrides;
     use chv_errors::ChvError;
@@ -2403,7 +3185,7 @@ mod tests {
                 "vm-respawn".to_string(),
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     pty_tx: pty_tx.clone(),
@@ -2481,7 +3263,7 @@ mod tests {
                 "vm-respawn-pty".to_string(),
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
                     pty_tx: pty_tx.clone(),
@@ -2582,7 +3364,7 @@ mod tests {
                 "vm-heal".to_string(),
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     pty_tx: pty_tx.clone(),
@@ -2714,7 +3496,7 @@ mod tests {
                 "vm-reboot-rotate".to_string(),
                 VmProcess {
                     api_socket: api_sock_path.clone(),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io: zombie_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     pty_tx: pty_tx.clone(),
@@ -2819,7 +3601,7 @@ mod tests {
                 "vm-reboot-fail".to_string(),
                 VmProcess {
                     api_socket: api_sock_path.clone(),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     pty_tx: pty_tx.clone(),
@@ -2880,6 +3662,503 @@ mod tests {
             .expect("post-reboot probe must arrive through the untouched connection")
             .expect("channel must be live");
         assert_eq!(got, b"post-reboot".to_vec());
+    }
+
+    /// Between `spawn()` returning and the child's `execve` completing there
+    /// is a small window in which `/proc/<pid>/cmdline` still reads empty;
+    /// tests that assert on process identity wait for it to be observable.
+    async fn wait_for_cmdline(pid: u32) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(cmdline) = super::proc_cmdline(pid) {
+                if !cmdline.is_empty() {
+                    return cmdline;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cmdline for pid {pid} never became observable"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// VmmChild semantics: an Owned child is killed and reaped through
+    /// kill/wait; an Adopted pid is only signalled when /proc/<pid>/cmdline
+    /// AND the executable name still prove identity against the VM's
+    /// api-socket path — a mismatching (e.g. recycled or argv-spoofed) pid
+    /// is refused, and a vanished pid is absorbed without panicking.
+    #[tokio::test]
+    async fn vmm_child_owned_and_adopted_semantics() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let api_socket = dir.path().join("vm.sock");
+
+        // Owned: spawn → live → kill → wait → exited.
+        let owned_child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let mut owned = VmmChild::Owned(owned_child);
+        assert!(matches!(
+            owned.prove_exited(&api_socket),
+            super::Liveness::Alive
+        ));
+        owned.kill(&api_socket, None);
+        owned.wait().await;
+        assert!(matches!(
+            owned.prove_exited(&api_socket),
+            super::Liveness::Exited
+        ));
+
+        // Adopted with a matching command line. `sh -c "sleep 5; true"`
+        // never execs (compound command), so the process keeps its argv —
+        // including the api-socket flag and path — for its lifetime.
+        let mut adopted_proc = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5; true")
+            .arg("--api-socket")
+            .arg(&api_socket)
+            .spawn()
+            .unwrap();
+        let adopted_pid = adopted_proc.id().expect("freshly spawned child has a pid");
+        wait_for_cmdline(adopted_pid).await;
+        // The stand-in's real executable — what the exe cross-check
+        // compares against (the adapter passes its chv_binary's file
+        // name in production).
+        let adopted_exe = std::fs::read_link(format!("/proc/{adopted_pid}/exe")).unwrap();
+        let adopted_exe_name = adopted_exe.file_name().unwrap().to_owned();
+        assert!(
+            super::pid_is_cloud_hypervisor(
+                adopted_pid,
+                &api_socket,
+                Some(adopted_exe_name.as_os_str())
+            ),
+            "argv + exe identity must match for the live stand-in"
+        );
+        // A correct argv with a WRONG expected executable is refused:
+        // crafted argv alone must never authorize a signal.
+        assert!(!super::pid_is_cloud_hypervisor(
+            adopted_pid,
+            &api_socket,
+            Some(std::ffi::OsStr::new("definitely-not-cloud-hypervisor"))
+        ));
+        let mut adopted = VmmChild::Adopted(adopted_pid);
+        assert!(matches!(
+            adopted.prove_exited(&api_socket),
+            super::Liveness::Alive
+        ));
+        adopted.kill(&api_socket, Some(adopted_exe_name.as_os_str()));
+        adopted.wait().await;
+        assert!(matches!(
+            adopted.prove_exited(&api_socket),
+            super::Liveness::Exited
+        ));
+        let _ = adopted_proc.wait().await;
+
+        // Adopted with a NON-matching command line: the kill must be
+        // refused — an unrelated process must never be signalled.
+        let mut unrelated = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let unrelated_pid = unrelated.id().expect("freshly spawned child has a pid");
+        let unrelated_cmdline = wait_for_cmdline(unrelated_pid).await;
+        assert!(
+            unrelated_cmdline.contains("sleep"),
+            "stand-in must be running"
+        );
+        assert!(!super::pid_is_cloud_hypervisor(
+            unrelated_pid,
+            &api_socket,
+            None
+        ));
+        let mut mismatched = VmmChild::Adopted(unrelated_pid);
+        mismatched.kill(&api_socket, None);
+        // The refusal left the process alive.
+        assert!(
+            super::pid_exists(unrelated_pid),
+            "kill must be refused for a pid without identity proof"
+        );
+        // Liveness for the re-spawn decision is about OUR VMM: a live but
+        // unproven pid (recycled) counts as exited — the runtime dir is
+        // ours to take over, the unrelated process is not ours to signal.
+        assert!(matches!(
+            mismatched.prove_exited(&api_socket),
+            super::Liveness::Exited
+        ));
+        let _ = unrelated.start_kill();
+        let _ = unrelated.wait().await;
+
+        // Adopted with a vanished pid: no panic, absorbed as exited.
+        let mut vanished = VmmChild::Adopted(4_000_000);
+        assert!(matches!(
+            vanished.prove_exited(&api_socket),
+            super::Liveness::Exited
+        ));
+        vanished.kill(&api_socket, None);
+        vanished.wait().await;
+    }
+
+    /// The adoption scan rebuilds the in-memory map from on-disk runtime
+    /// state: a live orphan (pid + cmdline identity + serial listener)
+    /// is re-attached with console capture resumed and console.log
+    /// APPENDED (pre-restart history preserved); a dead VMM still gets
+    /// an entry (idempotent stop/delete, re-spawnable start); dirs
+    /// without a pidfile or with unsafe ids are skipped.
+    #[tokio::test]
+    async fn adopt_rebuilds_map_from_runtime_dir() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let runtime_root = dir.path().join("runtime");
+        let vms_base = runtime_root.join("vms");
+
+        // vm-live: a live orphan with a serial listener and prior history.
+        let live_dir = vms_base.join("vm-live");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let live_api_socket = live_dir.join("vm.sock");
+        let serial_sock = live_dir.join("serial.sock");
+        let mut orphan = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5; true")
+            .arg("--api-socket")
+            .arg(&live_api_socket)
+            .spawn()
+            .unwrap();
+        let orphan_pid = orphan.id().expect("freshly spawned child has a pid");
+        wait_for_cmdline(orphan_pid).await;
+        std::fs::write(live_dir.join("ch.pid"), format!("{orphan_pid}")).unwrap();
+        std::fs::write(live_dir.join("vm-config.json"), "{}").unwrap();
+        std::fs::write(live_dir.join("console.log"), "history\n").unwrap();
+        // The orphan's serial listener: accept the agent's reconnect and
+        // stream a probe (with a small delay so the test can subscribe to
+        // the fan-out channel before the bytes flow).
+        let serial_listener = std::os::unix::net::UnixListener::bind(&serial_sock).unwrap();
+        let acceptor = std::thread::spawn(move || {
+            let (mut conn, _) = serial_listener.accept().expect("serial accept");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            conn.write_all(b"resumed").expect("write resumed probe");
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        });
+
+        // vm-dead: a reaped pid, no serial socket.
+        let dead_dir = vms_base.join("vm-dead");
+        std::fs::create_dir_all(&dead_dir).unwrap();
+        let mut dead_child = tokio::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead_child.id().expect("freshly spawned child has a pid");
+        let _ = dead_child.wait().await;
+        std::fs::write(dead_dir.join("ch.pid"), format!("{dead_pid}")).unwrap();
+
+        // vm-nopid: no pidfile → skipped with today's NotFound semantics.
+        std::fs::create_dir_all(vms_base.join("vm-nopid")).unwrap();
+
+        // Unsafe id (contains a path separator character): skipped.
+        let unsafe_dir = vms_base.join("bad\\id");
+        std::fs::create_dir_all(&unsafe_dir).unwrap();
+        std::fs::write(unsafe_dir.join("ch.pid"), "1").unwrap();
+
+        // The adapter's chv_binary file name is what the exe cross-check
+        // expects adopted VMMs to run — point it at the stand-in's real
+        // executable so identity validation runs in its production shape.
+        let orphan_exe = std::fs::read_link(format!("/proc/{orphan_pid}/exe")).unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(orphan_exe.clone());
+        adapter.adopt_running_vms(&runtime_root).await.unwrap();
+
+        let mut live_rx;
+        {
+            let vms = adapter.vms.read().await;
+            let live = vms.get("vm-live").expect("live orphan must be adopted");
+            let VmmChild::Adopted(live_pid) = &live.child else {
+                panic!("live orphan must be tracked as Adopted");
+            };
+            assert_eq!(*live_pid, orphan_pid);
+            assert!(super::pid_is_cloud_hypervisor(
+                *live_pid,
+                &live_api_socket,
+                orphan_exe.file_name()
+            ));
+            assert!(
+                live.broadcaster_alive.load(Ordering::SeqCst),
+                "console capture must resume for the adopted orphan"
+            );
+            live_rx = live.pty_tx.subscribe();
+
+            let dead = vms.get("vm-dead").expect("dead VMM dir must be adopted");
+            let VmmChild::Adopted(dead_tracked_pid) = &dead.child else {
+                panic!("dead VMM must be tracked as Adopted");
+            };
+            assert_eq!(*dead_tracked_pid, dead_pid);
+            assert!(
+                !super::pid_is_cloud_hypervisor(*dead_tracked_pid, &dead_dir.join("vm.sock"), None),
+                "dead VMM must classify as exited"
+            );
+            assert!(
+                !dead.broadcaster_alive.load(Ordering::SeqCst),
+                "no broadcaster may be spawned for a dead VMM"
+            );
+
+            assert!(
+                !vms.contains_key("vm-nopid"),
+                "dir without pidfile must be skipped"
+            );
+            assert!(!vms.contains_key("bad\\id"), "unsafe id must be skipped");
+        }
+
+        // Console capture actually resumed: the serial probe flows through
+        // the fan-out channel and console.log gains it WITHOUT losing the
+        // pre-restart history (append semantics).
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), live_rx.recv())
+            .await
+            .expect("resumed probe must arrive through the adopted console")
+            .expect("channel must be live");
+        assert_eq!(got, b"resumed".to_vec());
+
+        let log_path = live_dir.join("console.log");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if contents.contains("history") && contents.contains("resumed") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "console.log must contain history + resumed, got: {contents:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let _ = orphan.start_kill();
+        let _ = orphan.wait().await;
+        acceptor.join().expect("acceptor thread");
+    }
+
+    /// start_vm on a tracked VM whose VMM has exited routes to the
+    /// re-spawn path: without a persisted config it fails fast with a
+    /// clear re-create-required error while PRESERVING the entry
+    /// (stop/delete stay functional); with a config but a missing binary
+    /// the spawn failure surfaces.
+    #[tokio::test]
+    async fn start_vm_respawns_dead_vmm() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-rs");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        // The chv binary does not exist: any re-spawn attempt surfaces the
+        // spawn failure immediately instead of hanging.
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv-missing"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-rs".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io: std::fs::File::open("/dev/null").unwrap().into(),
+                    serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
+                    pty_tx,
+                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // No persisted config → clear re-create-required error, entry kept.
+        let err = adapter.start_vm("vm-rs", None).await.unwrap_err();
+        match &err {
+            ChvError::Internal { reason } => {
+                assert!(
+                    reason.contains("re-create"),
+                    "error must tell the operator to re-create: {reason}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert!(
+            adapter.vms.read().await.contains_key("vm-rs"),
+            "a failed re-spawn must preserve the tracked entry"
+        );
+
+        // Persisted config + missing binary → the spawn failure surfaces.
+        std::fs::write(vm_dir.join("vm-config.json"), r#"{"cpus":1}"#).unwrap();
+        let err = adapter.start_vm("vm-rs", None).await.unwrap_err();
+        assert!(
+            matches!(err, ChvError::Io { .. }),
+            "expected Io from the failed spawn, got {err:?}"
+        );
+        assert!(adapter.vms.read().await.contains_key("vm-rs"));
+    }
+
+    /// delete_vm removes the adapter-owned runtime artifacts (api socket,
+    /// ch.pid, vm-config.json) alongside the VMM process.
+    #[tokio::test]
+    async fn delete_vm_removes_runtime_artifacts() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-del");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        std::fs::write(&api_socket, b"").unwrap();
+        std::fs::write(vm_dir.join("ch.pid"), "12345").unwrap();
+        std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-del".to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child: VmmChild::Owned(child),
+                    console_io: std::fs::File::open("/dev/null").unwrap().into(),
+                    serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
+                    pty_tx,
+                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        adapter.delete_vm("vm-del", None).await.unwrap();
+        assert!(!api_socket.exists(), "api socket must be removed");
+        assert!(!vm_dir.join("ch.pid").exists(), "pidfile must be removed");
+        assert!(
+            !vm_dir.join("vm-config.json").exists(),
+            "persisted config must be removed"
+        );
+        assert!(!adapter.vms.read().await.contains_key("vm-del"));
+    }
+
+    /// Lifecycle operations serialize per VM: with the per-VM mutex held
+    /// by an external holder, a lifecycle op on the same VM must block
+    /// instead of running concurrently (two concurrent starts over an
+    /// exited VMM would otherwise both re-spawn a process for it). An op
+    /// on a DIFFERENT VM must not be blocked by the first holder.
+    #[tokio::test]
+    async fn lifecycle_ops_serialize_per_vm() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+
+        let held = adapter.vm_op_lock("vm-a");
+        let _guard = held.lock_owned().await;
+
+        // Same VM: must block — without serialization it would complete
+        // immediately with NotFound (the map is empty).
+        let start_a = adapter.start_vm("vm-a", None);
+        match tokio::time::timeout(std::time::Duration::from_millis(200), start_a).await {
+            Err(_elapsed) => {} // still blocked — serialization holds
+            Ok(res) => panic!("start on vm-a ran while its lifecycle lock was held: {res:?}"),
+        }
+
+        // Different VM: must not be blocked by vm-a's holder (it fails
+        // fast with NotFound instead).
+        let start_b = adapter.start_vm("vm-b", None);
+        match tokio::time::timeout(std::time::Duration::from_millis(200), start_b).await {
+            Ok(Err(ChvError::NotFound { .. })) => {}
+            other => panic!("start on vm-b should fail fast with NotFound, got {other:?}"),
+        }
+    }
+
+    /// create refuses to run a second VMM for a VM whose runtime dir
+    /// already hosts a live one — by pidfile identity, and by its api
+    /// socket answering — while a dead pid and a stale (non-listening)
+    /// socket file do not block a create.
+    #[tokio::test]
+    async fn create_refuses_over_live_vmm() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+
+        // --- Case 1: live VMM identified by pidfile + cmdline + exe. ---
+        let live_dir = dir.path().join("vms").join("vm-live");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let live_api_socket = live_dir.join("vm.sock");
+        let mut orphan = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5; true")
+            .arg("--api-socket")
+            .arg(&live_api_socket)
+            .spawn()
+            .unwrap();
+        let orphan_pid = orphan.id().expect("freshly spawned child has a pid");
+        wait_for_cmdline(orphan_pid).await;
+        std::fs::write(live_dir.join("ch.pid"), format!("{orphan_pid}")).unwrap();
+        let orphan_exe = std::fs::read_link(format!("/proc/{orphan_pid}/exe")).unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(orphan_exe.clone());
+        let cfg = VmConfig {
+            vm_id: "vm-live".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: dir.path().join("kernel"), // unused by the guard
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: live_api_socket.clone(),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        let err = adapter.ensure_no_live_vmm(&cfg).await.unwrap_err();
+        match &err {
+            ChvError::Internal { reason } => {
+                assert!(
+                    reason.contains("already running"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+
+        let _ = orphan.start_kill();
+        let _ = orphan.wait().await;
+
+        // --- Case 2: dead pid + stale non-listening socket: no refusal. ---
+        std::fs::write(&live_api_socket, b"").unwrap(); // stale file
+        adapter.ensure_no_live_vmm(&cfg).await.unwrap();
+
+        // --- Case 3: no pidfile, but the api socket answers: refusal. ---
+        let anon_dir = dir.path().join("vms").join("vm-anon");
+        std::fs::create_dir_all(&anon_dir).unwrap();
+        let anon_api_socket = anon_dir.join("vm.sock");
+        let responder = std::os::unix::net::UnixListener::bind(&anon_api_socket).unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = responder.accept() {
+                let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                // Hold the connection open until the test ends.
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+            }
+        });
+        let cfg_anon = VmConfig {
+            vm_id: "vm-anon".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: dir.path().join("kernel"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: anon_api_socket.clone(),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        let err = adapter.ensure_no_live_vmm(&cfg_anon).await.unwrap_err();
+        match &err {
+            ChvError::Internal { reason } => {
+                assert!(
+                    reason.contains("answered by a running cloud-hypervisor"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        server.join().expect("responder thread");
     }
 
     #[test]
@@ -2989,7 +4268,7 @@ mod tests {
                 "vm-test".to_string(),
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
                     pty_tx: pty_tx.clone(),
@@ -3053,7 +4332,7 @@ mod tests {
                 "vm-test".to_string(),
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
-                    child,
+                    child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
                     pty_tx: pty_tx.clone(),

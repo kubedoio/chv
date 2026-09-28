@@ -221,9 +221,13 @@ async fn start_core_native(
     };
     let activated = cellhv_core_startup::StartupTransaction::begin(&paths)?
         .activate_native_only(configured_seed)?;
-    let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> = Arc::new(
-        chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path),
-    );
+    let process_adapter =
+        chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path);
+    if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
+        warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
+    }
+    let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
+        Arc::new(process_adapter);
     let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
@@ -694,8 +698,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let process_adapter = ProcessCloudHypervisorAdapter::new(&config.chv_binary_path);
+    // Rebuild the in-memory VM map from on-disk runtime state before any
+    // mode wiring: VMs outlive agent restarts, and lifecycle ops must not
+    // fail with NotFound against VMs this node still runs. Fail-soft: an
+    // adoption failure degrades to today's empty-map semantics (warned)
+    // rather than bricking the agent.
+    if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
+        warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
+    }
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
-        Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
+        Arc::new(process_adapter);
     let vm_runtime = VmRuntime::new(adapter.clone());
 
     let cache = Arc::new(tokio::sync::Mutex::new(cache));

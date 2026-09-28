@@ -79,7 +79,9 @@ fn tuning_to_legacy(
     }
 }
 
-fn is_safe_resource_id(value: &str) -> bool {
+/// Shared with the process adapter (adoption scan) — see there for the
+/// second call site.
+pub(crate) fn is_safe_resource_id(value: &str) -> bool {
     !value.is_empty()
         && !value.contains('/')
         && !value.contains('\\')
