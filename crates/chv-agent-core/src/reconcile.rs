@@ -618,7 +618,10 @@ impl Reconciler {
             let cache = self.cache.lock().await;
             let mut desired_networks: BTreeSet<String> =
                 cache.vm_network_ids().into_iter().collect();
-            info!(desired_networks = ?desired_networks, "reconcile_networks: desired networks");
+            // Per-tick, per-network reconciliation noise: debug. A change in
+            // the desired set or a failure is what an operator needs; the
+            // steady-state "ensured N networks" stream only buries it.
+            debug!(desired_networks = ?desired_networks, "reconcile_networks: desired networks");
             desired_networks.extend(cache.network_fragments.keys().cloned());
 
             let mut network_cidrs: std::collections::HashMap<String, String> =
@@ -747,14 +750,14 @@ impl Reconciler {
                 .map(|s| s.as_str())
                 .unwrap_or("");
             let op_id = format!("reconcile-network-ensure-{}", net_id);
-            info!(network_id = %net_id, bridge = %bridge, "reconcile_networks: calling ensure_network_topology");
+            debug!(network_id = %net_id, bridge = %bridge, "reconcile_networks: calling ensure_network_topology");
             if let Err(e) = nwd
                 .ensure_network_topology(net_id, &bridge, cidr, gateway, Some(&op_id))
                 .await
             {
                 warn!(network_id = %net_id, error = %e, "failed to ensure network topology");
             } else {
-                info!(network_id = %net_id, bridge = %bridge, "reconcile_networks: ensure_network_topology succeeded");
+                debug!(network_id = %net_id, bridge = %bridge, "reconcile_networks: ensure_network_topology succeeded");
                 // Network health check (Sprint 11 A1)
                 match nwd.get_network_health(net_id).await {
                     Ok(health) => {
@@ -1087,6 +1090,21 @@ async fn prepare_vm_resources(
     let mut disks = Vec::new();
     let mut volume_ids = Vec::new();
     for disk in &vm_spec.disks {
+        // The volume id becomes a path component of the stord locator
+        // (`{volume_id}.img` under the vm dir): a crafted id (`../..`) is a
+        // write traversal. Reject anything that is not a single safe
+        // component at the node boundary — the control plane is a
+        // trusted-but-buggy peer, and the stord path allowlist is empty by
+        // default.
+        if !chv_common::is_safe_id(&disk.volume_id) {
+            return Err(ChvError::InvalidArgument {
+                field: "volume_id".to_string(),
+                reason: format!(
+                    "'{}' is not a safe volume id (must be a single path component)",
+                    disk.volume_id
+                ),
+            });
+        }
         let open_op_id = format!("{}-open-volume-{}", operation_id, disk.volume_id);
         let mut open_options = std::collections::HashMap::new();
         if let Some(size_bytes) = disk.size_bytes {

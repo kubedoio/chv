@@ -3424,7 +3424,9 @@ mod tests {
             });
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
 
         let mut cache = NodeCache::new("node-1");
         cache.node_state = crate::state_machine::NodeState::TenantReady
@@ -3578,7 +3580,9 @@ mod tests {
                 .ok();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
 
         let mut cache = NodeCache::new("node-1");
         cache.node_state = crate::state_machine::NodeState::TenantReady

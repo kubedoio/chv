@@ -1134,7 +1134,6 @@ mod tests {
     use super::*;
     use chv_nwd_api::chv_nwd_api::network_service_server::NetworkService;
     use chv_stord_api::chv_stord_api::storage_service_server::StorageService;
-    use std::time::Duration;
     use tonic::{Request, Response, Status};
 
     struct MockStord;
@@ -1379,7 +1378,9 @@ mod tests {
                 .ok();
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
         let mut client = StordClient::connect(&socket).await.unwrap();
         assert!(client.health_probe().await.unwrap());
     }
@@ -1402,7 +1403,9 @@ mod tests {
                 .ok();
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
         let mut client = NwdClient::connect(&socket).await.unwrap();
         assert!(client.health_probe().await.unwrap());
     }
@@ -1425,7 +1428,9 @@ mod tests {
                 .ok();
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
         let mut client = StordClient::connect(&socket).await.unwrap();
         let result = client.resize_volume("vol-1", 1024, Some("op-1")).await;
         assert!(matches!(result, Err(ChvError::BackendUnavailable { .. })));
@@ -1449,7 +1454,9 @@ mod tests {
                 .ok();
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
         let mut client = NwdClient::connect(&socket).await.unwrap();
         let result = client
             .detach_vm_nic("nic-1", "vm-1", "net-1", Some("op-1"))

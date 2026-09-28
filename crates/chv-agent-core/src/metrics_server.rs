@@ -38,6 +38,20 @@ impl Default for HostResources {
 }
 
 /// Shared state exposed via the Prometheus metrics endpoint.
+/// Core journal (core-managed mode) health metrics. Absent (`None`) in
+/// legacy mode — the journal poller only exists in core-managed mode.
+#[derive(Debug, Clone, Copy)]
+pub struct CoreJournalMetrics {
+    /// Cumulative failed journal scans since agent start.
+    pub scan_failures_total: u64,
+    /// Whether the most recent journal scan succeeded (and the executor is
+    /// not fatally terminated).
+    pub healthy: bool,
+    /// Current count of stuck operations: status `running` with a recovery
+    /// marker (InspectRequired) awaiting operator resolution.
+    pub inspect_required: u64,
+}
+
 pub struct MetricsState {
     pub node_id: String,
     pub node_state: String,
@@ -59,6 +73,8 @@ pub struct MetricsState {
     // Resource pressure indicators
     pub disk_pressure: bool,
     pub memory_pressure: bool,
+    // Core journal (core-managed mode only)
+    pub core_journal: Option<CoreJournalMetrics>,
 }
 
 impl MetricsState {
@@ -80,6 +96,7 @@ impl MetricsState {
             last_reconcile_duration_ms: 0,
             disk_pressure: false,
             memory_pressure: false,
+            core_journal: None,
         }
     }
 }
@@ -115,6 +132,27 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
     let s = state.lock().await;
     let uptime = s.start_time.elapsed().as_secs();
     let reconcile_duration_secs = s.last_reconcile_duration_ms as f64 / 1000.0;
+    // Core journal metrics exist only in core-managed mode: absent in
+    // legacy mode rather than zeroed (a zero gauge would read as
+    // "journal healthy" where no journal poller runs).
+    let core_journal_segment = match s.core_journal {
+        Some(core) => format!(
+            "# HELP chv_agent_journal_scan_failures_total Total failed core journal scans\n\
+             # TYPE chv_agent_journal_scan_failures_total counter\n\
+             chv_agent_journal_scan_failures_total{{node_id=\"{node_id}\"}} {scan_failures}\n\
+             # HELP chv_agent_journal_healthy Whether the core journal scanner is healthy (1=healthy)\n\
+             # TYPE chv_agent_journal_healthy gauge\n\
+             chv_agent_journal_healthy{{node_id=\"{node_id}\"}} {healthy}\n\
+             # HELP chv_agent_journal_inspect_required Operations stuck InspectRequired awaiting operator resolution\n\
+             # TYPE chv_agent_journal_inspect_required gauge\n\
+             chv_agent_journal_inspect_required{{node_id=\"{node_id}\"}} {inspect_required}\n",
+            node_id = s.node_id,
+            scan_failures = core.scan_failures_total,
+            healthy = if core.healthy { 1 } else { 0 },
+            inspect_required = core.inspect_required,
+        ),
+        None => String::new(),
+    };
     let body = format!(
         "# HELP chv_agent_node_state Current node state (1=active)\n\
          # TYPE chv_agent_node_state gauge\n\
@@ -172,7 +210,7 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
          chv_agent_disk_pressure{{node_id=\"{node_id}\"}} {disk_pressure}\n\
          # HELP chv_agent_memory_pressure Whether memory is under pressure (1=yes, 0=no)\n\
          # TYPE chv_agent_memory_pressure gauge\n\
-         chv_agent_memory_pressure{{node_id=\"{node_id}\"}} {mem_pressure}\n",
+         chv_agent_memory_pressure{{node_id=\"{node_id}\"}} {mem_pressure}\n{core_journal_segment}",
         node_id = s.node_id,
         state = s.node_state,
         vms = s.vm_count,

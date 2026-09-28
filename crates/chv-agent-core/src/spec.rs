@@ -79,6 +79,21 @@ impl VmSpec {
                 });
             }
         }
+        // Volume ids become path components of stord locators
+        // (`{volume_id}.img`): reject anything that is not a single safe
+        // component (a crafted id is a write traversal). The control plane
+        // is a trusted-but-buggy peer; this is the node-side boundary.
+        for disk in &self.disks {
+            if !chv_common::is_safe_id(&disk.volume_id) {
+                return Err(ChvError::InvalidArgument {
+                    field: "volume_id".to_string(),
+                    reason: format!(
+                        "'{}' is not a safe volume id (must be a single path component)",
+                        disk.volume_id
+                    ),
+                });
+            }
+        }
         if let Some(ref hv) = self.hypervisor_overrides {
             if let Some(ref src) = hv.rng_src {
                 hypervisor::validate_rng_src(src).map_err(|e| ChvError::InvalidArgument {

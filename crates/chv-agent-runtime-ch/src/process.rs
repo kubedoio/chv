@@ -368,21 +368,7 @@ async fn build_cloud_init_seed(
         })?;
 
     let seed_iso = vm_dir.join("seed.iso");
-    let output = tokio::process::Command::new("genisoimage")
-        .arg("-output")
-        .arg(&seed_iso)
-        .arg("-volid")
-        .arg("cidata")
-        .arg("-joliet")
-        .arg("-rock")
-        .arg(seed_dir.join("user-data"))
-        .arg(seed_dir.join("meta-data"))
-        .arg(seed_dir.join("network-config"))
-        .output()
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to run genisoimage: {}", e),
-        })?;
+    let output = run_genisoimage(&seed_iso, &seed_dir).await?;
 
     if !output.status.success() {
         return Err(ChvError::Internal {
@@ -394,6 +380,44 @@ async fn build_cloud_init_seed(
     }
 
     Ok(seed_iso)
+}
+
+/// Runs `genisoimage` to build the cloud-init seed ISO. Resolved through
+/// PATH first; if PATH lookup reports NotFound, falls back to the canonical
+/// install location (`install.sh` and the systemd unit guarantee /usr/bin,
+/// so this covers a stripped environment such as a minimal container).
+async fn run_genisoimage(
+    seed_iso: &std::path::Path,
+    seed_dir: &std::path::Path,
+) -> Result<std::process::Output, ChvError> {
+    let command = |binary: &str| {
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .arg("-output")
+            .arg(seed_iso)
+            .arg("-volid")
+            .arg("cidata")
+            .arg("-joliet")
+            .arg("-rock")
+            .arg(seed_dir.join("user-data"))
+            .arg(seed_dir.join("meta-data"))
+            .arg(seed_dir.join("network-config"));
+        command
+    };
+    match command("genisoimage").output().await {
+        Ok(output) => Ok(output),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            command("/usr/bin/genisoimage")
+                .output()
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to run genisoimage: {}", e),
+                })
+        }
+        Err(error) => Err(ChvError::Internal {
+            reason: format!("failed to run genisoimage: {}", error),
+        }),
+    }
 }
 
 impl ProcessCloudHypervisorAdapter {
