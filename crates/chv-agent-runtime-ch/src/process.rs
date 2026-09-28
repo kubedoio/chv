@@ -13,6 +13,7 @@ use tokio::process::Child;
 use tracing::{info, warn};
 
 use crate::core_runtime::is_safe_resource_id;
+use chv_hypervisor_api::resources::{vm_config_file, vm_pid_file};
 
 /// RAII guard that records VM lifecycle RED metrics when it drops.
 ///
@@ -382,7 +383,7 @@ impl ProcessCloudHypervisorAdapter {
     /// answers.
     async fn ensure_no_live_vmm(&self, config: &VmConfig) -> Result<(), ChvError> {
         if let Some(vm_dir) = config.api_socket_path.parent() {
-            if let Ok(raw) = std::fs::read_to_string(vm_dir.join("ch.pid")) {
+            if let Ok(raw) = std::fs::read_to_string(vm_pid_file(vm_dir)) {
                 if let Ok(pid) = raw.trim().parse::<u32>() {
                     if pid_is_cloud_hypervisor(
                         pid,
@@ -1188,7 +1189,7 @@ impl ProcessCloudHypervisorAdapter {
         let _ = tokio::fs::remove_file(&api_socket).await;
         let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
 
-        let config_path = vm_dir.join("vm-config.json");
+        let config_path = vm_config_file(&vm_dir);
         let body = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
             ChvError::Internal {
                 reason: format!(
@@ -1233,7 +1234,7 @@ impl ProcessCloudHypervisorAdapter {
         // hand-off.
         let mut child = ChildGuard::new(child);
         if let Some(pid) = child.id() {
-            let _ = std::fs::write(vm_dir.join("ch.pid"), format!("{pid}"));
+            let _ = std::fs::write(vm_pid_file(&vm_dir), format!("{pid}"));
         }
 
         if let Err(e) = Self::wait_for_socket(&api_socket, std::time::Duration::from_secs(10)).await
@@ -1622,9 +1623,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // this VM is skipped; without the config, a later start degrades
         // to a clear re-create-required error.
         if let Some(pid) = child.id() {
-            let _ = std::fs::write(vm_runtime_dir.join("ch.pid"), format!("{pid}"));
+            let _ = std::fs::write(vm_pid_file(vm_runtime_dir), format!("{pid}"));
         }
-        if let Err(e) = std::fs::write(vm_runtime_dir.join("vm-config.json"), &body) {
+        if let Err(e) = std::fs::write(vm_config_file(vm_runtime_dir), &body) {
             warn!(
                 vm_id = %config.vm_id,
                 error = %e,
@@ -2055,8 +2056,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // the VM directory itself belong to the storage/authority layers.
         let _ = tokio::fs::remove_file(&proc.api_socket).await;
         if let Some(vm_dir) = proc.api_socket.parent() {
-            let _ = tokio::fs::remove_file(vm_dir.join("ch.pid")).await;
-            let _ = tokio::fs::remove_file(vm_dir.join("vm-config.json")).await;
+            let _ = tokio::fs::remove_file(vm_pid_file(vm_dir)).await;
+            let _ = tokio::fs::remove_file(vm_config_file(vm_dir)).await;
         }
         __guard.succeeded = true;
         Ok(())
@@ -2864,7 +2865,7 @@ impl ProcessCloudHypervisorAdapter {
                 continue;
             }
 
-            let pid = std::fs::read_to_string(vm_dir.join("ch.pid"))
+            let pid = std::fs::read_to_string(vm_pid_file(&vm_dir))
                 .ok()
                 .and_then(|raw| raw.trim().parse::<u32>().ok());
             let Some(pid) = pid else {

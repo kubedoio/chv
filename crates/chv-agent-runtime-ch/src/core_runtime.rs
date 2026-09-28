@@ -34,13 +34,13 @@ use cellhv_core_operations::{CanonicalRequest, MutationCommand, OperationJournal
 use cellhv_core_types::{OperationKind, StorageAttachmentRef};
 use chv_errors::ChvError;
 use chv_hypervisor_api::resources::{
-    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir,
-    HostResourceController, DEFAULT_NIC_CIDR,
+    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file,
+    vm_pid_file, vm_runtime_dir, HostResourceController, DEFAULT_NIC_CIDR,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Runtime-side mirror of the `cellhv-core-types` path-safety rule.
 ///
@@ -546,7 +546,26 @@ impl CloudHypervisorCoreRuntime {
         // Key the drain by the operation's authoritative `vm_id` (the same key
         // the CreateVm arm inserts under).
         let vm_id = operation.operation.vm_id.as_str();
-        let delete_result = self.adapter.delete_vm(vm_id, Some(op_id)).await;
+        let mut delete_result = self.adapter.delete_vm(vm_id, Some(op_id)).await;
+        // Idempotent delete: the force-stop path removes the adapter's map
+        // entry by design (pre-existing force-stop semantics), so a delete
+        // issued after a force stop finds no runtime entry and the adapter
+        // reports NotFound — although the VM exists at the authority and its
+        // runtime dir is still on disk (run 8d of the M2.5 qualification: the
+        // S2 retry stop's graceful window expired, the force fallback dropped
+        // the entry, and the subsequent delete failed NOT_FOUND on every
+        // retry). When the runtime dir shows the VM once ran on this node,
+        // the delete's runtime goal — no live VMM, no adapter-owned
+        // artifacts — is completable from the shared layout, so finish the
+        // cleanup the adapter would have done and succeed. A VM with neither
+        // an entry nor a runtime dir never ran on this node: NotFound stays
+        // NotFound (a misrouted delete must surface, not silently no-op).
+        if let Err(ChvError::NotFound { .. }) = &delete_result {
+            if vm_runtime_dir(&self.runtime_dir, vm_id).is_dir() {
+                self.remove_orphaned_vm_artifacts(vm_id, op_id).await;
+                delete_result = Ok(());
+            }
+        }
         if delete_result.is_err() {
             tracing::warn!(
                 vm_id,
@@ -561,6 +580,43 @@ impl CloudHypervisorCoreRuntime {
             .await;
         delete_result.map_err(Self::map_err)?;
         Ok(None)
+    }
+
+    /// Best-effort removal of the adapter-owned artifacts (the api socket,
+    /// the pid file, the persisted creation payload) for a VM whose runtime
+    /// entry is already gone — the same set the adapter's delete removes,
+    /// derived from the shared layout helpers so the two cannot drift. Disk
+    /// images and the VM directory itself belong to the storage/authority
+    /// layers and are deliberately left alone.
+    async fn remove_orphaned_vm_artifacts(&self, vm_id: &str, op_id: &str) {
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+        info!(
+            vm_id,
+            operation_id = op_id,
+            "no runtime entry for delete (force-stopped or prior delete); cleaning adapter-owned artifacts from the runtime dir"
+        );
+        for artifact in [
+            vm_api_socket(&vm_dir),
+            vm_pid_file(&vm_dir),
+            vm_config_file(&vm_dir),
+        ] {
+            match tokio::fs::remove_file(&artifact).await {
+                Ok(()) => info!(
+                    vm_id,
+                    operation_id = op_id,
+                    path = %artifact.display(),
+                    "removed orphaned vm artifact"
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!(
+                    vm_id,
+                    operation_id = op_id,
+                    path = %artifact.display(),
+                    error = %e,
+                    "orphaned vm artifact removal failed (continuing)"
+                ),
+            }
+        }
     }
 }
 
