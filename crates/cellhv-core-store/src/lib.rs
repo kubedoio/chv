@@ -266,6 +266,21 @@ impl CoreStore {
             != 0)
     }
 
+    /// Whether migration state exists from any source other than `source`.
+    /// The NodeCache cutover writes its marker under its own source name;
+    /// markers from any other source mean an unknown importer produced this
+    /// authority.
+    pub fn has_migration_state_other_than(&self, source: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM migration_state WHERE source != ?1)",
+                [source],
+                |row| row.get::<_, i64>(0),
+            )?
+            != 0)
+    }
+
     pub fn is_pristine_migration_target(&self) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT (SELECT count(*) FROM host_identity) + (SELECT count(*) FROM vms) + (SELECT count(*) FROM attachments) + (SELECT count(*) FROM operations) + (SELECT count(*) FROM operation_steps) + (SELECT count(*) FROM idempotency_keys) + (SELECT count(*) FROM events) + (SELECT count(*) FROM ownership_markers) + (SELECT count(*) FROM operation_recovery_assessments) + (SELECT count(*) FROM migration_state)",

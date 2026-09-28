@@ -55,6 +55,7 @@ pub struct ActivationProvenance {
     source_checksum: Option<String>,
     live_cache_present: bool,
     any_migration_state: bool,
+    foreign_migration_state: bool,
 }
 
 impl ActivationProvenance {
@@ -69,6 +70,15 @@ impl ActivationProvenance {
     pub fn has_any_migration_state(&self) -> bool {
         self.any_migration_state
     }
+
+    /// Whether the authority carries migration state from a source other
+    /// than the NodeCache cutover (`SOURCE_NAME`): an unknown importer
+    /// produced this authority. Disqualifying for every composition — the
+    /// NodeCache cutover markers themselves are expected only where the
+    /// mode's design says so.
+    pub fn has_foreign_migration_state(&self) -> bool {
+        self.foreign_migration_state
+    }
 }
 
 /// An already-open Core store with process-lifetime database exclusion held.
@@ -78,6 +88,15 @@ pub struct ActivatedStore {
     kind: ActivationKind,
     runtime_guard: RuntimeAuthorityGuard,
     provenance: ActivationProvenance,
+    /// Set only by [`StartupTransaction::activate_native_only`]: the
+    /// activation was requested by the native-only composition (no legacy
+    /// surface), whose runtime owner fences execution against migrated or
+    /// cache-adjacent state. Managed activations leave this false: the
+    /// core-managed composition is designed to boot from an imported legacy
+    /// NodeCache (cutover) and to run beside the live compatibility
+    /// projection cache (M2.2b), so those provenance signals are expected
+    /// there rather than disqualifying.
+    native_only: bool,
 }
 
 /// Database activation completed while the exact NodeCache snapshot and its
@@ -130,6 +149,13 @@ impl ActivatedStore {
         &self.provenance
     }
 
+    /// Whether this activation was requested by the native-only composition
+    /// ([`StartupTransaction::activate_native_only`]). See the field
+    /// documentation on [`ActivatedStore`].
+    pub fn native_only(&self) -> bool {
+        self.native_only
+    }
+
     pub fn into_runtime_parts(
         self,
     ) -> (
@@ -147,7 +173,9 @@ impl StartupTransaction {
         if self.cache.is_some() {
             return Err(StartupError::LegacyCachePresent);
         }
-        self.activate(configured_seed, None)
+        let mut activated = self.activate(configured_seed, None)?;
+        activated.native_only = true;
+        Ok(activated)
     }
 
     /// Acquires process-lifetime exclusion and the NodeCache transaction lock,
@@ -259,6 +287,7 @@ impl StartupTransaction {
         // The short cache transaction ends once the validated snapshot has
         // been consumed. Runtime database exclusion remains process-lifetime.
         let any_migration_state = service.has_any_migration_state()?;
+        let foreign_migration_state = service.has_migration_state_other_than(SOURCE_NAME)?;
         let activated = ActivatedStore {
             service,
             kind,
@@ -269,7 +298,9 @@ impl StartupTransaction {
                 source_checksum,
                 live_cache_present,
                 any_migration_state,
+                foreign_migration_state,
             },
+            native_only: false,
         };
         Ok(PendingActivatedStore {
             activated,
@@ -329,11 +360,6 @@ fn activate_existing(
     service: &mut OperationService,
 ) -> Result<(ActivationKind, Option<String>)> {
     let marker = service.legacy_migration_state(SOURCE_NAME)?;
-    let source_checksum = marker
-        .as_ref()
-        .map(|value| value.checksum.clone())
-        .or_else(|| import.map(|value| value.checksum().to_owned()));
-    let imported = marker.is_some() || import.is_some();
     match (cache, import, marker) {
         (None, None, None) => {
             if paths
@@ -343,44 +369,60 @@ fn activate_existing(
             {
                 return Err(StartupError::InterruptedMigrationSourceMissing);
             }
+            Ok((ActivationKind::Existing, None))
         }
         (None, None, Some(marker)) if marker.cutover => {
             verify_archive(&paths.node_cache_archive, &marker.checksum)?;
+            Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
         }
-        (None, None, Some(_)) => return Err(StartupError::ImportedSourceMissing),
+        (None, None, Some(_)) => Err(StartupError::ImportedSourceMissing),
         (Some(bytes), Some(import), None) => {
-            if !service.is_pristine_migration_target()? {
-                return Err(StartupError::UnrelatedAuthority);
+            if service.host_optional()?.is_some() {
+                // A live authority with no migration marker was never
+                // migrated from this cache: the NodeCache beside it is the
+                // core-managed compatibility projection (M2.2b), persisted
+                // downstream of Core execution and mutated at any time.
+                // The Core database is the authority — open it and leave
+                // the live cache to the projection instead of demanding a
+                // pristine import target (which a used authority can never
+                // be).
+                Ok((ActivationKind::Existing, None))
+            } else if !service.is_pristine_migration_target()? {
+                Err(StartupError::UnrelatedAuthority)
+            } else {
+                archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
+                import.import(service)?;
+                import.cutover(service)?;
+                Ok((
+                    ActivationKind::ImportedNodeCache,
+                    Some(import.checksum().to_owned()),
+                ))
             }
-            archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
-            import.import(service)?;
-            import.cutover(service)?;
         }
         (Some(bytes), Some(import), Some(marker)) => {
-            if import.checksum() != marker.checksum {
-                return Err(StartupError::ChecksumMismatch);
-            }
-            archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
-            if !marker.cutover {
+            if marker.cutover {
+                // The migration already cut over on an earlier boot: the
+                // live NodeCache is the compatibility projection and may
+                // legitimately differ from the archived migration source.
+                // Verify the retained archive (the exact source bytes) and
+                // open the existing authority without re-importing.
+                verify_archive(&paths.node_cache_archive, &marker.checksum)?;
+                Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
+            } else {
+                if import.checksum() != marker.checksum {
+                    return Err(StartupError::ChecksumMismatch);
+                }
+                archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
                 let disposition = import.import(service)?;
                 debug_assert_eq!(disposition, MigrationDisposition::Replay);
                 import.cutover(service)?;
+                Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
             }
         }
-        _ => {
-            return Err(StartupError::UnsafePath(
-                "inconsistent NodeCache activation snapshot".to_owned(),
-            ))
-        }
+        _ => Err(StartupError::UnsafePath(
+            "inconsistent NodeCache activation snapshot".to_owned(),
+        )),
     }
-    Ok((
-        if imported {
-            ActivationKind::ImportedNodeCache
-        } else {
-            ActivationKind::Existing
-        },
-        source_checksum,
-    ))
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -595,14 +637,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn source() -> Vec<u8> {
+    fn cache_bytes(node_id: &str, observed_generation: &str) -> Vec<u8> {
         let spec = serde_json::to_vec(&json!({
             "name":"legacy-vm", "cpus":2, "memory_bytes":1073741824_u64,
             "kernel_path":"/kernel", "disks":[], "nics":[], "desired_state":"Running"
         }))
         .unwrap();
         serde_json::to_vec(&json!({
-            "cache_version":1, "node_id":"node-a", "observed_generation":"7",
+            "cache_version":1, "node_id":node_id,
+            "observed_generation":observed_generation,
             "node_state":"TenantReady", "enrollment_complete":true,
             "vm_generations":{"vm-a":"3"}, "volume_generations":{}, "network_generations":{},
             "vm_fragments":{"vm-a":{"id":"vm-a","kind":"vm","generation":"3",
@@ -610,6 +653,10 @@ mod tests {
             "volume_fragments":{}, "network_fragments":{}, "vm_attachments":{},
             "volume_handles":{}, "pending_control_plane":[]
         })).unwrap()
+    }
+
+    fn source() -> Vec<u8> {
+        cache_bytes("node-a", "7")
     }
 
     fn test_paths(dir: &tempfile::TempDir) -> StartupPaths {
@@ -816,5 +863,128 @@ mod tests {
             active.service().host().unwrap().identity.id.as_str(),
             "node-a"
         );
+    }
+
+    #[test]
+    fn live_projection_cache_beside_established_authority_is_ignored() {
+        // Steady state of a core-managed node born fresh (never migrated):
+        // the compatibility projection persists agent-cache.json downstream
+        // of Core execution, so every restart after the first sees
+        // (cache, database). The live authority carries no migration
+        // marker — the cache is a projection artifact, not a migration
+        // source — so activation must open the existing authority instead
+        // of demanding a pristine import target (`UnrelatedAuthority` on
+        // every restart was the M2.5 real-KVM finding).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("host-projection".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::Fresh);
+        drop(active);
+
+        // The projection persists a cache beside the authority (same node
+        // identity, mutated generation).
+        write_private(&paths.node_cache, cache_bytes("host-projection", "9"));
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("host-projection".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::Existing);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "host-projection"
+        );
+        assert!(restarted.provenance().source_checksum().is_none());
+        assert!(restarted.provenance().live_cache_present());
+        assert!(!restarted.provenance().has_any_migration_state());
+        assert!(!restarted.provenance().has_foreign_migration_state());
+        // No import ran: no archive must exist, and the projection
+        // artifact must survive untouched for the compatibility surface.
+        assert!(!paths.node_cache_archive.exists());
+        assert!(paths.node_cache.exists());
+    }
+
+    #[test]
+    fn cutover_marker_with_mutated_projection_cache_opens_existing() {
+        // Legacy cutover boot imports the cache and marks the cutover
+        // complete. From the next boot on, the compatibility projection
+        // owns the live cache and its bytes legitimately diverge from the
+        // archived migration source. The steady state must verify the
+        // retained archive and open the authority (previously:
+        // `ChecksumMismatch` on every boot after the first projection
+        // save).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        assert!(paths.node_cache_archive.exists());
+        drop(active);
+
+        // The projection saves a mutated cache after the cutover (same
+        // node identity, new generation) — its checksum now differs from
+        // the migration marker.
+        write_private(&paths.node_cache, cache_bytes("node-a", "9"));
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::ImportedNodeCache);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
+        assert!(restarted.provenance().source_checksum().is_some());
+        assert!(restarted.provenance().has_any_migration_state());
+        // The archive still holds the exact migration source.
+        assert!(paths.node_cache_archive.exists());
+    }
+
+    #[test]
+    fn fresh_native_only_activation_carries_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let native = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate_native_only(Some("host-native".to_owned()))
+            .unwrap();
+        assert!(native.native_only());
+        assert_eq!(native.kind(), ActivationKind::Fresh);
+        assert!(native.provenance().source_checksum().is_none());
+    }
+
+    #[test]
+    fn native_only_activation_over_migrated_authority_keeps_provenance_visible() {
+        // A database migrated by the managed composition (marker present)
+        // must keep its migration provenance visible so the native-only
+        // runtime fence stays fail-closed, while the same state remains
+        // bootable by the managed composition.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, cache_bytes("node-a", "7"));
+        let managed = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert!(!managed.native_only());
+        assert_eq!(managed.kind(), ActivationKind::ImportedNodeCache);
+        drop(managed);
+
+        fs::remove_file(&paths.node_cache).unwrap();
+        let native = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate_native_only(Some("node-a".to_owned()))
+            .unwrap();
+        assert!(native.native_only());
+        assert_eq!(native.kind(), ActivationKind::ImportedNodeCache);
+        assert!(native.provenance().source_checksum().is_some());
+        assert!(native.provenance().has_any_migration_state());
+        // The cutover marker is the agent's own source, not a foreign one.
+        assert!(!native.provenance().has_foreign_migration_state());
     }
 }

@@ -141,7 +141,8 @@ pub struct JournalPollerConfig {
     pub drain_budget: Duration,
 }
 
-/// Sole owner of the bounded native-only Core runtime composition.
+/// Sole owner of the bounded Core runtime composition (core-managed and
+/// native-only activations alike).
 ///
 /// The journal executor lives inside a background poller task that drives
 /// `JournalExecutor::scan_ready` — the only ingress into the scheduler — at a
@@ -179,6 +180,7 @@ impl CoreRuntimeOwner {
         drain_timeout: Duration,
         poller: JournalPollerConfig,
     ) -> Result<Self> {
+        let native_only = activated.native_only();
         let (mut service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         // Fail-closed on nonsensical timings: in release builds a zero
         // scan_interval would spin at max rate, a zero scan_timeout would mark
@@ -191,7 +193,24 @@ impl CoreRuntimeOwner {
         {
             return Err(RuntimeOwnerError::InvalidPollerConfig(poller));
         }
-        validate_native_only(kind, &provenance)?;
+        // The native-only fence applies only to native-only activations
+        // (`StartupTransaction::activate_native_only`): that composition has
+        // no legacy surface and must fail closed rather than execute over
+        // migrated or cache-adjacent state. The core-managed composition is
+        // different by design — it boots from an imported legacy NodeCache
+        // (the cutover path) and runs beside the live compatibility
+        // projection (M2.2b), so those provenance signals are expected
+        // there and must not disqualify the runtime. One signal still
+        // disqualifies either way: migration state the NodeCache cutover
+        // never wrote means an unknown importer produced this authority,
+        // and it must not be silently adopted.
+        if native_only {
+            validate_native_only(kind, &provenance)?;
+        } else if provenance.has_foreign_migration_state() {
+            return Err(RuntimeOwnerError::Ineligible(
+                "durable migration state is present",
+            ));
+        }
         // Restart classification: durably mark every operation still
         // `running` as restart-interrupted (`InspectRequired`). This must
         // happen before the actor is spawned and the executor can claim:
@@ -545,6 +564,11 @@ impl Drop for CoreRuntimeOwner {
     }
 }
 
+/// Fence for native-only activations: the composition with no legacy surface
+/// must not execute over migrated or cache-adjacent state. Only invoked when
+/// the activation came from
+/// [`StartupTransaction::activate_native_only`](cellhv_core_startup::StartupTransaction::activate_native_only);
+/// managed activations are exempt by design (see `CoreRuntimeOwner::start`).
 fn validate_native_only(kind: ActivationKind, provenance: &ActivationProvenance) -> Result<()> {
     if provenance.source_checksum().is_some() {
         return Err(RuntimeOwnerError::Ineligible(
@@ -751,6 +775,65 @@ mod tests {
         assert!(request(&socket, "/v1/host")
             .await
             .contains("recovered-host"));
+        owner.shutdown().await.unwrap();
+    }
+
+    fn write_legacy_cache(paths: &StartupPaths, node_id: &str) {
+        let spec = serde_json::to_vec(&serde_json::json!({
+            "name":"legacy-vm", "cpus":2, "memory_bytes":1073741824_u64,
+            "kernel_path":"/kernel", "disks":[], "nics":[], "desired_state":"Running"
+        }))
+        .unwrap();
+        let cache = serde_json::to_vec(&serde_json::json!({
+            "cache_version":1, "node_id":node_id, "observed_generation":"7",
+            "node_state":"TenantReady", "enrollment_complete":true,
+            "vm_generations":{"vm-a":"3"}, "volume_generations":{}, "network_generations":{},
+            "vm_fragments":{"vm-a":{"id":"vm-a","kind":"vm","generation":"3",
+                "spec_json":spec,"policy_json":b"{}","updated_at":"2026-07-21T00:00:00Z","updated_by":"controller"}},
+            "volume_fragments":{}, "network_fragments":{}, "vm_attachments":{},
+            "volume_handles":{}, "pending_control_plane":[]
+        }))
+        .unwrap();
+        std::fs::write(&paths.node_cache, cache).unwrap();
+        std::fs::set_permissions(&paths.node_cache, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_imported_activation_starts_runtime() {
+        // Core-managed deployments activate through `activate()`, which
+        // imports a legacy NodeCache on the cutover boot (and the
+        // compatibility projection keeps a live cache beside the authority
+        // afterwards). The runtime owner must start on that provenance —
+        // the native-only fence must not disqualify it (Ineligible on
+        // every core-managed boot was the M2.5 real-KVM finding).
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        write_legacy_cache(&paths, "managed-host");
+        let activated = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("managed-host".to_owned()), None)
+            .unwrap();
+        assert_eq!(activated.kind(), ActivationKind::ImportedNodeCache);
+        assert!(!activated.native_only());
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(DummyRuntime),
+            activated,
+            &socket,
+            16,
+            Duration::from_secs(1),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        let response = request(&socket, "/v1/host").await;
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("managed-host"));
         owner.shutdown().await.unwrap();
     }
 
@@ -964,31 +1047,28 @@ mod tests {
 
     #[tokio::test]
     async fn imported_nodecache_is_refused_before_actor_or_listener_creation() {
+        // The native-only composition refuses an authority imported by the
+        // NodeCache cutover before the actor or listener is created. (The
+        // managed composition boots from that same cutover by design — see
+        // `managed_imported_activation_starts_runtime` — so the fence is
+        // scoped to native-only activations.)
         let directory = tempfile::tempdir().unwrap();
         let paths = paths(&directory);
         let socket = directory.path().join("core.sock");
-        let spec = serde_json::json!({
-            "name":"legacy-vm", "cpus":1, "memory_bytes":1073741824_u64,
-            "kernel_path":"/kernel", "disks":[], "nics":[], "desired_state":"Stopped"
-        });
-        let source = serde_json::json!({
-            "cache_version":1, "node_id":"legacy-host", "observed_generation":"1",
-            "node_state":"TenantReady", "enrollment_complete":true,
-            "vm_generations":{"vm-1":"1"}, "volume_generations":{}, "network_generations":{},
-            "vm_fragments":{"vm-1":{"id":"vm-1","kind":"vm","generation":"1",
-                "spec_json":serde_json::to_vec(&spec).unwrap(),
-                "policy_json":serde_json::to_vec(&serde_json::json!({})).unwrap(),
-                "updated_at":"now","updated_by":"controller"}},
-            "volume_fragments":{}, "network_fragments":{}, "vm_attachments":{},
-            "volume_handles":{}, "pending_control_plane":[]
-        });
-        std::fs::write(&paths.node_cache, serde_json::to_vec(&source).unwrap()).unwrap();
-        std::fs::set_permissions(&paths.node_cache, std::fs::Permissions::from_mode(0o600))
-            .unwrap();
+        write_legacy_cache(&paths, "legacy-host");
+        drop(
+            StartupTransaction::begin(&paths)
+                .unwrap()
+                .activate(Some("legacy-host".to_owned()), None)
+                .unwrap(),
+        );
+        std::fs::remove_file(&paths.node_cache).unwrap();
         let activated = StartupTransaction::begin(&paths)
             .unwrap()
-            .activate(Some("legacy-host".to_owned()), None)
+            .activate_native_only(Some("legacy-host".to_owned()))
             .unwrap();
+        assert!(activated.native_only());
+        assert_eq!(activated.kind(), ActivationKind::ImportedNodeCache);
         assert!(matches!(
             CoreRuntimeOwner::start(
                 std::sync::Arc::new(DummyRuntime),
