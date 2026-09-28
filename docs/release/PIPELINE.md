@@ -2,8 +2,8 @@
 
 **Purpose:** This is the single source of truth for the CHV release engineering pipeline. If you are an LLM agent working on releases, packaging, CI/CD, or versioning, **read this file first** before exploring the repository.
 
-**Last updated:** 2026-05-11  
-**Version:** 0.1.0  
+**Last updated:** 2026-09-28  
+**Version:** 0.1.1  
 
 ---
 
@@ -91,9 +91,9 @@ scripts/package/lifecycle-rpm.sh → same for RPM
 | Workflow | Trigger | What it does | Runner |
 |----------|---------|--------------|--------|
 | `ci.yml` | push/PR to `main` | fmt, clippy, test, version check | `ubuntu-latest` |
-| `package-pr.yml` | PR to `main` | build, package, smoke deb/rpm | `ubuntu-latest` |
-| `package-nightly.yml` | push to `main`, dispatch | build, package, smoke, lifecycle, publish pre-release | `ubuntu-latest` |
-| `release.yml` | tag `v*`, dispatch | full pipeline + SBOM + signing + GitHub Release | `ubuntu-latest` |
+| `package-pr.yml` | PR to `main` | build, package, smoke deb/rpm | `ubuntu-22.04` (glibc 2.35 pin — oldest smoke target is debian:12/glibc 2.36) |
+| `package-nightly.yml` | push to `main`, dispatch | build, package, smoke, lifecycle, publish pre-release | `ubuntu-22.04` (build job; same glibc pin) |
+| `release.yml` | tag `v*`, dispatch | full pipeline + SBOM + signing + GitHub Release | build job `ubuntu-22.04` (glibc pin); package/release jobs `ubuntu-latest` (binaries only run in containers) |
 | `integration-kvm.yml` | dispatch, PR label, push `main` | host diagnostics, KVM tests, package install | self-hosted `chv-kvm` |
 
 **Workflow dependencies:**
