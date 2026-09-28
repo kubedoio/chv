@@ -31,13 +31,25 @@ pub const DEFAULT_IOMMU: bool = false;
 pub const DEFAULT_RNG_SRC: &str = "/dev/urandom";
 pub const DEFAULT_WATCHDOG: bool = false;
 pub const DEFAULT_LANDLOCK_ENABLE: bool = false;
-pub const DEFAULT_SERIAL_MODE: &str = "Pty";
+/// Default serial transport for cloud-hypervisor. `Socket` streams the
+/// guest serial console over a unix-stream socket that cloud-hypervisor
+/// binds at VM creation and the agent connects to as a client. Unlike
+/// `Pty` — whose output cloud-hypervisor gates until input arrives on the
+/// pty, leaving passive readers (the agent's console capture) with
+/// nothing — `Socket` delivers output to a connected client immediately.
+pub const DEFAULT_SERIAL_MODE: &str = "Socket";
 pub const DEFAULT_CONSOLE_MODE: &str = "Off";
 pub const DEFAULT_PVPANIC: bool = false;
 pub const DEFAULT_TPM_TYPE: Option<&str> = None;
 pub const DEFAULT_TPM_SOCKET_PATH: Option<&str> = None;
 
-pub const VALID_SERIAL_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
+/// Valid serial modes for cloud-hypervisor. `Socket` streams the guest
+/// serial console over a unix-stream socket that cloud-hypervisor binds at
+/// VM creation; the agent connects as a client. Unlike `Pty` (whose output
+/// cloud-hypervisor gates until input arrives on the pty, so a passive
+/// reader receives nothing), `Socket` delivers output to a connected client
+/// immediately and is the agent's default transport.
+pub const VALID_SERIAL_MODES: &[&str] = &["Socket", "Pty", "File", "Off", "Null"];
 pub const VALID_CONSOLE_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
 pub const VALID_TPM_TYPES: &[&str] = &["swtpm"];
 

@@ -560,7 +560,7 @@ impl HypervisorTuning {
     /// pins the two rule sets together (it can see both crates; this crate
     /// must stay independent of the legacy surface).
     pub fn validate(&self) -> Result<(), ChvError> {
-        const VALID_SERIAL_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
+        const VALID_SERIAL_MODES: &[&str] = &["Socket", "Pty", "File", "Off", "Null"];
         const VALID_CONSOLE_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
         const VALID_TPM_TYPES: &[&str] = &["swtpm"];
         if let Some(rng_src) = &self.rng_src {
@@ -1155,6 +1155,14 @@ mod tests {
         };
         assert!(valid.validate().is_ok());
         assert!(HypervisorTuning::default().validate().is_ok());
+        // The Socket serial transport — the agent's default console
+        // transport on cloud-hypervisor v43 — is an accepted value.
+        assert!(HypervisorTuning {
+            serial_mode: Some("Socket".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
         // Each rule rejects exactly its own violation.
         for (tuning, field) in [
             (

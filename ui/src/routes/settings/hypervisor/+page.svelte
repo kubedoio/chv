@@ -103,7 +103,7 @@
 			rng_src: '/dev/urandom',
 			watchdog: false,
 			landlock_enable: false,
-			serial_mode: 'Pty',
+			serial_mode: 'Socket',
 			console_mode: 'Pty',
 			pvpanic: false,
 			tpm_type: null,
@@ -179,7 +179,7 @@
 
 				<SectionCard title="Serial & Protocol" icon={Monitor}>
 					<div class="params-grid">
-						<HypervisorSelectField label="SERIAL_FABRIC_MODE" value={settings.serial_mode} options={[{ value: 'Pty', label: 'Pty' }, { value: 'File', label: 'File' }, { value: 'Off', label: 'Off' }]} onchange={(v) => handleStringChange('serial_mode', v)} />
+						<HypervisorSelectField label="SERIAL_FABRIC_MODE" value={settings.serial_mode} options={[{ value: 'Socket', label: 'Socket' }, { value: 'Pty', label: 'Pty' }, { value: 'File', label: 'File' }, { value: 'Off', label: 'Off' }]} onchange={(v) => handleStringChange('serial_mode', v)} />
 						<HypervisorSelectField label="CONSOLE_FABRIC_MODE" value={settings.console_mode} options={[{ value: 'Pty', label: 'Pty' }, { value: 'File', label: 'File' }, { value: 'Off', label: 'Off' }]} onchange={(v) => handleStringChange('console_mode', v)} />
 						<HypervisorTextField label="TPM_TYPE" value={settings.tpm_type ?? ''} onchange={(v) => handleStringChange('tpm_type', v || null as any)} />
 						<HypervisorTextField label="TPM_SOCKET_PATH" value={settings.tpm_socket_path ?? ''} onchange={(v) => handleStringChange('tpm_socket_path', v || null as any)} />
