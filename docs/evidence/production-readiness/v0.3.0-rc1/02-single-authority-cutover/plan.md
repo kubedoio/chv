@@ -188,12 +188,21 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   generation cannot override newer accepted state; ambiguous ownership fails
   closed for destructive recovery; control-plane restart is not VM identity
   authority.
-  > **Status: NEXT (active).**
+  > **Status: COMPLETE.** Merged `94c9d9fe` (PR #271, evidence
+  > `m2.4-fault-injection-matrix.md`). All five crash windows have
+  > deterministic injection idioms with restart/replay proofs through the real
+  > composition; the six-scenario matrix passes (canary flagship + mid-effect
+  > crash + restart-spanning identity proofs are new). Reviewed through a
+  > 2-round adversarial loop (R1: 4 MINOR + 8 INFO, all fixed; R2: wording +
+  > coverage notes, closed). CI-VERIFIED only — mock adapter/controller, no
+  > real cloud-hypervisor. M2.5 is next.
 - **M2.5 — Real-KVM qualification.** Install pinned cloud-hypervisor (v43.0) +
   a minimal guest on this box (`/dev/kvm` present). Run
   Create/Start/Stop/Reboot/Delete plus a crash/restart replay scenario through
   the exact candidate path; capture evidence. If CH/guest install is not
   feasible on-site, report KVM-VERIFIED as **unproven** with the exact gap.
+  > **Status: NEXT.** Blocked on cloud-hypervisor + guest image availability
+  > on this host; not attempted yet.
 
 ## 4. Evidence matrix (Prompt 02 acceptance)
 
