@@ -3136,6 +3136,68 @@ async fn test_defaults_used_when_settings_query_fails() {
 }
 
 #[tokio::test]
+async fn test_migrated_serial_default_is_socket_everywhere() {
+    // Migration 0054 flips the seeded serial default from Pty (which
+    // cloud-hypervisor v43 gates against passive readers, starving the
+    // agent's console capture) to Socket. Pin the migrated state of every
+    // surface: the singleton global-settings row and the built-in
+    // profiles must carry Socket so the orchestrator's normal
+    // build_agent_vm_spec path dispatches the capture-capable transport.
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    let row = sqlx::query("SELECT serial_mode FROM hypervisor_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mode: String = sqlx::Row::get(&row, "serial_mode");
+    assert_eq!(mode, "Socket");
+
+    let profiles = sqlx::query(
+        "SELECT id, serial_mode FROM hypervisor_profiles WHERE is_builtin = 1 ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(!profiles.is_empty(), "built-in profiles must exist");
+    for profile in &profiles {
+        let m: String = sqlx::Row::get(profile, "serial_mode");
+        assert_eq!(
+            m,
+            "Socket",
+            "built-in profile {} must carry Socket",
+            sqlx::Row::get::<&str, _>(profile, "id")
+        );
+    }
+
+    // The migration's safety guard: a deliberate non-Pty choice survives.
+    // Re-run the 0054 statements verbatim against a row set to 'File' and
+    // confirm they leave it alone (idempotent on already-migrated rows
+    // with non-default values).
+    sqlx::query("UPDATE hypervisor_settings SET serial_mode = 'File' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hypervisor_settings SET serial_mode = 'Socket', updated_at = datetime('now') WHERE id = 1 AND serial_mode = 'Pty'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hypervisor_profiles SET serial_mode = 'Socket' WHERE is_builtin = 1 AND serial_mode = 'Pty'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let row = sqlx::query("SELECT serial_mode FROM hypervisor_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mode: String = sqlx::Row::get(&row, "serial_mode");
+    assert_eq!(
+        mode, "File",
+        "deliberate non-Pty settings must survive the migration"
+    );
+}
+
+#[tokio::test]
 async fn test_post_merge_validation_rejects_iommu_without_memory_shared() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();

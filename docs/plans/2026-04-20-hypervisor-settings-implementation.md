@@ -132,7 +132,7 @@ pub hypervisor_overrides: Option<HypervisorOverrides>,
 Add validation in `VmSpec::validate()`:
 - `rng_src` if set must be non-empty and a valid path-like string.
 - `tpm_type` if set must be one of `{"swtpm"}` (extensible enum).
-- `serial_mode` if set must be one of `{"Pty", "File", "Off", "Null"}`.
+- `serial_mode` if set must be one of `{"Pty", "File", "Off", "Null", "Socket"}` (added later; `Socket` is the default since cloud-hypervisor v43 gates Pty output against passive readers — see chv-common `hypervisor.rs`).
 - `console_mode` if set must be one of `{"Pty", "File", "Off", "Null"}`.
 
 **Backward compatibility**: Old agents without this field in their code will still parse the JSON (unknown fields are ignored by `serde(default)`). The agent should be built with the new code before the control plane starts sending the field.
@@ -211,7 +211,7 @@ let mut vm_config_json = serde_json::json!({
     "payload": payload,
     "disks": disks_json,
     "net": net_json,
-    "serial": { "mode": hv.serial_mode.as_deref().unwrap_or("Pty") },
+    "serial": { "mode": hv.serial_mode.as_deref().unwrap_or("Socket") }, // Socket default since the CH v43 Pty-gate fix
     "console": { "mode": hv.console_mode.as_deref().unwrap_or("Off") },
     // conditional:
     "iommu": hv.iommu,
@@ -237,7 +237,7 @@ let mut vm_config_json = serde_json::json!({
 | `rng_src` | `rng.src` | path string |
 | `watchdog` | `watchdog` | boolean |
 | `landlock_enable` | `landlock` | boolean (CHV v37+) |
-| `serial_mode` | `serial.mode` | "Pty"/"File"/"Off"/"Null" |
+| `serial_mode` | `serial.mode` | "Socket" (default)/"Pty"/"File"/"Off"/"Null" |
 | `console_mode` | `console.mode` | "Pty"/"File"/"Off"/"Null" |
 | `pvpanic` | `pvpanic` | boolean |
 | `tpm_type` | `tpm.type` | "swtpm" |

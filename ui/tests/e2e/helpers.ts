@@ -194,7 +194,7 @@ export const mockHypervisorSettings = {
 		rng_src: '/dev/urandom',
 		watchdog: false,
 		landlock_enable: false,
-		serial_mode: 'Pty',
+		serial_mode: 'Socket',
 		console_mode: 'Pty',
 		pvpanic: false,
 		tpm_type: null,

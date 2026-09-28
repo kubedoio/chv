@@ -122,6 +122,22 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
+/// How the guest serial console is attached. Kept alongside the connected
+/// fd so lifecycle paths can distinguish "reconnect to the listener" from
+/// "re-dup the pty slave" when the console broadcaster needs reviving.
+#[derive(Clone, Debug)]
+enum SerialTransport {
+    /// Unix-stream client of cloud-hypervisor's serial listener at this
+    /// path. cloud-hypervisor keeps the listener for the VMM process
+    /// lifetime, so a lost connection can be re-established by
+    /// reconnecting (and the stored fd swapped for the live one).
+    Socket(std::path::PathBuf),
+    /// Pty slave allocated by cloud-hypervisor (explicit tuning). The
+    /// kernel keeps the pty pair alive across guest reboots; consumers
+    /// re-dup the stored slave fd.
+    Pty,
+}
+
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
@@ -130,6 +146,8 @@ struct VmProcess {
     /// pty slave under explicit Pty tuning. Guest output is read (via the
     /// broadcaster) and user keystrokes written through it.
     console_io: OwnedFd,
+    /// Which transport `console_io` speaks; drives respawn semantics.
+    serial_transport: SerialTransport,
     pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
     broadcaster_alive: Arc<AtomicBool>,
@@ -443,6 +461,45 @@ impl ProcessCloudHypervisorAdapter {
         }
     }
 
+    /// Connects once to cloud-hypervisor's serial listener and returns a
+    /// blocking, FD_CLOEXEC fd. Fails if the listener is unreachable or
+    /// the peer-identity check fails.
+    async fn connect_serial_socket_once(socket_path: &Path) -> std::io::Result<OwnedFd> {
+        let stream = tokio::net::UnixStream::connect(socket_path).await?;
+        let std_stream = stream.into_std()?;
+        // tokio connects in non-blocking mode; restore blocking
+        // mode so the broadcaster's and console server's plain
+        // reads/writes block instead of failing with EAGAIN.
+        if let Ok(flags) = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_GETFL) {
+            let blocking =
+                nix::fcntl::OFlag::from_bits_retain(flags) & !nix::fcntl::OFlag::O_NONBLOCK;
+            let _ = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_SETFL(blocking));
+        }
+        let _ = nix::fcntl::fcntl(
+            &std_stream,
+            nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        );
+        // Defense-in-depth peer-identity check, mirroring this crate's
+        // trust-walk discipline: the listener at this path was bound by
+        // the cloud-hypervisor child this agent spawned — the same
+        // effective uid — and the kernel reports the listener owner's
+        // credentials to a connecting client via SO_PEERCRED. Anything
+        // else answering on this path means the socket is not ours; fail
+        // closed rather than pipe a stranger's bytes into the guest
+        // console.
+        match nix::sys::socket::getsockopt(&std_stream, nix::sys::socket::sockopt::PeerCredentials)
+        {
+            Ok(creds) if creds.uid() == nix::unistd::geteuid().as_raw() => {}
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "serial socket peer identity mismatch (peer={other:?}, expected euid {})",
+                    nix::unistd::geteuid()
+                )));
+            }
+        }
+        Ok(std_stream.into())
+    }
+
     /// Connects to the guest serial-console unix socket (Socket
     /// transport). cloud-hypervisor binds the listener while handling
     /// `vm.create`, so the socket exists by the time this runs; the
@@ -460,31 +517,15 @@ impl ProcessCloudHypervisorAdapter {
         let path_display = socket_path.to_string_lossy().to_string();
         let mut last_err = None;
         for attempt in 0..10u32 {
-            match tokio::net::UnixStream::connect(socket_path).await {
-                Ok(stream) => {
-                    let std_stream = stream.into_std().map_err(|e| ChvError::Io {
-                        path: path_display.clone(),
-                        source: e,
-                    })?;
-                    // tokio connects in non-blocking mode; restore blocking
-                    // mode so the broadcaster's and console server's plain
-                    // reads/writes block instead of failing with EAGAIN.
-                    if let Ok(flags) = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_GETFL) {
-                        let blocking = nix::fcntl::OFlag::from_bits_retain(flags)
-                            & !nix::fcntl::OFlag::O_NONBLOCK;
-                        let _ = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_SETFL(blocking));
-                    }
-                    let _ = nix::fcntl::fcntl(
-                        &std_stream,
-                        nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-                    );
+            match Self::connect_serial_socket_once(socket_path).await {
+                Ok(fd) => {
                     info!(
                         vm_id = vm_id,
                         socket = %path_display,
                         op = operation_id.unwrap_or("-"),
                         "chv serial socket connected"
                     );
-                    return Ok(std_stream.into());
+                    return Ok(fd);
                 }
                 Err(e) => {
                     last_err = Some(e);
@@ -500,6 +541,99 @@ impl ProcessCloudHypervisorAdapter {
             path: path_display,
             source: last_err.unwrap_or_else(|| std::io::Error::other("connect failed")),
         })
+    }
+
+    /// Reconnects to the guest serial-console listener for an already
+    /// running VM (broadcaster respawn): the stored connection may have
+    /// been closed by the VMM side, so a fresh one is established. No
+    /// child to fail closed on — the caller degrades gracefully (console
+    /// capture stays down, retried on the next start_vm).
+    async fn reconnect_serial_socket(socket_path: &Path) -> Option<OwnedFd> {
+        for attempt in 0..10u32 {
+            if let Ok(fd) = Self::connect_serial_socket_once(socket_path).await {
+                return Some(fd);
+            }
+            if attempt < 9 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        None
+    }
+
+    /// Duplicates a console fd for a secondary consumer (broadcaster,
+    /// console server). The dup inherits the source fd's blocking mode —
+    /// a property of the open file description — while FD_CLOEXEC is
+    /// per-descriptor and must be set on each dup.
+    fn dup_cloexec(fd: &OwnedFd) -> std::io::Result<OwnedFd> {
+        let dup = nix::unistd::dup(fd).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let _ = nix::fcntl::fcntl(&dup, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
+        Ok(dup)
+    }
+
+    /// Revives the console broadcaster if it died while the VM was
+    /// running. Obtains a FRESH endpoint, not a dup of the stored fd: for
+    /// the Socket transport the stored connection may itself be dead (the
+    /// VMM side can close it across serial reconfiguration or shutdown
+    /// cycles), and a broadcaster on a dup of a dead connection dies
+    /// instantly — silent, unrecoverable console loss. Socket transport
+    /// reconnects and swaps the stored connection for the live one; the
+    /// pty slave survives guest reboots, so it is re-dup'ed. A failed
+    /// reconnect is non-fatal: console capture stays down and is retried
+    /// on the next start_vm.
+    async fn respawn_broadcaster_if_dead(
+        &self,
+        vm_id: &str,
+        serial_transport: &SerialTransport,
+        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+        pty_scrollback: &Arc<tokio::sync::RwLock<Vec<u8>>>,
+        broadcaster_alive: &Arc<AtomicBool>,
+    ) {
+        if broadcaster_alive.load(Ordering::SeqCst) {
+            return;
+        }
+        info!(vm_id = %vm_id, "respawning console broadcaster");
+        let broadcaster_fd: Option<OwnedFd> = match serial_transport {
+            SerialTransport::Socket(path) => {
+                match Self::reconnect_serial_socket(path).await {
+                    Some(fresh) => {
+                        let dup = Self::dup_cloexec(&fresh).ok();
+                        if dup.is_some() {
+                            // Swap the stored connection so the console
+                            // server and future respawns use the live
+                            // endpoint.
+                            let mut vms = self.vms.write().await;
+                            if let Some(proc) = vms.get_mut(vm_id) {
+                                proc.console_io = fresh;
+                            }
+                        }
+                        dup
+                    }
+                    None => {
+                        warn!(
+                            vm_id = %vm_id,
+                            socket = %path.display(),
+                            "serial socket reconnect failed; console capture stays down until the next start_vm"
+                        );
+                        None
+                    }
+                }
+            }
+            SerialTransport::Pty => {
+                let vms = self.vms.read().await;
+                vms.get(vm_id)
+                    .and_then(|proc| Self::dup_cloexec(&proc.console_io).ok())
+            }
+        };
+        if let Some(broadcaster_fd) = broadcaster_fd {
+            broadcaster_alive.store(true, Ordering::SeqCst);
+            Self::spawn_pty_broadcaster(
+                vm_id.to_string(),
+                broadcaster_fd,
+                pty_tx.clone(),
+                pty_scrollback.clone(),
+                broadcaster_alive.clone(),
+            );
+        }
     }
 
     /// Opens the pty slave cloud-hypervisor allocated for the guest serial
@@ -951,16 +1085,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
+        let serial_transport = if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
+            SerialTransport::Socket(serial_socket_path.clone())
+        } else {
+            SerialTransport::Pty
+        };
 
         // Duplicate the descriptor for the broadcaster while retaining the
         // owned console descriptor for the VM process map.
-        let broadcaster_fd = nix::unistd::dup(&console_io).ok();
-        if let Some(ref broadcaster_fd) = broadcaster_fd {
-            let _ = nix::fcntl::fcntl(
-                broadcaster_fd,
-                nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-            );
-        }
+        let broadcaster_fd = Self::dup_cloexec(&console_io).ok();
 
         // Acquire the vm-process-map lock while the guard is still armed so a
         // cancellation landing on this await still SIGKILLs the child; then
@@ -979,6 +1112,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // cloud-hypervisor's serial listener by default (Socket
                 // transport), or the pty slave under explicit Pty tuning.
                 console_io,
+                serial_transport,
                 pty_tx: pty_tx.clone(),
                 pty_scrollback: pty_scrollback.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
@@ -1047,7 +1181,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("start");
-        let (api_socket, console_io, pty_tx, pty_scrollback, broadcaster_alive) = {
+        let (api_socket, serial_transport, pty_tx, pty_scrollback, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
@@ -1055,9 +1189,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             })?;
             (
                 proc.api_socket.clone(),
-                nix::unistd::dup(&proc.console_io).map_err(|e| ChvError::Internal {
-                    reason: format!("failed to duplicate console io fd for vm {}: {}", vm_id, e),
-                })?,
+                proc.serial_transport.clone(),
                 proc.pty_tx.clone(),
                 proc.pty_scrollback.clone(),
                 proc.broadcaster_alive.clone(),
@@ -1087,24 +1219,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Respawn broadcaster if it died while the VM was running.
         // This must happen BEFORE the idempotent early return so console
         // output doesn't stall when start_vm is called on an already-running VM.
-        if !broadcaster_alive.load(Ordering::SeqCst) {
-            info!(vm_id = %vm_id, "respawning console broadcaster");
-            let broadcaster_fd = nix::unistd::dup(&console_io).ok();
-            if let Some(broadcaster_fd) = broadcaster_fd {
-                let _ = nix::fcntl::fcntl(
-                    &broadcaster_fd,
-                    nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-                );
-                broadcaster_alive.store(true, Ordering::SeqCst);
-                Self::spawn_pty_broadcaster(
-                    vm_id.to_string(),
-                    broadcaster_fd,
-                    pty_tx.clone(),
-                    pty_scrollback.clone(),
-                    broadcaster_alive.clone(),
-                );
-            }
-        }
+        self.respawn_broadcaster_if_dead(
+            vm_id,
+            &serial_transport,
+            &pty_tx,
+            &pty_scrollback,
+            &broadcaster_alive,
+        )
+        .await;
 
         match action {
             StartVmAction::AlreadyRunning => {
@@ -1830,7 +1952,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
         let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        nix::unistd::dup(&proc.console_io).ok()
+        Self::dup_cloexec(&proc.console_io).ok()
     }
 
     async fn pty_output_rx(
@@ -1962,12 +2084,14 @@ mod tests {
     use super::build_cpus_config;
     use super::parse_http_status;
     use super::ProcessCloudHypervisorAdapter;
+    use super::SerialTransport;
     use super::VmProcess;
     use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig};
     use chv_common::hypervisor::HypervisorOverrides;
     use chv_errors::ChvError;
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     #[test]
@@ -2057,6 +2181,12 @@ mod tests {
             0,
             "serial socket fd must be CLOEXEC"
         );
+        // The connect contract keeps the spawned VMM alive on success —
+        // only the failure path kills the child.
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "child must still be running after a successful serial connect"
+        );
         // The accepted listener end must be drained by the helper's
         // connect having completed the handshake (no deadlock risk from an
         // unread backlog is asserted implicitly by the connect succeeding).
@@ -2086,6 +2216,198 @@ mod tests {
         assert!(matches!(err, ChvError::Io { .. }));
         let status = child.try_wait().unwrap().expect("child must be reaped");
         assert!(!status.success(), "the spawned child must be killed");
+    }
+
+    #[test]
+    fn dup_cloexec_sets_cloexec_and_carries_data() {
+        use std::io::Write as _;
+
+        let (a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let owned: OwnedFd = a.into();
+        let dup = ProcessCloudHypervisorAdapter::dup_cloexec(&owned).expect("dup must succeed");
+
+        // FD_CLOEXEC is per-descriptor: the dup must carry it.
+        let fd_flags = nix::fcntl::fcntl(&dup, nix::fcntl::F_GETFD).unwrap();
+        assert_ne!(
+            fd_flags & nix::fcntl::FdFlag::FD_CLOEXEC.bits(),
+            0,
+            "dup must be CLOEXEC"
+        );
+
+        // The dup is a live view of the same open file description: data
+        // written to the peer arrives through the dup...
+        b.write_all(b"x").unwrap();
+        let mut buf = [0u8; 1];
+        let n = nix::unistd::read(&dup, &mut buf).unwrap();
+        assert_eq!((n, buf[0]), (1, b'x'));
+
+        // ...and the source fd is still open and usable (the dup did not
+        // consume it).
+        b.write_all(b"y").unwrap();
+        let mut buf = [0u8; 1];
+        let n = nix::unistd::read(&owned, &mut buf).unwrap();
+        assert_eq!((n, buf[0]), (1, b'y'));
+    }
+
+    #[tokio::test]
+    async fn respawn_broadcaster_reconnects_and_swaps_dead_socket() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-respawn");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        // Stand in for cloud-hypervisor's serial listener: accept one
+        // connection and immediately stream a probe byte (guest output).
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let acceptor = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            conn.write_all(b"probe").expect("write probe");
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        // A dead stand-in for a VMM-closed serial connection.
+        let dead_console_io: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let dead_fd = dead_console_io.as_raw_fd();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-respawn".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child,
+                    console_io: dead_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // Subscribe before the respawn so the broadcaster's fan-out is
+        // observable.
+        let mut rx = pty_tx.subscribe();
+        adapter
+            .respawn_broadcaster_if_dead(
+                "vm-respawn",
+                &SerialTransport::Socket(sock_path),
+                &pty_tx,
+                &pty_scrollback,
+                &broadcaster_alive,
+            )
+            .await;
+
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive after respawn"
+        );
+
+        // The stored connection was swapped for the live one (the dead
+        // fd stays owned by the map entry until the swap, so the numbers
+        // must differ).
+        let map = adapter.vms.read().await;
+        let proc = map.get("vm-respawn").unwrap();
+        assert_ne!(
+            proc.console_io.as_raw_fd(),
+            dead_fd,
+            "stored console fd must be swapped for the reconnected one"
+        );
+        drop(map);
+
+        // The respawned broadcaster streams guest output from the fresh
+        // connection through the fan-out channel.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("probe must arrive through the fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"probe".to_vec());
+
+        // The reconnect handshake completed on the listener side too.
+        acceptor.join().expect("acceptor thread");
+    }
+
+    #[tokio::test]
+    async fn respawn_broadcaster_redups_pty_transport() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-respawn-pty");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        let (a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let console_io: OwnedFd = a.into();
+        let original_fd = console_io.as_raw_fd();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-respawn-pty".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child,
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        let mut rx = pty_tx.subscribe();
+        adapter
+            .respawn_broadcaster_if_dead(
+                "vm-respawn-pty",
+                &SerialTransport::Pty,
+                &pty_tx,
+                &pty_scrollback,
+                &broadcaster_alive,
+            )
+            .await;
+
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive after respawn"
+        );
+
+        // The pty transport re-dups the stored slave; the stored fd is NOT
+        // swapped (the kernel keeps the pty pair alive across reboots).
+        let map = adapter.vms.read().await;
+        let proc = map.get("vm-respawn-pty").unwrap();
+        assert_eq!(
+            proc.console_io.as_raw_fd(),
+            original_fd,
+            "pty transport must keep the stored slave fd"
+        );
+        drop(map);
+
+        // The broadcaster reads through the dup: output written to the
+        // peer end arrives through the fan-out channel.
+        b.write_all(b"probe").unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("probe must arrive through the fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"probe".to_vec());
     }
 
     #[test]
@@ -2197,6 +2519,7 @@ mod tests {
                     api_socket: vm_dir.join("vm.sock"),
                     child,
                     console_io,
+                    serial_transport: SerialTransport::Pty,
                     pty_tx: pty_tx.clone(),
                     pty_scrollback: pty_scrollback.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
@@ -2260,6 +2583,7 @@ mod tests {
                     api_socket: vm_dir.join("vm.sock"),
                     child,
                     console_io,
+                    serial_transport: SerialTransport::Pty,
                     pty_tx: pty_tx.clone(),
                     pty_scrollback: pty_scrollback.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
