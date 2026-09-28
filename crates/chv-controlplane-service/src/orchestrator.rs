@@ -1,4 +1,5 @@
 use crate::convergence_metrics::SharedConvergenceMetrics;
+use crate::fabric_planner::FabricPlanner;
 use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use crate::overlay::OverlayManager;
@@ -26,6 +27,7 @@ pub struct Orchestrator {
     tick_interval: Duration,
     node_client_pool: NodeClientPool,
     overlay_manager: Option<OverlayManager>,
+    fabric_planner: FabricPlanner,
     convergence_metrics: SharedConvergenceMetrics,
 }
 
@@ -39,6 +41,7 @@ impl Orchestrator {
         node_client_pool: NodeClientPool,
         convergence_metrics: SharedConvergenceMetrics,
     ) -> Self {
+        let fabric_planner = FabricPlanner::new(pool.clone());
         Self {
             pool,
             operation_repo,
@@ -48,6 +51,7 @@ impl Orchestrator {
             tick_interval: Duration::from_secs(2),
             node_client_pool,
             overlay_manager: None,
+            fabric_planner,
             convergence_metrics,
         }
     }
@@ -432,6 +436,15 @@ impl Orchestrator {
     }
 
     async fn dispatch_operation(&self, row: &AcceptedOperationRow) -> Result<(), ChvError> {
+        // UpdateOverlay fans out to EVERY participating node of the network
+        // (ADR-021 bounded flood list), not just the claim-resolved anchor
+        // node, so it bypasses the single-node resolution below entirely.
+        if row.operation_type == "UpdateOverlay" {
+            return self
+                .dispatch_update_overlay(&row.operation_id, &row.resource_id)
+                .await;
+        }
+
         let node_id = row
             .node_id
             .as_deref()
@@ -974,6 +987,74 @@ impl Orchestrator {
                 Err(e)
             }
         }
+    }
+
+    /// Dispatch an `UpdateOverlay` operation (ADR-021): compile per-node
+    /// fabric plans for the network and fan them out to every participating
+    /// node agent via the overlay manager.
+    ///
+    /// On success the operation is marked `Succeeded` here (the generic
+    /// single-node ack handling in `dispatch_operation` does not apply to a
+    /// fan-out). On failure the error propagates to `tick()`, whose retry
+    /// machinery records the per-node failure detail from the aggregated
+    /// overlay-manager error.
+    ///
+    /// `pub(crate)` so integration tests can invoke the dispatch directly
+    /// (driving the full orchestrator tick loop requires live agent
+    /// sockets for every claimed operation).
+    pub(crate) async fn dispatch_update_overlay(
+        &self,
+        operation_id: &str,
+        network_id: &str,
+    ) -> Result<(), ChvError> {
+        let overlay_manager = self
+            .overlay_manager
+            .as_ref()
+            .ok_or_else(|| ChvError::Internal {
+                reason: "overlay manager is not configured; cannot dispatch UpdateOverlay"
+                    .to_string(),
+            })?;
+
+        let plans = self
+            .fabric_planner
+            .compile_for_network(network_id)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to compile fabric plan for network {network_id}: {e}"),
+            })?;
+
+        overlay_manager
+            .send_fabric_update(network_id, &plans, operation_id)
+            .await?;
+
+        let nodes: Vec<&str> = plans.iter().map(|p| p.node_id.as_str()).collect();
+        info!(
+            operation_id = operation_id,
+            network_id = network_id,
+            nodes = %nodes.join(","),
+            "fabric plans dispatched to all participating nodes"
+        );
+
+        self.operation_repo
+            .update_status(&OperationStatusUpdateInput {
+                operation_id: OperationId::new(operation_id.to_string()).map_err(|e| {
+                    ChvError::Internal {
+                        reason: format!("invalid operation_id: {e}"),
+                    }
+                })?,
+                status: OperationStatus::Succeeded,
+                error_code: None,
+                error_message: None,
+                observed_generation: None,
+                updated_by: Some("orchestrator".into()),
+                updated_unix_ms: now_unix_ms(),
+            })
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to mark UpdateOverlay operation terminal: {e}"),
+            })?;
+
+        Ok(())
     }
 
     fn requires_schedulable_node(operation_type: &str) -> bool {

@@ -32,10 +32,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env!("CHV_RELEASE_CHANNEL"),
     );
 
-    let server = NetworkServer::new(
-        chv_nwd_core::executor::LinuxExecutor::new(config.runtime_dir.clone()),
-        chv_observability::Metrics::new(),
-    );
+    let mut executor = chv_nwd_core::executor::LinuxExecutor::new(config.runtime_dir.clone());
+    if config.fabric.enabled {
+        let fabric = chv_nwd_core::fabric::NwdFabricProvider::real(&config.fabric)?;
+        info!(
+            state_dir = %config.fabric.state_dir.display(),
+            name_prefix = %config.fabric.name_prefix,
+            wireguard_port = config.fabric.wireguard_port,
+            vxlan_port = config.fabric.vxlan_port,
+            default_tenant_mtu = config.fabric.default_tenant_mtu,
+            "stretched-L2 fabric provider enabled (ADR-021)"
+        );
+        executor = executor.with_fabric(fabric);
+    } else {
+        info!("stretched-L2 fabric provider disabled; fabric RPCs fail closed");
+    }
+
+    let server = NetworkServer::new(executor, chv_observability::Metrics::new());
 
     let socket_path = config.socket_path.clone();
     let mut sigterm = signal(SignalKind::terminate())?;

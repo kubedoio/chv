@@ -638,6 +638,7 @@ impl NwdClient {
                 vni: 0,
                 vtep_endpoints: vec![],
                 overlay_type: 0,
+                fabric: None,
             }),
         };
         let span = tracing::info_span!(
@@ -989,6 +990,7 @@ impl NwdClient {
                 range_start: range_start.to_string(),
                 range_end: range_end.to_string(),
                 dns_servers,
+                mtu: 0,
             }),
         };
         let span = tracing::info_span!(
@@ -1042,12 +1044,40 @@ impl NwdClient {
         Ok(())
     }
 
+    pub async fn get_fabric_identity(&mut self) -> Result<(String, u32), ChvError> {
+        let req = chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest {};
+        let span = tracing::info_span!("get_fabric_identity");
+        let resp = self
+            .inner
+            .get_fabric_identity(req)
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") && !result.status.is_empty() {
+                return Err(ChvError::NetworkUnavailable {
+                    resource: "nwd".to_string(),
+                    reason: format!(
+                        "get_fabric_identity failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
+                });
+            }
+        }
+        Ok((resp.public_key, resp.underlay_mtu))
+    }
+
     pub async fn update_overlay(
         &mut self,
         network_id: &str,
         vni: u32,
         vtep_endpoints: Vec<chv_nwd_api::chv_nwd_api::VtepEndpoint>,
         fdb_entries: Vec<chv_nwd_api::chv_nwd_api::FdbEntry>,
+        fabric: Option<chv_nwd_api::chv_nwd_api::FabricPlan>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         let req = UpdateOverlayRequest {
@@ -1055,6 +1085,7 @@ impl NwdClient {
             vni,
             vtep_endpoints,
             fdb_entries,
+            fabric,
         };
         let span = tracing::info_span!("update_overlay", operation_id = operation_id.unwrap_or(""));
         let resp = self
@@ -1126,6 +1157,203 @@ impl NwdClient {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fabric_test_support {
+    //! Shared fabric-aware NWD mock for agent tests: serves
+    //! `GetFabricIdentity` with a fixed identity and records the fabric
+    //! plan of every `UpdateOverlay` call. All other RPCs (and the
+    //! identity RPC when `identity_error` is set) fail like an unhealthy
+    //! nwd, exercising the callers' best-effort paths.
+
+    use chv_nwd_api::chv_nwd_api::network_service_server::NetworkService;
+    use std::sync::{Arc, Mutex};
+    use tonic::{Request, Response, Status};
+
+    #[derive(Default)]
+    pub(crate) struct FabricNwdCalls {
+        pub overlay_fabrics: Mutex<Vec<chv_nwd_api::chv_nwd_api::FabricPlan>>,
+    }
+
+    pub(crate) struct MockFabricNwd {
+        pub calls: Arc<FabricNwdCalls>,
+        pub public_key: String,
+        pub underlay_mtu: u32,
+        /// When true, `GetFabricIdentity` answers with an in-band error
+        /// result instead of an identity.
+        pub identity_error: bool,
+    }
+
+    fn ok_result() -> chv_nwd_api::chv_nwd_api::Result {
+        chv_nwd_api::chv_nwd_api::Result {
+            status: "ok".to_string(),
+            error_code: String::new(),
+            human_summary: String::new(),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl NetworkService for MockFabricNwd {
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
+            if self.identity_error {
+                return Ok(Response::new(
+                    chv_nwd_api::chv_nwd_api::FabricIdentityResponse {
+                        result: Some(chv_nwd_api::chv_nwd_api::Result {
+                            status: "error".to_string(),
+                            error_code: "FABRIC_DISABLED".to_string(),
+                            human_summary: "fabric disabled".to_string(),
+                        }),
+                        public_key: String::new(),
+                        underlay_mtu: 0,
+                    },
+                ));
+            }
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::FabricIdentityResponse {
+                    result: Some(ok_result()),
+                    public_key: self.public_key.clone(),
+                    underlay_mtu: self.underlay_mtu,
+                },
+            ))
+        }
+
+        async fn update_overlay(
+            &self,
+            req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
+            let inner = req.into_inner();
+            self.calls
+                .overlay_fabrics
+                .lock()
+                .unwrap()
+                .push(inner.fabric.unwrap_or_default());
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::UpdateOverlayResponse {
+                    result: Some(ok_result()),
+                },
+            ))
+        }
+
+        async fn list_namespace_state(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ListNamespaceStateRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse { items: vec![] },
+            ))
+        }
+
+        async fn ensure_network_topology(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn delete_network_topology(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::DeleteNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_network_health(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::NetworkHealthRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::NetworkHealthResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn attach_vm_nic(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::AttachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::AttachVmNicResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn detach_vm_nic(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn set_firewall_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn set_nat_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SetNatPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dhcp_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDhcpScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dns_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDnsScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn expose_service(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ExposeServiceRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn withdraw_service_exposure(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_security_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_rate_limit(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::RateLimitPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
+            Err(Status::unimplemented(""))
+        }
     }
 }
 
@@ -1358,6 +1586,13 @@ mod tests {
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
             Err(Status::unimplemented(""))
         }
+
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
     }
 
     #[tokio::test]
@@ -1462,5 +1697,155 @@ mod tests {
             .detach_vm_nic("nic-1", "vm-1", "net-1", Some("op-1"))
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn nwd_get_fabric_identity_maps_fields() {
+        use super::fabric_test_support::{FabricNwdCalls, MockFabricNwd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let calls = std::sync::Arc::new(FabricNwdCalls::default());
+        {
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service = MockFabricNwd {
+                calls: calls.clone(),
+                public_key: "wg-pub-key-1".to_string(),
+                underlay_mtu: 1500,
+                identity_error: false,
+            };
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            service,
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut client = NwdClient::connect(&socket).await.unwrap();
+        let (public_key, underlay_mtu) = client.get_fabric_identity().await.unwrap();
+        assert_eq!(public_key, "wg-pub-key-1");
+        assert_eq!(underlay_mtu, 1500);
+    }
+
+    #[tokio::test]
+    async fn nwd_get_fabric_identity_rpc_error_maps_to_network_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                        MockNwd,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+
+        let mut client = NwdClient::connect(&socket).await.unwrap();
+        let result = client.get_fabric_identity().await;
+        assert!(matches!(result, Err(ChvError::NetworkUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn nwd_get_fabric_identity_in_band_error_maps_to_network_unavailable() {
+        use super::fabric_test_support::{FabricNwdCalls, MockFabricNwd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let calls = std::sync::Arc::new(FabricNwdCalls::default());
+        {
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service = MockFabricNwd {
+                calls,
+                public_key: String::new(),
+                underlay_mtu: 0,
+                identity_error: true,
+            };
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            service,
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut client = NwdClient::connect(&socket).await.unwrap();
+        let result = client.get_fabric_identity().await;
+        assert!(matches!(result, Err(ChvError::NetworkUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn nwd_update_overlay_relays_fabric_plan() {
+        use super::fabric_test_support::{FabricNwdCalls, MockFabricNwd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let calls = std::sync::Arc::new(FabricNwdCalls::default());
+        {
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service = MockFabricNwd {
+                calls: calls.clone(),
+                public_key: String::new(),
+                underlay_mtu: 0,
+                identity_error: false,
+            };
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            service,
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let plan = chv_nwd_api::chv_nwd_api::FabricPlan {
+            fabric_domain_id: "fabric-1".to_string(),
+            local_host_id: "node-1".to_string(),
+            local_fabric_ip: "100.100.0.1".to_string(),
+            tenant_mtu: 1380,
+            fabric_mtu: 1440,
+            binding_generation: 3,
+            plan_generation: 7,
+            peers: vec![chv_nwd_api::chv_nwd_api::FabricPeer {
+                node_id: "node-2".to_string(),
+                public_key: "wg-pub-node-2".to_string(),
+                underlay_endpoint: "10.0.0.2:65001".to_string(),
+                fabric_ip: "100.100.0.2".to_string(),
+            }],
+        };
+
+        let mut client = NwdClient::connect(&socket).await.unwrap();
+        client
+            .update_overlay("net-1", 42, vec![], vec![], Some(plan), Some("op-1"))
+            .await
+            .unwrap();
+
+        let recorded = calls.overlay_fabrics.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].fabric_domain_id, "fabric-1");
+        assert_eq!(recorded[0].peers.len(), 1);
+        assert_eq!(recorded[0].peers[0].public_key, "wg-pub-node-2");
     }
 }

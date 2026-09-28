@@ -10,6 +10,21 @@ homepage: https://github.com/kubedoio/chv
 license: MIT
 depends:
   - chv-controlplane
+# wireguard-tools: hard dependency on deb (in Debian/Ubuntu main), soft
+# `recommends` on rpm — it is EPEL-only on EL distributions and a hard
+# requirement would break installs on systems without EPEL enabled. The
+# fabric is disabled by default in chv-nwd; install wireguard-tools before
+# enabling it.
+overrides:
+  deb:
+    depends:
+      - chv-controlplane
+      - wireguard-tools
+  rpm:
+    depends:
+      - chv-controlplane
+    recommends:
+      - wireguard-tools
 contents:
   - src: target/release/chv-agent
     dst: /usr/bin/chv-agent

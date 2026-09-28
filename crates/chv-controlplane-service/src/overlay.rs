@@ -104,11 +104,22 @@ impl OverlayManager {
         Ok(())
     }
 
-    /// Resolve the Unix socket path for a given node.
+    /// Resolve the Unix socket path for a node and connect through the
+    /// client pool. Shared by the legacy overlay update path and the
+    /// ADR-021 fabric fan-out.
+    async fn connect_node(
+        &self,
+        node_id: &str,
+    ) -> Result<crate::node_client::NodeClient, ChvError> {
+        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id)?;
+        self.node_pool.get_or_connect(node_id, &socket_path).await
+    }
+
     /// Send an overlay update to a specific node via the node client pool.
     ///
     /// Uses the UpdateOverlay RPC on the agent's lifecycle service, which proxies
-    /// the request to nwd's UpdateOverlay endpoint.
+    /// the request to nwd's UpdateOverlay endpoint. Legacy (pre-fabric)
+    /// migration path: no fabric plan, no generation fence.
     async fn send_overlay_update(
         &self,
         node_id: &str,
@@ -119,8 +130,7 @@ impl OverlayManager {
     ) -> Result<(), ChvError> {
         use control_plane_node_api::control_plane_node_api as proto;
 
-        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id)?;
-        let mut client = self.node_pool.get_or_connect(node_id, &socket_path).await?;
+        let mut client = self.connect_node(node_id).await?;
 
         let vtep_endpoints: Vec<proto::VtepEndpoint> = vteps
             .iter()
@@ -150,9 +160,93 @@ impl OverlayManager {
                 proto_fdb_entries,
                 &operation_id,
                 Some("control-plane"),
+                None,
+                "",
             )
             .await?;
 
+        Ok(())
+    }
+
+    /// Fan out compiled ADR-021 fabric plans: every participating node
+    /// receives its own plan (its peer list excludes itself), with the
+    /// network's plan generation as the `desired_state_version` fence.
+    ///
+    /// All nodes are attempted even if some fail; the returned error
+    /// carries per-node detail so the operation record shows exactly which
+    /// agents missed the update.
+    pub async fn send_fabric_update(
+        &self,
+        network_id: &str,
+        plans: &[crate::fabric_planner::CompiledFabricPlan],
+        operation_id: &str,
+    ) -> Result<(), ChvError> {
+        let mut failures: Vec<String> = Vec::new();
+
+        for compiled in plans {
+            let node_id = compiled.node_id.clone();
+            match self
+                .send_fabric_plan_to_node(network_id, compiled, operation_id)
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        network_id = network_id,
+                        node_id = %node_id,
+                        operation_id = operation_id,
+                        peers = compiled.plan.peers.len(),
+                        "fabric plan dispatched to node"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        network_id = network_id,
+                        node_id = %node_id,
+                        operation_id = operation_id,
+                        error = %e,
+                        "failed to dispatch fabric plan to node"
+                    );
+                    failures.push(format!("{node_id}: {e}"));
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ChvError::Internal {
+                reason: format!(
+                    "fabric update for network {network_id} failed on {} node(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            })
+        }
+    }
+
+    /// Deliver one compiled plan to its node. The legacy VTEP/FDB fields
+    /// are empty: when `fabric` is set, nwd takes the fabric path and the
+    /// legacy fields are inert.
+    async fn send_fabric_plan_to_node(
+        &self,
+        network_id: &str,
+        compiled: &crate::fabric_planner::CompiledFabricPlan,
+        operation_id: &str,
+    ) -> Result<(), ChvError> {
+        let mut client = self.connect_node(&compiled.node_id).await?;
+        client
+            .update_overlay(
+                &compiled.node_id,
+                network_id,
+                compiled.vni,
+                Vec::new(),
+                Vec::new(),
+                operation_id,
+                Some("control-plane"),
+                Some(compiled.plan.clone()),
+                &compiled.plan.plan_generation.to_string(),
+            )
+            .await?;
         Ok(())
     }
 }

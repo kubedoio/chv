@@ -1,6 +1,8 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
-use chv_controlplane_store::{NodeInventoryInput, NodeRepository, NodeVersionInput};
+use chv_controlplane_store::{
+    NodeInventoryInput, NodeRepository, NodeVersionInput, VtepRepository,
+};
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,11 +23,15 @@ pub trait InventoryService: Send + Sync {
 #[derive(Clone)]
 pub struct InventoryServiceImplementation {
     node_repo: NodeRepository,
+    vtep_repo: VtepRepository,
 }
 
 impl InventoryServiceImplementation {
-    pub fn new(node_repo: NodeRepository) -> Self {
-        Self { node_repo }
+    pub fn new(node_repo: NodeRepository, vtep_repo: VtepRepository) -> Self {
+        Self {
+            node_repo,
+            vtep_repo,
+        }
     }
 
     fn now_ms(&self) -> i64 {
@@ -140,6 +146,24 @@ impl InventoryService for InventoryServiceImplementation {
                 reported_unix_ms: now,
             })
             .await?;
+
+        // Re-sync the node's fabric identity (ADR-021 §5) on every periodic
+        // inventory report — the agent re-reports every 30 s, so a key
+        // rotation or a fabric-IP wipe converges without re-enrollment.
+        // Fails closed like the rest of this handler's store writes; the
+        // agent retries the report.
+        if !inventory.wireguard_public_key.is_empty() {
+            self.vtep_repo
+                .register_fabric_identity(
+                    node_id.as_str(),
+                    &inventory.wireguard_public_key,
+                    inventory.underlay_mtu,
+                    // Populated by a follow-up once node underlay addressing
+                    // is wired (the planner fails closed while it is NULL).
+                    None,
+                )
+                .await?;
+        }
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {

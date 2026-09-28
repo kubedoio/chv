@@ -32,6 +32,14 @@ message NodeInventory {
   map<string, string> labels = 8;
   repeated string hypervisor_capabilities = 9;
   string vtep_ip = 10; // VTEP IP address for overlay networking
+  // Node's WireGuard public key for the stretched-L2 fabric (ADR-021),
+  // reported best-effort from nwd's GetFabricIdentity RPC. Empty string
+  // means the node has no fabric identity yet (nwd not up or fabric
+  // disabled); the agent re-reports on the next inventory cycle.
+  string wireguard_public_key = 11;
+  // Measured default-route MTU of the node's underlay (0 = unmeasured),
+  // used by the control plane to derive tenant/fabric MTUs.
+  uint32 underlay_mtu = 12;
 }
 
 message ServiceVersions {
@@ -568,6 +576,30 @@ message UpdateOverlayRequest {
   uint32 vni = 4;
   repeated VtepEndpoint vtep_endpoints = 5;
   repeated FdbEntry fdb_entries = 6;
+  // Stretched-L2 fabric plan (ADR-021); takes the fabric path in nwd when set.
+  FabricPlan fabric = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Stretched-L2 fabric (ADR-021) — mirrors chv-nwd-api FabricPeer/FabricPlan
+// ---------------------------------------------------------------------------
+
+message FabricPeer {
+  string node_id = 1;
+  string public_key = 2;        // WireGuard public key (base64, 44 chars)
+  string underlay_endpoint = 3; // host:port of the peer's WireGuard listener
+  string fabric_ip = 4;         // peer transport IP inside the fabric mesh
+}
+
+message FabricPlan {
+  string fabric_domain_id = 1;
+  string local_host_id = 2;
+  string local_fabric_ip = 3;
+  uint32 tenant_mtu = 4;   // 0 = daemon default
+  uint32 fabric_mtu = 5;   // 0 = daemon default
+  uint64 binding_generation = 6;
+  uint64 plan_generation = 7;
+  repeated FabricPeer peers = 8; // bounded head-end replication set
 }
 
 message SendGratuitousArpRequest {

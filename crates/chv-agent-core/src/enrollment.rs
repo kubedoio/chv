@@ -280,6 +280,8 @@ mod tests {
             hypervisor_capabilities: vec![],
             labels: std::collections::HashMap::new(),
             vtep_ip: String::new(),
+            wireguard_public_key: String::new(),
+            underlay_mtu: 0,
         };
         let versions = proto::ServiceVersions {
             node_id: "node-123".to_string(),

@@ -2837,6 +2837,19 @@ mod tests {
             }))
         }
 
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::FabricIdentityResponse {
+                    result: None,
+                    public_key: String::new(),
+                    underlay_mtu: 0,
+                },
+            ))
+        }
+
         async fn send_gratuitous_arp(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,

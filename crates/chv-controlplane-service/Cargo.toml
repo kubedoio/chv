@@ -52,3 +52,4 @@ async-trait = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tonic = { workspace = true }
+tokio-stream = { workspace = true }

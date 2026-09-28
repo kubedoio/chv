@@ -2,6 +2,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod ebpf;
 pub mod executor;
+pub mod fabric;
 pub mod firewall;
 pub mod handlers;
 pub mod link_monitor;

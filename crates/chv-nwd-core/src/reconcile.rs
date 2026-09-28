@@ -279,6 +279,7 @@ mod tests {
             _nic_id: &str,
             _vm_id: &str,
             _bridge_name: &str,
+            _tenant_mtu: Option<u32>,
             _mac_address: &str,
             _ip_address: &str,
         ) -> Result<(String, String), ChvError> {
@@ -437,6 +438,31 @@ mod tests {
             &self,
             _namespace: &str,
             _vni: u32,
+        ) -> Result<crate::executor::OverlayStatusInfo, ChvError> {
+            unimplemented!()
+        }
+
+        async fn apply_fabric_overlay(
+            &self,
+            _network_id: &str,
+            _vni: u32,
+            _plan: &chv_nwd_api::chv_nwd_api::FabricPlan,
+            _bridge_name: &str,
+        ) -> Result<crate::fabric::AppliedFabric, ChvError> {
+            unimplemented!()
+        }
+
+        async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn fabric_identity(&self) -> Result<crate::fabric::FabricIdentity, ChvError> {
+            unimplemented!()
+        }
+
+        async fn fabric_overlay_status(
+            &self,
+            _network_id: &str,
         ) -> Result<crate::executor::OverlayStatusInfo, ChvError> {
             unimplemented!()
         }

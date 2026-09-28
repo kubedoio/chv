@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
-use chv_nwd_api::chv_nwd_api::{OverlayType, TopologySpec};
+use chv_nwd_api::chv_nwd_api::{FabricPlan, OverlayType, TopologySpec};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,6 +8,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+use crate::fabric::{AppliedFabric, FabricHandle, FabricIdentity};
 
 // Metric names for network daemon operations.
 const NWD_FDB_ERRORS_TOTAL: &str = "chv_nwd_fdb_errors_total";
@@ -18,6 +20,12 @@ const NWD_DHCP_ERRORS_TOTAL: &str = "chv_nwd_dhcp_errors_total";
 pub struct TopologyApplyResult {
     pub namespace_handle: String,
     pub bridge_handle: String,
+    /// Tenant MTU applied by the fabric path (advertised via DHCP option 26
+    /// and set on the bridge/TAPs). `None` for bridge-only topologies.
+    pub tenant_mtu: Option<u32>,
+    /// Fabric plan generation applied by the fabric path, for stale-plan
+    /// fencing on later updates. `None` for bridge-only topologies.
+    pub fabric_plan_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,12 +50,14 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         state: &crate::state::TopologyState,
     ) -> Result<String, ChvError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn attach_vm_nic(
         &self,
         network_id: &str,
         nic_id: &str,
         vm_id: &str,
         bridge_name: &str,
+        tenant_mtu: Option<u32>,
         mac_address: &str,
         ip_address: &str,
     ) -> Result<(String, String), ChvError>;
@@ -164,6 +174,30 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         namespace: &str,
         vni: u32,
     ) -> Result<OverlayStatusInfo, ChvError>;
+
+    // --- Stretched-L2 fabric methods (ADR-021) ---
+
+    /// Realize a fabric plan for a network and graft the fabric consumer
+    /// veth into the tenant bridge (enslave + MTU). The caller is
+    /// responsible for generation fencing before invoking this.
+    async fn apply_fabric_overlay(
+        &self,
+        network_id: &str,
+        vni: u32,
+        plan: &FabricPlan,
+        bridge_name: &str,
+    ) -> Result<AppliedFabric, ChvError>;
+
+    /// Tear down one network's fabric state (reverse dependency order,
+    /// preserves the WireGuard key). Called before local topology teardown.
+    async fn remove_fabric_overlay(&self, network_id: &str) -> Result<(), ChvError>;
+
+    /// The node's public fabric identity (WireGuard public key + measured
+    /// underlay MTU). Fails closed when the fabric provider is disabled.
+    async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError>;
+
+    /// Observed fabric overlay status for a network.
+    async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError>;
 }
 
 /// A service exposure tracked by the executor so the DNAT forward-accept rule
@@ -180,7 +214,9 @@ struct ExposureSpec {
 
 pub struct LinuxExecutor {
     _runtime_dir: PathBuf,
-    vtep_ip: Option<String>,
+    /// Stretched-L2 fabric provider (ADR-021). `None` = fabric disabled;
+    /// every fabric RPC fails closed in that state.
+    fabric: Option<Arc<dyn FabricHandle>>,
     /// Serializes all nft table mutations for this executor (firewall/NAT
     /// apply, service exposure, topology create/delete). The filter and NAT
     /// paths flush+rebuild chains on the per-network table, so concurrent
@@ -204,14 +240,52 @@ pub struct LinuxExecutor {
     exposures: Arc<DashMap<String, Vec<ExposureSpec>>>,
 }
 
+/// Owned-argument helper for command sequences held as `Vec<String>`.
+fn string_args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| (*s).to_string()).collect()
+}
+
 impl LinuxExecutor {
     pub fn new(runtime_dir: PathBuf) -> Self {
         Self {
             _runtime_dir: runtime_dir,
-            vtep_ip: None,
+            fabric: None,
             nft_lock: Arc::new(Mutex::new(())),
             exposures: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Attach a fabric provider, enabling the stretched-L2 fabric paths
+    /// (ADR-021). Without this, fabric requests fail closed.
+    pub fn with_fabric(mut self, fabric: Arc<dyn FabricHandle>) -> Self {
+        self.fabric = Some(fabric);
+        self
+    }
+
+    fn fabric_handle(&self) -> Result<&Arc<dyn FabricHandle>, ChvError> {
+        self.fabric.as_ref().ok_or_else(|| ChvError::InvalidArgument {
+            field: "fabric".to_string(),
+            reason: "fabric overlay requested but the fabric provider is disabled in nwd configuration"
+                .to_string(),
+        })
+    }
+
+    /// Host-namespace command sequence grafting the fabric consumer veth
+    /// into the tenant bridge after a successful fabric apply (ADR-021):
+    /// enslave, set the tenant MTU on bridge and veth, then bring the veth
+    /// up (the host side may still be down after a provider re-apply).
+    fn fabric_attach_commands(
+        consumer_veth: &str,
+        bridge_name: &str,
+        tenant_mtu: u32,
+    ) -> Vec<Vec<String>> {
+        let mtu = tenant_mtu.to_string();
+        vec![
+            string_args(&["link", "set", consumer_veth, "master", bridge_name]),
+            string_args(&["link", "set", bridge_name, "mtu", mtu.as_str()]),
+            string_args(&["link", "set", consumer_veth, "mtu", mtu.as_str()]),
+            string_args(&["link", "set", consumer_veth, "up"]),
+        ]
     }
 
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
@@ -645,6 +719,7 @@ impl LinuxExecutor {
         bridge_name: &str,
         cidr: &str,
         gateway_ip: &str,
+        tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError> {
         let runtime_dir = PathBuf::from("/run/chv/nwd");
         let _ = tokio::fs::create_dir_all(&runtime_dir).await;
@@ -662,13 +737,22 @@ impl LinuxExecutor {
 
         let (range_start, range_end, netmask) = Self::derive_dhcp_range(cidr)?;
 
+        // DHCP option 26 (interface MTU): advertise the tenant MTU on
+        // fabric-backed topologies so guests frame correctly across the
+        // WireGuard+VXLAN overhead (ADR-021 §3). Omitted when unknown.
+        let mtu_option = match tenant_mtu {
+            Some(mtu) if mtu > 0 => format!("dhcp-option=26,{}\n", mtu),
+            _ => String::new(),
+        };
+
         let config = format!(
-            "interface={}\nbind-interfaces\nport=0\ndhcp-range={},{},{},12h\ndhcp-option=3,{}\ndhcp-option=6,1.1.1.1\ndhcp-hostsfile={}\nexcept-interface=lo\nno-resolv\n",
+            "interface={}\nbind-interfaces\nport=0\ndhcp-range={},{},{},12h\ndhcp-option=3,{}\ndhcp-option=6,1.1.1.1\n{}dhcp-hostsfile={}\nexcept-interface=lo\nno-resolv\n",
             bridge_name,
             range_start,
             range_end,
             netmask,
             gateway_ip,
+            mtu_option,
             hosts_path.display()
         );
         tokio::fs::write(&conf_path, config)
@@ -923,6 +1007,37 @@ impl NetworkExecutor for LinuxExecutor {
             }
         }
 
+        // Stretched-L2 fabric (ADR-021): realize the fabric plan BEFORE
+        // dnsmasq starts so the DHCP scope can advertise the authoritative
+        // tenant MTU (option 26) computed from the applied plan. Replaces
+        // the legacy nolearning VXLAN branch, which was inert (vtep_ip was
+        // never configured and the executor failed closed).
+        let mut tenant_mtu = None;
+        let mut fabric_plan_generation = None;
+        if spec.vni > 0 && spec.overlay_type == OverlayType::OverlayVxlan as i32 {
+            let fabric_plan = spec
+                .fabric
+                .as_ref()
+                .ok_or_else(|| ChvError::InvalidArgument {
+                    field: "fabric".to_string(),
+                    reason: "VXLAN overlay requires a fabric plan".to_string(),
+                })?;
+            let applied = self
+                .apply_fabric_overlay(&spec.network_id, spec.vni, fabric_plan, &spec.bridge_name)
+                .await?;
+            info!(
+                network_id = %spec.network_id,
+                vni = spec.vni,
+                tenant_mtu = applied.tenant_mtu,
+                consumer_veth = %applied.consumer_veth,
+                created_fabric = applied.report.created_fabric,
+                created_network = applied.report.created_network,
+                "fabric overlay applied"
+            );
+            tenant_mtu = Some(applied.tenant_mtu);
+            fabric_plan_generation = Some(applied.plan_generation);
+        }
+
         // Start dnsmasq for DHCP
         if !spec.subnet_cidr.is_empty() && !spec.gateway_ip.is_empty() {
             if let Err(e) = Self::start_dnsmasq(
@@ -930,6 +1045,7 @@ impl NetworkExecutor for LinuxExecutor {
                 &spec.bridge_name,
                 &spec.subnet_cidr,
                 &spec.gateway_ip,
+                tenant_mtu,
             )
             .await
             {
@@ -945,54 +1061,11 @@ impl NetworkExecutor for LinuxExecutor {
         let _ = Self::run_nft_quiet(&["add", "table", "inet", &format!("chv-{}", spec.network_id)])
             .await;
 
-        // VXLAN overlay: create VXLAN interface if overlay_type is VXLAN and vni > 0
-        if spec.vni > 0 && spec.overlay_type == OverlayType::OverlayVxlan as i32 {
-            let vtep_ip = self
-                .vtep_ip
-                .as_deref()
-                .ok_or_else(|| ChvError::InvalidArgument {
-                    field: "vtep_ip".to_string(),
-                    reason: "VXLAN overlay requested but no local VTEP IP configured on executor"
-                        .to_string(),
-                })?;
-            let vtep_port = spec
-                .vtep_endpoints
-                .first()
-                .map(|e| if e.vtep_port == 0 { 4789 } else { e.vtep_port })
-                .unwrap_or(4789);
-
-            self.create_vxlan_interface(
-                &spec.namespace_name,
-                &spec.bridge_name,
-                spec.vni,
-                vtep_ip,
-                vtep_port,
-            )
-            .await?;
-
-            // Add FDB entries for peer VTEPs (use broadcast MAC for BUM traffic)
-            for vtep in &spec.vtep_endpoints {
-                self.add_fdb_entry(
-                    &spec.namespace_name,
-                    spec.vni,
-                    "00:00:00:00:00:00",
-                    &vtep.vtep_ip,
-                )
-                .await?;
-            }
-
-            info!(
-                network_id = %spec.network_id,
-                vni = spec.vni,
-                vtep_ip = %vtep_ip,
-                peer_count = spec.vtep_endpoints.len(),
-                "VXLAN overlay configured"
-            );
-        }
-
         Ok(TopologyApplyResult {
             namespace_handle: spec.namespace_name.clone(),
             bridge_handle: spec.bridge_name.clone(),
+            tenant_mtu,
+            fabric_plan_generation,
         })
     }
 
@@ -1008,6 +1081,14 @@ impl NetworkExecutor for LinuxExecutor {
             namespace = %state.namespace_name,
             "deleting topology"
         );
+
+        // Fabric teardown runs FIRST, in reverse dependency order: the local
+        // tenant bridge enslaves the fabric's consumer veth, so the fabric
+        // network objects must be removed before local teardown. The shared
+        // fabric and the WireGuard key survive (ADR-021 §4).
+        if state.fabric_plan_generation.is_some() {
+            self.remove_fabric_overlay(network_id).await?;
+        }
 
         Self::stop_dnsmasq(network_id).await;
 
@@ -1081,6 +1162,7 @@ impl NetworkExecutor for LinuxExecutor {
         nic_id: &str,
         _vm_id: &str,
         bridge_name: &str,
+        tenant_mtu: Option<u32>,
         mac_address: &str,
         ip_address: &str,
     ) -> Result<(String, String), ChvError> {
@@ -1099,6 +1181,15 @@ impl NetworkExecutor for LinuxExecutor {
         }
         Self::run_ip(&["link", "set", "dev", &tap_name, "master", bridge_name]).await?;
         Self::run_ip(&["link", "set", "dev", &tap_name, "up"]).await?;
+
+        // Fabric-backed topologies carry the tenant MTU onto the TAP so
+        // guest frames fit the WireGuard+VXLAN overhead (ADR-021 §3).
+        if let Some(mtu) = tenant_mtu {
+            if mtu > 0 {
+                let mtu_str = mtu.to_string();
+                Self::run_ip(&["link", "set", "dev", &tap_name, "mtu", &mtu_str]).await?;
+            }
+        }
 
         Self::add_dhcp_host(network_id, mac_address, ip_address).await;
 
@@ -1510,6 +1601,44 @@ impl NetworkExecutor for LinuxExecutor {
             fdb_entry_count,
         })
     }
+
+    // --- Stretched-L2 fabric implementations (ADR-021) ---
+
+    async fn apply_fabric_overlay(
+        &self,
+        network_id: &str,
+        vni: u32,
+        plan: &FabricPlan,
+        bridge_name: &str,
+    ) -> Result<AppliedFabric, ChvError> {
+        let fabric = self.fabric_handle()?;
+        let applied = fabric.apply(network_id, vni, plan).await?;
+        // Graft the fabric consumer veth into the tenant bridge and carry
+        // the tenant MTU onto the bridge. Any failure here is surfaced as
+        // NetworkUnavailable by run_ip (fail closed).
+        for args in
+            Self::fabric_attach_commands(&applied.consumer_veth, bridge_name, applied.tenant_mtu)
+        {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            Self::run_ip(&refs).await?;
+        }
+        Ok(applied)
+    }
+
+    async fn remove_fabric_overlay(&self, network_id: &str) -> Result<(), ChvError> {
+        let fabric = self.fabric_handle()?;
+        fabric.remove_network(network_id).await
+    }
+
+    async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
+        let fabric = self.fabric_handle()?;
+        fabric.identity().await
+    }
+
+    async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError> {
+        let fabric = self.fabric_handle()?;
+        fabric.overlay_status(network_id).await
+    }
 }
 
 #[cfg(test)]
@@ -1521,6 +1650,75 @@ mod tests {
     fn linux_executor_implements_network_executor() {
         let _executor = LinuxExecutor::new(std::env::temp_dir());
         // If this compiles, the trait is fully implemented.
+    }
+
+    #[test]
+    fn fabric_attach_commands_enslave_and_set_mtu() {
+        let commands = LinuxExecutor::fabric_attach_commands("chv-c-0123abcd", "br-net-1", 1380);
+        assert_eq!(
+            commands,
+            vec![
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "chv-c-0123abcd".to_string(),
+                    "master".to_string(),
+                    "br-net-1".to_string()
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "br-net-1".to_string(),
+                    "mtu".to_string(),
+                    "1380".to_string()
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "chv-c-0123abcd".to_string(),
+                    "mtu".to_string(),
+                    "1380".to_string()
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "chv-c-0123abcd".to_string(),
+                    "up".to_string()
+                ],
+            ],
+            "the fabric consumer veth must be enslaved to the tenant bridge, \
+             carry the tenant MTU, and be brought up"
+        );
+    }
+
+    #[tokio::test]
+    async fn fabric_rpcs_fail_closed_when_provider_disabled() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+
+        let plan = FabricPlan::default();
+        let err = executor
+            .apply_fabric_overlay("net-1", 100, &plan, "br-net-1")
+            .await
+            .expect_err("fabric apply must fail closed when disabled");
+        match err {
+            ChvError::InvalidArgument { field, reason } => {
+                assert_eq!(field, "fabric");
+                assert!(reason.contains("disabled"));
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
+
+        let err = executor
+            .remove_fabric_overlay("net-1")
+            .await
+            .expect_err("fabric remove must fail closed when disabled");
+        assert!(matches!(err, ChvError::InvalidArgument { .. }));
+
+        let err = executor
+            .fabric_identity()
+            .await
+            .expect_err("fabric identity must fail closed when disabled");
+        assert!(matches!(err, ChvError::InvalidArgument { .. }));
     }
 
     #[test]
@@ -1647,6 +1845,7 @@ mod tests {
             _nic_id: &str,
             _vm_id: &str,
             _bridge_name: &str,
+            _tenant_mtu: Option<u32>,
             _mac_address: &str,
             _ip_address: &str,
         ) -> Result<(String, String), ChvError> {
@@ -1802,6 +2001,31 @@ mod tests {
         ) -> Result<OverlayStatusInfo, ChvError> {
             unimplemented!()
         }
+
+        async fn apply_fabric_overlay(
+            &self,
+            _network_id: &str,
+            _vni: u32,
+            _plan: &FabricPlan,
+            _bridge_name: &str,
+        ) -> Result<AppliedFabric, ChvError> {
+            unimplemented!()
+        }
+
+        async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
+            unimplemented!()
+        }
+
+        async fn fabric_overlay_status(
+            &self,
+            _network_id: &str,
+        ) -> Result<OverlayStatusInfo, ChvError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -1817,6 +2041,8 @@ mod tests {
             runtime_status: "ensured".to_string(),
             vni: Some(100),
             peer_vteps: vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()],
+            tenant_mtu: None,
+            fabric_plan_generation: None,
         };
 
         executor.delete_topology("net-vxlan", &state).await.unwrap();
@@ -1862,6 +2088,8 @@ mod tests {
             runtime_status: "ensured".to_string(),
             vni: None,
             peer_vteps: Vec::new(),
+            tenant_mtu: None,
+            fabric_plan_generation: None,
         };
 
         executor.delete_topology("net-plain", &state).await.unwrap();

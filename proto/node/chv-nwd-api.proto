@@ -24,6 +24,7 @@ message TopologySpec {
   uint32 vni = 8;                           // 0 = no overlay (bridge-only)
   repeated VtepEndpoint vtep_endpoints = 9; // peer VTEPs for this network
   OverlayType overlay_type = 10;
+  FabricPlan fabric = 11;                   // stretched-L2 fabric plan (ADR-021)
 }
 
 message NicSpec {
@@ -51,6 +52,7 @@ message DhcpScope {
   string range_start = 3;
   string range_end = 4;
   repeated string dns_servers = 5;
+  uint32 mtu = 6; // DHCP option 26; 0 = unspecified (omit)
 }
 
 message DnsScope {
@@ -173,6 +175,7 @@ service NetworkService {
   rpc UpdateSecurityPolicy(SecurityPolicy) returns (UpdateSecurityPolicyResponse);
   rpc UpdateRateLimit(RateLimitPolicy) returns (UpdateRateLimitResponse);
   rpc GetOverlayStatus(GetOverlayStatusRequest) returns (OverlayStatus);
+  rpc GetFabricIdentity(GetFabricIdentityRequest) returns (FabricIdentityResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,10 +258,41 @@ message UpdateOverlayRequest {
   uint32 vni = 2;
   repeated VtepEndpoint vtep_endpoints = 3;
   repeated FdbEntry fdb_entries = 4;
+  FabricPlan fabric = 5; // stretched-L2 fabric plan (ADR-021); takes the fabric path when set
 }
 
 message UpdateOverlayResponse {
   Result result = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Stretched-L2 fabric (ADR-021)
+// ---------------------------------------------------------------------------
+
+message FabricPeer {
+  string node_id = 1;
+  string public_key = 2;        // WireGuard public key (base64, 44 chars)
+  string underlay_endpoint = 3; // host:port of the peer's WireGuard listener
+  string fabric_ip = 4;         // peer transport IP inside the fabric mesh
+}
+
+message FabricPlan {
+  string fabric_domain_id = 1;
+  string local_host_id = 2;
+  string local_fabric_ip = 3;
+  uint32 tenant_mtu = 4;   // 0 = daemon default
+  uint32 fabric_mtu = 5;   // 0 = daemon default
+  uint64 binding_generation = 6;
+  uint64 plan_generation = 7;
+  repeated FabricPeer peers = 8; // bounded head-end replication set
+}
+
+message GetFabricIdentityRequest {}
+
+message FabricIdentityResponse {
+  Result result = 1;
+  string public_key = 2;  // node's WireGuard public key (never the private key)
+  uint32 underlay_mtu = 3; // measured default-route MTU
 }
 
 message SendGratuitousArpRequest {

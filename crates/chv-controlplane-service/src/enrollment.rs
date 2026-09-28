@@ -236,6 +236,26 @@ impl EnrollmentService for EnrollmentServiceImplementation {
             }
         }
 
+        // Register the node's fabric identity (ADR-021 §5). Unlike the
+        // legacy VTEP registration above, this fails closed: a node whose
+        // reported identity cannot be persisted must not be treated as
+        // enrolled, or the fabric plan compiler would later fail on a node
+        // the control plane believes it knows. Only the public key is
+        // transported (never private key material).
+        if !inventory.wireguard_public_key.is_empty() {
+            self.vtep_repo
+                .register_fabric_identity(
+                    node_id.as_str(),
+                    &inventory.wireguard_public_key,
+                    inventory.underlay_mtu,
+                    // The node underlay endpoint is not reported yet; it is
+                    // populated by a follow-up once node underlay addressing
+                    // is wired (the planner fails closed while it is NULL).
+                    None,
+                )
+                .await?;
+        }
+
         Ok(proto::EnrollmentResponse {
             result: Some(proto::ResultMeta {
                 operation_id: "".into(),

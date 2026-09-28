@@ -1285,13 +1285,15 @@ impl NodeClient {
         fdb_entries: Vec<proto::FdbEntry>,
         operation_id: &str,
         requested_by: Option<&str>,
+        fabric: Option<proto::FabricPlan>,
+        desired_state_version: &str,
     ) -> Result<proto::AckResponse, ChvError> {
         let req = proto::UpdateOverlayRequest {
             meta: Some(proto::RequestMeta {
                 operation_id: operation_id.to_string(),
                 requested_by: requested_by.unwrap_or("control-plane").to_string(),
                 target_node_id: node_id.to_string(),
-                desired_state_version: "".to_string(),
+                desired_state_version: desired_state_version.to_string(),
                 request_unix_ms: now_unix_ms(),
             }),
             node_id: node_id.to_string(),
@@ -1299,6 +1301,7 @@ impl NodeClient {
             vni,
             vtep_endpoints,
             fdb_entries,
+            fabric,
         };
         let method = "update_overlay";
         let span = tracing::info_span!("update_overlay", operation_id, network_id);

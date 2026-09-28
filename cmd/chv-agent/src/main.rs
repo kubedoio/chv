@@ -507,7 +507,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &hostname,
                         &config.storage_base_dir,
                     );
-                    let inventory = reporter.build_inventory();
+                    // Best-effort fabric identity (ADR-021): nwd may not be
+                    // up yet during enrollment; the empty identity is
+                    // reported then and re-sent on the periodic inventory
+                    // cycle once nwd is reachable.
+                    let fabric_identity =
+                        chv_agent_core::inventory::fetch_fabric_identity(&config.nwd_socket).await;
+                    let inventory = reporter.build_inventory_with_fabric_identity(fabric_identity);
                     let versions = reporter.build_versions();
                     let tls_cert = cache
                         .certificate_path
@@ -1225,7 +1231,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tick_count += 1;
         if tick_count.is_multiple_of(6) {
             let op_id = format!("inventory-{}", tick_count);
-            let inv = inventory_reporter.build_inventory();
+            // Best-effort fabric identity (ADR-021): a transient nwd outage
+            // must not block the periodic inventory report; the empty
+            // identity is re-reported on the next cycle.
+            let fabric_identity =
+                chv_agent_core::inventory::fetch_fabric_identity(&config.nwd_socket).await;
+            let inv = inventory_reporter.build_inventory_with_fabric_identity(fabric_identity);
             let ver = inventory_reporter.build_versions();
             let inv_req =
                 control_plane_node_api::control_plane_node_api::ReportNodeInventoryRequest {
