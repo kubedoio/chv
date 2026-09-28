@@ -8,7 +8,7 @@ use control_plane_node_api::control_plane_node_api as proto;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::enrollment::FABRIC_WIREGUARD_PORT;
+use crate::enrollment::derive_underlay_endpoint;
 
 #[async_trait]
 pub trait InventoryService: Send + Sync {
@@ -170,16 +170,21 @@ impl InventoryService for InventoryServiceImplementation {
                     // The inventory report carries no explicit underlay
                     // endpoint, so derive one from the transport-level peer
                     // address the control plane actually observed, pinned
-                    // to the fabric WireGuard port. NAT caveat: behind NAT
-                    // this is the NAT's mapped address — usually exactly
-                    // what remote peers must dial — but a NAT that maps
-                    // the gRPC connection differently from the node's
-                    // WireGuard listener yields an unreachable endpoint;
-                    // the fabric plan compiler surfaces unreachable peers
-                    // (fail closed) instead of guessing.
-                    peer_addr
-                        .map(|addr| format!("{}:{}", addr.ip(), FABRIC_WIREGUARD_PORT))
-                        .as_deref(),
+                    // to the fabric WireGuard port. First registration
+                    // wins at the store layer, so the endpoint derived at
+                    // enrollment (or the first report) is never rotated by
+                    // a later re-report. NAT / LB / proxy caveat: behind
+                    // NAT this is the NAT's mapped address — usually
+                    // exactly what remote peers must dial — but a NAT,
+                    // load balancer, or proxy that maps the gRPC
+                    // connection differently from the node's WireGuard
+                    // listener yields an unreachable endpoint; in
+                    // particular, a transient LB/proxy/VPN reconnection
+                    // must not replace a previously-good endpoint (that
+                    // is exactly what the first-registration-wins policy
+                    // prevents). The fabric plan compiler surfaces
+                    // unreachable peers (fail closed) instead of guessing.
+                    peer_addr.map(derive_underlay_endpoint).as_deref(),
                 )
                 .await?;
         }

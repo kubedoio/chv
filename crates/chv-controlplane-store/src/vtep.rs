@@ -176,9 +176,19 @@ impl VtepRepository {
     /// fabric transport IP from 100.100.0.0/16.
     ///
     /// `underlay_mtu == 0` (the proto default for "not measured") is stored
-    /// as NULL. `underlay_endpoint` is only overwritten when `Some`, so a
-    /// later identity re-report without an endpoint never erases one
-    /// registered by a more specific path.
+    /// as NULL.
+    ///
+    /// `underlay_endpoint` follows FIRST-REGISTRATION-WINS: the stored
+    /// value is only written when the node does not have one yet (insert,
+    /// or previously NULL). The control-plane callers derive it from the
+    /// observed gRPC peer address, which can change between connections
+    /// when the node is reached through an LB/proxy/VPN — a transient
+    /// proxy address on a re-report must not silently replace a
+    /// previously-good endpoint (all nodes behind one shared proxy would
+    /// otherwise converge on the proxy's address). A node whose stored
+    /// endpoint is wrong needs an operator-initiated store correction;
+    /// unreachable endpoints surface fail-closed at the fabric plan
+    /// compiler rather than being silently rotated.
     pub async fn register_fabric_identity(
         &self,
         node_id: &str,
@@ -241,13 +251,17 @@ impl VtepRepository {
         // identity is durable; vtep_ip keeps the empty-string sentinel the
         // legacy column requires (NOT NULL) until the fabric path populates
         // fabric_ip below.
+        // First-registration-wins for the underlay endpoint: an existing
+        // stored value is never replaced by a later (peer-derived, so
+        // possibly proxy-shaped) one. The public key and underlay MTU
+        // keep their normal upsert semantics.
         sqlx::query(
             r#"INSERT INTO vtep_registry (node_id, vtep_ip, vtep_port, public_key, underlay_mtu, underlay_endpoint, updated_at)
                VALUES (?, '', 4789, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                ON CONFLICT(node_id) DO UPDATE SET
                    public_key = excluded.public_key,
                    underlay_mtu = excluded.underlay_mtu,
-                   underlay_endpoint = COALESCE(excluded.underlay_endpoint, vtep_registry.underlay_endpoint),
+                   underlay_endpoint = COALESCE(vtep_registry.underlay_endpoint, excluded.underlay_endpoint),
                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"#,
         )
         .bind(node_id)

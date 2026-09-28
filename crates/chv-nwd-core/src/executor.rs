@@ -4,6 +4,7 @@ use chv_nwd_api::chv_nwd_api::{FabricPlan, OverlayType, TopologySpec};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -14,6 +15,24 @@ use crate::fabric::{AppliedFabric, FabricHandle, FabricIdentity};
 // Metric names for network daemon operations.
 const NWD_NFT_ERRORS_TOTAL: &str = "chv_nwd_nft_errors_total";
 const NWD_DHCP_ERRORS_TOTAL: &str = "chv_nwd_dhcp_errors_total";
+
+/// MTU a bridge-only topology runs at: a fresh bridge-only ensure never
+/// sets an MTU, so the kernel default for a new bridge (1500) is the
+/// authoritative value. Used to reset a previously fabric-backed bridge
+/// when it is re-ensured bridge-only (m7 residue).
+const BRIDGE_ONLY_DEFAULT_MTU: u32 = 1500;
+
+/// Poll interval of the bounded dnsmasq exit wait (m8 race).
+const DNSMASQ_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Budget for the bounded dnsmasq exit wait after SIGTERM (m8 race):
+/// dnsmasq runs with `bind-interfaces`, so a replacement started while
+/// the old process still holds the listen address fails with
+/// NetworkUnavailable ("address already in use") — after the fabric
+/// re-apply already succeeded.
+const DNSMASQ_EXIT_TERM_BUDGET: Duration = Duration::from_secs(2);
+/// Brief final wait after SIGKILL, so a fast re-ensure still finds the
+/// listen address free in the common case.
+const DNSMASQ_EXIT_KILL_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct TopologyApplyResult {
@@ -40,6 +59,45 @@ pub struct OverlayStatusInfo {
     pub fdb_entry_count: u32,
 }
 
+/// Outcome of a topology delete (n11): the overall `Result` of
+/// `NetworkExecutor::delete_topology` reports the LOCAL teardown, while
+/// the fabric-half teardown is fail-open inside the executor and its
+/// outcome is reported separately — so the handler can count
+/// `nwd_fabric_remove_total` truthfully instead of proxying it from the
+/// aggregate result (the old approximation counted a fabric success even
+/// when the fail-open fabric removal had failed, and counted a fabric
+/// failure on a purely local teardown error).
+///
+/// `fabric_removed` is:
+/// - `None` — no fabric teardown was attempted: the topology had no
+///   applied fabric plan, or the fabric provider is disabled in nwd
+///   configuration (the executor already warns; there is no removal
+///   whose outcome could be counted);
+/// - `Some(Ok(()))` — the fabric overlay was removed;
+/// - `Some(Err(e))` — removal was attempted and failed; local teardown
+///   continued (fail-open for teardown only — apply stays fail-closed)
+///   and the residue stays visible via the provider ownership journal.
+#[derive(Debug)]
+pub struct DeleteOutcome {
+    pub fabric_removed: Option<Result<(), ChvError>>,
+}
+
+/// Result of a fabric ownership probe (used by the no-state-row delete
+/// path, M3): distinguishes "the enabled provider holds no entry" from
+/// "the provider is disabled in configuration", so the residue case
+/// (fabric applied, nwd restarted with the fabric provider disabled,
+/// delete) is loudly visible instead of a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FabricOwnership {
+    /// The provider's durable ownership journal holds the network.
+    Owned,
+    /// The provider is enabled and holds no entry for the network.
+    NotOwned,
+    /// The fabric provider is disabled in nwd configuration: ownership
+    /// cannot be observed in this process.
+    ProviderDisabled,
+}
+
 #[async_trait]
 pub trait NetworkExecutor: Send + Sync + 'static {
     async fn ensure_topology(&self, spec: &TopologySpec) -> Result<TopologyApplyResult, ChvError>;
@@ -48,7 +106,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         &self,
         network_id: &str,
         state: &crate::state::TopologyState,
-    ) -> Result<(), ChvError>;
+    ) -> Result<DeleteOutcome, ChvError>;
 
     async fn health(
         &self,
@@ -152,10 +210,12 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     async fn remove_fabric_overlay(&self, network_id: &str) -> Result<(), ChvError>;
 
     /// Whether the fabric provider's durable ownership journal holds an
-    /// entry for this network. `Ok(false)` when the provider is disabled
-    /// in configuration or holds no entry — used by the delete path to
-    /// clean fabric residue after an nwd restart wiped the topology table.
-    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError>;
+    /// entry for this network — used by the delete path to clean fabric
+    /// residue after an nwd restart wiped the topology table. Returns
+    /// [`FabricOwnership::ProviderDisabled`] when the provider is
+    /// disabled in configuration, so the caller can warn about the
+    /// unobservable residue instead of silently no-op'ing.
+    async fn fabric_owned(&self, network_id: &str) -> Result<FabricOwnership, ChvError>;
 
     /// The node's public fabric identity (WireGuard public key + measured
     /// underlay MTU). Fails closed when the fabric provider is disabled.
@@ -164,10 +224,16 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     /// Observed fabric overlay status for a network.
     async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError>;
 
-    /// Re-assert a changed tenant MTU onto a running topology (m8): set
-    /// the MTU of the bridge and every currently enslaved port, then
-    /// restart the network's dnsmasq so DHCP option 26 advertises the new
-    /// value. Only invoked on an MTU change.
+    /// Re-assert the tenant MTU of a running topology on the bridge and
+    /// every currently enslaved port, then restart the network's dnsmasq
+    /// so DHCP option 26 advertises the new value (m8). Only invoked on
+    /// an MTU change.
+    ///
+    /// `None` resets a previously fabric-backed topology to the
+    /// bridge-only defaults (m7 residue): the bridge and ports are set
+    /// to [`BRIDGE_ONLY_DEFAULT_MTU`] and dnsmasq is restarted WITHOUT
+    /// DHCP option 26, matching what a fresh bridge-only ensure leaves
+    /// behind.
     #[allow(clippy::too_many_arguments)]
     async fn reassert_tenant_mtu(
         &self,
@@ -175,7 +241,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         bridge_name: &str,
         subnet_cidr: &str,
         gateway_ip: &str,
-        tenant_mtu: u32,
+        tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError>;
 }
 
@@ -614,19 +680,52 @@ impl LinuxExecutor {
         Ok((range_start, range_end, netmask))
     }
 
-    async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
-        let Ok(pid_str) = tokio::fs::read_to_string(pid_path).await else {
-            return false;
-        };
-        let Ok(pid) = pid_str.trim().parse::<i32>() else {
-            return false;
-        };
+    async fn read_pid_file(pid_path: &std::path::Path) -> Option<i32> {
+        let pid_str = tokio::fs::read_to_string(pid_path).await.ok()?;
+        pid_str.trim().parse::<i32>().ok()
+    }
+
+    /// Whether the process with `pid` is alive (`kill -0` semantics).
+    async fn process_alive(pid: i32) -> bool {
         Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
             .await
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Bounded wait for a signalled process to actually exit (m8 race):
+    /// dnsmasq runs with `bind-interfaces`, so a replacement started
+    /// while the old process still holds the listen address fails with
+    /// NetworkUnavailable ("address already in use") — after the fabric
+    /// re-apply already succeeded. Polls `is_alive` every
+    /// [`DNSMASQ_EXIT_POLL_INTERVAL`] until it reports the process gone
+    /// or `budget` elapses. Returns `true` when the process exited within
+    /// the budget. The closure indirection keeps the wait logic
+    /// unit-testable without a real process.
+    async fn wait_for_process_exit<F, Fut>(mut is_alive: F, budget: Duration) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if !is_alive().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(DNSMASQ_EXIT_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
+        match Self::read_pid_file(pid_path).await {
+            Some(pid) => Self::process_alive(pid).await,
+            None => false,
+        }
     }
 
     async fn start_dnsmasq(
@@ -721,7 +820,36 @@ impl LinuxExecutor {
         let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
         let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
 
+        // SIGTERM, then a bounded wait for the process to actually exit
+        // before the pid file is removed (m8 race): dnsmasq uses
+        // bind-interfaces, so an immediate restart (the MTU re-assert
+        // path) or a fast re-ensure after this delete would fail to bind
+        // the listen address while the old process is still tearing down.
+        let pid = Self::read_pid_file(&pid_path).await;
         Self::signal_by_pid_file(&pid_path, "-TERM").await;
+        if let Some(pid) = pid {
+            let exited =
+                Self::wait_for_process_exit(|| Self::process_alive(pid), DNSMASQ_EXIT_TERM_BUDGET)
+                    .await;
+            if !exited {
+                warn!(
+                    network_id = %network_id,
+                    pid,
+                    "dnsmasq did not exit within the bounded wait after SIGTERM; sending SIGKILL"
+                );
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .output()
+                    .await;
+                // One final brief wait so a fast re-ensure still finds
+                // the listen address free in the common case.
+                let _ = Self::wait_for_process_exit(
+                    || Self::process_alive(pid),
+                    DNSMASQ_EXIT_KILL_BUDGET,
+                )
+                .await;
+            }
+        }
 
         let _ = tokio::fs::remove_file(&pid_path).await;
         let _ = tokio::fs::remove_file(&conf_path).await;
@@ -1023,7 +1151,7 @@ impl NetworkExecutor for LinuxExecutor {
         &self,
         network_id: &str,
         state: &crate::state::TopologyState,
-    ) -> Result<(), ChvError> {
+    ) -> Result<DeleteOutcome, ChvError> {
         let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %network_id,
@@ -1042,7 +1170,11 @@ impl NetworkExecutor for LinuxExecutor {
         // after the overlay was applied — must not block dnsmasq/netns/
         // bridge/nft cleanup forever. The residue stays visible via the
         // provider's durable ownership journal, and the apply path remains
-        // fail-closed.
+        // fail-closed. The fabric-half outcome is reported through
+        // `DeleteOutcome` so the handler can count the remove metric
+        // truthfully (n11) instead of proxying it from this aggregate
+        // result.
+        let mut fabric_removed = None;
         if state.fabric_plan_generation.is_some() {
             match self.fabric.as_ref() {
                 None => {
@@ -1052,16 +1184,18 @@ impl NetworkExecutor for LinuxExecutor {
                          teardown (residue remains visible via the provider ownership journal)"
                     );
                 }
-                Some(fabric) => {
-                    if let Err(e) = fabric.remove_network(network_id).await {
+                Some(fabric) => match fabric.remove_network(network_id).await {
+                    Ok(()) => fabric_removed = Some(Ok(())),
+                    Err(e) => {
                         warn!(
                             network_id = %network_id,
                             error = %e,
                             "fabric overlay removal failed; continuing local topology \
                              teardown (fail-open for teardown only — apply stays fail-closed)"
                         );
+                        fabric_removed = Some(Err(e));
                     }
-                }
+                },
             }
         }
 
@@ -1085,7 +1219,7 @@ impl NetworkExecutor for LinuxExecutor {
         // Drop remembered service exposures for this network.
         self.exposures.remove(network_id);
 
-        Ok(())
+        Ok(DeleteOutcome { fabric_removed })
     }
 
     async fn health(
@@ -1411,12 +1545,19 @@ impl NetworkExecutor for LinuxExecutor {
         fabric.remove_network(network_id).await
     }
 
-    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError> {
+    async fn fabric_owned(&self, network_id: &str) -> Result<FabricOwnership, ChvError> {
         match self.fabric.as_ref() {
             // Provider disabled in configuration: this process holds (and
-            // can observe) no fabric state.
-            None => Ok(false),
-            Some(fabric) => fabric.fabric_owned(network_id).await,
+            // can observe) no fabric state — the caller must warn instead
+            // of treating this as "not owned" (silent no-op).
+            None => Ok(FabricOwnership::ProviderDisabled),
+            Some(fabric) => {
+                if fabric.fabric_owned(network_id).await? {
+                    Ok(FabricOwnership::Owned)
+                } else {
+                    Ok(FabricOwnership::NotOwned)
+                }
+            }
         }
     }
 
@@ -1436,39 +1577,50 @@ impl NetworkExecutor for LinuxExecutor {
         bridge_name: &str,
         subnet_cidr: &str,
         gateway_ip: &str,
-        tenant_mtu: u32,
+        tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError> {
         // Serialize with topology create/delete so the port enumeration
         // cannot race a concurrent enslavement.
         let _guard = self.nft_lock.lock().await;
-        info!(
-            network_id = %network_id,
-            bridge = %bridge_name,
-            tenant_mtu = tenant_mtu,
-            "tenant MTU changed; re-asserting bridge/port MTUs and restarting dnsmasq"
-        );
+        // `None` resets a previously fabric-backed bridge to the
+        // bridge-only default (m7 residue): a fresh bridge-only ensure
+        // never sets an MTU, so the kernel default for a new bridge is
+        // the authoritative value.
+        let effective_mtu = tenant_mtu.unwrap_or(BRIDGE_ONLY_DEFAULT_MTU);
+        match tenant_mtu {
+            Some(tenant_mtu) => info!(
+                network_id = %network_id,
+                bridge = %bridge_name,
+                tenant_mtu,
+                "tenant MTU changed; re-asserting bridge/port MTUs and restarting dnsmasq"
+            ),
+            None => info!(
+                network_id = %network_id,
+                bridge = %bridge_name,
+                default_mtu = effective_mtu,
+                "fabric overlay removed; resetting bridge/port MTUs to the bridge-only \
+                 default and restarting dnsmasq without DHCP option 26"
+            ),
+        }
 
         // (a) Re-assert the bridge MTU and the MTU of every port currently
         // enslaved to it (TAPs and the fabric consumer veth alike).
         let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
-        for args in Self::port_mtu_commands(&owned, tenant_mtu) {
+        for args in Self::port_mtu_commands(&owned, effective_mtu) {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             Self::run_ip(&refs).await?;
         }
 
-        // (b) Restart dnsmasq so the rewritten config (DHCP option 26)
-        // takes effect; start_dnsmasq early-returns while the old instance
-        // is still running.
+        // (b) Restart dnsmasq so the rewritten config takes effect: with
+        // `Some(mtu)` the new DHCP option 26 advertises it, with `None`
+        // the option is dropped entirely (bridge-only default).
+        // start_dnsmasq early-returns while the old instance is still
+        // running; stop_dnsmasq bounded-waits for the old process to exit
+        // so the restart cannot fail on "address already in use" (m8).
         if !subnet_cidr.is_empty() && !gateway_ip.is_empty() {
             Self::stop_dnsmasq(network_id).await;
-            Self::start_dnsmasq(
-                network_id,
-                bridge_name,
-                subnet_cidr,
-                gateway_ip,
-                Some(tenant_mtu),
-            )
-            .await?;
+            Self::start_dnsmasq(network_id, bridge_name, subnet_cidr, gateway_ip, tenant_mtu)
+                .await?;
         }
         Ok(())
     }
@@ -1776,30 +1928,84 @@ mod tests {
         // Local teardown targets objects that do not exist on this host, so
         // every local step is a no-op — the assertion is that the fabric
         // failure does NOT abort the delete (previously it failed forever).
-        executor
+        let outcome = executor
             .delete_topology("net-m5", &fabric_backed_state())
             .await
             .expect("delete must succeed despite persistent fabric errors");
+        // The fabric-half failure must be reported truthfully (n11) so the
+        // handler can count the remove metric as a failure.
+        assert!(
+            matches!(outcome.fabric_removed, Some(Err(_))),
+            "a failed fabric removal must surface in the DeleteOutcome, got {:?}",
+            outcome.fabric_removed
+        );
     }
 
     #[tokio::test]
     async fn delete_topology_skips_fabric_removal_when_provider_disabled() {
         let executor = LinuxExecutor::new(std::env::temp_dir());
-        executor
+        let outcome = executor
             .delete_topology("net-m5", &fabric_backed_state())
             .await
             .expect("delete must succeed when the fabric provider is disabled");
+        // No teardown was attempted (the provider cannot even be asked), so
+        // there is no removal outcome to count.
+        assert!(outcome.fabric_removed.is_none());
     }
 
     #[tokio::test]
-    async fn fabric_owned_is_false_when_provider_disabled() {
+    async fn fabric_owned_reports_provider_disabled_when_disabled() {
         let executor = LinuxExecutor::new(std::env::temp_dir());
-        assert!(
-            !executor
+        assert_eq!(
+            executor
                 .fabric_owned("net-1")
                 .await
                 .expect("ownership lookup must not fail when disabled"),
-            "a disabled provider owns nothing"
+            FabricOwnership::ProviderDisabled,
+            "a disabled provider cannot observe ownership — the caller must warn, \
+             not treat it as not-owned"
+        );
+    }
+
+    // ---- bounded dnsmasq exit wait (m8 race) --------------------------------
+
+    #[tokio::test]
+    async fn wait_for_process_exit_returns_true_once_the_checker_reports_gone() {
+        // The "process" reports alive for the first 3 probes, then exits.
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = probes.clone();
+        let exited = LinuxExecutor::wait_for_process_exit(
+            move || {
+                let p = seen.clone();
+                async move { p.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 }
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            exited,
+            "the wait must succeed once the checker reports gone"
+        );
+        assert!(
+            probes.load(std::sync::atomic::Ordering::Relaxed) >= 4,
+            "the checker must have been polled past the last alive report"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_process_exit_gives_up_at_the_budget_when_never_exiting() {
+        let started = std::time::Instant::now();
+        let exited =
+            LinuxExecutor::wait_for_process_exit(|| async { true }, Duration::from_millis(50))
+                .await;
+        assert!(
+            !exited,
+            "a process that never exits must exhaust the budget, not hang"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait must give up at (not far past) the budget, took {:?}",
+            started.elapsed()
         );
     }
 

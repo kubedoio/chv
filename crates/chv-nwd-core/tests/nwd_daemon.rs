@@ -7,7 +7,9 @@ use chv_nwd_api::chv_nwd_api::{
     ListNamespaceStateRequest, NatPolicy, NetworkHealthRequest, NicSpec, SetFirewallPolicyRequest,
     SetNatPolicyRequest, TopologySpec, WithdrawServiceExposureRequest,
 };
-use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
+use chv_nwd_core::executor::{
+    DeleteOutcome, FabricOwnership, NetworkExecutor, OverlayStatusInfo, TopologyApplyResult,
+};
 use chv_nwd_core::fabric::{AppliedFabric, ApplyReport, FabricIdentity};
 use chv_nwd_core::{NetworkServer, TopologyState};
 use chv_observability::Metrics;
@@ -39,8 +41,10 @@ impl NetworkExecutor for MockExecutor {
         &self,
         _network_id: &str,
         _state: &TopologyState,
-    ) -> Result<(), ChvError> {
-        Ok(())
+    ) -> Result<DeleteOutcome, ChvError> {
+        Ok(DeleteOutcome {
+            fabric_removed: None,
+        })
     }
 
     async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
@@ -88,8 +92,8 @@ impl NetworkExecutor for MockExecutor {
         Ok(())
     }
 
-    async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
-        Ok(false)
+    async fn fabric_owned(&self, _network_id: &str) -> Result<FabricOwnership, ChvError> {
+        Ok(FabricOwnership::NotOwned)
     }
 
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
@@ -115,7 +119,7 @@ impl NetworkExecutor for MockExecutor {
         _bridge_name: &str,
         _subnet_cidr: &str,
         _gateway_ip: &str,
-        _tenant_mtu: u32,
+        _tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError> {
         Ok(())
     }
@@ -212,8 +216,10 @@ impl NetworkExecutor for RecordingExecutor {
         &self,
         _network_id: &str,
         _state: &TopologyState,
-    ) -> Result<(), ChvError> {
-        Ok(())
+    ) -> Result<DeleteOutcome, ChvError> {
+        Ok(DeleteOutcome {
+            fabric_removed: None,
+        })
     }
 
     async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
@@ -261,8 +267,8 @@ impl NetworkExecutor for RecordingExecutor {
         Ok(())
     }
 
-    async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
-        Ok(false)
+    async fn fabric_owned(&self, _network_id: &str) -> Result<FabricOwnership, ChvError> {
+        Ok(FabricOwnership::NotOwned)
     }
 
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
@@ -288,7 +294,7 @@ impl NetworkExecutor for RecordingExecutor {
         _bridge_name: &str,
         _subnet_cidr: &str,
         _gateway_ip: &str,
-        _tenant_mtu: u32,
+        _tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError> {
         Ok(())
     }

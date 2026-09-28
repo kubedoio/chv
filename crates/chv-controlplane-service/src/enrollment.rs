@@ -10,12 +10,26 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// WireGuard listener port of chv-nwd's fabric transport (ADR-021 §6;
-/// matches the `fabric.wireguard_port` default in chv-config). The
-/// control plane uses it to derive a node's underlay endpoint from the
-/// observed gRPC peer address until agents report their own underlay
-/// addressing.
+/// WireGuard listener port of chv-nwd's fabric transport (ADR-021 §6).
+/// This matches the `fabric.wireguard_port` DEFAULT in chv-config, but
+/// the port is node-config-overridable and the control plane cannot see
+/// node configuration: a node that overrides `fabric.wireguard_port`
+/// must not rely on control-plane-derived underlay endpoints (they pin
+/// this default port). There is deliberately no CP-side knob for this
+/// value — it exists only to derive endpoints from observed gRPC peer
+/// addresses until agents report their own underlay addressing.
 pub(crate) const FABRIC_WIREGUARD_PORT: u16 = 65001;
+
+/// Derive a node's fabric underlay endpoint from the transport-level
+/// peer address the control plane actually observed, pinned to the
+/// fabric WireGuard port. IPv6 peer addresses are bracketed so the
+/// endpoint parses as `host:port`.
+pub(crate) fn derive_underlay_endpoint(addr: SocketAddr) -> String {
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{FABRIC_WIREGUARD_PORT}"),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{FABRIC_WIREGUARD_PORT}"),
+    }
+}
 
 #[async_trait]
 pub trait CertificateIssuer: Send + Sync {
@@ -265,16 +279,21 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                     // The enrollment request carries no explicit underlay
                     // endpoint, so derive one from the transport-level peer
                     // address the control plane actually observed, pinned to
-                    // the fabric WireGuard port. NAT caveat: behind NAT this
-                    // is the NAT's mapped address — usually exactly what
-                    // remote peers must dial — but a NAT that maps the gRPC
-                    // connection differently from the node's WireGuard
-                    // listener yields an unreachable endpoint; the fabric
-                    // plan compiler surfaces unreachable peers (fail
-                    // closed) instead of guessing.
-                    peer_addr
-                        .map(|addr| format!("{}:{}", addr.ip(), FABRIC_WIREGUARD_PORT))
-                        .as_deref(),
+                    // the fabric WireGuard port. First registration wins at
+                    // the store layer, so a re-enrollment through a
+                    // different address does not rotate the endpoint. NAT /
+                    // LB / proxy caveat: behind NAT this is the NAT's
+                    // mapped address — usually exactly what remote peers
+                    // must dial — but a NAT, load balancer, or proxy that
+                    // maps the gRPC connection differently from the node's
+                    // WireGuard listener yields an unreachable endpoint; in
+                    // particular, nodes enrolled through one shared
+                    // LB/proxy all appear behind the proxy's address, which
+                    // then gets pinned at first registration (every node
+                    // behind it would dial the proxy). The fabric plan
+                    // compiler surfaces unreachable peers (fail closed)
+                    // instead of guessing.
+                    peer_addr.map(derive_underlay_endpoint).as_deref(),
                 )
                 .await?;
         }

@@ -669,6 +669,203 @@ async fn test_enrollment_with_peer_addr_derives_underlay_endpoint() {
     );
 }
 
+/// The endpoint derivation must bracket IPv6 peer addresses so the stored
+/// value parses as `host:port` (an unbracketed v6 address would glue the
+/// port onto the last hextet), and keep the plain `ip:port` form for v4.
+#[test]
+fn test_derive_underlay_endpoint_formats_v4_and_v6() {
+    let v4: std::net::SocketAddr = "203.0.113.9:55555".parse().unwrap();
+    assert_eq!(
+        crate::enrollment::derive_underlay_endpoint(v4),
+        "203.0.113.9:65001"
+    );
+
+    let v6: std::net::SocketAddr = "[2001:db8::1]:55555".parse().unwrap();
+    assert_eq!(
+        crate::enrollment::derive_underlay_endpoint(v6),
+        "[2001:db8::1]:65001",
+        "an IPv6 peer must be bracketed before the port is appended"
+    );
+
+    // The derived endpoint must round-trip through SocketAddr parsing
+    // (what the fabric plan compiler's peer validation expects).
+    let parsed: std::net::SocketAddr = crate::enrollment::derive_underlay_endpoint(v6)
+        .parse()
+        .expect("a bracketed v6 endpoint must parse as a socket address");
+    assert_eq!(parsed.port(), 65001);
+    assert!(parsed.is_ipv6());
+}
+
+/// Enrolling over an IPv6 transport must persist a bracketed underlay
+/// endpoint (round-2 review finding: the endpoint policy).
+#[tokio::test]
+async fn test_enrollment_with_ipv6_peer_addr_stores_bracketed_endpoint() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service =
+        EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
+
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES (?, false)")
+        .bind("a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let request = proto::EnrollmentRequest {
+        bootstrap_token: "123".into(),
+        inventory: Some(proto::NodeInventory {
+            node_id: "node-fab-v6".into(),
+            hostname: "host-fab-v6".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
+            labels: std::collections::HashMap::new(),
+            vtep_ip: String::new(),
+            wireguard_public_key: "pub-key-v6-base64".into(),
+            underlay_mtu: 1500,
+        }),
+        versions: Some(proto::ServiceVersions {
+            node_id: "node-fab-v6".into(),
+            chv_agent_version: "1.0.0".into(),
+            chv_stord_version: "1.0.0".into(),
+            chv_nwd_version: "1.0.0".into(),
+            cloud_hypervisor_version: "40.0.0".into(),
+            host_bundle_version: "1.2.3".into(),
+        }),
+    };
+
+    let peer_addr: std::net::SocketAddr = "[2001:db8:42::1]:55555".parse().unwrap();
+    service
+        .enroll_node(request, Some(peer_addr))
+        .await
+        .expect("enrollment over an IPv6 transport must succeed");
+
+    let identity = VtepRepository::new(pool)
+        .get_fabric_identity("node-fab-v6")
+        .await
+        .unwrap()
+        .expect("fabric identity must be registered");
+    assert_eq!(
+        identity.underlay_endpoint.as_deref(),
+        Some("[2001:db8:42::1]:65001"),
+        "an IPv6 peer address must be stored bracketed, pinned to the \
+         fabric WireGuard port"
+    );
+}
+
+/// First registration wins (round-2 review finding): a peer-derived
+/// endpoint from a LATER re-report (e.g. a transient LB/proxy/VPN
+/// reconnection observed as a different source address) must not replace
+/// the endpoint pinned at enrollment.
+#[tokio::test]
+async fn test_inventory_re_report_does_not_rotate_pinned_underlay_endpoint() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service =
+        EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
+
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES (?, false)")
+        .bind("a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let request = proto::EnrollmentRequest {
+        bootstrap_token: "123".into(),
+        inventory: Some(proto::NodeInventory {
+            node_id: "node-fab-pin".into(),
+            hostname: "host-fab-pin".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
+            labels: std::collections::HashMap::new(),
+            vtep_ip: String::new(),
+            wireguard_public_key: "pub-key-pin-base64".into(),
+            underlay_mtu: 1500,
+        }),
+        versions: Some(proto::ServiceVersions {
+            node_id: "node-fab-pin".into(),
+            chv_agent_version: "1.0.0".into(),
+            chv_stord_version: "1.0.0".into(),
+            chv_nwd_version: "1.0.0".into(),
+            cloud_hypervisor_version: "40.0.0".into(),
+            host_bundle_version: "1.2.3".into(),
+        }),
+    };
+
+    // Enrollment through the node's real address pins the endpoint.
+    let enroll_peer: std::net::SocketAddr = "198.51.100.23:44444".parse().unwrap();
+    service
+        .enroll_node(request, Some(enroll_peer))
+        .await
+        .expect("enrollment must succeed");
+
+    // The periodic inventory re-report arrives through a proxy/LB whose
+    // address differs: the pinned endpoint must survive (last-writer-wins
+    // would silently replace a previously-good endpoint).
+    let inventory_service = crate::inventory::InventoryServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        VtepRepository::new(pool.clone()),
+    );
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        proto::ReportNodeInventoryRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: "op-inv-pin".into(),
+                requested_by: "test".into(),
+                target_node_id: "node-fab-pin".into(),
+                desired_state_version: "1".into(),
+                request_unix_ms: 1000,
+            }),
+            inventory: Some(proto::NodeInventory {
+                node_id: "node-fab-pin".into(),
+                hostname: "host-fab-pin".into(),
+                architecture: "x86_64".into(),
+                cpu_threads: 8,
+                memory_bytes: 16 * 1024 * 1024 * 1024,
+                storage_classes: vec![],
+                network_capabilities: vec![],
+                hypervisor_capabilities: vec![],
+                labels: std::collections::HashMap::new(),
+                vtep_ip: String::new(),
+                wireguard_public_key: "pub-key-rotated".into(),
+                underlay_mtu: 1500,
+            }),
+        },
+        Some("203.0.113.77:9999".parse().unwrap()),
+    )
+    .await
+    .expect("periodic inventory must succeed");
+
+    let identity = VtepRepository::new(pool)
+        .get_fabric_identity("node-fab-pin")
+        .await
+        .unwrap()
+        .expect("identity must survive re-report");
+    assert_eq!(
+        identity.underlay_endpoint.as_deref(),
+        Some("198.51.100.23:65001"),
+        "the endpoint pinned at first registration must not be rotated by \
+         a later peer-derived re-report"
+    );
+    // The identity re-sync itself still works (key rotation converges).
+    assert_eq!(identity.public_key.as_deref(), Some("pub-key-rotated"));
+}
+
 #[tokio::test]
 async fn test_rotate_certificate_missing_node() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;

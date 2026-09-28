@@ -19,7 +19,9 @@ use chv_nwd_api::chv_nwd_api::{
     EnsureNetworkTopologyRequest, FabricPeer, FabricPlan, GetFabricIdentityRequest,
     GetOverlayStatusRequest, NicSpec, OverlayType, TopologySpec, UpdateOverlayRequest,
 };
-use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
+use chv_nwd_core::executor::{
+    DeleteOutcome, FabricOwnership, NetworkExecutor, OverlayStatusInfo, TopologyApplyResult,
+};
 use chv_nwd_core::fabric::{AppliedFabric, ApplyReport, FabricIdentity};
 use chv_nwd_core::handlers::NetworkServiceImpl;
 use chv_nwd_core::{NetworkServer, TopologyState, TopologyTable};
@@ -37,6 +39,20 @@ const TEST_PUBLIC_KEY: &str = "K7XbF9cV2mQpT3nZ8sL4dW6yH1jR5uA0eG9iO2pS7kM=";
 const PEER_PUBLIC_KEY: &str = "Q8YcG0dW3nRqU4oA9tM5eX7zI2kS6vB1fH0jP3qT8lN=";
 const DEFAULT_TENANT_MTU: u32 = 1380;
 
+/// Serializes tests that increment or exactly assert the process-global
+/// fabric metric counters: the capturing recorder installed by
+/// `fabric_metrics_recorder::install()` is shared by every test in this
+/// binary and cargo runs the tests concurrently, so a before/after
+/// equality assertion would otherwise race a concurrent test's
+/// increment. An async lock so the guard may be held across the test's
+/// await points (clippy::await_holding_lock).
+static FABRIC_METRIC_MUTEX: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn metric_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    FABRIC_METRIC_MUTEX.lock().await
+}
+
 /// Recording mock mirroring the `LinuxExecutor` fabric contract.
 #[derive(Clone)]
 struct FabricExecutor {
@@ -49,6 +65,10 @@ struct FabricExecutor {
     overlay_status_error: bool,
     /// When set, fabric removal fails persistently (m5 handler semantics).
     remove_fails: bool,
+    /// When set, `delete_topology` fails its LOCAL teardown half (n11:
+    /// the handler must not proxy the fabric metric from the aggregate
+    /// error).
+    local_delete_fails: bool,
 }
 
 impl FabricExecutor {
@@ -59,6 +79,7 @@ impl FabricExecutor {
             owned: Arc::new(StdMutex::new(HashSet::new())),
             overlay_status_error: false,
             remove_fails: false,
+            local_delete_fails: false,
         }
     }
 
@@ -79,6 +100,13 @@ impl FabricExecutor {
     fn with_failing_removal() -> Self {
         Self {
             remove_fails: true,
+            ..Self::enabled()
+        }
+    }
+
+    fn with_failing_local_delete() -> Self {
+        Self {
+            local_delete_fails: true,
             ..Self::enabled()
         }
     }
@@ -134,13 +162,23 @@ impl NetworkExecutor for FabricExecutor {
         &self,
         network_id: &str,
         state: &TopologyState,
-    ) -> Result<(), ChvError> {
-        // Fabric-first teardown (reverse dependency order).
-        if state.fabric_plan_generation.is_some() {
-            self.remove_fabric_overlay(network_id).await?;
+    ) -> Result<DeleteOutcome, ChvError> {
+        // Fabric-first teardown (reverse dependency order), fail-open for
+        // the fabric half like the LinuxExecutor (m5): the outcome is
+        // reported through DeleteOutcome so the handler can count the
+        // remove metric truthfully (n11). A disabled provider means no
+        // teardown is attempted at all (unobservable, like LinuxExecutor).
+        let mut fabric_removed = None;
+        if state.fabric_plan_generation.is_some() && self.fabric_enabled {
+            fabric_removed = Some(self.remove_fabric_overlay(network_id).await);
         }
         self.record(format!("delete:{network_id}"));
-        Ok(())
+        if self.local_delete_fails {
+            return Err(ChvError::Internal {
+                reason: "local topology teardown deliberately failing".to_string(),
+            });
+        }
+        Ok(DeleteOutcome { fabric_removed })
     }
 
     async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
@@ -290,12 +328,16 @@ impl NetworkExecutor for FabricExecutor {
         Ok(())
     }
 
-    async fn fabric_owned(&self, network_id: &str) -> Result<bool, ChvError> {
+    async fn fabric_owned(&self, network_id: &str) -> Result<FabricOwnership, ChvError> {
         self.record(format!("fabric_owned:{network_id}"));
         if !self.fabric_enabled {
-            return Ok(false);
+            return Ok(FabricOwnership::ProviderDisabled);
         }
-        Ok(self.owned.lock().unwrap().contains(network_id))
+        if self.owned.lock().unwrap().contains(network_id) {
+            Ok(FabricOwnership::Owned)
+        } else {
+            Ok(FabricOwnership::NotOwned)
+        }
     }
 
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
@@ -337,9 +379,14 @@ impl NetworkExecutor for FabricExecutor {
         _bridge_name: &str,
         _subnet_cidr: &str,
         _gateway_ip: &str,
-        tenant_mtu: u32,
+        tenant_mtu: Option<u32>,
     ) -> Result<(), ChvError> {
-        self.record(format!("reassert_mtu:{network_id}:{tenant_mtu}"));
+        // `none` marks the bridge-only reset (m7 residue): port MTUs back
+        // to the default and dnsmasq restarted without DHCP option 26.
+        let mtu = tenant_mtu
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        self.record(format!("reassert_mtu:{network_id}:{mtu}"));
         Ok(())
     }
 }
@@ -745,6 +792,7 @@ async fn fabric_rpcs_fail_closed_when_provider_disabled() {
 
 #[tokio::test]
 async fn delete_topology_tears_down_fabric_first() {
+    let _metrics = metric_test_lock().await;
     let executor = FabricExecutor::enabled();
     let (socket, _dir) = spawn_server(executor.clone()).await;
     let mut client = make_client(socket).await;
@@ -925,6 +973,7 @@ async fn update_overlay_rejects_lower_binding_generation() {
 
 #[tokio::test]
 async fn fabric_to_bridge_only_reensure_removes_fabric_overlay() {
+    let _metrics = metric_test_lock().await;
     let executor = FabricExecutor::enabled();
     let (socket, _dir) = spawn_server(executor.clone()).await;
     let mut client = make_client(socket).await;
@@ -958,6 +1007,19 @@ async fn fabric_to_bridge_only_reensure_removes_fabric_overlay() {
         executor.calls().iter().any(|c| c == "remove_fabric:net-m7"),
         "the applied fabric object must be removed on bridge-only re-ensure"
     );
+    // m7 residue cleanup: the fabric MTU (1380) and DHCP option 26 must
+    // not survive the transition — the re-assert machinery must reset the
+    // bridge/port MTUs to the bridge-only default and restart dnsmasq
+    // without option 26 (`none` marks the reset invocation).
+    assert!(
+        executor
+            .calls()
+            .iter()
+            .any(|c| c == "reassert_mtu:net-m7:none"),
+        "the bridge-only re-ensure must reset the fabric tenant MTU residue, \
+         got {:?}",
+        executor.calls()
+    );
 
     // The fabric fields are cleared from state: the overlay reports down.
     let status = client
@@ -986,6 +1048,114 @@ async fn fabric_to_bridge_only_reensure_removes_fabric_overlay() {
         .into_inner();
     assert_eq!(again.status, "OK");
     assert_eq!(executor.count("remove_fabric:"), 1);
+}
+
+// ---- m7 residue: fabric → bridge-only clears tenant_mtu state ---------------
+
+#[tokio::test]
+async fn fabric_to_bridge_only_reensure_clears_tenant_mtu_state() {
+    let _metrics = metric_test_lock().await;
+    let executor = FabricExecutor::enabled();
+    let (service, table) = direct_service(executor.clone());
+
+    let ensure = service
+        .ensure_network_topology(TonicRequest::new(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(fabric_topology_spec("net-m7-state", 1)),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+    assert_eq!(
+        table.get("net-m7-state").unwrap().tenant_mtu,
+        Some(DEFAULT_TENANT_MTU)
+    );
+
+    // Re-ensure the same network as bridge-only (no fabric plan, vni 0):
+    // the persisted state must record the bridge-only defaults — no
+    // tenant MTU, no fabric fields — matching the reset datapath.
+    let mut spec = fabric_topology_spec("net-m7-state", 1);
+    spec.vni = 0;
+    spec.overlay_type = OverlayType::OverlayNone as i32;
+    spec.fabric = None;
+    let reensure = service
+        .ensure_network_topology(TonicRequest::new(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(spec),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(reensure.status, "OK");
+
+    let state = table.get("net-m7-state").unwrap();
+    assert_eq!(
+        state.tenant_mtu, None,
+        "the fabric tenant MTU must not survive a bridge-only re-ensure"
+    );
+    assert_eq!(state.vni, None);
+    assert_eq!(state.fabric_plan_generation, None);
+    assert_eq!(state.binding_generation, None);
+    assert!(
+        executor
+            .calls()
+            .iter()
+            .any(|c| c == "reassert_mtu:net-m7-state:none"),
+        "the MTU/dnsmasq reset must have run, got {:?}",
+        executor.calls()
+    );
+}
+
+// ---- input hardening: vni > 0 requires a fabric plan ------------------------
+
+#[tokio::test]
+async fn ensure_rejects_nonzero_vni_without_fabric_plan() {
+    let executor = FabricExecutor::enabled();
+    let (socket, _dir) = spawn_server(executor.clone()).await;
+    let mut client = make_client(socket).await;
+
+    // vni > 0 with no fabric plan (the legacy field): rejected in-band
+    // before anything is applied or persisted — the legacy nolearning
+    // VXLAN/FDB datapath was retired, so a nonzero VNI has no datapath.
+    let mut spec = fabric_topology_spec("net-vni-nofab", 1);
+    spec.fabric = None;
+    let rejected = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(spec),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(rejected.status, "error");
+    assert_eq!(rejected.error_code, "INVALID_ARGUMENT");
+    assert!(
+        rejected.human_summary.contains("fabric plan"),
+        "the rejection must name the missing fabric plan, got: {}",
+        rejected.human_summary
+    );
+    assert_eq!(
+        executor.count("ensure:"),
+        0,
+        "nothing may reach the executor on a rejected spec"
+    );
+
+    // vni == 0 with no fabric plan: a plain bridge-only ensure is fine.
+    let mut spec = fabric_topology_spec("net-vni-nofab", 1);
+    spec.vni = 0;
+    spec.overlay_type = OverlayType::OverlayNone as i32;
+    spec.fabric = None;
+    let bridge_only = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(spec),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(bridge_only.status, "OK");
+    assert_eq!(executor.count("ensure:"), 1);
 }
 
 // ---- m8: tenant MTU change reaches ports and dnsmasq -----------------------
@@ -1068,6 +1238,7 @@ fn direct_service(
 
 #[tokio::test]
 async fn delete_after_restart_cleans_orphaned_fabric_state() {
+    let _metrics = metric_test_lock().await;
     let executor = FabricExecutor::enabled();
     let (service, table) = direct_service(executor.clone());
 
@@ -1086,7 +1257,10 @@ async fn delete_after_restart_cleans_orphaned_fabric_state() {
     table.remove("net-restart");
     assert!(table.get("net-restart").is_none());
     assert!(
-        executor.fabric_owned("net-restart").await.unwrap(),
+        matches!(
+            executor.fabric_owned("net-restart").await.unwrap(),
+            FabricOwnership::Owned
+        ),
         "the ownership journal survives the restart"
     );
 
@@ -1162,6 +1336,7 @@ async fn delete_after_restart_reports_fabric_teardown_failure_loudly_but_succeed
     // visible via the warn log and the remove-failure metric.
     let executor = FabricExecutor::with_failing_removal();
     let counters = fabric_metrics_recorder::install();
+    let _metrics = metric_test_lock().await;
     let (service, table) = direct_service(executor.clone());
 
     // Seed ownership directly (the mock's removal fails, so apply-then-wipe
@@ -1207,6 +1382,205 @@ async fn delete_after_restart_reports_fabric_teardown_failure_loudly_but_succeed
     assert!(
         after > before,
         "the failed removal must be counted in nwd_fabric_remove_total{{result=failure}}"
+    );
+}
+
+// ---- n11 (round 2): truthful fabric-remove metric on the state-row path ----
+
+#[tokio::test]
+async fn delete_with_state_row_counts_fabric_failure_but_succeeds() {
+    // The executor's fabric teardown is fail-open: a failing removal must
+    // not fail the delete, but the metric must count the FAILURE (the old
+    // approximation counted it as a success because the aggregate delete
+    // returned Ok).
+    let counters = fabric_metrics_recorder::install();
+    let _metrics = metric_test_lock().await;
+    let executor = FabricExecutor::with_failing_removal();
+    let (service, table) = direct_service(executor.clone());
+
+    let ensure = service
+        .ensure_network_topology(TonicRequest::new(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(fabric_topology_spec("net-delfail", 1)),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    let before_failure = counters
+        .lock()
+        .unwrap()
+        .get("nwd_fabric_remove_total{result=failure}")
+        .copied()
+        .unwrap_or(0);
+    let before_success = counters
+        .lock()
+        .unwrap()
+        .get("nwd_fabric_remove_total{result=success}")
+        .copied()
+        .unwrap_or(0);
+
+    let del = service
+        .delete_network_topology(TonicRequest::new(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-delfail".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        del.status, "OK",
+        "a fail-open fabric teardown failure must not fail the delete"
+    );
+    assert!(
+        executor
+            .calls()
+            .iter()
+            .any(|c| c == "remove_fabric:net-delfail"),
+        "the removal must have been attempted"
+    );
+
+    let snapshot = counters.lock().unwrap().clone();
+    let after_failure = snapshot
+        .get("nwd_fabric_remove_total{result=failure}")
+        .copied()
+        .unwrap_or(0);
+    let after_success = snapshot
+        .get("nwd_fabric_remove_total{result=success}")
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        after_failure > before_failure,
+        "the failed fabric removal must be counted as a failure"
+    );
+    assert_eq!(
+        after_success, before_success,
+        "a failed fabric removal must NOT be counted as a success"
+    );
+    assert!(
+        table.get("net-delfail").is_none(),
+        "the local state row is removed (fail-open teardown semantics)"
+    );
+}
+
+#[tokio::test]
+async fn delete_with_local_teardown_error_does_not_proxy_fabric_metric() {
+    // A LOCAL teardown error must not be proxied into the fabric-remove
+    // metric (the old approximation counted it as a fabric failure even
+    // though the fabric half had succeeded).
+    let counters = fabric_metrics_recorder::install();
+    let _metrics = metric_test_lock().await;
+    let executor = FabricExecutor::with_failing_local_delete();
+    let (service, _table) = direct_service(executor.clone());
+
+    let ensure = service
+        .ensure_network_topology(TonicRequest::new(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(fabric_topology_spec("net-localfail", 1)),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    let before_failure = counters
+        .lock()
+        .unwrap()
+        .get("nwd_fabric_remove_total{result=failure}")
+        .copied()
+        .unwrap_or(0);
+    let before_success = counters
+        .lock()
+        .unwrap()
+        .get("nwd_fabric_remove_total{result=success}")
+        .copied()
+        .unwrap_or(0);
+
+    let del = service
+        .delete_network_topology(TonicRequest::new(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-localfail".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(del.status, "error");
+    assert_eq!(del.error_code, "INTERNAL_ERROR");
+    // The fabric half ran first and succeeded...
+    assert!(
+        executor
+            .calls()
+            .iter()
+            .any(|c| c == "remove_fabric:net-localfail"),
+        "the fabric teardown must have run before the local failure"
+    );
+    // ...but neither fabric metric moves: the aggregate error is a local
+    // teardown failure, and the fabric-half outcome is not observable
+    // through it (counting it as a fabric failure was the removed
+    // approximation).
+    let snapshot = counters.lock().unwrap().clone();
+    assert_eq!(
+        snapshot
+            .get("nwd_fabric_remove_total{result=failure}")
+            .copied()
+            .unwrap_or(0),
+        before_failure,
+        "a local teardown error must not count as a fabric failure"
+    );
+    assert_eq!(
+        snapshot
+            .get("nwd_fabric_remove_total{result=success}")
+            .copied()
+            .unwrap_or(0),
+        before_success
+    );
+}
+
+// ---- M3 observability (round 2): disabled provider + no state row warns -----
+
+#[tokio::test]
+async fn delete_without_state_row_and_disabled_provider_warns() {
+    // Residue case: the fabric overlay may have been applied before an
+    // nwd restart that came up with the fabric provider disabled — the
+    // delete with no state row must not be a SILENT no-op: the ownership
+    // probe is consulted and a warning is emitted.
+    let executor = FabricExecutor::disabled();
+    let (service, _table) = direct_service(executor.clone());
+    let warnings = warn_capture::WarnCollector::default();
+    let _guard = tracing::subscriber::set_default(warnings.clone());
+
+    let del = service
+        .delete_network_topology(TonicRequest::new(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-ghost-fab".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        del.status, "OK",
+        "nothing local failed; the RPC result stays Ok"
+    );
+    assert!(
+        executor
+            .calls()
+            .iter()
+            .any(|c| c == "fabric_owned:net-ghost-fab"),
+        "the ownership probe must be consulted"
+    );
+    assert_eq!(
+        executor.count("remove_fabric:"),
+        0,
+        "nothing can be torn down with the provider disabled"
+    );
+    assert!(
+        warnings
+            .messages()
+            .iter()
+            .any(|m| m.contains("fabric provider disabled")),
+        "the unobservable residue must be warned about, got {:?}",
+        warnings.messages()
     );
 }
 
@@ -1314,6 +1688,67 @@ async fn get_overlay_status_reports_down_when_provider_disabled() {
     );
 }
 
+// ---- warn capture (test-only tracing subscriber) ----------------------------
+
+/// Minimal `tracing` subscriber that records the messages of WARN-level
+/// events, so handler-level tests can assert a warning is observable
+/// (M3 round 2). Installed per-thread with
+/// `tracing::subscriber::set_default`, which the current-thread
+/// `#[tokio::test]` runtime keeps alive across every await point.
+mod warn_capture {
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Visit;
+    use tracing::span::{Attributes, Id};
+    use tracing::{Event, Metadata};
+
+    #[derive(Clone, Default)]
+    pub struct WarnCollector {
+        warnings: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl WarnCollector {
+        pub fn messages(&self) -> Vec<String> {
+            self.warnings.lock().unwrap().clone()
+        }
+    }
+
+    struct MessageVisitor(Option<String>);
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = Some(format!("{:?}", value));
+            }
+        }
+    }
+
+    impl tracing::Subscriber for WarnCollector {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = MessageVisitor(None);
+            event.record(&mut visitor);
+            if let Some(message) = visitor.0 {
+                self.warnings.lock().unwrap().push(message);
+            }
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+}
+
 // ---- n11: fabric datapath metrics -------------------------------------------
 
 mod fabric_metrics_recorder {
@@ -1400,6 +1835,7 @@ mod fabric_metrics_recorder {
 #[tokio::test]
 async fn fabric_apply_and_remove_are_counted_in_metrics() {
     let counters = fabric_metrics_recorder::install();
+    let _metrics = metric_test_lock().await;
     let executor = FabricExecutor::enabled();
     let (socket, _dir) = spawn_server(executor.clone()).await;
     let mut client = make_client(socket).await;

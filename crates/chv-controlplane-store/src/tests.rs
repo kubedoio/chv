@@ -685,3 +685,79 @@ async fn fabric_ip_unique_index_rejects_duplicate_rows() {
         "expected a UNIQUE constraint violation, got: {err}"
     );
 }
+
+// --- ADR-021 underlay endpoint policy (round-2 review finding) ---
+
+/// The peer-derived `underlay_endpoint` follows first-registration-wins:
+/// a second registration carrying a different endpoint must NOT
+/// overwrite the stored one (a transient LB/proxy/VPN reconnection must
+/// not silently replace a previously-good endpoint), while the public
+/// key and underlay MTU keep their normal upsert semantics. A NULL
+/// endpoint is still populated by the first registration that carries
+/// one.
+#[tokio::test]
+async fn second_registration_does_not_overwrite_stored_underlay_endpoint() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = VtepRepository::new(pool.clone());
+    seed_fabric_node_row(&pool, "node-ep-pin").await;
+
+    // First registration pins the endpoint.
+    repo.register_fabric_identity("node-ep-pin", "pub-ep-1", 1500, Some("198.51.100.10:65001"))
+        .await
+        .expect("first registration must succeed");
+
+    // A re-report through a different observed peer address (e.g. an
+    // LB/proxy reconnection) must not rotate the pinned endpoint.
+    repo.register_fabric_identity("node-ep-pin", "pub-ep-2", 1400, Some("203.0.113.99:65001"))
+        .await
+        .expect("re-registration must succeed");
+
+    let entry = repo.get_vtep("node-ep-pin").await.expect("row must exist");
+    assert_eq!(
+        entry.underlay_endpoint.as_deref(),
+        Some("198.51.100.10:65001"),
+        "first registration wins: the endpoint must not be overwritten"
+    );
+    assert_eq!(
+        entry.public_key.as_deref(),
+        Some("pub-ep-2"),
+        "the public key keeps its normal upsert semantics"
+    );
+    assert_eq!(
+        entry.underlay_mtu,
+        Some(1400),
+        "the underlay MTU keeps its normal upsert semantics"
+    );
+
+    // A re-report WITHOUT an endpoint must not erase the pinned value.
+    repo.register_fabric_identity("node-ep-pin", "pub-ep-3", 0, None)
+        .await
+        .expect("re-registration without an endpoint must succeed");
+    let entry = repo.get_vtep("node-ep-pin").await.expect("row must exist");
+    assert_eq!(
+        entry.underlay_endpoint.as_deref(),
+        Some("198.51.100.10:65001")
+    );
+
+    // A node with no endpoint yet still gets one on its first
+    // endpoint-carrying registration.
+    seed_fabric_node_row(&pool, "node-ep-late").await;
+    repo.register_fabric_identity("node-ep-late", "pub-ep-late", 1500, None)
+        .await
+        .expect("registration without an endpoint must succeed");
+    repo.register_fabric_identity(
+        "node-ep-late",
+        "pub-ep-late",
+        1500,
+        Some("[2001:db8::1]:65001"),
+    )
+    .await
+    .expect("registration with an endpoint must succeed");
+    let entry = repo.get_vtep("node-ep-late").await.expect("row must exist");
+    assert_eq!(
+        entry.underlay_endpoint.as_deref(),
+        Some("[2001:db8::1]:65001"),
+        "a NULL endpoint is populated by the first registration carrying one"
+    );
+}

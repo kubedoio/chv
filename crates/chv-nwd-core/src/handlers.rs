@@ -1,5 +1,5 @@
 use crate::ebpf::{self, EbpfManager};
-use crate::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
+use crate::executor::{FabricOwnership, NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
 use crate::state::{TopologyState, TopologyTable};
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
@@ -152,6 +152,27 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             return Ok(Response::new(Self::err_result(&e)));
         }
 
+        // Input hardening (fail closed): a nonzero VNI requires a fabric
+        // plan. The legacy nolearning VXLAN/FDB datapath was retired by
+        // ADR-021, so a nonzero VNI without a plan has no datapath behind
+        // it — storing `state.vni = Some(vni)` anyway would record state
+        // the executor never realized. No in-tree caller does this (the
+        // agent always sends vni = 0 for bridge-only topologies, and the
+        // bridge-only re-ensure below requires vni == 0), but a direct
+        // gRPC client could.
+        if spec.vni > 0 && spec.fabric.is_none() {
+            let e = ChvError::InvalidArgument {
+                field: "vni".to_string(),
+                reason: format!(
+                    "VNI {} requires a fabric plan: the legacy nolearning VXLAN/FDB \
+                     datapath was retired by ADR-021, so a nonzero VNI has no datapath \
+                     without one",
+                    spec.vni
+                ),
+            };
+            return Ok(Response::new(Self::err_result(&e)));
+        }
+
         // Idempotency and fabric generation fencing (ADR-021 §4): a fabric
         // plan older than the last applied generation for this network is
         // rejected; an unchanged topology (including fabric generation,
@@ -219,6 +240,33 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                             network_id = %spec.network_id,
                             "fabric overlay removed on bridge-only re-ensure"
                         );
+                        // m7 residue cleanup: the removed overlay leaves
+                        // the tenant bridge at the fabric MTU and the
+                        // running dnsmasq advertising `dhcp-option=26` —
+                        // nothing in the plain bridge-only re-ensure below
+                        // resets either. Reset both to the bridge-only
+                        // defaults (kernel-default MTU, no option 26) via
+                        // the m8 re-assert machinery, targeting the
+                        // RUNNING topology's bridge/subnet/gateway from
+                        // the existing state. Fail closed: the new state
+                        // records `tenant_mtu: None`, so the datapath must
+                        // actually be at the default before it is
+                        // persisted (a failure leaves the old state in
+                        // place; the retry re-enters this branch because
+                        // fabric removal is idempotent).
+                        if let Err(e) = self
+                            .executor
+                            .reassert_tenant_mtu(
+                                &spec.network_id,
+                                &existing.bridge_name,
+                                &existing.subnet_cidr,
+                                &existing.gateway_ip,
+                                None,
+                            )
+                            .await
+                        {
+                            return Ok(Response::new(Self::err_result(&e)));
+                        }
                     }
                     Err(e) => {
                         self.metrics.increment_nwd_fabric_remove("failure");
@@ -263,7 +311,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                                 &spec.bridge_name,
                                 &spec.subnet_cidr,
                                 &spec.gateway_ip,
-                                new_mtu,
+                                Some(new_mtu),
                             )
                             .await
                         {
@@ -312,19 +360,55 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
         if let Some(state) = self.topologies.get(&req.network_id) {
             let fabric_was_applied = state.fabric_plan_generation.is_some();
-            if let Err(e) = self.executor.delete_topology(&req.network_id, &state).await {
-                // The executor's fabric teardown inside delete_topology is
-                // fail-open (m5); a failure here is a local teardown
-                // failure.
-                if fabric_was_applied {
-                    self.metrics.increment_nwd_fabric_remove("failure");
+            match self.executor.delete_topology(&req.network_id, &state).await {
+                Ok(outcome) => {
+                    // Count the fabric-half outcome truthfully from the
+                    // executor's report (n11): the fabric teardown inside
+                    // delete_topology is fail-open (m5), so the aggregate
+                    // Ok is NOT evidence that the fabric overlay was
+                    // removed. The previous approximation proxied this
+                    // metric from the aggregate result — counting a fabric
+                    // success even when the fail-open removal had failed,
+                    // and a fabric failure on a purely local teardown
+                    // error.
+                    if fabric_was_applied {
+                        match outcome.fabric_removed {
+                            Some(Ok(())) => {
+                                self.metrics.increment_nwd_fabric_remove("success");
+                            }
+                            Some(Err(ref e)) => {
+                                self.metrics.increment_nwd_fabric_remove("failure");
+                                warn!(
+                                    network_id = %req.network_id,
+                                    error = %e,
+                                    "fabric overlay removal failed during topology delete; \
+                                     local teardown completed (fail-open for teardown only — \
+                                     apply stays fail-closed; residue remains visible via the \
+                                     provider ownership journal)"
+                                );
+                            }
+                            None => {
+                                // Fabric teardown was not attempted (the
+                                // provider is disabled in configuration);
+                                // the executor already warned. There was
+                                // no removal, so there is no outcome to
+                                // count.
+                            }
+                        }
+                    }
+                    self.topologies.remove(&req.network_id);
                 }
-                return Ok(Response::new(Self::err_result(&e)));
+                Err(e) => {
+                    // Local teardown failure. The fabric half ran first
+                    // inside the executor, but its outcome is not
+                    // observable through this error, so the fabric-remove
+                    // metric is deliberately NOT proxied from the
+                    // aggregate outcome (the removed approximation counted
+                    // this as a fabric failure even when the fabric half
+                    // had succeeded).
+                    return Ok(Response::new(Self::err_result(&e)));
+                }
             }
-            if fabric_was_applied {
-                self.metrics.increment_nwd_fabric_remove("success");
-            }
-            self.topologies.remove(&req.network_id);
         } else {
             // No local topology state row (typically after an nwd restart
             // wiped the in-memory table), but the fabric provider's durable
@@ -336,29 +420,47 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             // into an error — there is no local topology to fail on — but
             // it is loudly visible.
             match self.executor.fabric_owned(&req.network_id).await {
-                Ok(true) => match self.executor.remove_fabric_overlay(&req.network_id).await {
-                    Ok(()) => {
-                        self.metrics.increment_nwd_fabric_remove("success");
-                        info!(
-                            network_id = %req.network_id,
-                            "fabric overlay removed for network with no local topology \
-                             state (provider ownership journal held it across a restart)"
-                        );
+                Ok(FabricOwnership::Owned) => {
+                    match self.executor.remove_fabric_overlay(&req.network_id).await {
+                        Ok(()) => {
+                            self.metrics.increment_nwd_fabric_remove("success");
+                            info!(
+                                network_id = %req.network_id,
+                                "fabric overlay removed for network with no local topology \
+                                 state (provider ownership journal held it across a restart)"
+                            );
+                        }
+                        Err(e) => {
+                            self.metrics.increment_nwd_fabric_remove("failure");
+                            warn!(
+                                network_id = %req.network_id,
+                                error = %e,
+                                "fabric overlay removal failed for network with no local \
+                                 topology state; the fabric network may outlive the delete \
+                                 (residue remains visible via the provider ownership journal)"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        self.metrics.increment_nwd_fabric_remove("failure");
-                        warn!(
-                            network_id = %req.network_id,
-                            error = %e,
-                            "fabric overlay removal failed for network with no local \
-                             topology state; the fabric network may outlive the delete \
-                             (residue remains visible via the provider ownership journal)"
-                        );
-                    }
-                },
-                Ok(false) => {
-                    // Not owned by the fabric provider: nothing to do —
+                }
+                Ok(FabricOwnership::NotOwned) => {
+                    // Provider enabled and holds no entry: nothing to do —
                     // the current no-state behavior.
+                }
+                Ok(FabricOwnership::ProviderDisabled) => {
+                    // Residue case (M3 observability gap): the fabric
+                    // overlay may have been applied before an nwd restart
+                    // that came up with the fabric provider disabled in
+                    // configuration — ownership is unobservable in this
+                    // process and the delete cannot tear the fabric half
+                    // down. Loud, not silent; the RPC result stays Ok
+                    // (nothing local failed).
+                    warn!(
+                        network_id = %req.network_id,
+                        "delete for a network with no local topology state found the \
+                         fabric provider disabled in nwd configuration; any fabric residue \
+                         cannot be observed or torn down until the provider is re-enabled \
+                         (residue remains visible via the provider ownership journal)"
+                    );
                 }
                 // Ownership cannot be determined: fail closed rather than
                 // silently no-op (the original leak was exactly a silent
