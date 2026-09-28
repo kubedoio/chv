@@ -35,7 +35,7 @@ pub async fn execute(
         UserCommands::List => {
             let resp = client.post("/v1/users", &json!({})).await?;
             let items = resp
-                .get("users")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();

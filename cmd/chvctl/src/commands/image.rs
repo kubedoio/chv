@@ -35,7 +35,7 @@ pub async fn execute(
         ImageCommands::List => {
             let resp = client.post("/v1/images", &json!({})).await?;
             let items = resp
-                .get("images")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();

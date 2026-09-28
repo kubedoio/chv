@@ -37,26 +37,19 @@ pub async fn execute(
         NodeCommands::List => {
             let resp = client.post("/v1/nodes", &json!({})).await?;
             let items = resp
-                .get("nodes")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
             output::print_list(
                 &items,
-                &[
-                    "node_id",
-                    "hostname",
-                    "status",
-                    "cpu_total",
-                    "memory_total",
-                    "vm_count",
-                ],
+                &["node_id", "name", "state", "health", "cpu", "memory"],
                 format,
             );
         }
         NodeCommands::Get { node_id } => {
             let resp = client
-                .post("/v1/nodes", &json!({ "node_id": node_id }))
+                .post("/v1/nodes/get", &json!({ "node_id": node_id }))
                 .await?;
             output::print_value(&resp, format);
         }

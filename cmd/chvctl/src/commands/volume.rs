@@ -35,7 +35,7 @@ pub async fn execute(
         VolumeCommands::List => {
             let resp = client.post("/v1/volumes", &json!({})).await?;
             let items = resp
-                .get("volumes")
+                .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
