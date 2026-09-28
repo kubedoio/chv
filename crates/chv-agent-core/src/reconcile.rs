@@ -231,7 +231,7 @@ impl Reconciler {
                     Ok(raw) => raw,
                     Err(error) => {
                         warn!(
-                            vm_id = %vm_id,
+                            vm_id = %vm_id.escape_debug(),
                             %error,
                             "failed to decode vm_fragment spec_json for telemetry"
                         );
@@ -242,7 +242,7 @@ impl Reconciler {
                     Ok(spec) => spec,
                     Err(error) => {
                         warn!(
-                            vm_id = %vm_id,
+                            vm_id = %vm_id.escape_debug(),
                             %error,
                             "failed to parse vm_fragment spec_json for telemetry"
                         );

@@ -2668,10 +2668,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .map_err(map_authority_error)?;
         // Audit trail: the resolution terminal-persists a stuck operation;
         // record who decided what, with the journal's own identifiers as the
-        // authoritative reference.
+        // authoritative reference. Journal identifiers are escape_debug'd,
+        // not trusted: identifier admission historically accepts control
+        // characters, and this record must stay single-line.
         tracing::info!(
-            operation_id = %resolved.entry.operation.id,
-            vm_id = %resolved.entry.operation.vm_id,
+            operation_id = %resolved.entry.operation.id.as_str().escape_debug(),
+            vm_id = %resolved.entry.operation.vm_id.as_str().escape_debug(),
             requested_vm_id = %vm_id,
             succeeded,
             note,
