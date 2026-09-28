@@ -481,6 +481,8 @@ mod tests {
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: version(1),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         }
     }
 

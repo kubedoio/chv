@@ -48,6 +48,8 @@ fn submit(vm: &str, op: &str) -> SubmitMutation {
                 requested_power_state: RequestedPowerState::Stopped,
                 observed_power_state: ObservedPowerState::Unknown,
                 resource_version: ResourceVersion::new(1).unwrap(),
+                cloud_init_userdata: None,
+                hypervisor_tuning: None,
             },
         },
     }

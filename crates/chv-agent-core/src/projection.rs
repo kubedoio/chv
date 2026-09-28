@@ -260,6 +260,8 @@ mod tests {
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: ResourceVersion::new(1).unwrap(),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         }
     }
 
@@ -526,11 +528,14 @@ mod tests {
                         attachment_id: "vol-0".to_string(),
                         storage_ref: "vol-0".to_string(),
                         read_only: false,
+                        size_bytes: None,
+                        seed_from: None,
                     }];
                     def.networks = vec![cellhv_core_types::NetworkAttachmentRef {
                         attachment_id: "nic-0".to_string(),
                         network_ref: "net-0".to_string(),
                         mac_address: None,
+                        addressing: None,
                     }];
                     def
                 },
@@ -597,6 +602,8 @@ mod tests {
                         attachment_id: "vol-0".to_string(),
                         storage_ref: "vol-0".to_string(),
                         read_only: false,
+                        size_bytes: None,
+                        seed_from: None,
                     },
                 },
             ),
@@ -615,6 +622,7 @@ mod tests {
                         attachment_id: "nic-0".to_string(),
                         network_ref: "net-0".to_string(),
                         mac_address: None,
+                        addressing: None,
                     },
                 },
             ),

@@ -10,9 +10,9 @@
 use crate::VmSpec;
 use cellhv_core_operations::{MutationCommand, SubmitMutation};
 use cellhv_core_types::{
-    BootSpec, ComputeSpec, IdempotencyKey, NetworkAttachmentRef, ObservedPowerState, OperationId,
-    OperationRequestMetadata, RequestedPowerState, ResourceVersion, StorageAttachmentRef,
-    VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
+    BootSpec, ComputeSpec, HypervisorTuning, IdempotencyKey, NetworkAttachmentRef, NicAddressing,
+    ObservedPowerState, OperationId, OperationRequestMetadata, RequestedPowerState,
+    ResourceVersion, StorageAttachmentRef, VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
 };
 use cellhv_nodecache_migration::{legacy_network_attachment_id, legacy_storage_attachment_id};
 use chv_errors::ChvError;
@@ -144,24 +144,41 @@ pub fn adapt_legacy_vm_mutation(
     })
 }
 
+/// Translate the legacy hypervisor override surface into the Core mirror,
+/// field for field. Field parity with `chv_common::HypervisorOverrides` is
+/// pinned by `hypervisor_tuning_parity_with_legacy_surface` below: adding a
+/// field to either side without mirroring it fails that test (the fixture
+/// is a fully populated struct literal, so the compiler forces it).
+fn tuning_from_legacy(overrides: chv_common::hypervisor::HypervisorOverrides) -> HypervisorTuning {
+    HypervisorTuning {
+        cpu_nested: overrides.cpu_nested,
+        cpu_amx: overrides.cpu_amx,
+        cpu_kvm_hyperv: overrides.cpu_kvm_hyperv,
+        memory_mergeable: overrides.memory_mergeable,
+        memory_hugepages: overrides.memory_hugepages,
+        memory_shared: overrides.memory_shared,
+        memory_prefault: overrides.memory_prefault,
+        iommu: overrides.iommu,
+        rng_src: overrides.rng_src,
+        watchdog: overrides.watchdog,
+        landlock_enable: overrides.landlock_enable,
+        serial_mode: overrides.serial_mode,
+        console_mode: overrides.console_mode,
+        pvpanic: overrides.pvpanic,
+        tpm_type: overrides.tpm_type,
+        tpm_socket_path: overrides.tpm_socket_path,
+    }
+}
+
 fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvError> {
     spec.validate()?;
-    if spec.cloud_init_userdata.is_some() {
-        return unsupported("cloud_init_userdata");
-    }
-    if spec.hypervisor_overrides.is_some() {
-        return unsupported("hypervisor_overrides");
-    }
-    if spec.disks.iter().any(|disk| disk.size_bytes.is_some()) {
-        return unsupported("disks.size_bytes");
-    }
-    if spec.nics.iter().any(|nic| {
-        !nic.ip_address.is_empty()
-            || !nic.tap_name.is_empty()
-            || !nic.cidr.is_empty()
-            || !nic.gateway.is_empty()
-    }) {
-        return unsupported("NIC addressing or tap configuration");
+    // Legacy fields Core does not model are still rejected explicitly —
+    // never silently dropped. Cloud-init userdata, the hypervisor override
+    // surface, disk sizing/seed, and control-plane NIC addressing are all
+    // modeled in VmDefinition now and translate below. Tap configuration
+    // remains runtime-owned and unsupported here.
+    if spec.nics.iter().any(|nic| !nic.tap_name.is_empty()) {
+        return unsupported("nics.tap_name");
     }
 
     let requested_power_state = match spec.desired_state.as_str() {
@@ -169,36 +186,72 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
         "Stopped" => RequestedPowerState::Stopped,
         _ => return invalid("desired_state", "must be Running or Stopped"),
     };
+    let hypervisor_tuning = spec.hypervisor_overrides.map(tuning_from_legacy);
+    // An empty (or whitespace) seed path is semantically absent — the
+    // executor treats it that way, and normalizing here keeps the durable
+    // definition free of Some("") sentinel values that older validators
+    // would reject.
+    let seed_path = spec
+        .disk_seed_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty());
     let definition = VmDefinition {
         id: VmId::new(vm_id)?,
         name: spec.name,
         boot: BootSpec {
             kernel: spec.kernel_path,
             firmware: spec.firmware_path,
-            initial_disk: spec.disk_seed_path,
+            initial_disk: seed_path.map(str::to_string),
         },
         compute: ComputeSpec::new(spec.cpus, spec.memory_bytes)?,
         storage: spec
             .disks
             .into_iter()
-            .map(|disk| StorageAttachmentRef {
+            .enumerate()
+            .map(|(index, disk)| StorageAttachmentRef {
                 attachment_id: legacy_storage_attachment_id(&disk.volume_id),
                 storage_ref: disk.volume_id,
                 read_only: disk.read_only,
+                size_bytes: disk.size_bytes,
+                // The legacy seed path is per-VM and applies to the boot
+                // disk only — a deliberate divergence from the legacy
+                // reconcile loop, which would seed every absent disk from
+                // the same image; existing (already-provisioned) volumes
+                // skip seeding in stord either way.
+                seed_from: if index == 0 {
+                    seed_path.map(str::to_string)
+                } else {
+                    None
+                },
             })
             .collect(),
         networks: spec
             .nics
             .into_iter()
-            .map(|nic| NetworkAttachmentRef {
-                attachment_id: legacy_network_attachment_id(vm_id, &nic.network_id),
-                network_ref: nic.network_id,
-                mac_address: Some(nic.mac_address),
+            .map(|nic| {
+                let addressing =
+                    if nic.ip_address.is_empty() && nic.cidr.is_empty() && nic.gateway.is_empty() {
+                        None
+                    } else {
+                        Some(NicAddressing {
+                            ip_address: nic.ip_address,
+                            cidr: nic.cidr,
+                            gateway: nic.gateway,
+                        })
+                    };
+                NetworkAttachmentRef {
+                    attachment_id: legacy_network_attachment_id(vm_id, &nic.network_id),
+                    network_ref: nic.network_id,
+                    mac_address: Some(nic.mac_address),
+                    addressing,
+                }
             })
             .collect(),
         requested_power_state,
         observed_power_state: ObservedPowerState::Unknown,
         resource_version: ResourceVersion::new(1).expect("one is a valid resource version"),
+        cloud_init_userdata: spec.cloud_init_userdata,
+        hypervisor_tuning,
     };
     definition.validate()?;
     Ok(definition)
@@ -394,10 +447,19 @@ mod tests {
         ] {
             assert!(adapt_legacy_vm_mutation(&meta(), "node-a", mutation, version(3)).is_err());
         }
+        // Tap configuration is runtime-owned: still rejected explicitly
+        // rather than silently dropped.
         let mut create_meta = meta();
         create_meta.desired_state_version = "1".into();
         let mut spec = minimal_spec();
-        spec.cloud_init_userdata = Some("secret".into());
+        spec.nics.push(NicSpec {
+            network_id: "network-a".into(),
+            mac_address: "02:00:00:00:00:01".into(),
+            ip_address: String::new(),
+            tap_name: "tap-leftover".into(),
+            cidr: String::new(),
+            gateway: String::new(),
+        });
         assert!(adapt_legacy_vm_mutation(
             &create_meta,
             "node-a",
@@ -408,6 +470,212 @@ mod tests {
             version(1)
         )
         .is_err());
+    }
+
+    #[test]
+    fn create_translates_the_full_legacy_spec_shape() {
+        // The BFF's build_agent_vm_spec always emits disk sizes, control-plane
+        // NIC addressing, and merged hypervisor overrides; all of it is
+        // modeled in VmDefinition now and must translate losslessly.
+        let mut create_meta = meta();
+        create_meta.desired_state_version = "1".into();
+        let mut spec = minimal_spec();
+        spec.disk_seed_path = Some("/var/lib/chv/images/ubuntu.img".into());
+        spec.disks.push(DiskSpec {
+            volume_id: "volume-a".into(),
+            read_only: false,
+            size_bytes: Some(10_737_418_240),
+        });
+        spec.nics.push(NicSpec {
+            network_id: "network-a".into(),
+            mac_address: "02:00:00:00:00:01".into(),
+            ip_address: "10.200.0.47".into(),
+            tap_name: String::new(),
+            cidr: "10.200.0.0/24".into(),
+            gateway: "10.200.0.1".into(),
+        });
+        spec.cloud_init_userdata = Some("#cloud-config".into());
+        spec.hypervisor_overrides = Some(chv_common::hypervisor::HypervisorOverrides {
+            cpu_nested: Some(true),
+            rng_src: Some("/dev/hwrng".into()),
+            ..Default::default()
+        });
+        let result = adapt_legacy_vm_mutation(
+            &create_meta,
+            "node-a",
+            LegacyVmMutation::Create {
+                vm_id: "vm-a".into(),
+                spec: Box::new(spec),
+            },
+            version(1),
+        )
+        .unwrap();
+        let MutationCommand::CreateVm { definition } = result.submission.command else {
+            panic!("expected create command")
+        };
+        assert_eq!(
+            definition.boot.initial_disk.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(definition.storage[0].size_bytes, Some(10_737_418_240));
+        assert_eq!(
+            definition.storage[0].seed_from.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        let addressing = definition.networks[0]
+            .addressing
+            .as_ref()
+            .expect("addressing must be carried");
+        assert_eq!(addressing.ip_address, "10.200.0.47");
+        assert_eq!(addressing.cidr, "10.200.0.0/24");
+        assert_eq!(addressing.gateway, "10.200.0.1");
+        assert_eq!(
+            definition.cloud_init_userdata.as_deref(),
+            Some("#cloud-config")
+        );
+        let tuning = definition
+            .hypervisor_tuning
+            .as_ref()
+            .expect("tuning must be carried");
+        assert_eq!(tuning.cpu_nested, Some(true));
+        assert_eq!(tuning.rng_src.as_deref(), Some("/dev/hwrng"));
+    }
+
+    #[test]
+    fn create_normalizes_an_empty_seed_path_to_absent() {
+        // An empty (or whitespace) seed path is semantically absent — the
+        // executor treats it that way, and the durable definition must not
+        // carry Some("") sentinel values.
+        let mut create_meta = meta();
+        create_meta.desired_state_version = "1".into();
+        let mut spec = minimal_spec();
+        spec.disk_seed_path = Some("   ".to_owned());
+        spec.disks.push(DiskSpec {
+            volume_id: "volume-a".into(),
+            read_only: false,
+            size_bytes: None,
+        });
+        let result = adapt_legacy_vm_mutation(
+            &create_meta,
+            "node-a",
+            LegacyVmMutation::Create {
+                vm_id: "vm-a".into(),
+                spec: Box::new(spec),
+            },
+            version(1),
+        )
+        .unwrap();
+        let MutationCommand::CreateVm { definition } = result.submission.command else {
+            panic!("expected create command")
+        };
+        assert_eq!(definition.boot.initial_disk, None);
+        assert_eq!(definition.storage[0].seed_from, None);
+    }
+
+    #[test]
+    fn hypervisor_tuning_parity_with_legacy_surface() {
+        // Fully populated on BOTH sides so the compiler forces this fixture
+        // to grow whenever either struct gains a field. The total check is
+        // the JSON-equality assertion below: both structs share field names
+        // and 1:1 types, so a faithful translation reproduces the input
+        // object exactly — any dropped, added, or swapped field breaks it.
+        // The alternating/distinctive values additionally make the first
+        // diverging field identifiable in the assertion diff.
+        let overrides = chv_common::hypervisor::HypervisorOverrides {
+            cpu_nested: Some(true),
+            cpu_amx: Some(false),
+            cpu_kvm_hyperv: Some(true),
+            memory_mergeable: Some(false),
+            memory_hugepages: Some(true),
+            memory_shared: Some(false),
+            memory_prefault: Some(true),
+            iommu: Some(false),
+            rng_src: Some("/dev/hwrng".to_string()),
+            watchdog: Some(true),
+            landlock_enable: Some(false),
+            serial_mode: Some("Null".to_string()),
+            console_mode: Some("Pty".to_string()),
+            pvpanic: Some(true),
+            tpm_type: Some("swtpm".to_string()),
+            tpm_socket_path: Some("/run/tpm.sock".to_string()),
+        };
+        let tuning = tuning_from_legacy(overrides.clone());
+        assert_eq!(
+            serde_json::to_value(&tuning).unwrap(),
+            serde_json::to_value(&overrides).unwrap(),
+            "tuning_from_legacy must reproduce the legacy object field for field"
+        );
+        // And the empty surface stays empty.
+        assert_eq!(
+            tuning_from_legacy(chv_common::hypervisor::HypervisorOverrides::default()),
+            HypervisorTuning::default()
+        );
+        // Spot fields keep their readable failure messages.
+        assert_eq!(tuning.cpu_nested, Some(true));
+        assert_eq!(tuning.cpu_amx, Some(false));
+        assert_eq!(tuning.rng_src.as_deref(), Some("/dev/hwrng"));
+        assert_eq!(tuning.serial_mode.as_deref(), Some("Null"));
+        assert_eq!(tuning.console_mode.as_deref(), Some("Pty"));
+        assert_eq!(tuning.tpm_socket_path.as_deref(), Some("/run/tpm.sock"));
+    }
+
+    #[test]
+    fn core_tuning_validation_matches_the_legacy_boundary_rules() {
+        // Rule parity: every hypervisor-override value the legacy spec
+        // boundary accepts or rejects must get the same verdict from the
+        // Core mirror's validation (VmDefinition::validate calls it at every
+        // Core boundary — direct submissions, journal replays, migrations).
+        // chv-agent-core can see both rule sets; cellhv-core-types cannot
+        // (it must stay independent of the legacy surface), so the parity
+        // is pinned HERE.
+        let cases = [
+            // Invalid on both sides.
+            chv_common::hypervisor::HypervisorOverrides {
+                rng_src: Some(String::new()),
+                ..Default::default()
+            },
+            chv_common::hypervisor::HypervisorOverrides {
+                rng_src: Some("relative/path".to_string()),
+                ..Default::default()
+            },
+            chv_common::hypervisor::HypervisorOverrides {
+                serial_mode: Some("Hero".to_string()),
+                ..Default::default()
+            },
+            chv_common::hypervisor::HypervisorOverrides {
+                console_mode: Some("Hero".to_string()),
+                ..Default::default()
+            },
+            chv_common::hypervisor::HypervisorOverrides {
+                tpm_type: Some("tpm2".to_string()),
+                ..Default::default()
+            },
+            chv_common::hypervisor::HypervisorOverrides {
+                tpm_socket_path: Some("/run/tpm.sock".to_string()),
+                ..Default::default()
+            },
+            // Valid on both sides.
+            chv_common::hypervisor::HypervisorOverrides::default(),
+            chv_common::hypervisor::HypervisorOverrides {
+                rng_src: Some("/dev/hwrng".to_string()),
+                serial_mode: Some("Null".to_string()),
+                console_mode: Some("Pty".to_string()),
+                tpm_type: Some("swtpm".to_string()),
+                tpm_socket_path: Some("/run/tpm.sock".to_string()),
+                cpu_nested: Some(true),
+                ..Default::default()
+            },
+        ];
+        for (index, case) in cases.into_iter().enumerate() {
+            let mut spec = minimal_spec();
+            spec.hypervisor_overrides = Some(case.clone());
+            let legacy_verdict = spec.validate().is_ok();
+            let core_verdict = tuning_from_legacy(case).validate().is_ok();
+            assert_eq!(
+                legacy_verdict, core_verdict,
+                "case {index}: legacy boundary says {legacy_verdict}, Core mirror says {core_verdict}"
+            );
+        }
     }
 
     #[test]

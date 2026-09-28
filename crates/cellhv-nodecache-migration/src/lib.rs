@@ -168,16 +168,14 @@ fn convert_vm(
     spec: LegacyVmSpec,
     observed: Option<&LegacyAttachments>,
 ) -> Result<VmDefinition> {
-    if spec.cloud_init_userdata.is_some() {
-        return Err(unsupported(&format!(
-            "vm_fragments.{id}.spec_json.cloud_init_userdata"
-        )));
-    }
-    if spec.hypervisor_overrides.is_some() {
-        return Err(unsupported(&format!(
-            "vm_fragments.{id}.spec_json.hypervisor_overrides"
-        )));
-    }
+    // Legacy fields Core does not model are still rejected explicitly —
+    // never silently dropped. Cloud-init userdata and the hypervisor
+    // override surface ARE modeled now (VmDefinition carries them) and are
+    // translated below.
+    let hypervisor_tuning = spec
+        .hypervisor_overrides
+        .map(|value| parse_hypervisor_tuning(id, value))
+        .transpose()?;
     let requested_power_state = match spec.desired_state.as_str() {
         "Running" => RequestedPowerState::Running,
         "Stopped" => RequestedPowerState::Stopped,
@@ -187,37 +185,54 @@ fn convert_vm(
             )))
         }
     };
+    // An empty (or whitespace) seed path is semantically absent — the same
+    // normalization the adapter applies, keeping the durable definition free
+    // of Some("") sentinel values.
+    let seed_path = spec
+        .disk_seed_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string);
     let mut storage = Vec::new();
-    for disk in spec.disks {
-        if disk.size_bytes.is_some() {
-            return Err(unsupported(&format!(
-                "vm_fragments.{id}.spec_json.disks.size_bytes"
-            )));
-        }
+    for (index, disk) in spec.disks.into_iter().enumerate() {
         nonempty("disk.volume_id", &disk.volume_id)?;
         storage.push(StorageAttachmentRef {
             attachment_id: legacy_storage_attachment_id(&disk.volume_id),
             storage_ref: disk.volume_id,
             read_only: disk.read_only,
+            size_bytes: disk.size_bytes,
+            // The legacy seed path is per-VM and applies to the boot disk
+            // only — a deliberate divergence from the legacy reconcile
+            // loop, which would seed every absent disk from the same
+            // image; existing (already-provisioned) volumes skip seeding
+            // in stord either way.
+            seed_from: if index == 0 { seed_path.clone() } else { None },
         });
     }
     let mut networks = Vec::new();
     for (index, nic) in spec.nics.into_iter().enumerate() {
-        if !nic.ip_address.is_empty()
-            || !nic.tap_name.is_empty()
-            || !nic.cidr.is_empty()
-            || !nic.gateway.is_empty()
-        {
+        if !nic.tap_name.is_empty() {
             return Err(unsupported(&format!(
-                "vm_fragments.{id}.spec_json.nics[{index}].runtime_network_fields"
+                "vm_fragments.{id}.spec_json.nics[{index}].tap_name"
             )));
         }
         nonempty("nic.network_id", &nic.network_id)?;
         nonempty("nic.mac_address", &nic.mac_address)?;
+        let addressing =
+            if nic.ip_address.is_empty() && nic.cidr.is_empty() && nic.gateway.is_empty() {
+                None
+            } else {
+                Some(cellhv_core_types::NicAddressing {
+                    ip_address: nic.ip_address,
+                    cidr: nic.cidr,
+                    gateway: nic.gateway,
+                })
+            };
         networks.push(NetworkAttachmentRef {
             attachment_id: legacy_network_attachment_id(id, &nic.network_id),
             network_ref: nic.network_id,
             mac_address: Some(nic.mac_address),
+            addressing,
         });
     }
     validate_attachment_projection(id, &storage, &networks, observed)?;
@@ -227,7 +242,7 @@ fn convert_vm(
         boot: BootSpec {
             kernel: spec.kernel_path,
             firmware: spec.firmware_path,
-            initial_disk: spec.disk_seed_path,
+            initial_disk: seed_path,
         },
         compute: ComputeSpec::new(spec.cpus, spec.memory_bytes)
             .map_err(|error| malformed(&error.to_string()))?,
@@ -236,11 +251,42 @@ fn convert_vm(
         requested_power_state,
         observed_power_state: ObservedPowerState::Unknown,
         resource_version: version,
+        cloud_init_userdata: spec.cloud_init_userdata,
+        hypervisor_tuning,
     };
     definition
         .validate()
         .map_err(|error| malformed(&error.to_string()))?;
     Ok(definition)
+}
+
+/// Parse and semantically validate the legacy hypervisor override surface.
+/// The error taxonomy is deliberate: a non-object value or a wrongly-typed
+/// field is malformed legacy data; a key outside Core's tuning mirror
+/// ([`cellhv_core_types::HypervisorTuning::KNOWN_FIELDS`]) is unsupported —
+/// Core does not model it and it must never be silently dropped; a value
+/// failing the semantic rules (`rng_src`, `serial_mode`, `console_mode`,
+/// `tpm_type`, tpm pairing) is malformed, matching what the legacy spec
+/// boundary rejects.
+fn parse_hypervisor_tuning(
+    id: &str,
+    value: serde_json::Value,
+) -> Result<cellhv_core_types::HypervisorTuning> {
+    let field = format!("vm_fragments.{id}.spec_json.hypervisor_overrides");
+    let Some(map) = value.as_object() else {
+        return Err(malformed(&format!("{field}: expected an object")));
+    };
+    for key in map.keys() {
+        if !cellhv_core_types::HypervisorTuning::KNOWN_FIELDS.contains(&key.as_str()) {
+            return Err(unsupported(&format!("{field}.{key}")));
+        }
+    }
+    let tuning: cellhv_core_types::HypervisorTuning =
+        serde_json::from_value(value).map_err(|error| malformed(&format!("{field}: {error}")))?;
+    tuning
+        .validate()
+        .map_err(|error| malformed(&format!("{field}: {error}")))?;
+    Ok(tuning)
 }
 
 fn validate_attachment_projection(
@@ -321,8 +367,16 @@ fn validate_fragment_metadata(id: &str, fragment: &LegacyFragment) -> Result<()>
     nonempty("fragment.generation", &fragment.generation)?;
     nonempty("fragment.updated_at", &fragment.updated_at)?;
     nonempty("fragment.updated_by", &fragment.updated_by)?;
-    serde_json::from_slice::<serde_json::Value>(&fragment.policy_json)
-        .map_err(|error| malformed(&format!("fragment {id} policy_json: {error}")))?;
+    // Every real producer writes an EMPTY policy_json for fragments (the
+    // control plane's node_client has sent `vec![]` since the first commit,
+    // and the M2.2b projection writes `Vec::new()`): empty means "no
+    // policy". Requiring it to parse as JSON rejected every real cache —
+    // a latent bug surfaced by the projection round-trip test. Non-empty
+    // policy must still be valid JSON.
+    if !fragment.policy_json.is_empty() {
+        serde_json::from_slice::<serde_json::Value>(&fragment.policy_json)
+            .map_err(|error| malformed(&format!("fragment {id} policy_json: {error}")))?;
+    }
     Ok(())
 }
 fn validate_auxiliary_fragments(
@@ -553,12 +607,169 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        spec["cloud_init_userdata"] = json!("do not drop me");
         value["vm_fragments"]["vm-a"]["generation"] = json!("1");
+
+        // Modeled legacy fields are carried, not dropped: cloud-init
+        // userdata now translates into the Core definition.
+        spec["cloud_init_userdata"] = json!("do not drop me");
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let carried = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            carried.definitions()[0].cloud_init_userdata.as_deref(),
+            Some("do not drop me")
+        );
+
+        // Unmodeled legacy fields still fail closed instead of being
+        // dropped: tap configuration is runtime-owned.
+        spec["nics"] = json!([{
+            "network_id":"net-0", "mac_address":"02:00:00:00:00:01",
+            "ip_address":"", "tap_name":"tap-leftover",
+            "cidr":"", "gateway":""
+        }]);
         value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
         assert!(matches!(
             plan(&serde_json::to_vec(&value).unwrap()),
             Err(MigrationError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn modeled_legacy_fields_translate_losslessly() {
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        spec["disk_seed_path"] = json!("/var/lib/chv/images/ubuntu.img");
+        spec["disks"] =
+            json!([{"volume_id":"vol-a", "read_only":false, "size_bytes":10_737_418_240_u64}]);
+        spec["nics"] = json!([{
+            "network_id":"net-0", "mac_address":"02:00:00:00:00:01",
+            "ip_address":"10.200.0.47", "tap_name":"",
+            "cidr":"10.200.0.0/24", "gateway":"10.200.0.1"
+        }]);
+        spec["hypervisor_overrides"] = json!({"cpu_nested": true, "rng_src": "/dev/hwrng"});
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let import = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let definition = &import.definitions()[0];
+
+        assert_eq!(
+            definition.boot.initial_disk.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(definition.storage[0].size_bytes, Some(10_737_418_240));
+        // The per-VM legacy seed path seeds the boot disk attachment.
+        assert_eq!(
+            definition.storage[0].seed_from.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        let addressing = definition.networks[0]
+            .addressing
+            .as_ref()
+            .expect("addressing must be carried");
+        assert_eq!(addressing.ip_address, "10.200.0.47");
+        assert_eq!(addressing.cidr, "10.200.0.0/24");
+        assert_eq!(addressing.gateway, "10.200.0.1");
+        let tuning = definition
+            .hypervisor_tuning
+            .as_ref()
+            .expect("tuning must be carried");
+        assert_eq!(tuning.cpu_nested, Some(true));
+        assert_eq!(tuning.rng_src.as_deref(), Some("/dev/hwrng"));
+
+        // An override key the Core mirror does not know is still rejected,
+        // never silently dropped.
+        spec["hypervisor_overrides"] = json!({"made_up_flag": true});
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        assert!(matches!(
+            plan(&serde_json::to_vec(&value).unwrap()),
+            Err(MigrationError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn hypervisor_override_taxonomy_distinguishes_unsupported_from_malformed() {
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let repack = |value: &mut serde_json::Value, spec: &serde_json::Value| {
+            value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(spec).unwrap());
+            serde_json::to_vec(value).unwrap()
+        };
+        // A key outside Core's tuning mirror: unsupported — Core does not
+        // model it and it must never be silently dropped.
+        spec["hypervisor_overrides"] = json!({"made_up_flag": true});
+        let error = plan(&repack(&mut value, &spec)).unwrap_err();
+        assert!(matches!(error, MigrationError::Unsupported(_)));
+        assert!(error.to_string().contains("made_up_flag"));
+        // A wrongly-typed value: malformed legacy data.
+        spec["hypervisor_overrides"] = json!({"cpu_nested": "yes"});
+        assert!(matches!(
+            plan(&repack(&mut value, &spec)).unwrap_err(),
+            MigrationError::Malformed(_)
+        ));
+        // A non-object overrides value: malformed legacy data.
+        spec["hypervisor_overrides"] = json!("nope");
+        assert!(matches!(
+            plan(&repack(&mut value, &spec)).unwrap_err(),
+            MigrationError::Malformed(_)
+        ));
+        // A semantically invalid value: malformed — the same verdict the
+        // legacy spec boundary (VmSpec::validate) would have given.
+        spec["hypervisor_overrides"] = json!({"serial_mode": "Hero"});
+        let error = plan(&repack(&mut value, &spec)).unwrap_err();
+        assert!(matches!(error, MigrationError::Malformed(_)));
+        assert!(error.to_string().contains("serial_mode"));
+    }
+
+    #[test]
+    fn empty_seed_path_is_treated_as_absent() {
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        spec["disk_seed_path"] = json!("");
+        spec["disks"] = json!([{"volume_id":"vol-a", "read_only":false}]);
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let import = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let definition = &import.definitions()[0];
+        assert_eq!(definition.boot.initial_disk, None);
+        assert_eq!(definition.storage[0].seed_from, None);
+    }
+
+    #[test]
+    fn empty_policy_json_is_absent_not_malformed() {
+        // Every real producer (the control plane's node_client and the M2.2b
+        // projection) writes an EMPTY policy_json for fragments; the
+        // migration must accept the format producers actually write.
+        // Non-empty policy must still parse as JSON.
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        value["vm_fragments"]["vm-a"]["policy_json"] = json!(Vec::<u8>::new());
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(plan(&bytes).is_ok());
+        value["vm_fragments"]["vm-a"]["policy_json"] = json!(b"not json".to_vec());
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(matches!(
+            plan(&bytes).unwrap_err(),
+            MigrationError::Malformed(_)
         ));
     }
 

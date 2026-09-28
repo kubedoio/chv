@@ -59,11 +59,15 @@ fn create_submission(vm_id: &str, op_id: &str) -> SubmitMutation {
             attachment_id: "vol-0".to_string(),
             storage_ref: "vol-0".to_string(),
             read_only: false,
+            size_bytes: None,
+            seed_from: None,
         }],
         networks: vec![],
         requested_power_state: RequestedPowerState::Stopped,
         observed_power_state: ObservedPowerState::Unknown,
         resource_version: version(1),
+        cloud_init_userdata: None,
+        hypervisor_tuning: None,
     };
     base_submission(vm_id, op_id, MutationCommand::CreateVm { definition })
 }

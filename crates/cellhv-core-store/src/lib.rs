@@ -3336,15 +3336,20 @@ mod tests {
                 attachment_id: "disk-0".to_owned(),
                 storage_ref: "volume-1".to_owned(),
                 read_only: false,
+                size_bytes: None,
+                seed_from: None,
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_owned(),
                 network_ref: "network-1".to_owned(),
                 mac_address: None,
+                addressing: None,
             }],
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: version(resource_version),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         }
     }
     fn operation(id: &str, fingerprint: &str) -> Operation {

@@ -657,11 +657,13 @@ impl NodeCache {
     ///
     /// M2.2b: this is a *projection* derived from one authoritative Core
     /// terminal outcome — it is never the authority for desired state. The
-    /// legacy `VmSpec` shape carries exactly what the legacy readers (`VmSpec`,
-    /// `vm_network_ids`, `vm_volume_handles`) can consume; fields Core M1 does
-    /// not model (cloud-init userdata, hypervisor overrides, per-NIC addressing)
-    /// are projected as the values the single effector used (None / shared
-    /// default CIDR / empty addressing) — identical to the M2.2a residuals.
+    /// projected legacy `VmSpec` mirrors every Core-modeled field (disk
+    /// sizing/seed, per-NIC addressing, cloud-init userdata, hypervisor
+    /// tuning) so a rebuild → re-import round trip is lossless; the only
+    /// synthesized value is the runtime-owned `tap_name: ""`. Absent
+    /// addressing projects the topology default CIDR, matching what the
+    /// single effector applies. Pinned by
+    /// `projected_vm_spec_round_trips_through_both_legacy_parsers`.
     pub fn project_vm(
         &mut self,
         def: &cellhv_core_types::VmDefinition,
@@ -673,27 +675,40 @@ impl NodeCache {
             cellhv_core_types::RequestedPowerState::Running => "Running",
             cellhv_core_types::RequestedPowerState::Stopped => "Stopped",
         };
+        // The projected legacy spec mirrors every Core-modeled field so a
+        // rebuild → re-import round trip is lossless. `to_value` on this
+        // plain struct is infallible (primitive/String fields only).
+        let hypervisor_overrides = def
+            .hypervisor_tuning
+            .as_ref()
+            .map(serde_json::to_value)
+            .and_then(Result::ok);
         let spec = serde_json::json!({
             "name": def.name.clone(),
             "cpus": def.compute.vcpus,
             "memory_bytes": def.compute.memory_bytes,
             "kernel_path": def.boot.kernel.clone(),
             "firmware_path": def.boot.firmware.clone(),
+            "disk_seed_path": def.boot.initial_disk.clone(),
             "disks": def.storage.iter().map(|storage| serde_json::json!({
                 "volume_id": storage.storage_ref.clone(),
                 "read_only": storage.read_only,
+                "size_bytes": storage.size_bytes,
             })).collect::<Vec<_>>(),
-            "nics": def.networks.iter().map(|network| serde_json::json!({
-                "network_id": network.network_ref.clone(),
-                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
-                "ip_address": "",
-                "tap_name": "",
-                "cidr": chv_hypervisor_api::resources::DEFAULT_NIC_CIDR,
-                "gateway": "",
-            })).collect::<Vec<_>>(),
+            "nics": def.networks.iter().map(|network| {
+                let addressing = network.addressing.as_ref();
+                serde_json::json!({
+                    "network_id": network.network_ref.clone(),
+                    "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
+                    "ip_address": addressing.map(|a| a.ip_address.clone()).unwrap_or_default(),
+                    "tap_name": "",
+                    "cidr": addressing.map(|a| a.cidr.clone()).unwrap_or_else(|| chv_hypervisor_api::resources::DEFAULT_NIC_CIDR.to_string()),
+                    "gateway": addressing.map(|a| a.gateway.clone()).unwrap_or_default(),
+                })
+            }).collect::<Vec<_>>(),
             "desired_state": desired_state,
-            "cloud_init_userdata": None::<String>,
-            "hypervisor_overrides": None::<String>,
+            "cloud_init_userdata": def.cloud_init_userdata.clone(),
+            "hypervisor_overrides": hypervisor_overrides,
         });
         let generation = def.resource_version.get().to_string();
         self.store_fragment(
@@ -837,15 +852,20 @@ mod tests {
                 attachment_id: "vol-0".to_string(),
                 storage_ref: "vol-0".to_string(),
                 read_only: false,
+                size_bytes: None,
+                seed_from: None,
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: Some("02:00:00:00:00:01".to_string()),
+                addressing: None,
             }],
             requested_power_state: RequestedPowerState::Running,
             observed_power_state: ObservedPowerState::Unknown,
             resource_version: ResourceVersion::new(3).unwrap(),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
         }
     }
 
@@ -907,11 +927,13 @@ mod tests {
                 attachment_id: "nic-0".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: None,
+                addressing: None,
             },
             NetworkAttachmentRef {
                 attachment_id: "nic-1".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: None,
+                addressing: None,
             },
         ];
         let mut cache = NodeCache::new("node-1");
@@ -931,6 +953,92 @@ mod tests {
     }
 
     #[test]
+    fn projected_vm_spec_round_trips_through_both_legacy_parsers() {
+        use cellhv_core_types::{NicAddressing, StorageAttachmentRef};
+
+        // Fully populated with every Core-modeled field, and with the
+        // legacy-convention attachment ids every real definition carries
+        // (the adapter and the migration both derive
+        // `{vm_id}-{network_id}` / `{volume_id}`); the migration's
+        // deterministic-identity check rejects anything else by design.
+        let mut def = projected_definition("vm-a");
+        def.boot.initial_disk = Some("/var/lib/chv/images/ubuntu.img".to_string());
+        def.storage = vec![StorageAttachmentRef {
+            attachment_id: "vol-0".to_string(),
+            storage_ref: "vol-0".to_string(),
+            read_only: false,
+            size_bytes: Some(10_737_418_240),
+            seed_from: Some("/var/lib/chv/images/ubuntu.img".to_string()),
+        }];
+        def.networks = vec![cellhv_core_types::NetworkAttachmentRef {
+            attachment_id: "vm-a-net-0".to_string(),
+            network_ref: "net-0".to_string(),
+            mac_address: Some("02:00:00:00:00:01".to_string()),
+            addressing: Some(NicAddressing {
+                ip_address: "10.200.0.47".to_string(),
+                cidr: "10.200.0.0/24".to_string(),
+                gateway: "10.200.0.1".to_string(),
+            }),
+        }];
+        def.cloud_init_userdata = Some("#cloud-config".to_string());
+        def.hypervisor_tuning = Some(cellhv_core_types::HypervisorTuning {
+            cpu_nested: Some(true),
+            rng_src: Some("/dev/hwrng".to_string()),
+            serial_mode: Some("File".to_string()),
+            ..Default::default()
+        });
+
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(&def, "1700000000000".to_string(), "requester".to_string());
+
+        // Reader 1: the in-node legacy spec parser (reconcile readers).
+        let frag = cache.get_fragment("vm", "vm-a").unwrap();
+        let spec =
+            crate::spec::VmSpec::from_json(std::str::from_utf8(&frag.spec_json).unwrap()).unwrap();
+        assert_eq!(
+            spec.disk_seed_path.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(spec.disks[0].size_bytes, Some(10_737_418_240));
+        assert_eq!(spec.nics[0].ip_address, "10.200.0.47");
+        assert_eq!(spec.nics[0].cidr, "10.200.0.0/24");
+        assert_eq!(spec.nics[0].gateway, "10.200.0.1");
+        assert_eq!(spec.cloud_init_userdata.as_deref(), Some("#cloud-config"));
+        let overrides = spec.hypervisor_overrides.as_ref().unwrap();
+        assert_eq!(overrides.cpu_nested, Some(true));
+        assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
+        assert_eq!(overrides.serial_mode.as_deref(), Some("File"));
+        assert!(spec.validate().is_ok());
+
+        // Reader 2: the rebuild → re-import path (deny_unknown_fields over
+        // the full cache document, not just the fragment).
+        let bytes = serde_json::to_vec(&cache).unwrap();
+        let plan = cellhv_nodecache_migration::plan(&bytes).unwrap();
+        let definition = &plan.definitions()[0];
+        assert_eq!(
+            definition.boot.initial_disk.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(definition.storage[0].size_bytes, Some(10_737_418_240));
+        assert_eq!(
+            definition.storage[0].seed_from.as_deref(),
+            Some("/var/lib/chv/images/ubuntu.img")
+        );
+        let addressing = definition.networks[0].addressing.as_ref().unwrap();
+        assert_eq!(addressing.ip_address, "10.200.0.47");
+        assert_eq!(addressing.cidr, "10.200.0.0/24");
+        assert_eq!(addressing.gateway, "10.200.0.1");
+        assert_eq!(
+            definition.cloud_init_userdata.as_deref(),
+            Some("#cloud-config")
+        );
+        let tuning = definition.hypervisor_tuning.as_ref().unwrap();
+        assert_eq!(tuning.cpu_nested, Some(true));
+        assert_eq!(tuning.rng_src.as_deref(), Some("/dev/hwrng"));
+        assert_eq!(tuning.serial_mode.as_deref(), Some("File"));
+    }
+
+    #[test]
     fn project_vm_maps_power_state_and_defaults_unmodeled_fields() {
         use cellhv_core_types::{NetworkAttachmentRef, RequestedPowerState};
         let mut def = projected_definition("vm-stop");
@@ -939,6 +1047,7 @@ mod tests {
             attachment_id: "nic-1".to_string(),
             network_ref: "net-1".to_string(),
             mac_address: None,
+            addressing: None,
         }];
         let mut cache = NodeCache::new("node-1");
         cache.project_vm(&def, "core-rebuild".to_string(), "core".to_string());
