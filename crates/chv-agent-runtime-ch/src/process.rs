@@ -695,6 +695,23 @@ async fn run_genisoimage(
 }
 
 impl ProcessCloudHypervisorAdapter {
+    /// How long a graceful stop waits, after pressing the ACPI power
+    /// button (`vm.power-button`), for the guest OS to power itself off
+    /// before falling back to a force kill.
+    ///
+    /// Measured on the pinned noble guest image (M2.5 qualification,
+    /// isolation experiment 2026-09-28): a healthy, fully-booted guest
+    /// needs ~32 s from button press to poweroff — `snapd.service` alone
+    /// stops for 28-31 s — and a button pressed before `systemd-logind`
+    /// has subscribed to the input device is silently dropped by the
+    /// guest (no shutdown begins at all). The previous 10 s window
+    /// therefore force-killed routine guest shutdowns mid-flight, which
+    /// removed the runtime map entry and console.log and cascaded into
+    /// spurious start failures after an otherwise successful stop. 60 s
+    /// gives ~2x headroom over the measured shutdown while still
+    /// bounding the worst case for a wedged guest.
+    const GRACEFUL_STOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
     /// Builds the cloud-hypervisor serial-console config object for the
     /// VM creation payload. `Socket` (the default transport) points the
     /// serial console at a unix-stream listener inside the VM runtime
@@ -1918,14 +1935,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // later start re-spawns the VMM and re-creates the VM from the
             // payload persisted at create time (see `respawn_vmm`), and
             // stop/delete remain idempotent against the dead process. Poll
-            // vm.info for up to 10s waiting for a non-running terminal state
-            // (Shutdown or Created).
+            // vm.info for the graceful window (see `GRACEFUL_STOP_WINDOW`)
+            // waiting for a non-running terminal state (Shutdown or
+            // Created).
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await;
-            // Poll vm.info for up to 10s waiting for the VM to reach a
-            // non-running terminal state (Shutdown or Created).
+            // Poll vm.info waiting for the VM to reach a non-running
+            // terminal state (Shutdown or Created). A guest that powers
+            // itself off takes the process with it (v43 exits with the
+            // guest), so the request failing mid-window is the normal
+            // completion signal too.
             let start = std::time::Instant::now();
             let mut graceful_shutdown = false;
-            while start.elapsed() < std::time::Duration::from_secs(10) {
+            while start.elapsed() < Self::GRACEFUL_STOP_WINDOW {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok((200, body)) =
                     Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None)
