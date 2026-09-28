@@ -571,7 +571,9 @@ impl ProcessCloudHypervisorAdapter {
     }
 
     /// Revives the console broadcaster if it died while the VM was
-    /// running. Obtains a FRESH endpoint, not a dup of the stored fd: for
+    /// running (outer safety net; the broadcaster itself self-heals
+    /// across VMM-side connection cycles — see `spawn_pty_broadcaster`).
+    /// Obtains a FRESH endpoint, not a dup of the stored fd: for
     /// the Socket transport the stored connection may itself be dead (the
     /// VMM side can close it across serial reconfiguration or shutdown
     /// cycles), and a broadcaster on a dup of a dead connection dies
@@ -627,8 +629,10 @@ impl ProcessCloudHypervisorAdapter {
         if let Some(broadcaster_fd) = broadcaster_fd {
             broadcaster_alive.store(true, Ordering::SeqCst);
             Self::spawn_pty_broadcaster(
+                self.vms.clone(),
                 vm_id.to_string(),
                 broadcaster_fd,
+                serial_transport.clone(),
                 pty_tx.clone(),
                 pty_scrollback.clone(),
                 broadcaster_alive.clone(),
@@ -713,37 +717,92 @@ impl ProcessCloudHypervisorAdapter {
         Ok(pty_master)
     }
 
+    /// Spawns the console broadcaster for a VM: reads guest serial output
+    /// from the console fd and fans it out to the scrollback buffer and
+    /// subscribers. For the Socket transport the broadcaster is
+    /// SELF-HEALING: cloud-hypervisor tears the serial device down and
+    /// re-binds the listener at the same path across `vm.reboot`
+    /// (`SerialManager::drop` closes the accepted connection and removes
+    /// the socket file; `pre_create_console_devices` re-binds it), and the
+    /// VMM switches to a reconnecting client by shutting the previous
+    /// connection down — so on EOF the broadcaster reconnects, swaps the
+    /// stored `console_io` for the live endpoint, and keeps streaming.
+    /// Console capture therefore survives reboots and any VMM-side
+    /// connection cycle without lifecycle-path coupling. The Pty transport
+    /// exits on EOF instead (a reboot allocates a NEW pty at a different
+    /// path; re-attachment is a recorded follow-up) and revival is left
+    /// to the next `start_vm` respawn.
     fn spawn_pty_broadcaster(
+        vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
         vm_id: String,
         pty_fd: OwnedFd,
+        transport: SerialTransport,
         pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
         pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
             let _guard = AliveGuard(broadcaster_alive);
-            let std_file = std::fs::File::from(pty_fd);
-            let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
-            let mut buf = [0u8; 4096];
+            // The canonical console endpoint this broadcaster reads from;
+            // the heal path replaces it with the fresh connection.
+            let mut current = pty_fd;
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let data = buf[..n].to_vec();
-                        {
-                            let mut sb = pty_scrollback.write().await;
-                            sb.extend_from_slice(&data);
-                            if sb.len() > CONSOLE_SCROLLBACK_BYTES {
-                                let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
-                                sb.drain(0..excess);
+                // Each connection cycle gets its own dup of `current` for
+                // its reader; dropping the cycle's reader closes that dup
+                // (and with it the old connection) when the cycle ends.
+                let cycle_fd = match Self::dup_cloexec(&current) {
+                    Ok(d) => d,
+                    Err(_) => break,
+                };
+                let std_file = std::fs::File::from(cycle_fd);
+                let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) | Err(_) => break, // endpoint lost
+                        Ok(n) => {
+                            let data = buf[..n].to_vec();
+                            {
+                                let mut sb = pty_scrollback.write().await;
+                                sb.extend_from_slice(&data);
+                                if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+                                    let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+                                    sb.drain(0..excess);
+                                }
                             }
+                            let _ = pty_tx.send(data);
                         }
-                        let _ = pty_tx.send(data);
                     }
-                    Err(e) => {
-                        tracing::debug!(vm_id = %vm_id, error = %e, "pty broadcaster read error");
-                        break;
+                }
+                // Endpoint lost. Socket transport: re-establish the
+                // connection (bounded retry — the VMM re-binds the
+                // listener within the same API call that closed the old
+                // one), swap the stored endpoint, and keep streaming.
+                // Anything else (reconnect exhausted, VM left the map,
+                // Pty transport) ends the broadcaster.
+                match transport {
+                    SerialTransport::Socket(ref path) => {
+                        match Self::reconnect_serial_socket(path).await {
+                            Some(fresh) => {
+                                let next = match Self::dup_cloexec(&fresh) {
+                                    Ok(d) => d,
+                                    Err(_) => break,
+                                };
+                                let mut map = vms.write().await;
+                                match map.get_mut(&vm_id) {
+                                    Some(proc) => {
+                                        proc.console_io = fresh;
+                                    }
+                                    None => break,
+                                }
+                                drop(map);
+                                current = next;
+                                continue;
+                            }
+                            None => break,
+                        }
                     }
+                    SerialTransport::Pty => break,
                 }
             }
             tracing::debug!(vm_id = %vm_id, "pty broadcaster exited");
@@ -1112,7 +1171,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // cloud-hypervisor's serial listener by default (Socket
                 // transport), or the pty slave under explicit Pty tuning.
                 console_io,
-                serial_transport,
+                serial_transport: serial_transport.clone(),
                 pty_tx: pty_tx.clone(),
                 pty_scrollback: pty_scrollback.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
@@ -1125,8 +1184,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Spawn background broadcaster: read PTY output and fan out via broadcast channel
         if let Some(broadcaster_fd) = broadcaster_fd {
             Self::spawn_pty_broadcaster(
+                self.vms.clone(),
                 config.vm_id.clone(),
                 broadcaster_fd,
+                serial_transport,
                 pty_tx.clone(),
                 pty_scrollback.clone(),
                 broadcaster_alive.clone(),
@@ -2408,6 +2469,129 @@ mod tests {
             .expect("probe must arrive through the fan-out")
             .expect("channel must be live");
         assert_eq!(got, b"probe".to_vec());
+    }
+
+    #[tokio::test]
+    async fn broadcaster_self_heals_across_listener_rebind() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-heal");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        // Stand in for cloud-hypervisor's serial lifecycle across a
+        // vm.reboot: SerialManager::drop closes the accepted connection
+        // AND removes the socket file while dropping the listener, then
+        // pre_create_console_devices re-binds a fresh listener at the same
+        // path and the new guest's output must flow to a reconnecting
+        // client.
+        let rebind_path = sock_path.clone();
+        let listener1 = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn1, _) = listener1.accept().expect("accept 1");
+            conn1.write_all(b"first").expect("write first");
+            // vm.reboot: tear the serial device down — the listener first
+            // (so no reconnect can land in a doomed accept backlog), then
+            // the accepted connection (whose close is what signals EOF to
+            // the broadcaster) — and re-bind a fresh listener at the same
+            // path, exactly as pre_create_console_devices does after
+            // SerialManager::drop removed the socket file.
+            drop(listener1);
+            drop(conn1);
+            std::fs::remove_file(&rebind_path).unwrap();
+            let listener2 = std::os::unix::net::UnixListener::bind(&rebind_path).unwrap();
+            let (mut conn2, _) = listener2.accept().expect("accept 2");
+            conn2.write_all(b"second").expect("write second");
+            // Hold the new connection open while the test asserts.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        // A dead stand-in for a VMM-closed serial connection.
+        let dead_console_io: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let dead_fd = dead_console_io.as_raw_fd();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-heal".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child,
+                    console_io: dead_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        let mut rx = pty_tx.subscribe();
+        adapter
+            .respawn_broadcaster_if_dead(
+                "vm-heal",
+                &SerialTransport::Socket(sock_path.clone()),
+                &pty_tx,
+                &pty_scrollback,
+                &broadcaster_alive,
+            )
+            .await;
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive after respawn"
+        );
+
+        // First probe arrives through the first connection, and the dead
+        // stored fd was swapped for the live one.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("first probe must arrive through the fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"first".to_vec());
+        let fd_after_first = {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-heal").unwrap();
+            assert_ne!(
+                proc.console_io.as_raw_fd(),
+                dead_fd,
+                "stored console fd must be swapped for the reconnected one"
+            );
+            proc.console_io.as_raw_fd()
+        };
+
+        // Across the simulated reboot (connection closed, listener dropped
+        // and re-bound at the same path), the broadcaster SELF-HEALS: the
+        // second probe arrives through the new connection, the stored fd
+        // is swapped again, and the broadcaster never dies.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("second probe must arrive after the self-heal")
+            .expect("channel must be live");
+        assert_eq!(got, b"second".to_vec());
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must survive the connection cycle without respawning"
+        );
+        {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-heal").unwrap();
+            assert_ne!(
+                proc.console_io.as_raw_fd(),
+                fd_after_first,
+                "stored console fd must be swapped across the self-heal"
+            );
+        }
+
+        server.join().expect("server thread");
     }
 
     #[test]
