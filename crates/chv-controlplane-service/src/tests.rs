@@ -1994,7 +1994,7 @@ async fn test_stop_vm_persists_desired_power_state_stopped() {
 }
 
 #[tokio::test]
-async fn test_reboot_vm_persists_desired_power_state_rebooting() {
+async fn test_reboot_vm_persists_desired_power_state_running() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-reboot', 'host', 'host')")
@@ -2031,7 +2031,11 @@ async fn test_reboot_vm_persists_desired_power_state_rebooting() {
         .await
         .unwrap();
     let power: Option<String> = sqlx::Row::get(&row, "desired_power_state");
-    assert_eq!(power, Some("Rebooting".to_string()));
+    // A reboot's desired end-state is Running: the operation carries the
+    // transient reboot, and the desired state must not strand itself on a
+    // transient label nothing ever clears (the BFF renders desired power
+    // state with priority over the observed state).
+    assert_eq!(power, Some("Running".to_string()));
 }
 
 #[tokio::test]
