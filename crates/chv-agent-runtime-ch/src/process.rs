@@ -125,7 +125,11 @@ impl std::ops::DerefMut for ChildGuard {
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
-    pty_master: OwnedFd,
+    /// Guest serial-console I/O fd — a unix-stream socket connected to
+    /// cloud-hypervisor's serial listener (default Socket transport) or the
+    /// pty slave under explicit Pty tuning. Guest output is read (via the
+    /// broadcaster) and user keystrokes written through it.
+    console_io: OwnedFd,
     pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
     broadcaster_alive: Arc<AtomicBool>,
@@ -421,6 +425,160 @@ async fn run_genisoimage(
 }
 
 impl ProcessCloudHypervisorAdapter {
+    /// Builds the cloud-hypervisor serial-console config object for the
+    /// VM creation payload. `Socket` (the default transport) points the
+    /// serial console at a unix-stream listener inside the VM runtime
+    /// directory, which cloud-hypervisor binds while creating the VM and
+    /// the agent connects to right after; every other mode is passed
+    /// through as the bare mode string, matching the cloud-hypervisor
+    /// REST schema (`ConsoleConfig`).
+    fn serial_console_config(serial_mode: &str, socket_path: &Path) -> serde_json::Value {
+        if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
+            serde_json::json!({
+                "mode": "Socket",
+                "socket": socket_path.to_string_lossy(),
+            })
+        } else {
+            serde_json::json!({ "mode": serial_mode })
+        }
+    }
+
+    /// Connects to the guest serial-console unix socket (Socket
+    /// transport). cloud-hypervisor binds the listener while handling
+    /// `vm.create`, so the socket exists by the time this runs; the
+    /// bounded retry only guards a slow bind racing the connect. The fd is
+    /// returned in blocking mode with FD_CLOEXEC set — the console
+    /// broadcaster and console server use blocking reads and writes on it.
+    /// On failure the spawned child is killed: a console-less VM is never
+    /// left running.
+    async fn connect_serial_socket(
+        socket_path: &Path,
+        child: &mut Child,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<OwnedFd, ChvError> {
+        let path_display = socket_path.to_string_lossy().to_string();
+        let mut last_err = None;
+        for attempt in 0..10u32 {
+            match tokio::net::UnixStream::connect(socket_path).await {
+                Ok(stream) => {
+                    let std_stream = stream.into_std().map_err(|e| ChvError::Io {
+                        path: path_display.clone(),
+                        source: e,
+                    })?;
+                    // tokio connects in non-blocking mode; restore blocking
+                    // mode so the broadcaster's and console server's plain
+                    // reads/writes block instead of failing with EAGAIN.
+                    if let Ok(flags) = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_GETFL) {
+                        let blocking = nix::fcntl::OFlag::from_bits_retain(flags)
+                            & !nix::fcntl::OFlag::O_NONBLOCK;
+                        let _ = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_SETFL(blocking));
+                    }
+                    let _ = nix::fcntl::fcntl(
+                        &std_stream,
+                        nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+                    );
+                    info!(
+                        vm_id = vm_id,
+                        socket = %path_display,
+                        op = operation_id.unwrap_or("-"),
+                        "chv serial socket connected"
+                    );
+                    return Ok(std_stream.into());
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 9 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        Err(ChvError::Io {
+            path: path_display,
+            source: last_err.unwrap_or_else(|| std::io::Error::other("connect failed")),
+        })
+    }
+
+    /// Opens the pty slave cloud-hypervisor allocated for the guest serial
+    /// console (Pty transport, explicit tuning only). The slave path comes
+    /// from `vm.info`; the pty is set to raw mode so the host line
+    /// discipline does not buffer or echo keystrokes. On failure the
+    /// spawned child is killed.
+    async fn open_serial_pty(
+        api_socket_path: &Path,
+        child: &mut Child,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<OwnedFd, ChvError> {
+        // Query CHV for the PTY slave path it created for the serial device.
+        let (info_status, info_body) =
+            Self::ch_api_request_with_body(api_socket_path, "GET", "/api/v1/vm.info", None).await?;
+        let slave_path = if info_status == 200 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
+                v.pointer("/config/serial/file")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let slave_path = match slave_path {
+            Some(path) => path,
+            None => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ChvError::Internal {
+                    reason: format!("vm.info did not return serial PTY path for vm {}", vm_id),
+                });
+            }
+        };
+
+        // Open the PTY slave that CHV created.  This is the I/O endpoint
+        // for the guest serial console — we read guest output from it and
+        // write user keystrokes to it.
+        let pty_slave = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOCTTY)
+            .open(&slave_path)
+        {
+            Ok(slave) => slave,
+            Err(e) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ChvError::Io {
+                    path: slave_path.clone(),
+                    source: e,
+                });
+            }
+        };
+        // Set raw mode so the host line discipline doesn't buffer or echo
+        // keystrokes — we want every byte forwarded to the guest immediately.
+        if let Ok(mut term) = nix::sys::termios::tcgetattr(&pty_slave) {
+            nix::sys::termios::cfmakeraw(&mut term);
+            let _ =
+                nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
+        }
+        let pty_master: OwnedFd = pty_slave.into();
+        let _ = nix::fcntl::fcntl(
+            &pty_master,
+            nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        );
+
+        info!(
+            vm_id = vm_id,
+            pty = %slave_path,
+            op = operation_id.unwrap_or("-"),
+            "chv serial pty ready"
+        );
+        Ok(pty_master)
+    }
+
     fn spawn_pty_broadcaster(
         vm_id: String,
         pty_fd: OwnedFd,
@@ -683,8 +841,22 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             memory["prefault"] = serde_json::json!(v);
         }
 
-        let serial_mode = hv.and_then(|h| h.serial_mode.as_deref()).unwrap_or("Pty");
+        // Serial transport: cloud-hypervisor v43 gates Pty-mode output
+        // until input arrives on the pty (vmm/src/serial_manager.rs starts
+        // the serial output gate closed and only an epoll input event on
+        // the pty master opens it), so a passive consumer — exactly what
+        // the agent's console capture is — receives nothing and console.log
+        // stays empty forever. Socket mode streams output to a connected
+        // unix-stream client with no gate, so it is the default transport
+        // (DEFAULT_SERIAL_MODE, shared with the control plane's global
+        // hypervisor settings); an explicit serial_mode tuning is still
+        // honored (with the Pty gate semantics that mode implies).
+        let serial_mode = hv
+            .and_then(|h| h.serial_mode.as_deref())
+            .unwrap_or(chv_common::hypervisor::DEFAULT_SERIAL_MODE);
         let console_mode = hv.and_then(|h| h.console_mode.as_deref()).unwrap_or("Off");
+        let serial_socket_path = vm_runtime_dir.join("serial.sock");
+        let serial_json = Self::serial_console_config(serial_mode, &serial_socket_path);
 
         let mut vm_config_json = serde_json::json!({
             "cpus": cpus,
@@ -692,7 +864,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "payload": payload,
             "disks": disks_json,
             "net": net_json,
-            "serial": { "mode": serial_mode },
+            "serial": serial_json,
             "console": { "mode": console_mode },
         });
 
@@ -751,70 +923,38 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
-        // Query CHV for the PTY slave path it created for the serial device.
-        let (info_status, info_body) =
-            Self::ch_api_request_with_body(&config.api_socket_path, "GET", "/api/v1/vm.info", None)
-                .await?;
-        let slave_path = if info_status == 200 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
-                v.pointer("/config/serial/file")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                None
-            }
+        // Acquire the guest serial-console I/O endpoint — guest output is
+        // read from it and user keystrokes are written to it. Socket mode
+        // (the default) connects to the unix listener cloud-hypervisor
+        // bound while creating the VM; Pty mode (explicit tuning only)
+        // opens the pty slave cloud-hypervisor allocated and reported in
+        // vm.info. Both helpers fail closed: on error they kill the
+        // spawned child so a console-less VM is never left running.
+        let console_io: OwnedFd = if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
+            Self::connect_serial_socket(
+                &serial_socket_path,
+                &mut child,
+                &config.vm_id,
+                operation_id,
+            )
+            .await?
         } else {
-            None
-        }
-        .ok_or_else(|| {
-            let _ = child.start_kill();
-            ChvError::Internal {
-                reason: format!(
-                    "vm.info did not return serial PTY path for vm {}",
-                    config.vm_id
-                ),
-            }
-        })?;
-
-        // Open the PTY slave that CHV created.  This is the I/O endpoint
-        // for the guest serial console — we read guest output from it and
-        // write user keystrokes to it.
-        let pty_slave = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(nix::libc::O_NOCTTY)
-            .open(&slave_path)
-            .map_err(|e| ChvError::Io {
-                path: slave_path.clone(),
-                source: e,
-            })?;
-        // Set raw mode so the host line discipline doesn't buffer or echo
-        // keystrokes — we want every byte forwarded to the guest immediately.
-        if let Ok(mut term) = nix::sys::termios::tcgetattr(&pty_slave) {
-            nix::sys::termios::cfmakeraw(&mut term);
-            let _ =
-                nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
-        }
-        let pty_master: OwnedFd = pty_slave.into();
-        let _ = nix::fcntl::fcntl(
-            &pty_master,
-            nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-        );
-
-        info!(
-            vm_id = %config.vm_id,
-            pty = %slave_path,
-            op = operation_id.unwrap_or("-"),
-            "chv serial pty ready"
-        );
+            Self::open_serial_pty(
+                &config.api_socket_path,
+                &mut child,
+                &config.vm_id,
+                operation_id,
+            )
+            .await?
+        };
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
 
         // Duplicate the descriptor for the broadcaster while retaining the
-        // owned master descriptor for the VM process map.
-        let broadcaster_fd = nix::unistd::dup(&pty_master).ok();
+        // owned console descriptor for the VM process map.
+        let broadcaster_fd = nix::unistd::dup(&console_io).ok();
         if let Some(ref broadcaster_fd) = broadcaster_fd {
             let _ = nix::fcntl::fcntl(
                 broadcaster_fd,
@@ -835,7 +975,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
                 child,
-                pty_master,
+                // The guest serial-console I/O fd: a unix-stream socket to
+                // cloud-hypervisor's serial listener by default (Socket
+                // transport), or the pty slave under explicit Pty tuning.
+                console_io,
                 pty_tx: pty_tx.clone(),
                 pty_scrollback: pty_scrollback.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
@@ -904,7 +1047,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("start");
-        let (api_socket, pty_master, pty_tx, pty_scrollback, broadcaster_alive) = {
+        let (api_socket, console_io, pty_tx, pty_scrollback, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
@@ -912,8 +1055,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             })?;
             (
                 proc.api_socket.clone(),
-                nix::unistd::dup(&proc.pty_master).map_err(|e| ChvError::Internal {
-                    reason: format!("failed to duplicate pty master for vm {}: {}", vm_id, e),
+                nix::unistd::dup(&proc.console_io).map_err(|e| ChvError::Internal {
+                    reason: format!("failed to duplicate console io fd for vm {}: {}", vm_id, e),
                 })?,
                 proc.pty_tx.clone(),
                 proc.pty_scrollback.clone(),
@@ -945,8 +1088,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // This must happen BEFORE the idempotent early return so console
         // output doesn't stall when start_vm is called on an already-running VM.
         if !broadcaster_alive.load(Ordering::SeqCst) {
-            info!(vm_id = %vm_id, "respawning pty broadcaster");
-            let broadcaster_fd = nix::unistd::dup(&pty_master).ok();
+            info!(vm_id = %vm_id, "respawning console broadcaster");
+            let broadcaster_fd = nix::unistd::dup(&console_io).ok();
             if let Some(broadcaster_fd) = broadcaster_fd {
                 let _ = nix::fcntl::fcntl(
                     &broadcaster_fd,
@@ -1687,7 +1830,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
         let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        nix::unistd::dup(&proc.pty_master).ok()
+        nix::unistd::dup(&proc.console_io).ok()
     }
 
     async fn pty_output_rx(
@@ -1850,6 +1993,102 @@ mod tests {
     }
 
     #[test]
+    fn serial_console_config_socket_mode_carries_listener_path() {
+        // Socket is the default transport: the config must point
+        // cloud-hypervisor at the per-VM listener the agent connects to —
+        // a bare mode string would silently fall back to the pty, whose
+        // v43 output gate swallows passive console capture.
+        let value = ProcessCloudHypervisorAdapter::serial_console_config(
+            "Socket",
+            std::path::Path::new("/run/chv/vms/vm-1/serial.sock"),
+        );
+        assert_eq!(value["mode"], serde_json::json!("Socket"));
+        assert_eq!(
+            value["socket"],
+            serde_json::json!("/run/chv/vms/vm-1/serial.sock")
+        );
+    }
+
+    #[test]
+    fn serial_console_config_passes_other_modes_through() {
+        for mode in ["Pty", "File", "Null", "Off"] {
+            let value = ProcessCloudHypervisorAdapter::serial_console_config(
+                mode,
+                std::path::Path::new("/run/chv/vms/vm-1/serial.sock"),
+            );
+            assert_eq!(value["mode"], serde_json::json!(mode));
+            assert!(value.get("socket").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_serial_socket_returns_blocking_cloexec_fd() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let socket_path = dir.path().join("serial.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+
+        let fd = ProcessCloudHypervisorAdapter::connect_serial_socket(
+            &socket_path,
+            &mut child,
+            "vm-test",
+            None,
+        )
+        .await
+        .expect("connect must succeed against a bound listener");
+
+        // The broadcaster and console server issue plain blocking
+        // reads/writes; a non-blocking fd would EAGAIN and silently kill
+        // console capture.
+        let status_flags =
+            nix::fcntl::fcntl(&fd, nix::fcntl::F_GETFL).expect("fd flags must be readable");
+        assert_eq!(
+            nix::fcntl::OFlag::from_bits_retain(status_flags) & nix::fcntl::OFlag::O_NONBLOCK,
+            nix::fcntl::OFlag::empty(),
+            "serial socket fd must be blocking"
+        );
+        let fd_flags =
+            nix::fcntl::fcntl(&fd, nix::fcntl::F_GETFD).expect("fd flags must be readable");
+        assert_ne!(
+            fd_flags & nix::fcntl::FdFlag::FD_CLOEXEC.bits(),
+            0,
+            "serial socket fd must be CLOEXEC"
+        );
+        // The accepted listener end must be drained by the helper's
+        // connect having completed the handshake (no deadlock risk from an
+        // unread backlog is asserted implicitly by the connect succeeding).
+        drop(listener);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn connect_serial_socket_fails_closed_and_kills_child_without_listener() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let socket_path = dir.path().join("serial.sock");
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+
+        let err = ProcessCloudHypervisorAdapter::connect_serial_socket(
+            &socket_path,
+            &mut child,
+            "vm-test",
+            None,
+        )
+        .await
+        .expect_err("connect must fail with no listener");
+
+        assert!(matches!(err, ChvError::Io { .. }));
+        let status = child.try_wait().unwrap().expect("child must be reaped");
+        assert!(!status.success(), "the spawned child must be killed");
+    }
+
+    #[test]
     fn validate_vm_config_rejects_missing_kernel() {
         let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let chv_bin = dir.path().join("cloud-hypervisor");
@@ -1948,7 +2187,7 @@ mod tests {
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
-        let pty_master = std::fs::File::open("/dev/null").unwrap().into();
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         {
             let mut map = adapter.vms.write().await;
@@ -1957,7 +2196,7 @@ mod tests {
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
                     child,
-                    pty_master,
+                    console_io,
                     pty_tx: pty_tx.clone(),
                     pty_scrollback: pty_scrollback.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
@@ -2006,7 +2245,7 @@ mod tests {
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
-        let pty_master = std::fs::File::open("/dev/null").unwrap().into();
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately so the graceful shutdown loop
         // breaks early (CH process disappeared).
@@ -2020,7 +2259,7 @@ mod tests {
                 VmProcess {
                     api_socket: vm_dir.join("vm.sock"),
                     child,
-                    pty_master,
+                    console_io,
                     pty_tx: pty_tx.clone(),
                     pty_scrollback: pty_scrollback.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),

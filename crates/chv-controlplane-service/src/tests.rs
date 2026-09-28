@@ -3125,7 +3125,10 @@ async fn test_defaults_used_when_settings_query_fails() {
     assert_eq!(hv["rng_src"], "/dev/urandom");
     assert_eq!(hv["watchdog"], false);
     assert_eq!(hv["landlock_enable"], false);
-    assert_eq!(hv["serial_mode"], "Pty");
+    // The serial transport default is Socket: cloud-hypervisor v43 gates
+    // Pty-mode output until input arrives on the pty, which starves the
+    // agent's passive console capture (see chv_common::hypervisor).
+    assert_eq!(hv["serial_mode"], "Socket");
     assert_eq!(hv["console_mode"], "Off");
     assert_eq!(hv["pvpanic"], false);
     assert!(hv.get("tpm_type").is_none() || hv["tpm_type"].is_null());
