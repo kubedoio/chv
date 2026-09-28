@@ -238,8 +238,28 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   Create/Start/Stop/Reboot/Delete plus a crash/restart replay scenario through
   the exact candidate path; capture evidence. If CH/guest install is not
   feasible on-site, report KVM-VERIFIED as **unproven** with the exact gap.
-  > **Status: NEXT.** Blocked on cloud-hypervisor + guest image availability
-  > on this host; not attempted yet.
+  > **Status: COMPLETE.** Qualification passed 2026-09-28 (run 8e, post-#291
+  > main `3ef619dc`): **47 PASS / 0 FAIL** through the exact candidate path —
+  > core-managed authority, real TLS, token enrollment, chvctl-driven
+  > create/start/reboot/stop/delete, two agent SIGKILL crash replays with VMM
+  > adoption (same CH pid across both restarts, exactly one VMM at every
+  > check), an interrupted-stop resolution through the node-local RPC, the
+  > documented idempotent operator retry, and force-fallback convergence;
+  > #291's delete-after-force-stop idempotence verified in-stack. Full
+  > evidence: `m2.5-kvm-qualification.md` (runs 8a–8e, isolation experiments
+  > e2–e7, artifacts preserved). **One guest-platform finding — root-caused,
+  > recorded, and gating higher tiers but not this one:** fresh-VMM boots of
+  > the full VM config (root + seed + NIC) freeze the guest mid-boot on
+  > CH v43 × this stack (logind never starts, ACPI presses have no consumer;
+  > the designed force fallback is what converged every S2 stop in 8c–8e).
+  > chv's machinery is unaffected — the crash/replay/convergence design
+  > absorbed the worst case exactly as designed — but "start a VM and the
+  > guest boots" is false on this stack until the platform defect is fixed.
+  > **KVM-VERIFIED applies to the lifecycle machinery; RELEASED-tier claims
+  > stay blocked** on the freeze's CH-side root cause (e7 bisection: neither
+  > the NIC nor the seed alone triggers it — the freeze requires the full
+  > root+seed+NIC combination on a fresh VMM; mechanism open, follow-up
+  > recorded in the evidence doc).
 
 ## 4. Evidence matrix (Prompt 02 acceptance)
 
@@ -251,7 +271,7 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
 | Required audit/idempotency/version metadata durable | M2.1b schema migration 0004 + tests (merged `297cb904`) |
 | Crash/fault-injection matrix passes | M2.4 |
 | Concurrent duplicate + conflict tests pass | M2.4 |
-| Real-KVM lifecycle/restart/replay evidence passes | M2.5 (or unproven + gap) |
+| Real-KVM lifecycle/restart/replay evidence passes | M2.5 run 8e: 47/47 on `3ef619dc` (`m2.5-kvm-qualification.md`); guest-platform freeze (fresh-VMM boots, CH v43 × this stack) recorded as a RELEASED-tier blocker |
 | Architecture/spec/guards describe the production path | this plan + spec updates (adapter/journal/owner docs un-staled) |
 | Second authority structurally impossible in production config | M2.3 (observe-only construction; exhaustive mode match; first-statement fail-closed mutation methods) |
 
