@@ -2600,6 +2600,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        // Informational field, but it is echoed on the single-line audit
+        // record: hold it to the same injection boundary as the note. (The
+        // identifier! constructor only rejects empty strings.)
+        if inner.vm_id.chars().any(|c| c.is_control()) {
+            return Err(Status::invalid_argument(
+                "vm_id must not contain control characters",
+            ));
+        }
         let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let operation_id = cellhv_core_types::OperationId::new(&inner.operation_id)
@@ -3909,6 +3917,10 @@ mod tests {
                     "succeeded",
                     "operator inspected\nsecond line",
                 ),
+            ),
+            (
+                "control characters in vm_id",
+                request("vm-1\nforged", "op-1", "succeeded", "operator inspected"),
             ),
             (
                 "empty vm_id",
