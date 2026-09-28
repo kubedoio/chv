@@ -157,6 +157,13 @@ Branch: `fabric-adr021-implementation`. Files:
 - Privileged multi-host evidence harness (o3kio/fabric#2 Phase 3): three
   real hosts, real handshakes, cleartext-underlay capture, zero-leak
   teardown. Required before any production claim.
+- Endpoint policy follow-up: `vtep_registry.underlay_endpoint` is
+  first-registration-wins because today's only writer derives it from the
+  observed gRPC peer address (LB/proxy churn would otherwise rotate it).
+  When agents self-report their underlay addressing, an explicit
+  node-reported endpoint must win over the earlier peer-derived pin (and
+  the operator-correction tooling the store docstring mentions should
+  land with it).
 - Startup reconciliation from the provider's plan journal.
 
 ## Test strategy

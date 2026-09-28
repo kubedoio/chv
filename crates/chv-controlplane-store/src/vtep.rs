@@ -186,9 +186,19 @@ impl VtepRepository {
     /// proxy address on a re-report must not silently replace a
     /// previously-good endpoint (all nodes behind one shared proxy would
     /// otherwise converge on the proxy's address). A node whose stored
-    /// endpoint is wrong needs an operator-initiated store correction;
-    /// unreachable endpoints surface fail-closed at the fabric plan
-    /// compiler rather than being silently rotated.
+    /// endpoint is wrong needs an operator-initiated store correction
+    /// (no in-tree tooling for that yet); the fabric plan compiler only
+    /// fails closed on a NULL or unparseable endpoint — a plausible but
+    /// stale one still compiles, and the overlay simply stays
+    /// unreachable until the store is corrected.
+    ///
+    /// FORWARD-COMPAT: first-wins is a stopgap for peer-derived
+    /// endpoints. When agents begin self-reporting their underlay
+    /// addressing (see `FABRIC_WIREGUARD_PORT` and the fabric plan's
+    /// Phase-4 list), an explicit node-reported endpoint MUST win over
+    /// the earlier peer-derived pin — routing that path through this
+    /// COALESCE would silently keep the stale value. Revisit this
+    /// upsert then.
     pub async fn register_fabric_identity(
         &self,
         node_id: &str,

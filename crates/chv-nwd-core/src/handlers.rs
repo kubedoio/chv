@@ -234,6 +234,15 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             // visible via the provider ownership journal.
             if existing.fabric_plan_generation.is_some() && spec.fabric.is_none() && spec.vni == 0 {
                 match self.executor.remove_fabric_overlay(&spec.network_id).await {
+                    // Known inconsistency (unreachable today): with the
+                    // provider disabled, this path counts a remove
+                    // "failure" via fabric_handle()'s error, while the
+                    // delete path counts nothing (remove not attempted).
+                    // The executor's fabric handle is fixed at nwd
+                    // construction, so the config cannot toggle under a
+                    // running daemon; if that ever changes, make this
+                    // path distinguish "not attempted" from "attempted
+                    // and failed" like delete_topology does.
                     Ok(()) => {
                         self.metrics.increment_nwd_fabric_remove("success");
                         info!(

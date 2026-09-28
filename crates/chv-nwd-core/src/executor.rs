@@ -837,6 +837,12 @@ impl LinuxExecutor {
                     pid,
                     "dnsmasq did not exit within the bounded wait after SIGTERM; sending SIGKILL"
                 );
+                // Accepted-risk: the pid is not re-validated against the
+                // pid file (or via pidfd) before SIGKILL, so a pid reused
+                // by an unrelated process inside the <=2s+250ms window
+                // could take the kill. The window is bounded and the pid
+                // was ours when read; harden with pidfd if this ever
+                // bites in practice.
                 let _ = Command::new("kill")
                     .args(["-KILL", &pid.to_string()])
                     .output()
