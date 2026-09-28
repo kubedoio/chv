@@ -1,4 +1,12 @@
--- 0054: default serial transport Pty -> Socket
+-- 0055: default serial transport Pty -> Socket
+--
+-- (Renumbered from 0054: PR #287's 0054_fabric_ip_unique.sql collided
+-- with this file's original number — sqlx applies migrations by version
+-- and two files claiming 0054 made every fresh controlplane boot fail
+-- with "UNIQUE constraint failed: _sqlx_migrations.version". The
+-- renumber keeps fabric-lineage databases (54 = fabric_ip_unique)
+-- valid; main-lineage databases that applied this migration as 54 are
+-- dev-only and unreleased — see the PR for the one-line repair.)
 --
 -- cloud-hypervisor v43 gates Pty-mode serial output until input arrives
 -- on the pty master (vmm/src/serial_manager.rs starts the serial output
