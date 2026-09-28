@@ -443,7 +443,7 @@ pub async fn execute_migration(
 
         let vm_generation = get_vm_generation(pool, &state.vm_id).await?;
 
-        let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+        let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id)?;
         let mut source_client = node_client_pool
             .get_or_connect(&state.source_node_id, &source_socket)
             .await?;
@@ -616,7 +616,7 @@ pub async fn execute_migration(
         // can occur during the final data transfer. Cloud Hypervisor's send-migration
         // typically pauses the VM internally, but we enforce it here for coordination.
         let source_socket_for_pause =
-            resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+            resolve_agent_socket(agent_socket_pattern, &state.source_node_id)?;
         let pause_result = node_client_pool
             .get_or_connect(&state.source_node_id, &source_socket_for_pause)
             .await;
@@ -661,7 +661,7 @@ pub async fn execute_migration(
 
         transition_phase(pool, state, MigrationPhase::Paused).await?;
 
-        let dest_socket = resolve_agent_socket(agent_socket_pattern, &state.dest_node_id);
+        let dest_socket = resolve_agent_socket(agent_socket_pattern, &state.dest_node_id)?;
         let mut dest_client = node_client_pool
             .get_or_connect(&state.dest_node_id, &dest_socket)
             .await?;
@@ -808,7 +808,7 @@ async fn rollback_paused(
         "attempting rollback: resuming VM on source"
     );
 
-    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id)?;
     let resume_source = node_client_pool
         .get_or_connect(&state.source_node_id, &source_socket)
         .await;
@@ -895,7 +895,18 @@ async fn disable_source_dirty_tracking(
     }
 
     // Connect to the source agent.
-    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+    let source_socket = match resolve_agent_socket(agent_socket_pattern, &state.source_node_id) {
+        Ok(socket) => socket,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                vm_id = %state.vm_id,
+                error = %e,
+                "failed to resolve source agent socket (best-effort)"
+            );
+            return;
+        }
+    };
     let mut source_client = match node_client_pool
         .get_or_connect(&state.source_node_id, &source_socket)
         .await
@@ -1526,12 +1537,24 @@ async fn complete_migration_atomically(
 }
 
 /// Resolve agent socket path for a node.
-pub(crate) fn resolve_agent_socket(pattern: &str, node_id: &str) -> PathBuf {
-    if pattern.contains("{node_id}") {
-        PathBuf::from(pattern.replace("{node_id}", node_id))
-    } else {
-        PathBuf::from(pattern)
+///
+/// When the pattern substitutes `{node_id}`, the id must be a single safe
+/// path component: node ids reach this join from request parsing, the
+/// nodes table, and migration state, and a traversal-shaped id
+/// (`../../x`) would steer the control plane at an arbitrary local
+/// socket. Patterns without `{node_id}` never substitute and are
+/// unaffected.
+pub(crate) fn resolve_agent_socket(pattern: &str, node_id: &str) -> Result<PathBuf, ChvError> {
+    if !pattern.contains("{node_id}") {
+        return Ok(PathBuf::from(pattern));
     }
+    if !chv_common::is_safe_path_component(node_id) {
+        return Err(ChvError::InvalidArgument {
+            field: "node_id".to_string(),
+            reason: format!("node id {node_id:?} is not a safe path component"),
+        });
+    }
+    Ok(PathBuf::from(pattern.replace("{node_id}", node_id)))
 }
 
 /// Convert proto MigrationPhase enum int to string.
@@ -1643,7 +1666,18 @@ async fn notify_overlay_after_migration(
         }
 
         // 2. Send gratuitous ARP from the destination node
-        let dest_socket = resolve_agent_socket(agent_socket_pattern, &state.dest_node_id);
+        let dest_socket = match resolve_agent_socket(agent_socket_pattern, &state.dest_node_id) {
+            Ok(socket) => socket,
+            Err(e) => {
+                warn!(
+                    migration_id = %state.migration_id,
+                    vm_id = %state.vm_id,
+                    error = %e,
+                    "failed to resolve destination agent socket (best-effort)"
+                );
+                continue;
+            }
+        };
         match node_client_pool
             .get_or_connect(&state.dest_node_id, &dest_socket)
             .await
@@ -1693,6 +1727,26 @@ async fn notify_overlay_after_migration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_agent_socket_rejects_traversal_shaped_node_ids() {
+        // A substituting pattern must never produce a path outside the
+        // intended socket directory: traversal-shaped node ids are
+        // rejected at the substitution boundary. (The request boundary and
+        // the enrollment gate keep such ids out of the system; this is the
+        // last line for ids that predate those gates.)
+        assert!(resolve_agent_socket("/run/chv/agent-{node_id}.sock", "../../etc/passwd").is_err());
+        assert!(resolve_agent_socket("/run/chv/agent-{node_id}.sock", "a/b").is_err());
+        assert!(resolve_agent_socket("/run/chv/agent-{node_id}.sock", "..").is_err());
+        assert!(resolve_agent_socket("/run/chv/agent-{node_id}.sock", "node-a").is_ok());
+        // Printable ids (e.g. colons) are legal filename components.
+        assert!(resolve_agent_socket("/run/chv/agent-{node_id}.sock", "node:1").is_ok());
+        // Patterns without substitution are unaffected regardless of the id.
+        assert_eq!(
+            resolve_agent_socket("/run/chv/agent.sock", "../../x").unwrap(),
+            std::path::PathBuf::from("/run/chv/agent.sock")
+        );
+    }
 
     #[test]
     fn test_migration_phase_roundtrip() {

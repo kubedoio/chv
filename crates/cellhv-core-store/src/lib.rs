@@ -472,6 +472,72 @@ impl CoreStore {
         result
     }
 
+    /// Creates an empty schema-only authority and publishes it atomically:
+    /// the bootstrap runs in a private staging sibling that is renamed into
+    /// place only after it fully validates, so the externally visible path is
+    /// never a schema-empty scrap — a crash or power loss mid-bootstrap
+    /// leaves only the staging sibling (harmless; the next attempt picks a
+    /// fresh staging name), never an authority-shaped file that
+    /// `open_existing` would choke on.
+    ///
+    /// This is the migration-target flavor of [`Self::create_new_with_host`]:
+    /// schema only, no host identity — the legacy import writes the host
+    /// afterwards and carries its own idempotent crash recovery (the
+    /// migration-marker state machine in `cellhv-core-startup`, plus the
+    /// pristine-target re-import arm). The parent-directory acceptance is
+    /// deliberately identical to the previous in-place `create_new` behavior
+    /// (no fresh-path parent-mode requirement): the legacy-migration cutover
+    /// must not newly reject directory layouts that already worked.
+    pub fn create_new_staged(path: &Path) -> Result<Self> {
+        let staging = staging_path(path)?;
+        let mut published = false;
+        let result = (|| {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staging)
+                .map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "cannot create migration-target staging file {}: {error}",
+                        staging.display()
+                    ))
+                })?;
+            drop(file);
+
+            let mut conn = Connection::open_with_flags(
+                &staging,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            configure(&conn)?;
+            enforce_database_modes(&staging)?;
+            apply_migrations(&mut conn)?;
+            validate(&conn)?;
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            drop(conn);
+            remove_sidecars(&staging)?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&staging)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "cannot sync migration-target Core store {}: {error}",
+                        staging.display()
+                    ))
+                })?;
+            rename_noreplace(&staging, path)?;
+            published = true;
+            sync_parent(path)?;
+            Self::open_existing(path)
+        })();
+
+        if result.is_err() && !published {
+            let _ = remove_database_files(&staging);
+        }
+        result
+    }
+
     /// Creates a complete fresh authority and publishes it atomically.
     ///
     /// The externally visible path is never an identity-empty database: schema

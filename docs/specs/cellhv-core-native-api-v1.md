@@ -24,7 +24,7 @@ Controller, VMM, or provider stack.
 | `GET`, `POST` | `/v1/vms` | List definitions; asynchronously accept create |
 | `GET`, `PATCH`, `DELETE` | `/v1/vms/{id}` | Inspect; asynchronously accept update/delete |
 | `POST` | `/v1/vms/{id}/actions/{start,stop,reboot}` | Structured `unsupported` until an executor is wired |
-| `GET` | `/v1/operations` | Ordered operation journal inspection |
+| `GET` | `/v1/operations` | Ordered operation journal inspection; newest-first, bounded to the newest 1000 entries |
 | `GET` | `/v1/operations/{id}` | Operation journal entry inspection |
 | `GET` | `/v1/events?after=N&limit=M` | Ordered polling; limit is 1 through 1000 |
 

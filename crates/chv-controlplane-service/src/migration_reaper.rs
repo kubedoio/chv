@@ -221,7 +221,7 @@ impl MigrationReaper {
             _ => "1".to_string(),
         };
 
-        let socket = resolve_agent_socket(&self.agent_socket_pattern, &row.source_node_id);
+        let socket = resolve_agent_socket(&self.agent_socket_pattern, &row.source_node_id)?;
         let mut client = self
             .node_client_pool
             .get_or_connect(&row.source_node_id, &socket)

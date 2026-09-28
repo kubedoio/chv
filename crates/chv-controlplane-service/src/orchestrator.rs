@@ -445,7 +445,7 @@ impl Orchestrator {
             self.require_node_schedulable(node_id).await?;
         }
 
-        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id);
+        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id)?;
         let mut client = self
             .node_client_pool
             .get_or_connect(node_id, &socket_path)

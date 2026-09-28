@@ -3211,6 +3211,15 @@ async fn resolve_relay_validates_payload_before_egress() {
         LifecycleService::resolve_inspect_required_operation(&service, request).await,
         Err(ControlPlaneServiceError::InvalidArgument(_))
     ));
+    // Oversized note (the agent's 8000-byte journal bound) → invalid
+    // argument at the relay, not an opaque internal error from the agent's
+    // rejection after egress.
+    let mut request = resolve_request(&meta);
+    request.note = "x".repeat(8_001);
+    assert!(matches!(
+        LifecycleService::resolve_inspect_required_operation(&service, request).await,
+        Err(ControlPlaneServiceError::InvalidArgument(_))
+    ));
     // Empty vm_id → invalid argument, no relay.
     let mut request = resolve_request(&meta);
     request.vm_id = " ".into();
@@ -3219,8 +3228,9 @@ async fn resolve_relay_validates_payload_before_egress() {
         Err(ControlPlaneServiceError::InvalidArgument(_))
     ));
     // A target_node_id that is not a single safe path component would be
-    // substituted into the agent socket pattern: rejected before any socket
-    // resolution (injection defense).
+    // substituted into the agent socket pattern: rejected at the request
+    // boundary (parse_node_id) before any socket resolution (injection
+    // defense; resolve_agent_socket re-checks at substitution).
     let mut injected_meta = meta.clone();
     injected_meta.target_node_id = "../../etc/passwd".into();
     let result = LifecycleService::resolve_inspect_required_operation(
@@ -3231,7 +3241,7 @@ async fn resolve_relay_validates_payload_before_egress() {
     assert!(matches!(
         result,
         Err(ControlPlaneServiceError::InvalidArgument(ref reason))
-            if reason.contains("safe node id")
+            if reason.contains("path component")
     ));
     // Valid payload → the relay is attempted; the socket does not exist, so
     // the failure is UNAVAILABLE (not internal) and names the node: the
@@ -3244,6 +3254,19 @@ async fn resolve_relay_validates_payload_before_egress() {
         Err(ControlPlaneServiceError::NodeUnavailable(reason)) => {
             assert!(reason.contains("node-resolve-2"), "got: {reason}");
         }
+        other => panic!("expected node-unavailable relay error, got {other:?}"),
+    }
+    // An empty requested_by defaults to "control-plane" (NodeClient parity)
+    // instead of failing: the request still reaches egress.
+    let mut anonymous_meta = meta.clone();
+    anonymous_meta.requested_by = "  ".into();
+    let result = LifecycleService::resolve_inspect_required_operation(
+        &service,
+        resolve_request(&anonymous_meta),
+    )
+    .await;
+    match result {
+        Err(ControlPlaneServiceError::NodeUnavailable(_)) => {}
         other => panic!("expected node-unavailable relay error, got {other:?}"),
     }
 }
