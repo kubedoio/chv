@@ -38,7 +38,7 @@ futures-util = "0.3"
 nix = { workspace = true, features = ["term", "ioctl", "process", "fs", "user"] }
 jsonwebtoken = { workspace = true }
 lru = "0.18"
-sysinfo = "0.30"
+sysinfo = "0.37"
 
 [dev-dependencies]
 chv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }
