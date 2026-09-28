@@ -50,8 +50,12 @@ pub async fn get_overview(
             0
         });
 
+    // Observed-known running only: core-managed agents report desired
+    // state as runtime_status with health "Unknown" (observed power state
+    // is not reported yet); desired-Running must not be counted as a
+    // running workload on the overview.
     let vms_running = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running'",
+        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running' AND COALESCE(health_status, 'Unknown') != 'Unknown'",
     )
     .fetch_one(&state.pool)
     .await

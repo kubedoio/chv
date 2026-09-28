@@ -281,17 +281,33 @@ impl CoreRuntimeOwner {
                     drain_budget,
                 } = poller;
                 let mut consecutive_failures: u32 = 0;
+                // Last observed inspect-required set, so a change (new
+                // stuck operation, or an operator resolution un-blocking
+                // one) is logged — this is the scan-time discovery signal
+                // beyond the startup classification warning. (Element
+                // type inferred from the scan report.)
+                let mut last_inspect_required = Vec::new();
                 loop {
                     let delay = backoff_delay(scan_interval, consecutive_failures);
                     tokio::select! {
                         _ = stop_rx.changed() => break,
                         _ = tokio::time::sleep(delay) => {
                             match tokio::time::timeout(scan_timeout, executor.scan_ready()).await {
-                                Ok(Ok(_report)) => {
+                                Ok(Ok(report)) => {
                                     consecutive_failures = 0;
                                     journal_scan
                                         .consecutive_failures
                                         .store(0, Ordering::Relaxed);
+                                    if report.inspect_required != last_inspect_required {
+                                        // Debug formatting escapes identifier
+                                        // content; the journal is the trust
+                                        // boundary for these ids.
+                                        tracing::warn!(
+                                            inspect_required = ?report.inspect_required,
+                                            "journal scan: inspect-required operations changed (status Running + recovery marker; resolve via the agent resolve RPC)"
+                                        );
+                                        last_inspect_required = report.inspect_required;
+                                    }
                                 }
                                 Ok(Err(error)) => {
                                     if matches!(

@@ -416,8 +416,9 @@ impl JournalExecutor {
         drop(self.sender.take());
     }
 
-    /// Cancels in-flight tasks. Any acquired operation remains Running and is
-    /// therefore `InspectRequired` after restart.
+    /// Cancels in-flight tasks. Any acquired operation remains Running; it
+    /// becomes `InspectRequired` only via the abandonment marker or the next
+    /// startup classification.
     pub async fn abort(mut self) -> Result<()> {
         drop(self.sender.take());
         let task = self

@@ -8,8 +8,10 @@
 ## Invariants
 
 - Only `ClaimResult::Acquired` authorizes one external effect.
-- `ClaimResult::Replay` never calls the runtime or finishes the operation, and
-  quarantines that VM for the executor lifetime.
+- `ClaimResult::Replay` never calls the runtime or finishes the operation. It
+  is counted and never quarantines the VM: replay is the idempotent-success
+  path for a re-sent claim, and restart-marker semantics keep marked `running`
+  operations out of the queue, so a replay observed here is defensive.
 - Restart schedules only `Ready` operations. `InspectRequired` is surfaced to
   recovery and cannot enter the execution queue.
 - Operation IDs are deduplicated for the executor lifetime.
@@ -26,12 +28,16 @@
   prevents every later same-VM effect. Reports contain stable codes only and
   never authority errors, paths, tokens, or panic payloads.
 - A runtime task panic closes ingress, discards pending work, aborts remaining
-  tasks, and reports failure without launching another effect.
+  tasks, and reports failure without launching another effect. The composition
+  treats panic or task abandonment as fatal: the agent process exits non-zero
+  so the supervisor restarts it, because the authority would otherwise keep
+  acknowledging operations that are never executed.
 - Graceful shutdown closes ingress, drains acquired work through fenced terminal
   persistence, and joins the scheduler. The authority actor must be shut down
   only after executor shutdown returns.
-- Cancellation after claim leaves the operation `Running` and therefore
-  `InspectRequired`; it never authorizes an automatic retry.
+- Cancellation after claim leaves the operation `Running`; it becomes
+  `InspectRequired` only via the durable abandonment marker or the next
+  startup classification. It never authorizes an automatic retry.
 
 ## Pending
 

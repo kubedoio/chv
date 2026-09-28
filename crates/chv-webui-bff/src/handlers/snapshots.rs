@@ -112,18 +112,22 @@ pub async fn create_snapshot(
     super::vms::require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     // Check VM power state for quiescence advisory
-    let runtime_status: Option<String> =
-        sqlx::query_scalar("SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?")
-            .bind(&vm_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
-            .flatten();
+    let (runtime_status, health_status): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT runtime_status, health_status FROM vm_observed_state WHERE vm_id = ?",
+    )
+    .bind(&vm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
+    .unwrap_or((None, None));
 
-    let vm_is_running = runtime_status
-        .as_deref()
-        .map(|s| matches!(s, "Running" | "Starting" | "Resuming"))
-        .unwrap_or(false);
+    // Core-managed agents report desired state as runtime_status with
+    // health "Unknown" (observed power state not reported yet): treat an
+    // unknown state as conservatively-running for the advisory.
+    let vm_is_running = health_status.as_deref() == Some("Unknown")
+        || runtime_status
+            .as_deref()
+            .is_some_and(|s| matches!(s, "Running" | "Starting" | "Resuming"));
 
     let snapshot_id = chv_common::gen_short_id();
     let snapshot_path = state
@@ -284,13 +288,24 @@ pub async fn restore_snapshot(
     .await?;
 
     // Check VM power state — must be stopped before restoring a snapshot
-    let runtime_status: Option<String> =
-        sqlx::query_scalar("SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?")
-            .bind(&snapshot.vm_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
-            .flatten();
+    let (runtime_status, health_status): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT runtime_status, health_status FROM vm_observed_state WHERE vm_id = ?",
+    )
+    .bind(&snapshot.vm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
+    .unwrap_or((None, None));
+
+    // Fail closed on unknown observed state: core-managed agents report
+    // desired state as runtime_status with health "Unknown", and a restore
+    // must never proceed on an unverified power state (a desired-Stopped
+    // fragment while the guest genuinely runs would otherwise pass).
+    if health_status.as_deref() == Some("Unknown") {
+        return Err(BffError::BadRequest(
+            "VM observed power state is unknown (core-managed); verify the VM is stopped before restoring a snapshot".into(),
+        ));
+    }
 
     let is_running = runtime_status
         .as_deref()

@@ -1272,12 +1272,37 @@ mod tests {
             pending.is_empty(),
             "unmarked running operation is in flight in this process and must be excluded"
         );
+        // Operator-discovery surface (Core API /v1/operations is served from
+        // these entries): an in-flight operation is `Running` with NO
+        // recovery assessment — byte-distinct from a stuck one.
+        let in_flight = service.operations().unwrap();
+        let entry = in_flight
+            .iter()
+            .find(|e| e.operation.id.as_str() == "op-1")
+            .unwrap();
+        assert_eq!(entry.operation.status, OperationStatus::Running);
+        assert!(
+            entry.recovery_assessment.is_none(),
+            "in-flight operations carry no recovery marker"
+        );
         let classified = service.classify_restart_interrupted_operations().unwrap();
         assert_eq!(classified.len(), 1);
         let pending = service.restart_operations().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].disposition, RestartDisposition::InspectRequired);
         assert!(pending[0].recovery_assessment.is_some());
+        // After classification the entry surface flips: `Running` +
+        // recovery assessment = InspectRequired (stuck, resolvable).
+        let stuck = service.operations().unwrap();
+        let entry = stuck
+            .iter()
+            .find(|e| e.operation.id.as_str() == "op-1")
+            .unwrap();
+        let assessment = entry
+            .recovery_assessment
+            .as_ref()
+            .expect("classified operation must carry its recovery marker");
+        assert!(!assessment.evidence_fingerprint.is_empty());
     }
 
     #[test]

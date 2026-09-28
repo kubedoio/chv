@@ -98,6 +98,14 @@ When a node enters `Draining` (via `chvctl node drain` or the BFF API):
 
 Implementation: `ReconcileEngine` in `crates/chv-agent-core/src/reconcile.rs` handles the `NodeState::Draining` arm.
 
+In core-managed (single-authority) mode the drain flow is deliberately
+different: the reconcile loop is observe-only, issues **no** migration
+requests (the control plane, not the agent, owns re-homing), and blocks the
+`Draining` → `Maintenance` transition while any desired-Running or
+undecodable fragment remains. A blocked drain raises a `drain_blocked`
+control-plane alert on change; the control plane must re-home the VMs before
+the node can reach `Maintenance`.
+
 See ADR-003: [Node State Machine](./specs/adr/003-node-state-machine.md)
 
 ### Task State

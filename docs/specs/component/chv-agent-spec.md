@@ -25,6 +25,11 @@
 - VM lifecycle actions
 - service supervision intents
 - observed state and telemetry reports
+  - *deviation (core-managed mode):* VM telemetry currently reports the
+    desired state as `runtime_status` with `health_status: "Unknown"`
+    (observed power state is not yet reported). Consumers must not treat
+    `runtime_status` as an observation while health is `Unknown`.
+    Observed power-state reporting is planned follow-up work.
 - structured events with operation IDs
 
 ## Hard rules

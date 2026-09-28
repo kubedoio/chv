@@ -771,7 +771,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!("agent gRPC server exited unexpectedly — shutting down");
                 supervisor.shutdown().await;
                 if let Some(owner) = core_owner.take() { let _ = owner.shutdown().await; }
-                break;
+                // Exit non-zero: the systemd unit uses Restart=on-failure,
+                // and in core-managed mode this process is the sole Core
+                // authority — a clean exit here would strand the node with
+                // no supervisor recovery (mirrors the executor-fatal path).
+                return Err("agent gRPC server exited unexpectedly".into());
             }
         }
 

@@ -287,6 +287,7 @@ mod tests {
                 request_unix_ms: 1_700_000_000_000,
                 legacy_generation: None,
             }),
+            recovery_assessment: None,
         }
     }
 

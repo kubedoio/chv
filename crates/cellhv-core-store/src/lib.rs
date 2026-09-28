@@ -114,6 +114,14 @@ pub struct OperationJournalEntry {
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
     pub request_metadata: Option<OperationRequestMetadata>,
+    /// Latest recovery assessment for this operation, present exactly when
+    /// the operation carries the durable restart-interruption marker (or an
+    /// abandonment/assessment record). This is the operator-discovery
+    /// surface: `status == Running` + this field means InspectRequired
+    /// (stuck, resolvable via the agent resolve RPC), while `Running`
+    /// without it is in flight in the live process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_assessment: Option<RecoveryAssessmentRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +153,7 @@ pub struct CompletedOperation {
     pub entry: OperationJournalEntry,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RecoveryClassification {
     OwnershipMatched,
     OwnedAliveSocketUnavailable,
@@ -156,14 +164,14 @@ pub enum RecoveryClassification {
     CorruptOwnership,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RecoveryDisposition {
     OwnershipMatchedPendingControl,
     ExitedPendingPolicy,
     Quarantined,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RecoveryAssessmentRecord {
     pub revision: u64,
     pub classification: RecoveryClassification,
@@ -2967,6 +2975,10 @@ fn read_operation_entry(conn: &Connection, id: &str) -> Result<OperationJournalE
             .map(|value| serde_json::from_str(&value))
             .transpose()?,
         request_metadata,
+        // Operator-discovery surface: carry the latest recovery
+        // assessment (restart-interruption marker, abandonment, or
+        // resolution history) on every journal entry read.
+        recovery_assessment: read_latest_recovery_assessment(conn, id.as_str())?.map(|s| s.record),
     };
     let outcome_valid = match entry.operation.status {
         OperationStatus::Accepted | OperationStatus::Running => {

@@ -9,7 +9,9 @@
 | Failure case | Expected node state | New placements | Existing workloads | Immediate action | Severity |
 |---|---|---:|---|---|---|
 | control plane unreachable, node healthy | `Degraded` or control-plane-disconnected substate | denied | continue | preserve runtime state, buffer/report later | S2 |
-| `chv-agent` restart, infra services healthy | `Degraded` briefly then recover | denied during restart | continue | reload local cache, resume reconcile | S2 |
+| `chv-agent` restart, infra services healthy | `Degraded` briefly then recover | denied during restart | continue | reload local cache, resume reconcile; core-managed: startup classification marks interrupted `running` operations `InspectRequired` and quarantines their VMs until operator resolution | S2 |
+| core executor task panic or agent gRPC server exit (core-managed) | `Degraded` (persisted report) then non-zero process exit | denied during restart | continue | supervisor restarts the agent; fail-closed — the authority must not keep acknowledging operations that are never executed | S3 |
+| operation stuck `InspectRequired` after agent crash (core-managed) | node state unchanged | allowed (VM quarantined) | affected VM's mutations blocked, workload continues | operator resolves via node-scoped agent gRPC (`ResolveInspectRequiredOperation`); discovery via `/v1/operations` (`Running` + recovery assessment) | S3 |
 | `chv-stord` restart, backends intact | `Degraded` | denied | continue if possible | recover service, rebuild sessions where possible | S3 |
 | `chv-nwd` restart, topology preserved | `Degraded` | denied | continue with brief disturbance possible | reconstruct policy and exposure rules | S3 |
 | `chv-stord` persistent failure | `Degraded` to `Failed` depending on scope | denied | affected VMs may lose storage service | escalate, block risky ops, operator action | S4 |

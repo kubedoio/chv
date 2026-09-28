@@ -1,4 +1,4 @@
-use crate::cache::{NodeCache, VmNicAttachment};
+use crate::cache::{NodeCache, PendingControlPlaneMessage, VmNicAttachment};
 use crate::daemon_clients::{NwdClient, StordClient};
 use crate::migration_registry::MigrationTaskRegistry;
 use crate::state_machine::NodeState;
@@ -497,6 +497,42 @@ impl Reconciler {
                             "drain blocked on core-managed desired-Running VMs; the control plane must re-home them"
                         );
                         self.drain_block_logged = Some(remaining);
+                        // Surface the blocked drain to the control plane as
+                        // an alert (on change only, mirroring the warn): the
+                        // Draining state itself is visible in node
+                        // telemetry, but nothing at the CP escalates a
+                        // fail-closed blocked drain — this is the
+                        // actionable operator signal.
+                        {
+                            let mut cache = self.cache.lock().await;
+                            let node_id = cache.node_id.clone();
+                            let details = serde_json::json!({ "remaining_vms": running_vms });
+                            cache.enqueue_pending_message(
+                                PendingControlPlaneMessage::alert(
+                                    control_plane_node_api::control_plane_node_api::PublishAlertRequest {
+                                        meta: Some(
+                                            control_plane_node_api::control_plane_node_api::RequestMeta {
+                                                operation_id: format!(
+                                                    "drain-blocked-{}-{}",
+                                                    node_id, self.reconcile_tick
+                                                ),
+                                                requested_by: "agent".to_string(),
+                                                target_node_id: node_id.clone(),
+                                                desired_state_version: String::new(),
+                                                request_unix_ms: chv_common::now_unix_ms(),
+                                            },
+                                        ),
+                                        node_id,
+                                        severity: "Warning".to_string(),
+                                        alert_type: "drain_blocked".to_string(),
+                                        summary: format!(
+                                            "drain blocked on {remaining} core-managed desired-Running VM(s); the control plane must re-home them"
+                                        ),
+                                        details_json: details.to_string().into_bytes(),
+                                    },
+                                ),
+                            );
+                        }
                     }
                 } else {
                     // Request migration for each running VM via control plane event,
@@ -2016,6 +2052,7 @@ pub(crate) async fn cleanup_vm_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::PendingControlPlaneMessageKind;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -2166,10 +2203,20 @@ mod tests {
             assert_eq!(rec.current_state().await, NodeState::Draining);
         }
         let cache = cache.lock().await;
-        assert!(
-            cache.pending_control_plane.is_empty(),
-            "observe-only drain must not request migrations"
+        // The blocked drain surfaces exactly one control-plane alert (first
+        // blocked tick); the unchanged second tick must not spam, and no
+        // migration events may ever be requested.
+        assert_eq!(
+            cache.pending_control_plane.len(),
+            1,
+            "exactly one drain-blocked alert, no migration events"
         );
+        let message = &cache.pending_control_plane[0];
+        assert_eq!(message.kind, PendingControlPlaneMessageKind::PublishAlert);
+        let alert = message.decode_alert().unwrap();
+        assert_eq!(alert.alert_type, "drain_blocked");
+        assert_eq!(alert.severity, "Warning");
+        assert!(alert.summary.contains("desired-Running"));
     }
 
     #[tokio::test]
@@ -2201,9 +2248,12 @@ mod tests {
             assert_eq!(rec.current_state().await, NodeState::Draining);
         }
         let cache = cache.lock().await;
-        assert!(
-            cache.pending_control_plane.is_empty(),
-            "observe-only drain must not request migrations"
+        // Undecodable fragments block the drain (fail closed) and surface
+        // the same single drain-blocked alert.
+        assert_eq!(cache.pending_control_plane.len(), 1);
+        assert_eq!(
+            cache.pending_control_plane[0].kind,
+            PendingControlPlaneMessageKind::PublishAlert
         );
     }
 
@@ -2235,6 +2285,9 @@ mod tests {
         .await;
         assert!(rec.run_once().await.is_ok());
         assert_eq!(rec.current_state().await, NodeState::Maintenance);
+        // A completing drain raises no alert and requests no migrations.
+        let cache = cache.lock().await;
+        assert!(cache.pending_control_plane.is_empty());
     }
 
     #[tokio::test]
