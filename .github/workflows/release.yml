@@ -140,6 +140,23 @@ jobs:
       - name: Build Rust workspace (release)
         run: cargo build --workspace --release
 
+      - name: Verify embedded commit sha matches HEAD
+        # The build.rs embeds `git rev-parse --short HEAD`; with a warm
+        # cargo cache (Swatinem/rust-cache) a stale sha used to survive
+        # rebuilds that reused the target dir. Assert the binary reports
+        # the commit that is actually checked out.
+        run: |
+          set -e
+          OUTPUT=$(./target/release/chvctl version)
+          EMBEDDED_SHA=$(echo "$OUTPUT" | grep -oE 'commit [0-9a-f]+' | awk '{print $2}')
+          HEAD_SHA=$(git rev-parse --short HEAD)
+          echo "embedded sha: $EMBEDDED_SHA"
+          echo "HEAD sha:     $HEAD_SHA"
+          if [ "$EMBEDDED_SHA" != "$HEAD_SHA" ]; then
+            echo "Embedded commit sha ($EMBEDDED_SHA) does not match HEAD ($HEAD_SHA)"
+            exit 1
+          fi
+
       - name: Setup Node.js 20
         uses: actions/setup-node@v7
         with:
