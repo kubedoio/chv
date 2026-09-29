@@ -989,9 +989,10 @@ impl ProcessCloudHypervisorAdapter {
                 // frozen BEFORE its kernel banner (the exact signature
                 // this watchdog exists for) is masked forever by the
                 // previous boot's completed evidence. The episode
-                // counters survive the re-derivation: the watchdog's own
-                // reboot bumps the watermark mid-episode, and its budget
-                // must live through that.
+                // counters' fate is decided in phase 3 by WHICH anchor
+                // moved: a same-VMM reboot (the watchdog's own) preserves
+                // them, a new VM life (pid change) starts a fresh
+                // episode.
                 let stale = match wd.vms.get(&obs.vm_id) {
                     Some(state) => state.vmm_pid != obs.vmm_pid || state.watermark != obs.watermark,
                     None => false,
@@ -1080,13 +1081,26 @@ impl ProcessCloudHypervisorAdapter {
                     VmWatchState::fresh(&bytes, obs.vmm_pid, obs.watermark, &wd.config)
                 });
                 if rederive {
-                    // The generation changed under this state (a re-spawn,
-                    // or a watermark-bumping reboot): re-derive the
-                    // EVIDENCE from the capture, but preserve the episode
-                    // counters — the watchdog's own reboot bumps the
-                    // watermark mid-episode, and a budget reset here would
-                    // make the budget meaningless.
-                    let (reboots_fired, stood_down) = (state.reboots_fired, state.stood_down);
+                    // The generation changed under this state. Re-derive
+                    // the EVIDENCE from the capture; the episode counters
+                    // depend on WHICH change happened:
+                    // - a pid change is a NEW VM LIFE (a re-spawn replaced
+                    //   the entry): fresh episode, fresh budget — matching
+                    //   the documented semantics of the !alive state drop
+                    //   ("a later boot of the same id starts a fresh
+                    //   episode"), which a fast stop→start that never
+                    //   shows a dead window would otherwise miss;
+                    // - a watermark-only change is the SAME VMM mid-episode
+                    //   (the watchdog's own `reboot_vm` bumped it): the
+                    //   counters must survive, or the episode budget —
+                    //   the feature's core safety bound — would reset on
+                    //   every watchdog reboot.
+                    let pid_changed = state.vmm_pid != obs.vmm_pid;
+                    let (reboots_fired, stood_down) = if pid_changed {
+                        (0, false)
+                    } else {
+                        (state.reboots_fired, state.stood_down)
+                    };
                     *state = VmWatchState::fresh(&bytes, obs.vmm_pid, obs.watermark, &wd.config);
                     state.reboots_fired = reboots_fired;
                     state.stood_down = stood_down;
@@ -6956,9 +6970,11 @@ mod tests {
         let mock = MockChApiHandle::spawn(&vm_dir.join("vm.sock"), 16);
         let log = vm_console_log(&vm_dir);
 
-        // Shape 1 — re-spawn with a fresh watermark: the previous boot
-        // completed (evidence true), the entry is replaced by a new VMM
-        // (new pid) whose new boot appends firmware only and freezes.
+        // Shape 1 — re-spawn over a TRUNCATED log (the graceful-stop
+        // shape): the new entry's watermark is 0, same as the old
+        // state's, so the pid is the ONLY stale signal — this pins the
+        // pid anchor specifically. The previous boot completed (evidence
+        // true); the new VMM's boot writes firmware only and freezes.
         let old_boot = "Linux version 6.8.0\nsystemd-logind started\n";
         let _console_peer = insert_watchdog_vm(&adapter, "vm-wd-gen", &vm_dir, old_boot, 0).await;
         adapter.boot_watchdog_tick().await;
@@ -6966,17 +6982,18 @@ mod tests {
             watchdog_boot_complete(&adapter, "vm-wd-gen"),
             "precondition: the first generation's boot completed"
         );
-        // The re-spawn: new entry (new pid), watermark at the current
-        // file size, and the new boot's frozen-at-firmware output.
+        // The re-spawn: the log is truncated (graceful stop) and the new
+        // boot's frozen-at-firmware output replaces it; the entry is
+        // replaced by a new VMM with a fresh (zero) watermark.
         let firmware = "[INFO] Booting with PVH Boot Protocol\n";
-        std::fs::write(&log, format!("{old_boot}{firmware}")).unwrap();
+        std::fs::write(&log, firmware).unwrap();
         {
             let mut map = adapter.vms.write().await;
             if let Some(mut old) = map.remove("vm-wd-gen") {
                 old.child.kill(&old.api_socket, None);
                 old.child.wait().await;
             }
-            let (proc, peer) = watchdog_vm_process(&vm_dir, old_boot.len() as u64);
+            let (proc, peer) = watchdog_vm_process(&vm_dir, 0);
             map.insert("vm-wd-gen".to_string(), proc);
             drop(peer);
         }
