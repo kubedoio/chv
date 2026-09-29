@@ -13,7 +13,9 @@ use tokio::process::Child;
 use tracing::{debug, info, warn};
 
 use crate::core_runtime::is_safe_resource_id;
-use chv_hypervisor_api::resources::{vm_config_file, vm_pid_file};
+use chv_hypervisor_api::resources::{
+    rotate_console_log, vm_config_file, vm_console_log, vm_pid_file,
+};
 
 /// RAII guard that records VM lifecycle RED metrics when it drops.
 ///
@@ -372,6 +374,18 @@ fn scan_live_vmm_on_socket(api_socket: &Path) -> UntrackedVmmScan {
         }
     }
     UntrackedVmmScan::None
+}
+
+/// The retryable refusal a lifecycle op returns when the agent's
+/// graceful shutdown is already in progress: the on-disk state is
+/// untouched, and the operation is expected to be re-issued after the
+/// supervisor restarts the agent.
+fn shutting_down(vm_id: &str) -> ChvError {
+    ChvError::Internal {
+        reason: format!(
+            "agent shutdown in progress; cannot start vm {vm_id} — retry after the agent has restarted"
+        ),
+    }
 }
 
 struct VmProcess {
@@ -808,8 +822,12 @@ impl ProcessCloudHypervisorAdapter {
     /// has subscribed to the input device is silently dropped by the
     /// guest (no shutdown begins at all). The previous 10 s window
     /// therefore force-killed routine guest shutdowns mid-flight, which
-    /// removed the runtime map entry and console.log and cascaded into
-    /// spurious start failures after an otherwise successful stop. 60 s
+    /// removed the runtime map entry (and, at the time, outright
+    /// deleted the console evidence) and left a later start with no
+    /// entry to boot — today the force residual is handled
+    /// (`readopt_stopped_vm` re-derives the entry and the console log
+    /// is rotated, not deleted), but a force kill is still a worse
+    /// outcome than a clean guest shutdown. 60 s
     /// gives ~2x headroom over the measured shutdown while still
     /// bounding the worst case for a wedged guest.
     const GRACEFUL_STOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
@@ -1772,7 +1790,7 @@ impl ProcessCloudHypervisorAdapter {
         Self::spawn_console_log_writer(
             vm_id,
             &pty_tx,
-            vm_dir.join("console.log"),
+            vm_console_log(&vm_dir),
             ConsoleLogMode::Append,
         );
 
@@ -2211,7 +2229,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         Self::spawn_console_log_writer(
             &config.vm_id,
             &pty_tx,
-            vm_runtime_dir.join("console.log"),
+            vm_console_log(vm_runtime_dir),
             ConsoleLogMode::Fresh,
         );
 
@@ -2367,7 +2385,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     let mut sb = proc.pty_scrollback.write().await;
                     sb.clear();
                 }
-                let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                 // INVARIANT — kill and reap the VMM BEFORE `proc` (and its
                 // console_io descriptor, plus any dup the broadcaster still
                 // holds) drops: an agent-side close of a serial connection
@@ -2382,22 +2400,26 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // of an Owned child, and an unreaped exit would linger as
                 // a zombie for the agent's lifetime.
                 proc.child.wait().await;
-                log_path
+                vm_dir
             } else {
                 None
             };
-            if let Some(path) = log_path {
+            if let Some(vm_dir) = log_path {
                 // Rotate, never delete: the console log is the only
                 // record of what the guest was doing when it was killed
                 // (see `rotate_console_log`).
-                if let Err(e) = chv_hypervisor_api::resources::rotate_console_log(
-                    path.parent().unwrap_or(Path::new("/")),
-                )
-                .await
-                {
-                    warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to rotate console.log on force stop (evidence may be lost)");
-                } else {
-                    info!(vm_id = %vm_id, path = %path.display(), "rotated console.log → console.log.last on force stop");
+                match rotate_console_log(&vm_dir).await {
+                    Ok(()) => info!(
+                        vm_id = %vm_id,
+                        path = %vm_console_log(&vm_dir).display(),
+                        "rotated console.log → console.log.last on force stop"
+                    ),
+                    Err(e) => warn!(
+                        vm_id = %vm_id,
+                        path = %vm_console_log(&vm_dir).display(),
+                        error = %e,
+                        "failed to rotate console.log on force stop (evidence may be lost)"
+                    ),
                 }
             }
         } else {
@@ -2452,24 +2474,28 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         let mut sb = proc.pty_scrollback.write().await;
                         sb.clear();
                     }
-                    let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                    let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                     proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
                     // Reap before dropping the entry (zombie prevention).
                     proc.child.wait().await;
-                    log_path
+                    vm_dir
                 } else {
                     None
                 };
-                if let Some(path) = log_path {
+                if let Some(vm_dir) = log_path {
                     // Rotate, never delete (see `rotate_console_log`).
-                    if let Err(e) = chv_hypervisor_api::resources::rotate_console_log(
-                        path.parent().unwrap_or(Path::new("/")),
-                    )
-                    .await
-                    {
-                        warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to rotate console.log on force stop after graceful timeout (evidence may be lost)");
-                    } else {
-                        info!(vm_id = %vm_id, path = %path.display(), "rotated console.log → console.log.last on force stop after graceful timeout");
+                    match rotate_console_log(&vm_dir).await {
+                        Ok(()) => info!(
+                            vm_id = %vm_id,
+                            path = %vm_console_log(&vm_dir).display(),
+                            "rotated console.log → console.log.last on force stop after graceful timeout"
+                        ),
+                        Err(e) => warn!(
+                            vm_id = %vm_id,
+                            path = %vm_console_log(&vm_dir).display(),
+                            error = %e,
+                            "failed to rotate console.log on force stop after graceful timeout (evidence may be lost)"
+                        ),
                     }
                 }
                 // Force-kill fallback after graceful-stop timeout is still a
@@ -2500,7 +2526,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 let proc = vms.get(vm_id);
                 (
                     proc.map(|p| p.pty_scrollback.clone()),
-                    proc.and_then(|p| p.api_socket.parent().map(|d| d.join("console.log"))),
+                    proc.and_then(|p| p.api_socket.parent().map(vm_console_log)),
                 )
             };
             if let Some(sb) = pty_scrollback {
@@ -3334,6 +3360,17 @@ impl ProcessCloudHypervisorAdapter {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
         };
+        // Graceful agent shutdown: never mint a fresh serial connection —
+        // process exit would abortively close it, which resets the
+        // connection and can kill cloud-hypervisor v43's serial manager
+        // (the freeze hazard `drain_and_close_consoles` exists to
+        // prevent; the heal and respawn paths check the same latch).
+        // The start fails closed and is retryable once the agent has
+        // restarted — the on-disk state this path re-derives from is
+        // untouched.
+        if self.console_draining.load(Ordering::SeqCst) {
+            return Err(shutting_down(vm_id));
+        }
         let Some(vms_root) = self
             .vms_root
             .read()
@@ -3433,6 +3470,22 @@ impl ProcessCloudHypervisorAdapter {
                 );
                 return Ok(());
             }
+            // Post-lock double check of the shutdown latch (mirrors the
+            // heal and respawn paths): the drain hook holds this lock
+            // across its passes — if it latched while this readopt was
+            // connecting, abandon the fresh connection cleanly and fail
+            // the start rather than let process exit abortively close
+            // it.
+            if self.console_draining.load(Ordering::SeqCst) {
+                drop(map);
+                drop(broadcaster_fd);
+                if console_live {
+                    Self::abandon_serial_connection(vm_id, console_io, None).await;
+                } else {
+                    drop(console_io);
+                }
+                return Err(shutting_down(vm_id));
+            }
             map.insert(
                 vm_id.to_string(),
                 VmProcess {
@@ -3463,7 +3516,7 @@ impl ProcessCloudHypervisorAdapter {
             Self::spawn_console_log_writer(
                 vm_id,
                 &pty_tx,
-                vm_dir.join("console.log"),
+                vm_console_log(&vm_dir),
                 ConsoleLogMode::Append,
             );
         }
@@ -3758,7 +3811,7 @@ impl ProcessCloudHypervisorAdapter {
                 Self::spawn_console_log_writer(
                     &vm_id,
                     &pty_tx,
-                    vm_dir.join("console.log"),
+                    vm_console_log(&vm_dir),
                     ConsoleLogMode::Append,
                 );
                 info!(
@@ -5133,12 +5186,29 @@ mod tests {
 
     /// Reaps the stand-in's whole process group (the shell's `sleep`
     /// child is orphaned when only the shell is killed).
-    fn kill_vmm_standin_group(child: &mut std::process::Child) {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(child.id() as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        let _ = child.wait();
+    /// RAII ownership of a stand-in VMM's process group: kills and reaps
+    /// the whole group on drop, so a mid-test panic cannot leak the
+    /// shell and its `sleep` child for the full sleep duration.
+    struct StandinVmm(std::process::Child);
+
+    impl StandinVmm {
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.0.try_wait()
+        }
+    }
+
+    impl Drop for StandinVmm {
+        fn drop(&mut self) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(self.0.id() as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = self.0.wait();
+        }
     }
 
     /// The force-stop residual (M2.5 finding): the force paths remove the
@@ -5187,6 +5257,43 @@ mod tests {
         assert!(matches!(err, ChvError::NotFound { .. }), "got {err:?}");
     }
 
+    /// The shutdown latch guards `readopt_stopped_vm` (union-review
+    /// finding): a start racing graceful agent shutdown must never mint
+    /// a fresh serial connection the drain cannot reach — process exit
+    /// would abortively close it, the v43 serial-manager freeze hazard
+    /// `drain_and_close_consoles` exists to prevent. The start fails
+    /// closed (retryable after restart) and inserts no entry.
+    #[tokio::test]
+    async fn start_during_console_drain_fails_closed() {
+        use super::vm_config_file;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let runtime_root = dir.path().join("runtime");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv-missing"));
+        adapter.adopt_running_vms(&runtime_root).await.unwrap();
+
+        // The force-stop residual: a configured VM with no map entry —
+        // exactly the state readopt exists for.
+        let vm_dir = runtime_root.join("vms").join("vm-dr");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_config_file(&vm_dir), r#"{"cpus":1}"#).unwrap();
+
+        // Graceful shutdown in progress (the one-way latch).
+        adapter
+            .console_draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let err = adapter.start_vm("vm-dr", None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("shutdown in progress"),
+            "got {err:?}"
+        );
+        assert!(
+            !adapter.vms.read().await.contains_key("vm-dr"),
+            "no entry may be inserted while the drain latch is set"
+        );
+    }
+
     /// The crash-window residual: a LIVE VMM whose map entry is gone
     /// (agent died between spawn and pidfile write, or adoption was
     /// skipped). A later start must adopt it honestly — never fork a
@@ -5206,7 +5313,9 @@ mod tests {
         // and cmdline all match the adapter's identity checks (see
         // `write_vmm_standin_binary` / `spawn_vmm_standin`).
         let fake_bin = write_vmm_standin_binary(dir.path());
-        let mut fake = spawn_vmm_standin(&fake_bin, &api_socket);
+        // RAII: the guard killpg+reaps the whole group on drop, so a
+        // mid-test panic cannot leak the shell and its sleep child.
+        let fake = StandinVmm(spawn_vmm_standin(&fake_bin, &api_socket));
 
         let adapter = ProcessCloudHypervisorAdapter::new(&fake_bin);
         adapter.adopt_running_vms(&runtime_root).await.unwrap();
@@ -5244,18 +5353,17 @@ mod tests {
             1,
             "start must never spawn a second VMM over a live one"
         );
-        assert!(pid_exists(fake.id()), "the live VMM must be untouched");
+        assert!(pid_exists(fake.pid()), "the live VMM must be untouched");
         {
             let map = adapter.vms.read().await;
             let proc = map.get("vm-cw").expect("the entry must be re-derived");
             assert!(
-                matches!(&proc.child, VmmChild::Adopted(pid) if *pid == fake.id()),
+                matches!(&proc.child, VmmChild::Adopted(pid) if *pid == fake.pid()),
                 "the live untracked VMM must be adopted by pid"
             );
         }
 
-        // Reap the whole process group (shell + its sleep child).
-        kill_vmm_standin_group(&mut fake);
+        // (group teardown is the guard's Drop)
     }
 
     /// The delete liveness gate (M2.5 finding): "no map entry" is not
@@ -5284,10 +5392,12 @@ mod tests {
         std::fs::write(vm_config_file(&vm_dir), r#"{"cpus":1}"#).unwrap();
         let api_socket = vm_dir.join("vm.sock");
 
-        let mut fake = spawn_vmm_standin(&fake_bin, &api_socket);
+        // RAII (see `StandinVmm`): the guard reaps the whole group on
+        // drop even if an assertion below panics.
+        let mut fake = StandinVmm(spawn_vmm_standin(&fake_bin, &api_socket));
         // Wait out the spawn-before-exec /proc race before running the
         // delete.
-        wait_for_standin_argv(fake.id());
+        wait_for_standin_argv(fake.pid());
 
         adapter.delete_vm("vm-orphan", None).await.unwrap();
         assert!(
@@ -5304,9 +5414,8 @@ mod tests {
         );
         assert!(!api_socket.exists(), "api socket must be removed");
 
-        // Reap the whole process group (the shell's sleep child is
-        // orphaned when only the shell is reaped).
-        kill_vmm_standin_group(&mut fake);
+        // (group teardown is the guard's Drop — it also reaps the sleep
+        // child orphaned when the adapter reaped only the shell)
 
         // Misroute rule: a VM that never ran on this node stays NotFound.
         let err = adapter.delete_vm("vm-never", None).await.unwrap_err();
