@@ -151,10 +151,14 @@ enum SerialTransport {
 /// A dead VMM is not an error state: cloud-hypervisor v43 exits with
 /// the guest (the VMM control loop's Exit dispatch runs `vmm_shutdown`),
 /// so a stopped VM's entry legitimately points at an exited process —
-/// `start_vm` re-spawns it from the persisted creation payload.
+/// `start_vm` re-spawns it from the persisted creation payload. `Dead`
+/// marks a re-derived entry whose VMM is provably gone and whose pid was
+/// never known (no pidfile — e.g. a force-stop residual): there is
+/// nothing to signal, wait for, or prove.
 enum VmmChild {
     Owned(Child),
     Adopted(u32),
+    Dead,
 }
 
 /// Deterministic liveness for the re-spawn decision: `prove_exited`
@@ -193,6 +197,7 @@ impl VmmChild {
                     nix::sys::signal::Signal::SIGKILL,
                 );
             }
+            VmmChild::Dead => {}
         }
     }
 
@@ -214,6 +219,7 @@ impl VmmChild {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
+            VmmChild::Dead => {}
         }
     }
 
@@ -239,6 +245,7 @@ impl VmmChild {
                     Liveness::Exited
                 }
             }
+            VmmChild::Dead => Liveness::Exited,
         }
     }
 }
@@ -302,6 +309,71 @@ fn pid_is_cloud_hypervisor(
     true
 }
 
+/// Outcome of a `/proc` scan for a live VMM owning an api socket.
+enum UntrackedVmmScan {
+    /// The scan completed: no live VMM owns the socket.
+    None,
+    /// The scan found a live owner (pid).
+    Found(u32),
+    /// The scan could not be completed — e.g. a `/proc` mount hidden by
+    /// `hidepid` or a restricted container. Liveness is UNKNOWN and
+    /// callers MUST fail closed: assuming "no VMM" here is exactly the
+    /// stranded-guest (delete) or second-VMM-on-one-disk (start) hazard
+    /// the scan exists to prevent.
+    Unreadable(String),
+}
+
+/// Scans `/proc` for a live cloud-hypervisor process bound to exactly
+/// this api-socket path (its cmdline carries `--api-socket <path>`).
+/// Used where a runtime directory may be owned by a VMM this agent has
+/// no map entry for — an agent crash in the create window before the
+/// pidfile write, or adoption that was skipped or failed — so that
+/// lifecycle paths can prove ownership instead of assuming "no entry
+/// means no VMM".
+///
+/// Classification is deliberately LOOSE (cmdline only, no exe
+/// cross-check): the decision this feeds — adopt vs. re-spawn, delete
+/// vs. refuse — must never fork a second VMM onto a disk a live process
+/// owns, whatever that process's executable is named. The exe-strict
+/// check belongs only on the SIGKILL authorization path
+/// (`VmmChild::kill`), mirroring how `VmmChild::Adopted`'s liveness
+/// probe (`prove_exited`) is already loose while its kill is strict.
+fn scan_live_vmm_on_socket(api_socket: &Path) -> UntrackedVmmScan {
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(e) => return UntrackedVmmScan::Unreadable(format!("cannot read /proc: {e}")),
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        // Skip our own pid (its cmdline never matches, but the read is
+        // wasted work).
+        if pid == std::process::id() {
+            continue;
+        }
+        // Fail closed the moment one process's cmdline is hidden from
+        // us: under hidepid every pid would read as "not the VMM" and
+        // the scan would falsely report None. Other read errors (the
+        // process exited mid-scan) and empty cmdlines (kernel threads,
+        // zombies) are normal skips.
+        match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return UntrackedVmmScan::Unreadable(format!(
+                    "cannot read /proc/{pid}/cmdline: {e}"
+                ));
+            }
+            Err(_) => continue,
+            Ok(raw) if raw.is_empty() => continue,
+            Ok(_) => {}
+        }
+        if pid_is_cloud_hypervisor(pid, api_socket, None) {
+            return UntrackedVmmScan::Found(pid);
+        }
+    }
+    UntrackedVmmScan::None
+}
+
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: VmmChild,
@@ -341,6 +413,16 @@ pub struct ProcessCloudHypervisorAdapter {
     /// (see `drain_and_close_consoles` for the full defect chain). Never
     /// cleared: shutdown is one-way.
     console_draining: Arc<AtomicBool>,
+    /// Root of this agent's runtime tree (`<runtime_dir>/vms` lives under
+    /// it), recorded by `adopt_running_vms` at startup. Lets lifecycle
+    /// paths re-derive a runtime entry from the shared on-disk layout
+    /// (`<root>/vms/<vm_id>`) for a VM whose in-memory entry is gone —
+    /// the force-stop residual — instead of failing with NotFound
+    /// against a VM this node demonstrably runs (see
+    /// `readopt_stopped_vm`). `None` until adoption has run (tests and
+    /// any non-standard construction): those callers keep today's
+    /// NotFound semantics.
+    vms_root: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
 /// Console.log write mode. `Fresh` (create) truncates — a new VM
@@ -361,6 +443,7 @@ impl ProcessCloudHypervisorAdapter {
             vms: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
             console_draining: Arc::new(AtomicBool::new(false)),
+            vms_root: std::sync::RwLock::new(None),
         }
     }
 
@@ -2152,6 +2235,16 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // is proven, not assumed: an indeterminate probe result refuses
         // the re-spawn (a second VMM on one disk is never acceptable)
         // with an error the caller can retry.
+        //
+        // Force-stop residual: the force paths remove the in-memory
+        // entry while the persisted payload survives on disk. Re-derive
+        // the entry from the shared layout first so the start completes
+        // instead of failing terminally NotFound (the executor has no
+        // recoverable retry for a Failed op, and nothing else re-inserts
+        // an entry for a still-configured VM).
+        if !self.vms.read().await.contains_key(vm_id) {
+            self.readopt_stopped_vm(vm_id, operation_id).await?;
+        }
         let liveness = {
             let mut vms = self.vms.write().await;
             let Some(proc) = vms.get_mut(vm_id) else {
@@ -2410,12 +2503,25 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Serialize with the other lifecycle ops for this VM (see
         // `lifecycle_locks`).
         let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
-        let mut proc = {
+        let removed = {
             let mut map = self.vms.write().await;
-            map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?
+            map.remove(vm_id)
+        };
+        let mut proc = match removed {
+            Some(proc) => proc,
+            None => {
+                // Force-stop residual / create-window crash: no in-memory
+                // entry, but the shared layout may still own artifacts —
+                // and possibly a live VMM this agent never tracked.
+                // Handling it HERE keeps the whole gate under this VM's
+                // lifecycle op lock (already held): a concurrent start
+                // cannot spawn a VMM whose identity evidence this delete
+                // then removes, and the delete cannot kill a VMM a start
+                // just adopted.
+                self.delete_untracked_vm(vm_id, operation_id).await?;
+                __guard.succeeded = true;
+                return Ok(());
+            }
         };
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "deleting vm");
@@ -3164,6 +3270,292 @@ impl AdoptedVmHandle {
 }
 
 impl ProcessCloudHypervisorAdapter {
+    /// Re-derives a runtime map entry from the shared on-disk layout for
+    /// a VM whose in-memory entry is gone — the force-stop residual (the
+    /// force paths' only lasting effect is removing the entry; the
+    /// persisted creation payload survives) — so a later start is
+    /// completable instead of terminally NotFound (M2.5 finding: after a
+    /// force stop, only `create_vm` registration and startup adoption
+    /// could re-insert an entry, and neither runs for a still-configured
+    /// VM — the executor finishes a retried StartVm as Failed/NOT_FOUND
+    /// forever).
+    ///
+    /// Mirrors `adopt_running_vms`'s per-VM re-derivation with one
+    /// difference: a missing pidfile does not abort the re-derivation.
+    /// Liveness is established by scanning `/proc` for a live VMM owning
+    /// the api socket:
+    /// - a live owner (agent crash in the create window before the
+    ///   pidfile write, or skipped/failed adoption) is adopted honestly:
+    ///   `start_vm` will see it `Alive` and boot against it instead of
+    ///   forking a second VMM onto one disk;
+    /// - no live owner → `VmmChild::Dead`: provably nothing to signal,
+    ///   wait for, or prove, and `start_vm` re-spawns from the payload.
+    ///
+    /// Returns `NotFound` when the VM demonstrably never ran on this
+    /// node (no runtime dir, no persisted payload, unsafe id, or
+    /// adoption never recorded a runtime root) — the misroute rule: a
+    /// wrongly-addressed op must not be silently absorbed.
+    async fn readopt_stopped_vm(
+        &self,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let not_found = || ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        };
+        let Some(vms_root) = self
+            .vms_root
+            .read()
+            .expect("vms_root lock poisoned")
+            .clone()
+        else {
+            // Adoption never ran (non-standard construction): keep
+            // today's NotFound semantics rather than guess a layout.
+            return Err(not_found());
+        };
+        // Layer-B path-safety: the directory name becomes a map key and
+        // (via start) a re-spawn source; never build an entry for an id
+        // the authority layer would reject (mirrors adoption).
+        if !is_safe_resource_id(vm_id) {
+            return Err(not_found());
+        }
+        let vm_dir = vms_root.join("vms").join(vm_id);
+        // The persisted creation payload is what makes a start
+        // completable; without it the caller's contract is
+        // re-create-required, not NotFound-absorb.
+        if !vm_config_file(&vm_dir).is_file() {
+            return Err(not_found());
+        }
+        let api_socket = vm_dir.join("vm.sock");
+
+        // Loose (cmdline-only) classification, fail-closed on an
+        // unreadable /proc: we must never classify "no live owner"
+        // without a completed scan — that is the second-VMM-on-one-disk
+        // hazard. A found owner with a mismatched exe name is still
+        // adopted: prove_exited is equally loose, while the kill paths
+        // stay exe-strict.
+        let live_pid = match scan_live_vmm_on_socket(&api_socket) {
+            UntrackedVmmScan::Found(pid) => Some(pid),
+            UntrackedVmmScan::None => None,
+            UntrackedVmmScan::Unreadable(e) => {
+                return Err(ChvError::Internal {
+                    reason: format!(
+                        "cannot determine whether a live VMM still owns vm {vm_id}'s runtime dir ({e}); refusing to re-spawn — retry the operation"
+                    ),
+                });
+            }
+        };
+        let child = match live_pid {
+            Some(pid) => VmmChild::Adopted(pid),
+            None => VmmChild::Dead,
+        };
+        let serial_sock = vm_dir.join("serial.sock");
+        let serial_transport = if serial_sock.exists() {
+            SerialTransport::Socket(serial_sock)
+        } else {
+            SerialTransport::Pty
+        };
+
+        // Re-attach the console only for a live VMM on the Socket
+        // transport (mirrors adoption); anything else gets the EOF
+        // placeholder — an honest "no console" endpoint that
+        // `respawn_vmm`'s fresh entry will replace anyway.
+        let (console_io, console_live) = match (&child, &serial_transport) {
+            (VmmChild::Adopted(_), SerialTransport::Socket(path)) => {
+                match Self::connect_serial_socket_once(path).await {
+                    Ok(fd) => (fd, true),
+                    Err(e) => {
+                        warn!(
+                            vm_id = %vm_id,
+                            error = %e,
+                            "serial re-attach failed during re-adoption; console capture stays down"
+                        );
+                        (Self::eof_placeholder_fd(), false)
+                    }
+                }
+            }
+            _ => (Self::eof_placeholder_fd(), false),
+        };
+
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        // Take the broadcaster's endpoint BEFORE the entry consumes
+        // console_io (mirrors adoption); capture is only claimed alive
+        // when the dup (and with it the broadcaster spawn) happens.
+        let broadcaster_fd = if console_live {
+            Self::dup_cloexec(&console_io).ok()
+        } else {
+            None
+        };
+        let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
+
+        {
+            let mut map = self.vms.write().await;
+            // Never over a tracked entry (mirrors adoption): the op lock
+            // serializes lifecycle ops, but a concurrent re-adoption or
+            // split-brain peer must not replace an Owned child.
+            if map.contains_key(vm_id) {
+                info!(
+                    vm_id = %vm_id,
+                    op = operation_id.unwrap_or("-"),
+                    "re-adoption skipped: vm is already tracked"
+                );
+                return Ok(());
+            }
+            map.insert(
+                vm_id.to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child,
+                    console_io,
+                    serial_transport: serial_transport.clone(),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        if let Some(broadcaster_fd) = broadcaster_fd {
+            Self::spawn_pty_broadcaster(
+                self.vms.clone(),
+                vm_id.to_string(),
+                broadcaster_fd,
+                serial_transport,
+                pty_tx.clone(),
+                pty_scrollback.clone(),
+                broadcaster_alive,
+                self.console_draining.clone(),
+            );
+            Self::spawn_console_log_writer(
+                vm_id,
+                &pty_tx,
+                vm_dir.join("console.log"),
+                ConsoleLogMode::Append,
+            );
+        }
+        match live_pid {
+            Some(pid) => info!(
+                vm_id = %vm_id,
+                pid = pid,
+                op = operation_id.unwrap_or("-"),
+                "re-derived runtime entry: adopted a live untracked VMM"
+            ),
+            None => info!(
+                vm_id = %vm_id,
+                op = operation_id.unwrap_or("-"),
+                "re-derived runtime entry: no live VMM, start will re-spawn from the persisted payload"
+            ),
+        }
+        Ok(())
+    }
+
+    /// The no-entry delete path (force-stop residual, create-window
+    /// crash): the in-memory entry is gone while the persisted payload
+    /// and stale sockets survive on disk. A delete's runtime goal is
+    /// "no live VMM, no adapter-owned artifacts", so this proves no
+    /// live VMM owns the runtime dir — reaping an untracked owner if
+    /// one exists — and then removes the same artifact set as the
+    /// tracked path. MUST be called with the VM's lifecycle op lock
+    /// held (see `delete_vm`).
+    ///
+    /// Fail-closed discipline:
+    /// - an unreadable `/proc` refuses the delete (a hidden live VMM is
+    ///   exactly the stranded-guest hazard);
+    /// - a live owner that survives the bounded SIGKILL+wait refuses
+    ///   the delete with a retryable error — success is never claimed
+    ///   while a VMM may still own the disk. The kill is exe-strict
+    ///   (like every tracked kill), so an owner whose executable name
+    ///   does not match `chv_binary` also lands here, conservatively.
+    ///
+    /// Returns `NotFound` when the VM demonstrably never ran on this
+    /// node (no recorded runtime root, unsafe id, no persisted payload)
+    /// — the misroute rule: a wrongly-addressed delete must surface,
+    /// not be silently absorbed.
+    async fn delete_untracked_vm(
+        &self,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let not_found = || ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        };
+        let Some(vms_root) = self
+            .vms_root
+            .read()
+            .expect("vms_root lock poisoned")
+            .clone()
+        else {
+            // Adoption never ran (non-standard construction): keep
+            // today's NotFound semantics rather than guess a layout.
+            return Err(not_found());
+        };
+        // Layer-B path-safety (mirrors readopt_stopped_vm).
+        if !is_safe_resource_id(vm_id) {
+            return Err(not_found());
+        }
+        let vm_dir = vms_root.join("vms").join(vm_id);
+        // The persisted creation payload is the evidence this VM once
+        // ran on this node; without it the caller's contract is
+        // re-create-required, not NotFound-absorb.
+        if !vm_config_file(&vm_dir).is_file() {
+            return Err(not_found());
+        }
+        let api_socket = vm_dir.join("vm.sock");
+
+        match scan_live_vmm_on_socket(&api_socket) {
+            UntrackedVmmScan::None => {}
+            UntrackedVmmScan::Unreadable(e) => {
+                warn!(
+                    vm_id = %vm_id,
+                    op = operation_id.unwrap_or("-"),
+                    error = %e,
+                    "delete refused: cannot prove no live VMM owns the runtime dir"
+                );
+                return Err(ChvError::Internal {
+                    reason: format!(
+                        "cannot delete vm {vm_id}: cannot determine whether a live cloud-hypervisor still owns its runtime dir ({e}); terminate any such process and retry"
+                    ),
+                });
+            }
+            UntrackedVmmScan::Found(pid) => {
+                warn!(
+                    vm_id = %vm_id,
+                    op = operation_id.unwrap_or("-"),
+                    pid = pid,
+                    "reaping an untracked live VMM that owns the runtime dir"
+                );
+                let mut child = VmmChild::Adopted(pid);
+                child.kill(&api_socket, self.expected_vmm_exe());
+                child.wait().await;
+                if pid_exists(pid) {
+                    return Err(ChvError::Internal {
+                        reason: format!(
+                            "cannot delete vm {vm_id}: a live cloud-hypervisor process (pid {pid}) still owns its runtime dir and could not be reaped; terminate pid {pid} and retry"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // The same adapter-owned artifact set as the tracked path; disk
+        // images and the VM directory itself belong to the
+        // storage/authority layers.
+        let _ = tokio::fs::remove_file(&api_socket).await;
+        let _ = tokio::fs::remove_file(vm_pid_file(&vm_dir)).await;
+        let _ = tokio::fs::remove_file(vm_config_file(&vm_dir)).await;
+        info!(
+            vm_id = %vm_id,
+            op = operation_id.unwrap_or("-"),
+            "deleted untracked vm runtime (force-stop residual or crash window)"
+        );
+        Ok(())
+    }
+
     /// Rebuilds the in-memory VM map from on-disk runtime state after an
     /// agent restart.
     ///
@@ -3196,6 +3588,11 @@ impl ProcessCloudHypervisorAdapter {
     /// Failures are per-directory (warn + skip); only an unreadable base
     /// directory fails the call.
     pub async fn adopt_running_vms(&self, runtime_root: &std::path::Path) -> Result<(), ChvError> {
+        // Record the runtime root BEFORE any early return: lifecycle
+        // paths (start after a force stop, the delete liveness gate)
+        // need to re-derive entries from this layout even when there is
+        // nothing to adopt yet (empty or missing vms/ tree).
+        *self.vms_root.write().expect("vms_root lock poisoned") = Some(runtime_root.to_path_buf());
         let vms_base = runtime_root.join("vms");
         let entries = match std::fs::read_dir(&vms_base) {
             Ok(entries) => entries,
@@ -4638,6 +5035,252 @@ mod tests {
             "expected Io from the failed spawn, got {err:?}"
         );
         assert!(adapter.vms.read().await.contains_key("vm-rs"));
+    }
+
+    /// Writes the stand-in "cloud-hypervisor" binary for the untracked-VMM
+    /// tests: a copy of `sh` named `cloud-hypervisor`, so both the exe
+    /// (/proc/<pid>/exe resolves to the copy) and the file name match the
+    /// adapter's `chv_binary` identity checks.
+    fn write_vmm_standin_binary(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("cloud-hypervisor");
+        std::fs::copy("/bin/sh", &bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// Spawns the stand-in VMM: the shell keeps its `--api-socket` argv
+    /// and sleeps as a CHILD (no exec — the argv must stay visible in
+    /// /proc), in its own process group so teardown can reap the whole
+    /// tree. Retries on ETXTBSY: executing a file immediately after
+    /// writing it can transiently fail on overlayfs-style filesystems
+    /// under parallel test load.
+    fn spawn_vmm_standin(
+        bin: &std::path::Path,
+        api_socket: &std::path::Path,
+    ) -> std::process::Child {
+        use std::os::unix::process::CommandExt as _;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(bin)
+                .arg("-c")
+                .arg("sleep 300")
+                .arg("--api-socket")
+                .arg(api_socket)
+                .process_group(0)
+                .spawn()
+            {
+                Ok(child) => return child,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("spawn stand-in VMM {}: {e}", bin.display()),
+            }
+        }
+    }
+
+    /// Waits until the stand-in's `/proc/<pid>/cmdline` shows its final
+    /// argv — `spawn()` returns before `exec()`, so identity checks
+    /// racing the exec would read the parent's (test binary's) cmdline.
+    fn wait_for_standin_argv(pid: u32) {
+        let cmdline = format!("/proc/{pid}/cmdline");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok(raw) = std::fs::read(&cmdline) {
+                if raw
+                    .windows(b"--api-socket".len())
+                    .any(|w| w == b"--api-socket")
+                {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    /// Reaps the stand-in's whole process group (the shell's `sleep`
+    /// child is orphaned when only the shell is killed).
+    fn kill_vmm_standin_group(child: &mut std::process::Child) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = child.wait();
+    }
+
+    /// The force-stop residual (M2.5 finding): the force paths remove the
+    /// in-memory entry while the persisted creation payload survives on
+    /// disk, and nothing re-inserts an entry for a still-configured VM —
+    /// a later start used to fail NotFound, terminally (the executor
+    /// finishes a Failed op for good). The start must re-derive the entry
+    /// from the shared layout and proceed to the re-spawn.
+    #[tokio::test]
+    async fn start_after_force_stop_respawns_from_disk() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let runtime_root = dir.path().join("runtime");
+        // Startup FIRST (nothing to adopt yet): the force-stop residual
+        // happens at RUNTIME, between the force fallback dropping the
+        // entry and any agent restart — startup adoption must not mask
+        // it by re-inserting the entry itself.
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv-missing"));
+        adapter.adopt_running_vms(&runtime_root).await.unwrap();
+
+        let vm_dir = runtime_root.join("vms").join("vm-fs");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        // Force-stop leftovers: the entry is gone (never inserted here),
+        // the payload and the stale socket/pid files remain.
+        std::fs::write(vm_dir.join("vm-config.json"), r#"{"cpus":1}"#).unwrap();
+        std::fs::write(vm_dir.join("ch.pid"), "999999\n").unwrap();
+
+        // Before the fix this was NotFound (adoption already ran; nothing
+        // else re-inserts an entry until an agent restart). The chv
+        // binary does not exist, so the re-spawn surfaces the spawn
+        // failure immediately instead of hanging.
+        let err = adapter.start_vm("vm-fs", None).await.unwrap_err();
+        assert!(
+            matches!(err, ChvError::Io { .. }),
+            "expected the re-spawn's spawn failure, got {err:?}"
+        );
+        // The re-derived entry must be tracked so a retry — and stop or
+        // delete — works against it.
+        assert!(
+            adapter.vms.read().await.contains_key("vm-fs"),
+            "the re-derived entry must stay tracked"
+        );
+
+        // A VM with neither an entry nor a runtime dir never ran on this
+        // node: NotFound must still surface (the misroute rule).
+        let err = adapter.start_vm("vm-never", None).await.unwrap_err();
+        assert!(matches!(err, ChvError::NotFound { .. }), "got {err:?}");
+    }
+
+    /// The crash-window residual: a LIVE VMM whose map entry is gone
+    /// (agent died between spawn and pidfile write, or adoption was
+    /// skipped). A later start must adopt it honestly — never fork a
+    /// second VMM onto one disk.
+    #[tokio::test]
+    async fn start_adopts_live_untracked_vmm_instead_of_forking() {
+        use super::{pid_exists, pid_is_cloud_hypervisor};
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let runtime_root = dir.path().join("runtime");
+        let vm_dir = runtime_root.join("vms").join("vm-cw");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_dir.join("vm-config.json"), r#"{"cpus":1}"#).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+
+        // Stand in for a live cloud-hypervisor: file name, /proc exe link
+        // and cmdline all match the adapter's identity checks (see
+        // `write_vmm_standin_binary` / `spawn_vmm_standin`).
+        let fake_bin = write_vmm_standin_binary(dir.path());
+        let mut fake = spawn_vmm_standin(&fake_bin, &api_socket);
+
+        let adapter = ProcessCloudHypervisorAdapter::new(&fake_bin);
+        adapter.adopt_running_vms(&runtime_root).await.unwrap();
+
+        let count_vmm = || {
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+                .filter(|&pid| {
+                    pid != std::process::id()
+                        && pid_is_cloud_hypervisor(
+                            pid,
+                            &api_socket,
+                            Some(std::ffi::OsStr::new("cloud-hypervisor")),
+                        )
+                })
+                .count()
+        };
+        // spawn() returns before exec(): wait until the stand-in is
+        // actually observable with its final cmdline before asserting
+        // anything about /proc.
+        let setup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while count_vmm() == 0 && std::time::Instant::now() < setup_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(count_vmm(), 1, "test setup: the stand-in must be found");
+
+        // The start must not fork: it adopts the live VMM and boots
+        // against its api socket, which the stand-in never bound — an
+        // error, but never a second process.
+        let _ = adapter.start_vm("vm-cw", None).await.unwrap_err();
+        assert_eq!(
+            count_vmm(),
+            1,
+            "start must never spawn a second VMM over a live one"
+        );
+        assert!(pid_exists(fake.id()), "the live VMM must be untouched");
+        {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-cw").expect("the entry must be re-derived");
+            assert!(
+                matches!(&proc.child, VmmChild::Adopted(pid) if *pid == fake.id()),
+                "the live untracked VMM must be adopted by pid"
+            );
+        }
+
+        // Reap the whole process group (shell + its sleep child).
+        kill_vmm_standin_group(&mut fake);
+    }
+
+    /// The delete liveness gate (M2.5 finding): "no map entry" is not
+    /// proof of "no VMM" — an agent crash in the create window or a
+    /// skipped adoption leaves the runtime dir owned by a live VMM this
+    /// agent never tracked. The adapter's delete must reap it (under
+    /// the per-VM lifecycle lock, like every lifecycle op) and then
+    /// remove the artifacts — never claim success while the guest runs
+    /// untracked.
+    #[tokio::test]
+    async fn delete_after_force_stop_reaps_live_untracked_vmm() {
+        use super::{vm_config_file, vm_pid_file};
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let runtime_root = dir.path().join("runtime");
+        // Stand in for a live cloud-hypervisor (see the helpers): the
+        // exe-strict kill authorization must match its name.
+        let fake_bin = write_vmm_standin_binary(dir.path());
+        let adapter = ProcessCloudHypervisorAdapter::new(&fake_bin);
+        // Startup FIRST (nothing to adopt yet): the residual happens at
+        // RUNTIME, like the force-stop flow.
+        adapter.adopt_running_vms(&runtime_root).await.unwrap();
+
+        let vm_dir = runtime_root.join("vms").join("vm-orphan");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_config_file(&vm_dir), r#"{"cpus":1}"#).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+
+        let mut fake = spawn_vmm_standin(&fake_bin, &api_socket);
+        // Wait out the spawn-before-exec /proc race before running the
+        // delete.
+        wait_for_standin_argv(fake.id());
+
+        adapter.delete_vm("vm-orphan", None).await.unwrap();
+        assert!(
+            fake.try_wait().unwrap().is_some(),
+            "the untracked VMM must have been reaped"
+        );
+        assert!(
+            !vm_config_file(&vm_dir).exists(),
+            "persisted config must be removed after the reap"
+        );
+        assert!(
+            !vm_pid_file(&vm_dir).exists(),
+            "pid file must be removed after the reap"
+        );
+        assert!(!api_socket.exists(), "api socket must be removed");
+
+        // Reap the whole process group (the shell's sleep child is
+        // orphaned when only the shell is reaped).
+        kill_vmm_standin_group(&mut fake);
+
+        // Misroute rule: a VM that never ran on this node stays NotFound.
+        let err = adapter.delete_vm("vm-never", None).await.unwrap_err();
+        assert!(matches!(err, ChvError::NotFound { .. }), "got {err:?}");
     }
 
     /// delete_vm removes the adapter-owned runtime artifacts (api socket,
