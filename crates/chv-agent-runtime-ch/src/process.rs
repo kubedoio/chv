@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Child;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::core_runtime::is_safe_resource_id;
 use chv_hypervisor_api::resources::{vm_config_file, vm_pid_file};
@@ -331,6 +331,16 @@ pub struct ProcessCloudHypervisorAdapter {
     /// are never removed — dropping a key while an operation still holds
     /// its mutex would let a fresh key bypass that holder's serialization.
     lifecycle_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// One-way latch set by [`Self::drain_and_close_consoles`] during
+    /// graceful agent shutdown. Console healing (the broadcaster's
+    /// reconnect loop and `respawn_broadcaster_if_dead`) consults it and
+    /// stands down: a connection minted during shutdown would be
+    /// abortively closed by process exit — unread receive-queue data
+    /// makes the kernel reset the connection, which kills cloud-
+    /// hypervisor v43's serial-manager thread and can freeze the guest
+    /// (see `drain_and_close_consoles` for the full defect chain). Never
+    /// cleared: shutdown is one-way.
+    console_draining: Arc<AtomicBool>,
 }
 
 /// Console.log write mode. `Fresh` (create) truncates — a new VM
@@ -350,6 +360,7 @@ impl ProcessCloudHypervisorAdapter {
             chv_binary: chv_binary.into(),
             vms: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
+            console_draining: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -695,6 +706,13 @@ async fn run_genisoimage(
     }
 }
 
+/// Borrowed console fan-out pair (broadcast channel + scrollback) used
+/// by the serial abandonment paths to preserve drained guest output.
+type ConsoleFanout<'a> = (
+    &'a tokio::sync::broadcast::Sender<Vec<u8>>,
+    &'a Arc<tokio::sync::RwLock<Vec<u8>>>,
+);
+
 impl ProcessCloudHypervisorAdapter {
     /// How long a graceful stop waits, after pressing the ACPI power
     /// button (`vm.power-button`), for the guest OS to power itself off
@@ -743,12 +761,27 @@ impl ProcessCloudHypervisorAdapter {
         if let Ok(flags) = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_GETFL) {
             let blocking =
                 nix::fcntl::OFlag::from_bits_retain(flags) & !nix::fcntl::OFlag::O_NONBLOCK;
-            let _ = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_SETFL(blocking));
+            if let Err(e) = nix::fcntl::fcntl(&std_stream, nix::fcntl::F_SETFL(blocking)) {
+                // A fd left non-blocking makes every "blocking" console
+                // read spin on EAGAIN; not fatal (connect still
+                // succeeded), but it must be visible in the logs.
+                warn!(
+                    error = %e,
+                    "failed to restore blocking mode on the serial socket"
+                );
+            }
         }
-        let _ = nix::fcntl::fcntl(
+        if let Err(e) = nix::fcntl::fcntl(
             &std_stream,
             nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-        );
+        ) {
+            // Without FD_CLOEXEC this descriptor leaks into every
+            // subsequently spawned cloud-hypervisor child.
+            warn!(
+                error = %e,
+                "failed to set FD_CLOEXEC on the serial socket"
+            );
+        }
         // Defense-in-depth peer-identity check, mirroring this crate's
         // trust-walk discipline: the listener at this path was bound by
         // the cloud-hypervisor child this agent spawned — the same
@@ -817,9 +850,16 @@ impl ProcessCloudHypervisorAdapter {
     /// running VM (broadcaster respawn): the stored connection may have
     /// been closed by the VMM side, so a fresh one is established. No
     /// child to fail closed on — the caller degrades gracefully (console
-    /// capture stays down, retried on the next start_vm).
-    async fn reconnect_serial_socket(socket_path: &Path) -> Option<OwnedFd> {
+    /// capture stays down, retried on the next start_vm). Checks the
+    /// `draining` latch on every attempt and gives up immediately once
+    /// graceful agent shutdown has begun: a connection minted during
+    /// shutdown would be abortively closed by process exit (see
+    /// [`Self::drain_and_close_consoles`]).
+    async fn reconnect_serial_socket(socket_path: &Path, draining: &AtomicBool) -> Option<OwnedFd> {
         for attempt in 0..10u32 {
+            if draining.load(Ordering::SeqCst) {
+                return None;
+            }
             if let Ok(fd) = Self::connect_serial_socket_once(socket_path).await {
                 return Some(fd);
             }
@@ -830,13 +870,220 @@ impl ProcessCloudHypervisorAdapter {
         None
     }
 
+    /// Reads a serial-socket descriptor's kernel receive queue until it
+    /// would block and returns everything drained, restoring the
+    /// descriptor's prior status flags. The fd is forced non-blocking for
+    /// the drain so it cannot block on a stream that is still receiving
+    /// data. Bytes read here are removed from the queue — which is what
+    /// makes the descriptor's eventual close a clean FIN instead of an
+    /// RST (the kernel resets a unix-stream connection on close when its
+    /// receive queue still holds unread data).
+    fn drain_serial_receive_queue(fd: &OwnedFd) -> Vec<u8> {
+        let saved = nix::fcntl::fcntl(fd, nix::fcntl::F_GETFL)
+            .ok()
+            .and_then(nix::fcntl::OFlag::from_bits);
+        if let Some(saved) = saved {
+            let _ = nix::fcntl::fcntl(
+                fd,
+                nix::fcntl::F_SETFL(saved | nix::fcntl::OFlag::O_NONBLOCK),
+            );
+        }
+        let mut drained = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match nix::unistd::read(fd, &mut buf) {
+                Ok(0) => break, // peer closed its write side
+                Ok(n) => drained.extend_from_slice(&buf[..n]),
+                Err(_) => break, // EAGAIN (queue empty) or peer gone
+            }
+        }
+        if let Some(saved) = saved {
+            let _ = nix::fcntl::fcntl(fd, nix::fcntl::F_SETFL(saved));
+        }
+        drained
+    }
+
+    /// Cleanly abandons a live serial-console connection the agent has
+    /// decided not to keep (heal superseded by a map replacement, failed
+    /// dup, VM leaving the map). Consumes and closes the descriptor.
+    ///
+    /// Why this exists: cloud-hypervisor v43's socket-serial path
+    /// mishandles an *abortively* closed client. If the client's receive
+    /// queue still holds unread guest output when its descriptor closes,
+    /// the kernel resets the connection; the serial-manager thread then
+    /// dies silently on the ECONNRESET, `out` keeps pointing at the dead
+    /// socket, every guest UART byte's write fails EPIPE and skips the
+    /// THRE interrupt, and the guest's interrupt-driven tty tx stalls —
+    /// a frozen guest while `vm.info` keeps reporting Running (root
+    /// cause proven in the M2.5 qualification, isolation experiments
+    /// e9-kernel/e9-quiet). A *clean* close is handled correctly: the
+    /// manager logs "Remote end closed serial socket", detaches the
+    /// client, the guest is unaffected, and the listener keeps
+    /// accepting. This function therefore takes exactly the clean path:
+    ///
+    /// 1. half-close the write side (`shutdown(SHUT_WR)`) — the manager
+    ///    observes the same clean EOF a well-behaved client produces and
+    ///    detaches, which also stops it writing guest output into the
+    ///    connection;
+    /// 2. after a settle delay, drain the receive queue (forwarding any
+    ///    already-buffered guest output into the console fan-out when
+    ///    one is given, so console.log keeps the evidence);
+    /// 3. drop the descriptor — with an empty receive queue the close
+    ///    is a FIN, not an RST.
+    ///
+    /// `shutdown(SHUT_RD)` is deliberately NOT used anywhere on a live
+    /// connection: it makes the peer's writes fail EPIPE while the
+    /// connection is still open, which is itself a freeze trigger on
+    /// v43 (the skipped-THRE path above).
+    async fn abandon_serial_connection(
+        vm_id: &str,
+        fd: OwnedFd,
+        fanout: Option<ConsoleFanout<'_>>,
+    ) {
+        if let Err(e) =
+            nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Write)
+        {
+            debug!(vm_id = %vm_id, error = %e, "serial half-close failed (peer already gone?)");
+        }
+        // Settle: give the serial manager a moment to observe the EOF
+        // and stop writing guest output into the connection, so the
+        // drain below converges to an empty queue.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let drained = Self::drain_serial_receive_queue(&fd);
+        if drained.is_empty() {
+            return;
+        }
+        if let Some((tx, scrollback)) = fanout {
+            let mut sb = scrollback.write().await;
+            sb.extend_from_slice(&drained);
+            if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+                let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+                sb.drain(0..excess);
+            }
+            drop(sb);
+            let _ = tx.send(drained.clone());
+        }
+        info!(
+            vm_id = %vm_id,
+            bytes = drained.len(),
+            "drained buffered console output from an abandoned serial connection"
+        );
+    }
+
+    /// Graceful-shutdown hook: converts the agent's process exit from an
+    /// abortive close of every live serial-console connection into the
+    /// clean close cloud-hypervisor v43 handles correctly (see
+    /// [`Self::abandon_serial_connection`] for the defect chain — a
+    /// client closing with unread receive-queue data resets the
+    /// connection, silently kills the serial-manager thread, and can
+    /// freeze a still-running guest; VMs outlive the agent).
+    ///
+    /// Call this as the LAST act of a graceful shutdown — after the
+    /// core owner and supervisor shutdown, so the executor's bounded
+    /// drain (up to 60 s of still-running lifecycle ops and console
+    /// traffic) has finished first. Idempotent: the multiple signal and
+    /// error exit paths can each call it.
+    ///
+    /// 1. latch `console_draining` — console healing stands down instead
+    ///    of minting connections that process exit would abortively
+    ///    close;
+    /// 2. half-close every live Socket-transport connection — each
+    ///    serial manager observes the clean EOF it handles correctly and
+    ///    detaches, which also stops it writing guest output into the
+    ///    connection;
+    /// 3. after a settle delay, drain each receive queue, forwarding the
+    ///    buffered guest output into the console fan-out (scrollback +
+    ///    console.log) so the descriptors' close at process exit is a
+    ///    FIN, not an RST;
+    /// 4. yield once more so any healer that was mid-reconnect when the
+    ///    latch was set can acquire the (now released) vm-map lock, see
+    ///    the latch, and cleanly abandon its fresh connection before
+    ///    the process goes away.
+    ///
+    /// Residual risk, documented: guest output landing in a receive
+    /// queue between the drain and the process-exit close (a
+    /// microsecond-scale window on a loaded host), or a healer starved
+    /// past the final yield. A hit degrades to the pre-fix behavior —
+    /// recoverable by `vm.reboot`, which re-creates the serial manager.
+    pub async fn drain_and_close_consoles(&self) {
+        if self.console_draining.swap(true, Ordering::SeqCst) {
+            return; // a prior exit path already drained
+        }
+        let mut socket_vm_ids: Vec<String> = Vec::new();
+        {
+            // Hold the vm-map write lock across both passes: lifecycle
+            // endpoint swaps and the broadcaster heal's swap are blocked
+            // behind it, and the heal re-checks the draining latch after
+            // acquiring it. (Lock order vms -> pty_scrollback matches
+            // every other holder.)
+            let mut vms = self.vms.write().await;
+            for (vm_id, proc) in vms.iter() {
+                if !matches!(proc.serial_transport, SerialTransport::Socket(_)) {
+                    continue;
+                }
+                socket_vm_ids.push(vm_id.clone());
+                if let Err(e) = nix::sys::socket::shutdown(
+                    proc.console_io.as_raw_fd(),
+                    nix::sys::socket::Shutdown::Write,
+                ) {
+                    debug!(vm_id = %vm_id, error = %e, "console half-close failed (VMM gone?)");
+                }
+            }
+            if !socket_vm_ids.is_empty() {
+                info!(
+                    vms = socket_vm_ids.len(),
+                    "draining serial-console connections for agent shutdown"
+                );
+            }
+            // Settle: let every serial manager observe the EOF, detach
+            // its client, and stop writing guest output into the
+            // connection — the drain below then converges to an empty
+            // queue that stays empty.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            for vm_id in &socket_vm_ids {
+                let Some(proc) = vms.get_mut(vm_id) else {
+                    continue;
+                };
+                let drained = Self::drain_serial_receive_queue(&proc.console_io);
+                if drained.is_empty() {
+                    continue;
+                }
+                let mut sb = proc.pty_scrollback.write().await;
+                sb.extend_from_slice(&drained);
+                if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+                    let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+                    sb.drain(0..excess);
+                }
+                drop(sb);
+                let _ = proc.pty_tx.send(drained.clone());
+                info!(
+                    vm_id = %vm_id,
+                    bytes = drained.len(),
+                    "drained buffered console output during agent shutdown"
+                );
+            }
+        }
+        // Final yield: healers blocked on the vm-map lock when the drain
+        // began release here, observe the latch, and cleanly abandon
+        // their fresh connection. Without this yield the process could
+        // exit first and abortively close that connection — recreating
+        // the very defect this hook exists to prevent.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
     /// Duplicates a console fd for a secondary consumer (broadcaster,
     /// console server). The dup inherits the source fd's blocking mode —
     /// a property of the open file description — while FD_CLOEXEC is
     /// per-descriptor and must be set on each dup.
     fn dup_cloexec(fd: &OwnedFd) -> std::io::Result<OwnedFd> {
         let dup = nix::unistd::dup(fd).map_err(|e| std::io::Error::other(e.to_string()))?;
-        let _ = nix::fcntl::fcntl(&dup, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
+        if let Err(e) = nix::fcntl::fcntl(&dup, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC))
+        {
+            // FD_CLOEXEC is per-descriptor; without it this dup leaks
+            // into every subsequently spawned cloud-hypervisor child.
+            // Not fatal, but it must be visible in the logs.
+            warn!(error = %e, "failed to set FD_CLOEXEC on a console dup");
+        }
         Ok(dup)
     }
 
@@ -863,22 +1110,80 @@ impl ProcessCloudHypervisorAdapter {
         if broadcaster_alive.load(Ordering::SeqCst) {
             return;
         }
+        // Graceful agent shutdown: never mint a fresh connection — process
+        // exit would abortively close it (see `drain_and_close_consoles`).
+        if self.console_draining.load(Ordering::SeqCst) {
+            return;
+        }
         info!(vm_id = %vm_id, "respawning console broadcaster");
         let broadcaster_fd: Option<OwnedFd> = match serial_transport {
             SerialTransport::Socket(path) => {
-                match Self::reconnect_serial_socket(path).await {
+                match Self::reconnect_serial_socket(path, &self.console_draining).await {
                     Some(fresh) => {
-                        let dup = Self::dup_cloexec(&fresh).ok();
-                        if dup.is_some() {
-                            // Swap the stored connection so the console
-                            // server and future respawns use the live
-                            // endpoint.
-                            let mut vms = self.vms.write().await;
-                            if let Some(proc) = vms.get_mut(vm_id) {
+                        let dup = match Self::dup_cloexec(&fresh) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                warn!(
+                                    vm_id = %vm_id,
+                                    error = %e,
+                                    "serial respawn dup failed; abandoning the fresh connection"
+                                );
+                                Self::abandon_serial_connection(vm_id, fresh, None).await;
+                                return;
+                            }
+                        };
+                        let mut vms = self.vms.write().await;
+                        // Post-lock double check of the shutdown latch
+                        // (mirrors the broadcaster heal): the drain hook
+                        // holds this lock across its passes — if it
+                        // latched while this respawn was reconnecting,
+                        // abandon the fresh connection cleanly and exit
+                        // rather than let process exit abortively close
+                        // it (an abortive close resets the connection
+                        // and can kill the serial manager).
+                        if self.console_draining.load(Ordering::SeqCst) {
+                            drop(vms);
+                            drop(dup);
+                            Self::abandon_serial_connection(vm_id, fresh, None).await;
+                            return;
+                        }
+                        match vms.get_mut(vm_id) {
+                            // Supersede check (mirrors the broadcaster
+                            // heal): if the entry was replaced — fresh
+                            // channel from a VMM re-spawn or re-adoption —
+                            // a replacement broadcaster owns the console
+                            // now; swapping our endpoint under it would
+                            // split the byte stream between two readers of
+                            // one socket. Abandon the fresh connection
+                            // cleanly instead of dropping it with
+                            // possibly-unread data (an abortive close
+                            // resets the connection and can kill the
+                            // serial manager).
+                            Some(proc) if proc.pty_tx.same_channel(pty_tx) => {
                                 proc.console_io = fresh;
+                                Some(dup)
+                            }
+                            superseded => {
+                                let fanout = superseded
+                                    .map(|proc| (proc.pty_tx.clone(), proc.pty_scrollback.clone()));
+                                drop(vms);
+                                drop(dup);
+                                match fanout {
+                                    Some((tx, sb)) => {
+                                        Self::abandon_serial_connection(
+                                            vm_id,
+                                            fresh,
+                                            Some((&tx, &sb)),
+                                        )
+                                        .await;
+                                    }
+                                    None => {
+                                        Self::abandon_serial_connection(vm_id, fresh, None).await;
+                                    }
+                                }
+                                None
                             }
                         }
-                        dup
                     }
                     None => {
                         warn!(
@@ -906,6 +1211,7 @@ impl ProcessCloudHypervisorAdapter {
                 pty_tx.clone(),
                 pty_scrollback.clone(),
                 broadcaster_alive.clone(),
+                self.console_draining.clone(),
             );
         }
     }
@@ -1067,6 +1373,7 @@ impl ProcessCloudHypervisorAdapter {
     /// allocates a NEW pty at a different path; re-attachment is a
     /// recorded follow-up) and revival is left to the next `start_vm`
     /// respawn.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_pty_broadcaster(
         vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
         vm_id: String,
@@ -1075,6 +1382,7 @@ impl ProcessCloudHypervisorAdapter {
         pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
         pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: Arc<AtomicBool>,
+        console_draining: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
             let _guard = AliveGuard(broadcaster_alive);
@@ -1117,13 +1425,40 @@ impl ProcessCloudHypervisorAdapter {
                 // Pty transport) ends the broadcaster.
                 match transport {
                     SerialTransport::Socket(ref path) => {
-                        match Self::reconnect_serial_socket(path).await {
+                        // Graceful agent shutdown: stand down instead of
+                        // minting a connection that process exit would
+                        // abortively close (see `drain_and_close_consoles`).
+                        if console_draining.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match Self::reconnect_serial_socket(path, &console_draining).await {
                             Some(fresh) => {
                                 let next = match Self::dup_cloexec(&fresh) {
                                     Ok(d) => d,
-                                    Err(_) => break,
+                                    Err(e) => {
+                                        warn!(
+                                            vm_id = %vm_id,
+                                            error = %e,
+                                            "serial heal dup failed; abandoning the fresh connection"
+                                        );
+                                        Self::abandon_serial_connection(&vm_id, fresh, None).await;
+                                        break;
+                                    }
                                 };
                                 let mut map = vms.write().await;
+                                // Post-lock double check of the shutdown
+                                // latch: the drain hook holds this lock
+                                // across its passes — if it latched while
+                                // this heal was connecting, abandon the
+                                // fresh connection cleanly and exit rather
+                                // than let process exit abortively close
+                                // it.
+                                if console_draining.load(Ordering::SeqCst) {
+                                    drop(map);
+                                    drop(next);
+                                    Self::abandon_serial_connection(&vm_id, fresh, None).await;
+                                    break;
+                                }
                                 match map.get_mut(&vm_id) {
                                     Some(proc) => {
                                         // Supersede check: a VMM re-spawn or
@@ -1137,13 +1472,38 @@ impl ProcessCloudHypervisorAdapter {
                                         // Sender of the old channel, so the
                                         // old console.log writer observes
                                         // Closed and exits (no duplicate
-                                        // appends).
+                                        // appends). The fresh connection is
+                                        // abandoned CLEANLY — dropping it
+                                        // with unread receive-queue data
+                                        // would reset the connection and
+                                        // can kill the (new) serial manager
+                                        // (see `abandon_serial_connection`).
                                         if !proc.pty_tx.same_channel(&pty_tx) {
+                                            let (tx, sb) =
+                                                (proc.pty_tx.clone(), proc.pty_scrollback.clone());
+                                            drop(map);
+                                            drop(next);
+                                            Self::abandon_serial_connection(
+                                                &vm_id,
+                                                fresh,
+                                                Some((&tx, &sb)),
+                                            )
+                                            .await;
                                             break;
                                         }
                                         proc.console_io = fresh;
                                     }
-                                    None => break,
+                                    None => {
+                                        // The VM left the map (force stop /
+                                        // delete) — the VMM is being torn
+                                        // down, but abandon cleanly anyway:
+                                        // the same listener can already
+                                        // belong to a replacement VM.
+                                        drop(map);
+                                        drop(next);
+                                        Self::abandon_serial_connection(&vm_id, fresh, None).await;
+                                        break;
+                                    }
                                 }
                                 drop(map);
                                 current = next;
@@ -1323,6 +1683,7 @@ impl ProcessCloudHypervisorAdapter {
                 pty_tx.clone(),
                 pty_scrollback.clone(),
                 broadcaster_alive,
+                self.console_draining.clone(),
             );
         }
         Self::spawn_console_log_writer(
@@ -1759,6 +2120,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 pty_tx.clone(),
                 pty_scrollback.clone(),
                 broadcaster_alive.clone(),
+                self.console_draining.clone(),
             );
         }
 
@@ -1913,6 +2275,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     sb.clear();
                 }
                 let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                // INVARIANT — kill and reap the VMM BEFORE `proc` (and its
+                // console_io descriptor, plus any dup the broadcaster still
+                // holds) drops: an agent-side close of a serial connection
+                // whose receive queue holds unread data resets the
+                // connection, which kills cloud-hypervisor v43's serial
+                // manager (and with a live manager in the blast radius, can
+                // freeze the guest — see `abandon_serial_connection`).
+                // With the VMM already dead there is no peer left to reset.
+                // Any future reordering of these steps must preserve this.
                 proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
                 // Reap before dropping the entry: the agent is the parent
                 // of an Owned child, and an unreaped exit would linger as
@@ -2111,9 +2482,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // wakes every blocked reader on it (the broadcaster's dup
         // included): the broadcaster observes EOF and its self-heal
         // reconnects to the re-bound listener, swapping the stored
-        // endpoint and streaming the new boot. Bytes still queued in the
-        // kernel receive buffer are discarded — acceptable: the old guest
-        // is mid-teardown anyway. Best-effort: a failure means the
+        // endpoint and streaming the new boot. Queued bytes are NOT
+        // discarded by SHUT_RD (reads still drain them, then EOF), and
+        // the subsequent close of the rotated descriptors is clean even
+        // with data queued — SHUT_RD neutralizes the reset-on-close
+        // heuristic. It does make the peer's writes fail EPIPE while the
+        // connection is nominally open, which is exactly why SHUT_RD is
+        // used ONLY here, on a connection whose VMM peer is already torn
+        // down by the reboot — never on a live connection (see
+        // `abandon_serial_connection`). Best-effort: a failure means the
         // connection was already gone, which the broadcaster's own EOF
         // handling covers.
         if let Some(fd) = pre_reboot_console {
@@ -2949,6 +3326,7 @@ impl ProcessCloudHypervisorAdapter {
                     pty_tx.clone(),
                     pty_scrollback.clone(),
                     broadcaster_alive,
+                    self.console_draining.clone(),
                 );
                 Self::spawn_console_log_writer(
                     &vm_id,
@@ -3457,6 +3835,251 @@ mod tests {
         server.join().expect("server thread");
     }
 
+    /// Pins the exact AF_UNIX kernel semantics the clean-disconnect
+    /// machinery relies on. Root cause of the M2.5 guest freeze: an
+    /// agent-side close with unread receive-queue data RESETS the
+    /// connection, and cloud-hypervisor v43's serial manager dies
+    /// silently on the resulting ECONNRESET. If a kernel behavior change
+    /// ever breaks these assertions, the drain-before-close discipline
+    /// must be re-evaluated.
+    #[tokio::test]
+    async fn serial_close_semantics_regression() {
+        use std::io::{Read as _, Write as _};
+
+        // Negative control — the defect model itself: the "serial
+        // manager" writes a burst, the client closes WITHOUT draining,
+        // and the manager's next read observes ECONNRESET (not EOF).
+        {
+            let (mut manager, client) = std::os::unix::net::UnixStream::pair().unwrap();
+            manager.write_all(b"guest boot burst").unwrap();
+            // Let the bytes land in the client's receive queue.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(client); // abortive: unread data still queued
+            let mut buf = [0u8; 64];
+            let err = manager.read(&mut buf).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionReset,
+                "close with unread receive-queue data must reset the connection (defect model)"
+            );
+        }
+
+        // The fix's semantics: half-close, settle, drain, then drop —
+        // the manager observes a clean EOF instead.
+        {
+            let (mut manager, client) = std::os::unix::net::UnixStream::pair().unwrap();
+            manager.write_all(b"guest boot burst").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let client_fd: OwnedFd = client.into();
+            ProcessCloudHypervisorAdapter::abandon_serial_connection(
+                "vm-semantics",
+                client_fd,
+                None,
+            )
+            .await;
+            let mut buf = [0u8; 64];
+            let n = manager
+                .read(&mut buf)
+                .unwrap_or_else(|e| panic!("manager must observe a clean EOF, not {e:?}"));
+            assert_eq!(n, 0, "manager must observe EOF after a clean abandon");
+        }
+    }
+
+    /// `drain_and_close_consoles` converts agent shutdown into the clean
+    /// close cloud-hypervisor handles correctly: the serial-manager
+    /// stand-in observes a clean EOF — never the ECONNRESET an undrained
+    /// close produces — and the buffered guest output is preserved
+    /// through the console fan-out (scrollback + console.log evidence).
+    #[tokio::test]
+    async fn drain_and_close_consoles_closes_cleanly() {
+        use std::io::{Read as _, Write as _};
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-drain");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        // Stand in for cloud-hypervisor's serial manager: one accepted
+        // client connection that streams guest output.
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            // Simulate a mid-burst guest: console output the agent has
+            // not read yet when shutdown begins.
+            conn.write_all(b"late guest output").expect("write burst");
+            conn
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+
+        let client = std::os::unix::net::UnixStream::connect(&sock_path).unwrap();
+        let console_io: OwnedFd = client.into();
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-drain".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // Subscribe BEFORE the drain: broadcast sends without a
+        // receiver are dropped, and the drained bytes are the assertion
+        // target.
+        let mut rx = pty_tx.subscribe();
+        // Let the burst land in the receive queue, then run the
+        // graceful-shutdown drain.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        adapter.drain_and_close_consoles().await;
+
+        // The buffered guest output was preserved through the fan-out.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("drained output must reach the console fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"late guest output".to_vec());
+        assert!(pty_scrollback.read().await.ends_with(b"late guest output"));
+
+        // The serial manager observes a clean EOF — never a reset.
+        let mut conn = server.join().expect("server thread");
+        let mut buf = [0u8; 64];
+        let n = conn
+            .read(&mut buf)
+            .unwrap_or_else(|e| panic!("serial manager must observe EOF, not {e:?}"));
+        assert_eq!(n, 0, "serial manager must observe a clean EOF");
+
+        // Idempotent: the multiple process-exit paths can each call it.
+        adapter.drain_and_close_consoles().await;
+    }
+
+    /// While the shutdown drain latch is set, a broadcaster whose
+    /// connection ends must stand down instead of reconnecting: a
+    /// connection minted during shutdown would be abortively closed by
+    /// process exit — recreating the very freeze the drain prevents. The
+    /// serial-manager stand-in keeps its listener bound and must observe
+    /// no second connection.
+    #[tokio::test]
+    async fn drain_latch_suppresses_broadcaster_reconnect() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-latch");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+
+        let client = std::os::unix::net::UnixStream::connect(&sock_path).unwrap();
+        let console_io: OwnedFd = client.into();
+        let broadcaster_fd = ProcessCloudHypervisorAdapter::dup_cloexec(&console_io).unwrap();
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-latch".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+        // The alive flag is set by the spawner (the guard only clears it
+        // on exit) — mirror the production call sites.
+        broadcaster_alive.store(true, Ordering::SeqCst);
+        ProcessCloudHypervisorAdapter::spawn_pty_broadcaster(
+            adapter.vms.clone(),
+            "vm-latch".to_string(),
+            broadcaster_fd,
+            SerialTransport::Socket(sock_path.clone()),
+            pty_tx.clone(),
+            pty_scrollback.clone(),
+            broadcaster_alive.clone(),
+            adapter.console_draining.clone(),
+        );
+        // Subscribe before writing the probe so the send has a receiver.
+        let mut rx = pty_tx.subscribe();
+
+        // Accept the agent's connection (retry: the listener is
+        // non-blocking) and stream one probe through it.
+        let mut conn = loop {
+            match listener.accept() {
+                Ok((conn, _)) => break conn,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        };
+        conn.write_all(b"probe").unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("probe must arrive through the fan-out")
+            .expect("channel must be live");
+        assert_eq!(got, b"probe".to_vec());
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive and streaming"
+        );
+
+        // Begin the graceful-shutdown drain, then end the manager side
+        // of the connection: the broadcaster wakes with EOF and its
+        // heal must stand down — the listener stays bound, so a wrongful
+        // reconnect would be observable as a pending connection.
+        adapter.drain_and_close_consoles().await;
+        drop(conn);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while broadcaster_alive.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            !broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must stand down during the shutdown drain instead of reconnecting"
+        );
+
+        // No second connection may land on the still-bound listener.
+        let watch_until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < watch_until {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    drop(conn);
+                    panic!("broadcaster reconnected during the shutdown drain");
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("accept: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     /// `vm.reboot` in cloud-hypervisor v43 tears the VM down and
     /// re-creates it, re-binding the serial listener at the same path —
     /// but the OLD connection is orphaned without an EOF: the serial
@@ -3551,6 +4174,7 @@ mod tests {
             pty_tx.clone(),
             pty_scrollback.clone(),
             broadcaster_alive.clone(),
+            adapter.console_draining.clone(),
         );
         let mut rx = pty_tx.subscribe();
 
@@ -3656,6 +4280,7 @@ mod tests {
             pty_tx.clone(),
             pty_scrollback.clone(),
             broadcaster_alive.clone(),
+            adapter.console_draining.clone(),
         );
         let got = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
             .await
