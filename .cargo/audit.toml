@@ -1,42 +1,39 @@
 # cargo-audit configuration for the CHV workspace.
 #
 # `cargo audit` (RustSec) walks Cargo.lock directly and is stricter than
-# `cargo deny` — it does not perform feature/target reachability filtering.
-# Advisory ignores listed here MUST stay in sync with the matching entries
-# in deny.toml, with the same rationale comments.
+# `cargo deny` — it does not perform feature/target reachability filtering,
+# so it can surface advisories (e.g. `unsound`) that cargo-deny's graph walk
+# never evaluates. Verified 2026-09-29: event-listener RUSTSEC-2026-0221
+# (unsound) was invisible to cargo-deny but reported by cargo audit.
 #
 # Docs: https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
 # CI:   .github/workflows/security.yml (rustsec/audit-check@v2 reads this file)
 
 [advisories]
-# Each ignore below is mirrored verbatim from deny.toml. Keep the two files
-# in lockstep — divergence between them causes cargo audit / cargo deny to
-# report different sets of advisories, which is hard to reason about during
-# triage.
+# cargo-audit walks the raw Cargo.lock with NO reachability filtering, so its
+# ignore set is NOT identical to deny.toml's: crates that are present in the
+# lockfile but provably unreachable in the build graph (verified via
+# `cargo deny list` / cargo-deny's feature-aware walk) still fire here and
+# need an entry, with the reachability evidence documented below. Do not
+# blindly mirror the two files — reconcile each against its own tool.
+#
+# Removed 2026-09-29 (prompt 03 reconciliation, issue #230):
+#   RUSTSEC-2024-0370 (proc-macro-error 1.x) — crate left the graph entirely
+#     when tabled moved off it; superseded state (proc-macro-error2) also gone.
 ignore = [
     # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
-    #   Pulled into Cargo.lock by `sqlx-mysql` because sqlx 0.8's top-level
-    #   Cargo.toml lists sqlx-mysql unconditionally even though we only
-    #   enable the `sqlite` feature. None of that code reaches our binaries
-    #   (cargo-deny's feature-aware graph walk confirms the crate is not
-    #   reachable). CHV never performs RSA operations on attacker-observable
-    #   timing channels — the Marvin Attack vector is not applicable.
-    #   Upstream tracking:
-    #     - https://github.com/RustCrypto/RSA/issues/19  (no patch)
-    #     - https://github.com/launchbadge/sqlx/issues/2911 (sqlx side)
-    #   Removal condition: sqlx makes sqlx-mysql/-postgres optional, OR
-    #   `rsa` ships a constant-time implementation.
+    #   (a) Non-applicable: `rsa` enters Cargo.lock only via `sqlx-mysql`
+    #       (sqlx 0.8 lists sqlx-mysql unconditionally in its top-level
+    #       Cargo.toml). CHV enables only the `sqlite` feature, so none of
+    #       that code is compiled into CHV binaries — cargo-deny's
+    #       feature-aware graph walk confirms `rsa` is unreachable, which is
+    #       why this advisory needs no ignore in deny.toml. cargo-audit has
+    #       no reachability filtering, hence this entry.
+    #   (b) Upstream: https://github.com/RustCrypto/RSA/issues/19 (no patch).
+    #       sqlx side: https://github.com/launchbadge/sqlx/issues/2911
+    #   (c) Remove when sqlx makes sqlx-mysql/-postgres optional, or `rsa`
+    #       ships a constant-time implementation.
     "RUSTSEC-2023-0071",
-
-    # RUSTSEC-2024-0370 — `proc-macro-error` 1.x unmaintained.
-    #   Compile-time-only dep (proc macro) pulled by `tabled_derive` 0.8 ->
-    #   `tabled` 0.16 in chvctl. Never ships in binaries. Informational
-    #   advisory, not a vulnerability.
-    #   Upstream: https://github.com/zhiburt/tabled/issues/411 (tabled 0.17
-    #   migrated to proc-macro-error2).
-    #   Removal condition: chvctl upgrades tabled 0.16 -> 0.17+ (deferred
-    #   from this PR — multi-major upgrade with API changes).
-    "RUSTSEC-2024-0370",
 
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
     #   Pulled transitively by tonic 0.12 for client TLS PEM parsing.
@@ -48,12 +45,26 @@ ignore = [
     #   Removal condition: CHV upgrades tonic 0.12 -> 0.14+ (deferred —
     #   gRPC-stack-wide change, not in scope for this supply-chain PR).
     "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
+    #   CHV does not parse untrusted XML with duplicate check enabled.
+    #   Pulled via rust-s3 0.37 (quick-xml 0.38.4); fixed in quick-xml >= 0.41.
+    #   Removal condition: rust-s3/quick-xml update (tracked as issue #177).
+    "RUSTSEC-2026-0194",
+
+    # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
+    #   CHV does not use NsReader namespace resolution on untrusted XML.
+    #   Pulled via rust-s3 0.37 (quick-xml 0.38.4); fixed in quick-xml >= 0.41.
+    #   Removal condition: rust-s3/quick-xml update (tracked as issue #177).
+    "RUSTSEC-2026-0195",
 ]
 informational_warnings = ["unmaintained", "unsound", "notice"]
 severity_threshold = "none"
 
 [database]
-path = "~/.cargo/advisory-db"
+# NOTE: do NOT set `path` to a `~`-relative string — path expansion is
+# tool-specific (cargo-audit expands it; cargo-deny does not and creates a
+# literal `./~/` tree). The default (`~/.cargo/advisory-db`) is correct.
 url  = "https://github.com/rustsec/advisory-db"
 fetch = true
 stale = false

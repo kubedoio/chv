@@ -15,7 +15,14 @@
 [advisories]
 version = 2
 # Advisory database mirrors. Default is the official RustSec advisory-db.
-db-path = "~/.cargo/advisory-db"
+#
+# NOTE (verified 2026-09-29, cargo-deny 0.20.2): cargo-deny does NOT
+# tilde-expand `db-path` — not user-provided values and not its own default.
+# With `db-path` unset it clones the advisory DB into a literal
+# `./~/.cargo/advisory-db` relative to the working directory. The repo
+# `.gitignore` covers `~`, so this litter is harmless; leave `db-path` unset
+# so local and CI behavior stay uniform. (cargo-audit, in contrast, DOES
+# expand `~` — see .cargo/audit.toml.)
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
 # A vulnerability is a hard fail. Unmaintained crates warn so we have time to
@@ -28,32 +35,27 @@ yanked = "deny"
 #   (b) link to upstream tracking issue (or "no upstream fix" with rationale),
 #   (c) the removal condition (target version, milestone, or upstream event).
 #
-# See docs/specs/adr/ for the broader supply-chain posture.
+# Truth discipline (prompt 03): this list is reconciled against the actual
+# Cargo.lock AND cargo-deny's feature-aware dependency graph on every
+# cleanup — entries whose crate/version no longer matches are REMOVED, not
+# kept "just in case" (cargo-deny reports each non-matching ignore as
+# `advisory-not-detected`). Note the companion `.cargo/audit.toml`
+# (consumed by the real `cargo audit` CI job) walks the raw lockfile with
+# NO reachability filtering, so its ignore set is intentionally a superset
+# of this one (e.g. RUSTSEC-2023-0071): a crate can be unreachable in the
+# build graph (no deny.toml entry needed) yet still present in Cargo.lock
+# (audit.toml entry needed). Reconcile each file against its own tool.
+#
+# Removed 2026-09-29 (prompt 03 reconciliation, issue #230):
+#   RUSTSEC-2023-0071 (rsa) — `rsa` is unreachable in the build graph
+#     (sqlx-mysql never compiled; sqlite-only features), so cargo-deny does
+#     not encounter it. The entry REMAINS in .cargo/audit.toml because
+#     cargo-audit is lockfile-wide — see above.
+#   RUSTSEC-2026-0173 (proc-macro-error2) — the crate left the dependency
+#     graph entirely (tabled 0.22 dropped it); issue #146 closed.
+#   RUSTSEC-2026-0204 (crossbeam-epoch) — crossbeam-epoch 0.9.21 is outside
+#     the advisory's affected range.
 ignore = [
-    # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
-    #   (a) Non-applicable: CHV uses sqlx with only the `sqlite` feature.
-    #       The `rsa` crate enters the lockfile because sqlx 0.8's top-level
-    #       Cargo.toml unconditionally lists `sqlx-mysql` as a dep, which
-    #       depends on `rsa`. None of that code is compiled into CHV binaries.
-    #   (b) Upstream: https://github.com/RustCrypto/RSA/issues/19 (no patch).
-    #       sqlx side: https://github.com/launchbadge/sqlx/issues/2911
-    #   (c) Remove when sqlx makes sqlx-mysql/-postgres optional.
-    "RUSTSEC-2023-0071",
-    # RUSTSEC-2026-0173 — `proc-macro-error2` 2.x unmaintained.
-    #   (a) Non-applicable at runtime: this is a proc-macro build dep pulled
-    #       by `tabled_derive` 0.11 (used by `chvctl` for CLI table rendering).
-    #       It runs only at compile time, never in shipped binaries. The
-    #       advisory is informational ("unmaintained"), not a vulnerability.
-    #       Note: `proc-macro-error2` was originally created as a maintained
-    #       fork of `proc-macro-error` (RUSTSEC-2024-0370), which is now also
-    #       unmaintained. Both are dead ends; no safe upgrade.
-    #   (b) Upstream: https://github.com/GnomedDev/proc-macro-error-2/issues/17
-    #       tabled side: https://github.com/zhiburt/tabled/issues — track a
-    #       migration to a maintained alternative (manyhow, proc-macro2-diagnostics).
-    #   (c) Remove when chvctl migrates to a tabled version that uses a
-    #       maintained proc-macro helper, or migrates off tabled entirely.
-    "RUSTSEC-2026-0173",
-
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
     #   (a) Non-applicable as vuln: informational ("unmaintained"). The crate
     #       is pulled transitively by `tonic` 0.12 for client-side TLS PEM
@@ -65,23 +67,20 @@ ignore = [
     #       gRPC stack-wide change deferred from this supply-chain PR).
     "RUSTSEC-2025-0134",
 
-    # RUSTSEC-2026-0204 — `crossbeam-epoch` v0.9.18 Display pointer dereference.
-    #   (a) Non-applicable: pulled transitively via rayon-core / criterion
-    #       (dev/benchmark dependency). Never used or shipped in production binaries.
-    #   (b) Upstream: https://github.com/crossbeam-rs/crossbeam/pull/1276
-    #   (c) Remove when criterion/rayon updates crossbeam-epoch dependency.
-    "RUSTSEC-2026-0204",
-
     # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
     #   (a) Non-applicable: CHV does not parse untrusted XML with duplicate check enabled.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0194
-    #   (c) Remove on next quick-xml dependency update.
+    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
+    #   (c) Remove on the next quick-xml dependency update (tracked as
+    #       issue #177 — explicit debt until the rust-s3 path moves).
     "RUSTSEC-2026-0194",
 
     # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
     #   (a) Non-applicable: CHV does not use NsReader namespace resolution on untrusted XML.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0195
-    #   (c) Remove on next quick-xml dependency update.
+    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
+    #   (c) Remove on the next quick-xml dependency update (tracked as
+    #       issue #177 — explicit debt until the rust-s3 path moves).
     "RUSTSEC-2026-0195",
 ]
 

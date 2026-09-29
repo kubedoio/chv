@@ -2,20 +2,21 @@ name: Security
 
 # Supply-chain security gates for the Rust workspace.
 #
-# - cargo audit  -> RustSec advisory database (RUSTSEC-XXXX)
-# - cargo deny   -> licenses, banned crates, advisories, sources (see deny.toml)
+# - cargo audit  -> RustSec advisory database, raw Cargo.lock walk
+#                   (no reachability filtering; reads .cargo/audit.toml)
+# - cargo deny   -> licenses, banned crates, advisories, sources
+#                   (feature-aware dependency graph; reads deny.toml)
 #
-# Pinned action versions are listed below the `uses:` line so maintainers can
-# verify and rotate them. Replace with full commit SHAs for stricter pinning.
+# The two advisory checks have intentionally different semantics:
+# cargo audit walks the raw lockfile and can surface advisories cargo-deny
+# never evaluates (verified 2026-09-29 with an `unsound` advisory that was
+# invisible to cargo-deny); cargo deny proves whether an affected crate is
+# actually reachable in the build graph. Both must pass.
 #
-#   rustsec/audit-check@v2.0.0
-#     https://github.com/marketplace/actions/rust-audit-check
-#     SHA: <maintainer: pin to a commit SHA on next review>
-#
-#   EmbarkStudios/cargo-deny-action@v2
-#     https://github.com/marketplace/actions/cargo-deny
-#     Latest tag at time of authoring: v2.0.20
-#     SHA: <maintainer: pin to a commit SHA on next review>
+# All actions are pinned to immutable commit SHAs (prompt 03 supply-chain
+# hardening). Dependabot's github-actions ecosystem keeps them current;
+# when updating manually, resolve the new tag's SHA, e.g.:
+#   gh api repos/<owner>/<repo>/commits/<tag> --jq .sha
 
 on:
   pull_request:
@@ -25,6 +26,7 @@ on:
       - "Cargo.lock"
       - "**/Cargo.toml"
       - "deny.toml"
+      - ".cargo/audit.toml"
       - ".github/workflows/security.yml"
   push:
     branches: [main]
@@ -50,24 +52,17 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
+      # rustsec/audit-check runs `cargo audit` against Cargo.lock and reads
+      # .cargo/audit.toml. It needs no cargo registry cache: cargo-audit
+      # parses the lockfile directly without compiling the workspace.
+      - name: Run cargo audit
+        # rustsec/audit-check v2.0.0
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock', 'deny.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-audit-
-
-      - name: Run cargo audit via cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories
-          arguments: --all-features
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   cargo-deny:
     name: cargo deny
@@ -84,10 +79,12 @@ jobs:
           - sources
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Cache cargo registry
-        uses: actions/cache@v6
+        # actions/cache v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index
@@ -98,8 +95,8 @@ jobs:
             ${{ runner.os }}-cargo-deny-
 
       - name: Run cargo deny (${{ matrix.check }})
-        # EmbarkStudios/cargo-deny-action@v2
-        uses: EmbarkStudios/cargo-deny-action@v2
+        # EmbarkStudios/cargo-deny-action v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check ${{ matrix.check }}
           # deny.toml lives at the repo root.
