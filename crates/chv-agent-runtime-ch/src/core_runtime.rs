@@ -562,6 +562,21 @@ impl CloudHypervisorCoreRuntime {
         // NotFound (a misrouted delete must surface, not silently no-op).
         if let Err(ChvError::NotFound { .. }) = &delete_result {
             if vm_runtime_dir(&self.runtime_dir, vm_id).is_dir() {
+                // Adapter-agnostic FALLBACK only: the production process
+                // adapter handles the no-entry case itself, inside its
+                // per-VM lifecycle lock (reaping any live untracked
+                // owner — "no entry" is not proof of "no VMM" — before
+                // removing artifacts) and returns Ok for it; this arm
+                // therefore fires for it only when the dir holds no
+                // persisted payload (e.g. a prior partial delete). Mock
+                // and future adapters that return NotFound for the
+                // residual get the idempotent cleanup here. When the
+                // runtime dir shows the VM once ran on this node, the
+                // delete's runtime goal — no adapter-owned artifacts —
+                // is completable from the shared layout. A VM with
+                // neither an entry nor a runtime dir never ran on this
+                // node: NotFound stays NotFound (a misrouted delete
+                // must surface, not silently no-op).
                 self.remove_orphaned_vm_artifacts(vm_id, op_id).await;
                 delete_result = Ok(());
             }
