@@ -113,6 +113,41 @@ async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()>
     write_file_durable(path, contents, 0o600).await
 }
 
+/// Wire the guest-liveness (boot) watchdog when the agent config opts
+/// in (`[watchdog] enabled = true`). Drives the adapter's watchdog tick
+/// on a 5 s interval for the agent's lifetime. Disabled by default: the
+/// detection is marker-based and cannot distinguish a frozen boot from
+/// a legitimately quiet marker-less guest, so operators opt in per
+/// node (see `BootWatchdogAgentConfig`).
+fn spawn_boot_watchdog(
+    process_adapter: &Arc<ProcessCloudHypervisorAdapter>,
+    config: &chv_config::BootWatchdogAgentConfig,
+) {
+    if !config.enabled {
+        return;
+    }
+    process_adapter.configure_boot_watchdog(chv_agent_runtime_ch::process::BootWatchdogConfig {
+        boot_marker: config.boot_marker.clone(),
+        stall_secs: config.stall_secs,
+        max_reboots: config.max_reboots,
+        healthy_reset_secs: config.healthy_reset_secs,
+    });
+    let adapter = Arc::clone(process_adapter);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            adapter.boot_watchdog_tick().await;
+        }
+    });
+    info!(
+        stall_secs = config.stall_secs,
+        marker = %config.boot_marker,
+        max_reboots = config.max_reboots,
+        "guest-liveness (boot) watchdog enabled"
+    );
+}
+
 async fn start_core_managed(
     config: &AgentConfig,
     adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
@@ -235,6 +270,7 @@ async fn start_core_native(
     // Keep a concrete handle for the graceful-shutdown console drain;
     // the dyn Arc below is the one the runtime uses.
     let process_adapter = Arc::new(process_adapter);
+    spawn_boot_watchdog(&process_adapter, &config.watchdog);
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
         process_adapter.clone();
     let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
@@ -738,6 +774,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
         warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
     }
+    spawn_boot_watchdog(&process_adapter, &config.watchdog);
     // The dyn Arc is the one the runtime uses; the concrete handle stays
     // for the graceful-shutdown console drain at process exit.
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =

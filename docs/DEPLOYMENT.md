@@ -349,6 +349,21 @@ bootstrap_token_path = "/etc/chv/bootstrap.token"
 tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "/etc/chv/certs/ca.crt"
+
+# Guest-liveness (boot) watchdog — OPT-IN, disabled when omitted.
+# Detects a guest frozen mid-boot (the cloud-hypervisor v43 serial-manager
+# defect: the console stalls with no boot-complete marker while vm.info
+# keeps reporting Running) and recovers it with a bounded vm.reboot.
+# Only enable this on nodes whose guest images print the marker:
+# a marker-based detector cannot distinguish a frozen boot from a quiet
+# marker-less guest, nor from an adopted guest whose console wrapped
+# past its banner (all bounded by max_reboots).
+[watchdog]
+enabled = false
+boot_marker = "systemd-logind"  # printed by every systemd boot
+stall_secs = 120                # no console bytes for this long = stalled
+max_reboots = 2                 # per unhealthy episode, then stand down
+healthy_reset_secs = 900        # sustained health resets the budget
 ```
 
 **`/etc/chv/nwd.toml`**

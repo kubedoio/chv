@@ -432,6 +432,86 @@ pub struct AgentConfig {
     pub console_bind: String,
     #[serde(default = "default_agent_jwt_secret")]
     pub jwt_secret: String,
+    #[serde(default)]
+    pub watchdog: BootWatchdogAgentConfig,
+}
+
+/// Node-level guest-liveness (boot) watchdog settings, from the agent
+/// config's `[watchdog]` section. The watchdog detects the frozen-guest
+/// condition CH v43's serial-manager defect produces (§ evidence:
+/// a mid-burst serial-client death silently kills the manager; the guest
+/// freezes mid-boot while `vm.info` keeps reporting Running) and recovers
+/// it with `vm.reboot`, which also re-creates the serial manager and
+/// restores console capture.
+///
+/// Detection is marker-based: a boot is complete when `boot_marker`
+/// (default `systemd-logind`) appears in the VM's console capture after
+/// the current boot's kernel banner (a re-spawned VMM or an agent-driven
+/// reboot starts a fresh boot at a recorded byte offset — earlier
+/// boots' markers never count). A console that has stalled (no new
+/// bytes) with no marker on a Running VM triggers the reboot; a console
+/// that wraps or truncates (the 10 MiB capture cap, a graceful stop)
+/// never looks frozen on its own.
+///
+/// OPT-IN by design: a marker-based detector cannot distinguish a frozen
+/// boot from a legitimately quiet guest whose image never prints the
+/// marker (non-systemd/minimal images — set `boot_marker` accordingly or
+/// leave the watchdog disabled), nor from an adopted long-running guest
+/// whose console wrapped past its banner. Reboots are bounded by
+/// `max_reboots` per unhealthy episode, and a declined or failed reboot
+/// never consumes budget it did not earn.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BootWatchdogAgentConfig {
+    /// Master switch. Default: disabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The boot-complete marker string searched for in the console
+    /// capture after the most recent kernel banner. Default
+    /// `systemd-logind` (present exactly twice per systemd boot:
+    /// Starting + Started lines).
+    #[serde(default = "default_watchdog_boot_marker")]
+    pub boot_marker: String,
+    /// Seconds of no new console bytes (with the boot-complete marker
+    /// absent and the VMM alive) before the reboot fires. Default 120 —
+    /// far above a healthy boot's quiet gaps on the reference stack.
+    #[serde(default = "default_watchdog_stall_secs")]
+    pub stall_secs: u64,
+    /// Maximum watchdog reboots per unhealthy episode before standing
+    /// down (operator territory). Default 2.
+    #[serde(default = "default_watchdog_max_reboots")]
+    pub max_reboots: u32,
+    /// Seconds of continuous marker-healthy state after which the
+    /// reboot budget resets. Default 900 (15 minutes).
+    #[serde(default = "default_watchdog_healthy_reset_secs")]
+    pub healthy_reset_secs: u64,
+}
+
+impl Default for BootWatchdogAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            boot_marker: default_watchdog_boot_marker(),
+            stall_secs: default_watchdog_stall_secs(),
+            max_reboots: default_watchdog_max_reboots(),
+            healthy_reset_secs: default_watchdog_healthy_reset_secs(),
+        }
+    }
+}
+
+fn default_watchdog_boot_marker() -> String {
+    "systemd-logind".to_string()
+}
+
+fn default_watchdog_stall_secs() -> u64 {
+    120
+}
+
+fn default_watchdog_max_reboots() -> u32 {
+    2
+}
+
+fn default_watchdog_healthy_reset_secs() -> u64 {
+    900
 }
 
 impl Default for AgentConfig {
@@ -460,6 +540,7 @@ impl Default for AgentConfig {
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
             console_bind: default_console_bind(),
             jwt_secret: default_agent_jwt_secret(),
+            watchdog: BootWatchdogAgentConfig::default(),
         }
     }
 }
@@ -673,6 +754,53 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watchdog_section_parses_with_defaults_and_overrides() {
+        let base = r#"
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/var/lib/chv/agent"
+log_level = "info"
+control_plane_addr = "https://localhost:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = "test-node"
+jwt_secret = "0123456789abcdef0123456789abcdef"
+"#;
+        // Without the section: disabled with the documented defaults —
+        // existing agent.toml files are unaffected.
+        let cfg = load_agent_config_from_str(base).expect("parse without section");
+        assert!(!cfg.watchdog.enabled);
+        assert_eq!(cfg.watchdog.boot_marker, "systemd-logind");
+        assert_eq!(cfg.watchdog.stall_secs, 120);
+        assert_eq!(cfg.watchdog.max_reboots, 2);
+        assert_eq!(cfg.watchdog.healthy_reset_secs, 900);
+
+        // With the section: every field overridable (a non-systemd
+        // guest image needs a custom marker).
+        let cfg = load_agent_config_from_str(&format!(
+            "{base}\n[watchdog]\nenabled = true\nboot_marker = \"login:\"\nstall_secs = 45\nmax_reboots = 1\nhealthy_reset_secs = 300\n"
+        ))
+        .expect("parse with section");
+        assert!(cfg.watchdog.enabled);
+        assert_eq!(cfg.watchdog.boot_marker, "login:");
+        assert_eq!(cfg.watchdog.stall_secs, 45);
+        assert_eq!(cfg.watchdog.max_reboots, 1);
+        assert_eq!(cfg.watchdog.healthy_reset_secs, 300);
+    }
+
+    fn load_agent_config_from_str(
+        contents: &str,
+    ) -> Result<AgentConfig, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("agent.toml");
+        std::fs::write(&config_path, contents).expect("write config");
+        Ok(load_agent_config(Some(&config_path))?)
+    }
 
     #[test]
     fn load_agent_config_auto_generates_secret_when_default() {
