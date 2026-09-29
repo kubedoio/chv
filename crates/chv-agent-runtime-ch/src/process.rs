@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Child;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::core_runtime::is_safe_resource_id;
 use chv_hypervisor_api::resources::{
@@ -437,6 +437,119 @@ pub struct ProcessCloudHypervisorAdapter {
     /// any non-standard construction): those callers keep today's
     /// NotFound semantics.
     vms_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    /// Guest-liveness (boot) watchdog runtime: `None` until
+    /// [`Self::configure_boot_watchdog`] opts the node in (the feature
+    /// is disabled by default — see `BootWatchdogConfig`). Holds the
+    /// per-VM observation state; mutated only from
+    /// [`Self::boot_watchdog_tick`], which the agent's main loop drives
+    /// on a short interval. Sync lock discipline: never held across an
+    /// await (the tick copies out / writes back records around its
+    /// async work).
+    boot_watchdog: std::sync::RwLock<Option<BootWatchdog>>,
+}
+
+/// Node configuration for the guest-liveness (boot) watchdog. Mirrors
+/// the agent config's `[watchdog]` section (converted at wiring time);
+/// constructed only when the feature is enabled — the `enabled` switch
+/// itself lives in the agent config, not here.
+#[derive(Debug, Clone)]
+pub struct BootWatchdogConfig {
+    /// The boot-complete marker: a boot is healthy when this string
+    /// appears in the console capture after the most recent kernel
+    /// banner (`Linux version …`). Default `systemd-logind`.
+    pub boot_marker: String,
+    /// Seconds without new console bytes (marker absent, VMM alive)
+    /// before the watchdog fires `vm.reboot`.
+    pub stall_secs: u64,
+    /// Watchdog reboots allowed per unhealthy episode before standing
+    /// down.
+    pub max_reboots: u32,
+    /// Seconds of continuous marker-healthy state after which the
+    /// reboot budget resets.
+    pub healthy_reset_secs: u64,
+}
+
+impl Default for BootWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            boot_marker: "systemd-logind".to_string(),
+            stall_secs: 120,
+            max_reboots: 2,
+            healthy_reset_secs: 900,
+        }
+    }
+}
+
+/// The watchdog's per-VM observation record.
+#[derive(Debug, Clone)]
+struct VmWatchState {
+    /// console.log size at the last observation; a change means the
+    /// console is alive (progress), whatever the marker says.
+    last_size: u64,
+    /// When the console last grew (or when tracking started). The stall
+    /// clock: `now - last_change >= stall_secs` with the marker absent
+    /// is the frozen-guest signature.
+    last_change: std::time::Instant,
+    /// Marker-after-last-banner at the last derivation. Recomputed
+    /// whenever the size changes (a new banner always comes with new
+    /// bytes, so size-change is a sound invalidation trigger).
+    marker_present: bool,
+    /// Watchdog reboots fired in the current unhealthy episode.
+    reboots_fired: u32,
+    /// When the current stretch of marker-healthy state began; `None`
+    /// while a boot is (re)started and incomplete. Sustained health
+    /// past `healthy_reset_secs` resets `reboots_fired`.
+    healthy_since: Option<std::time::Instant>,
+    /// Set once the episode budget is exhausted (log-once semantics).
+    stood_down: bool,
+}
+
+impl VmWatchState {
+    fn fresh(size: u64, marker_present: bool) -> Self {
+        Self {
+            last_size: size,
+            last_change: std::time::Instant::now(),
+            marker_present,
+            reboots_fired: 0,
+            healthy_since: if marker_present {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            },
+            stood_down: false,
+        }
+    }
+}
+
+/// The configured watchdog: its settings plus the per-VM state map.
+struct BootWatchdog {
+    config: BootWatchdogConfig,
+    vms: HashMap<String, VmWatchState>,
+}
+
+impl BootWatchdog {
+    fn new(config: BootWatchdogConfig) -> Self {
+        Self {
+            config,
+            vms: HashMap::new(),
+        }
+    }
+}
+
+/// What one observation of a VM asks the tick to do. Computed under the
+/// state lock; executed after its release (the reboot awaits the
+/// lifecycle op lock and the CH API).
+enum BootWatchdogAction {
+    Noop,
+    Reboot {
+        /// 1-based episode attempt number (for the operation id).
+        attempt: u32,
+        /// How long the console had been stalled when the fire
+        /// condition was met (for the log).
+        stalled_secs: u64,
+    },
+    /// The episode budget is exhausted; log once and stand down.
+    StandDown,
 }
 
 /// Console.log write mode. `Fresh` (create) truncates — a new VM
@@ -458,6 +571,285 @@ impl ProcessCloudHypervisorAdapter {
             lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
             console_draining: Arc::new(AtomicBool::new(false)),
             vms_root: std::sync::RwLock::new(None),
+            boot_watchdog: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Opt the node into the guest-liveness (boot) watchdog. Call once,
+    /// after `adopt_running_vms` (adoption populates the map the tick
+    /// observes). Re-configuring resets the observation state. The
+    /// feature is disabled until this is called — the `enabled` switch
+    /// lives in the agent config (`[watchdog]`), which gates the wiring.
+    pub fn configure_boot_watchdog(&self, config: BootWatchdogConfig) {
+        let mut guard = self
+            .boot_watchdog
+            .write()
+            .expect("boot watchdog lock poisoned");
+        *guard = Some(BootWatchdog::new(config));
+    }
+
+    /// Derive boot progress from a console capture: the boot is
+    /// complete when `marker` appears after the most recent kernel
+    /// banner. A marker from an earlier boot (before the last banner —
+    /// the capture retains history across a same-entry `vm.reboot`,
+    /// whose writer keeps appending) does NOT count: only the current
+    /// boot's marker disarms the watchdog. With no banner at all (the
+    /// frozen-at-firmware signature, or a capture cut before the
+    /// kernel), the whole capture is searched.
+    fn boot_marker_after_last_banner(capture: &[u8], marker: &str) -> bool {
+        let marker_bytes = marker.as_bytes();
+        if marker_bytes.is_empty() {
+            // A degenerate configuration: treat every VM as healthy
+            // rather than reboot on an unsatisfiable marker.
+            return true;
+        }
+        let banner = b"Linux version";
+        let search_from = capture
+            .windows(banner.len())
+            .rposition(|w| w == banner)
+            .map(|p| p + banner.len())
+            .unwrap_or(0);
+        capture[search_from..]
+            .windows(marker_bytes.len())
+            .any(|w| w == marker_bytes)
+    }
+
+    /// One observation + decision for a single VM against the watchdog
+    /// state. Pure bookkeeping (no IO, no awaits) so it runs under the
+    /// sync state lock; the returned action is executed by the caller
+    /// after the lock is released.
+    fn boot_watchdog_observe(
+        wd: &mut BootWatchdog,
+        vm_id: &str,
+        alive: bool,
+        size: u64,
+        bytes: &[u8],
+    ) -> BootWatchdogAction {
+        let now = std::time::Instant::now();
+        if !alive {
+            // A stopped/crashed VMM is the lifecycle machinery's
+            // territory, not the watchdog's. Drop the tracking so a
+            // later boot of the same id starts with a fresh episode.
+            wd.vms.remove(vm_id);
+            return BootWatchdogAction::Noop;
+        }
+        let marker = wd.config.boot_marker.clone();
+        let state = wd.vms.entry(vm_id.to_string()).or_insert_with(|| {
+            VmWatchState::fresh(size, Self::boot_marker_after_last_banner(bytes, &marker))
+        });
+        if size != state.last_size {
+            // The console grew: the guest (or at least its output path)
+            // is alive. Re-derive the marker on the new bytes — a new
+            // kernel banner always comes with new bytes, so size-change
+            // is a sound invalidation trigger.
+            state.last_size = size;
+            state.last_change = now;
+            let marker_now = Self::boot_marker_after_last_banner(bytes, &marker);
+            if marker_now && !state.marker_present {
+                state.healthy_since = Some(now);
+            } else if !marker_now {
+                // A new boot is under way (or the capture was reset):
+                // prior health no longer counts.
+                state.healthy_since = None;
+            }
+            state.marker_present = marker_now;
+        }
+        if state.marker_present {
+            // Boot complete — healthy, however quiet the console is.
+            // Sustained health resets the episode's reboot budget.
+            if let Some(healthy_since) = state.healthy_since {
+                if now.duration_since(healthy_since).as_secs() >= wd.config.healthy_reset_secs {
+                    state.reboots_fired = 0;
+                    state.stood_down = false;
+                }
+            }
+            return BootWatchdogAction::Noop;
+        }
+        let stalled_secs = now.duration_since(state.last_change).as_secs();
+        if stalled_secs < wd.config.stall_secs {
+            // Within the stall window — the boot may just be slow.
+            return BootWatchdogAction::Noop;
+        }
+        if state.stood_down {
+            return BootWatchdogAction::Noop;
+        }
+        if state.reboots_fired >= wd.config.max_reboots {
+            state.stood_down = true;
+            return BootWatchdogAction::StandDown;
+        }
+        state.reboots_fired += 1;
+        // Post-fire cooldown: the reboot gets a full stall window to
+        // show output before the next evaluation.
+        state.last_change = now;
+        BootWatchdogAction::Reboot {
+            attempt: state.reboots_fired,
+            stalled_secs,
+        }
+    }
+
+    /// One guest-liveness (boot) watchdog pass. The agent's main loop
+    /// drives this on a short interval (5 s is the design point).
+    ///
+    /// What it detects: the frozen-guest condition CH v43's
+    /// serial-manager defect produces — a mid-burst serial-client death
+    /// (typically the agent's own SIGKILL) silently kills the manager,
+    /// the guest freezes mid-boot, and `vm.info` keeps reporting
+    /// Running. The working discriminator (the qualification harness's
+    /// logind gate, generalized): the boot-complete marker must appear
+    /// in the persisted console capture after the most recent kernel
+    /// banner. A console that has stalled — no new bytes for
+    /// `stall_secs` — with the marker absent and a live VMM is the
+    /// frozen signature.
+    ///
+    /// What it does: `vm.reboot`, which is a CH-level guest reset that
+    /// needs no cooperating guest, re-creates the serial manager (the
+    /// silently-dead component) and — through `reboot_vm`'s connection
+    /// rotation — restores console capture of the new boot.
+    ///
+    /// Safety rails: stands down while `console_draining` is latched
+    /// (graceful agent shutdown), considers Socket-transport consoles
+    /// only (`reboot_vm`'s rotation is Socket-only; Pty is a recorded
+    /// follow-up), skips non-alive VMMs, bounds reboots per unhealthy
+    /// episode, and counts FAILED reboot attempts toward the budget so
+    /// a wedged API socket cannot loop forever.
+    pub async fn boot_watchdog_tick(&self) {
+        if self.console_draining.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(config) = self
+            .boot_watchdog
+            .read()
+            .expect("boot watchdog lock poisoned")
+            .as_ref()
+            .map(|wd| wd.config.clone())
+        else {
+            // Not configured: the feature is opt-in.
+            return;
+        };
+        // Observe every tracked VM: clone the bits the tick needs
+        // without holding the map lock across file IO or the reboot.
+        // vm_dir derives from the entry's api_socket parent (the same
+        // derivation the stop paths use), so no vms_root dependency.
+        let mut observations: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
+        {
+            let vms = self.vms.read().await;
+            for (vm_id, proc) in vms.iter() {
+                if !matches!(proc.serial_transport, SerialTransport::Socket(_)) {
+                    continue;
+                }
+                // A dead broadcaster means the CAPTURE path is broken,
+                // not (necessarily) the guest: a mid-boot VM whose
+                // console relay died would look stalled in console.log
+                // while booting healthily. The heal path
+                // (`respawn_broadcaster_if_dead` on the next start)
+                // owns that failure; the watchdog must not reboot on
+                // missing evidence. The frozen-guest signature the
+                // watchdog exists for is the OPPOSITE state: a live
+                // broadcaster parked on a dead serial manager,
+                // receiving nothing.
+                if !proc.broadcaster_alive.load(Ordering::SeqCst) {
+                    debug!(
+                        vm_id = %vm_id,
+                        "boot watchdog: broadcaster not alive; skipping (capture gap is the heal path's territory)"
+                    );
+                    continue;
+                }
+                // Loose liveness (mirrors the readopt classification
+                // discipline): cmdline-strict identity is only for
+                // kill authorization.
+                let alive = match &proc.child {
+                    VmmChild::Dead => false,
+                    VmmChild::Owned(child) => child.id().is_some_and(pid_exists),
+                    VmmChild::Adopted(pid) => pid_exists(*pid),
+                };
+                if let Some(vm_dir) = proc.api_socket.parent() {
+                    observations.push((vm_id.clone(), vm_dir.to_path_buf(), alive));
+                }
+            }
+        }
+        let mut actions: Vec<(String, BootWatchdogAction)> = Vec::new();
+        for (vm_id, vm_dir, alive) in &observations {
+            let log_path = vm_console_log(vm_dir);
+            let (size, bytes) = match tokio::fs::read(&log_path).await {
+                Ok(bytes) => (bytes.len() as u64, bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (0, Vec::new()),
+                Err(e) => {
+                    warn!(
+                        vm_id = %vm_id,
+                        error = %e,
+                        "boot watchdog: console capture unreadable; skipping this pass"
+                    );
+                    continue;
+                }
+            };
+            let action = {
+                let mut guard = self
+                    .boot_watchdog
+                    .write()
+                    .expect("boot watchdog lock poisoned");
+                let Some(wd) = guard.as_mut() else {
+                    return;
+                };
+                Self::boot_watchdog_observe(wd, vm_id, *alive, size, &bytes)
+            };
+            actions.push((vm_id.clone(), action));
+        }
+        // Drop tracking for VMs that left the map this pass (stop,
+        // delete, respawn gap) so their next boot starts a fresh
+        // episode.
+        {
+            let mut guard = self
+                .boot_watchdog
+                .write()
+                .expect("boot watchdog lock poisoned");
+            if let Some(wd) = guard.as_mut() {
+                wd.vms
+                    .retain(|id, _| observations.iter().any(|(vm_id, _, _)| vm_id == id));
+            }
+        }
+        for (vm_id, action) in actions {
+            match action {
+                BootWatchdogAction::Noop => {}
+                BootWatchdogAction::Reboot {
+                    attempt,
+                    stalled_secs,
+                } => {
+                    let op_id = format!("boot-watchdog-reboot-{vm_id}-{attempt}");
+                    warn!(
+                        vm_id = %vm_id,
+                        op = %op_id,
+                        marker = %config.boot_marker,
+                        stalled_secs = stalled_secs,
+                        attempt = attempt,
+                        max_reboots = config.max_reboots,
+                        "boot watchdog: console stalled mid-boot without the boot-complete marker; \
+                         rebooting to recover (this also re-creates the serial manager and \
+                         restores console capture)"
+                    );
+                    match self.reboot_vm(&vm_id, Some(&op_id)).await {
+                        Ok(()) => info!(
+                            vm_id = %vm_id,
+                            op = %op_id,
+                            "boot watchdog: recovery reboot issued"
+                        ),
+                        Err(e) => warn!(
+                            vm_id = %vm_id,
+                            op = %op_id,
+                            error = %e,
+                            "boot watchdog: recovery reboot failed (counted toward the episode budget)"
+                        ),
+                    }
+                }
+                BootWatchdogAction::StandDown => {
+                    error!(
+                        vm_id = %vm_id,
+                        marker = %config.boot_marker,
+                        reboots = config.max_reboots,
+                        "boot watchdog: standing down after exhausting the episode reboot budget; \
+                         the VM requires operator attention"
+                    );
+                }
+            }
         }
     }
 
@@ -5312,6 +5704,391 @@ mod tests {
             !adapter.vms.read().await.contains_key("vm-dr"),
             "no entry may be inserted while the drain latch is set"
         );
+    }
+
+    // =====================================================================
+    // Guest-liveness (boot) watchdog
+    // =====================================================================
+
+    use super::{vm_console_log, BootWatchdogConfig};
+
+    /// Backdate a VM's stall clock so a tick can be evaluated without
+    /// real-time waiting (the stall window is 60 s in these tests).
+    fn backdate_watchdog_stall(adapter: &ProcessCloudHypervisorAdapter, vm_id: &str, secs: u64) {
+        let mut guard = adapter.boot_watchdog.write().unwrap();
+        let wd = guard.as_mut().expect("watchdog configured");
+        let state = wd.vms.get_mut(vm_id).expect("watch state exists");
+        state.last_change -= std::time::Duration::from_secs(secs);
+    }
+
+    /// A fake cloud-hypervisor API endpoint: answers every request with
+    /// 204 and records the request lines. Accepts up to `max_requests`
+    /// connections, then parks (the listener stays bound; a further
+    /// connect would queue, not fail — tests assert on the recorded
+    /// count, never on a refused connection).
+    fn spawn_mock_ch_api(
+        api_sock_path: &std::path::Path,
+        max_requests: usize,
+    ) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use std::io::{Read as _, Write as _};
+        if let Some(parent) = api_sock_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let listener = std::os::unix::net::UnixListener::bind(api_sock_path).unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            for _ in 0..max_requests {
+                let (mut conn, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 1024];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                if let Some(line) = request.lines().next() {
+                    recorded.lock().unwrap().push(line.to_string());
+                }
+                let _ = conn.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+            }
+            // Park with the listener bound so late connects queue
+            // instead of erroring.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        });
+        requests
+    }
+
+    /// A watchdog-test fixture: a tracked VM with the given console.log
+    /// content, a live stand-in VMM child, a live broadcaster flag, and
+    /// a Socket-transport console on a socketpair.
+    struct WatchdogVm {
+        _console_peer: std::os::unix::net::UnixStream,
+        child: tokio::process::Child,
+    }
+
+    async fn insert_watchdog_vm(
+        adapter: &ProcessCloudHypervisorAdapter,
+        vm_id: &str,
+        vm_dir: &std::path::Path,
+        console_log: &str,
+    ) -> WatchdogVm {
+        std::fs::create_dir_all(vm_dir).unwrap();
+        std::fs::write(vm_console_log(vm_dir), console_log).unwrap();
+        let (console_peer, console_agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let mut map = adapter.vms.write().await;
+        map.insert(
+            vm_id.to_string(),
+            VmProcess {
+                api_socket: vm_dir.join("vm.sock"),
+                child: VmmChild::Owned(
+                    tokio::process::Command::new("sleep")
+                        .arg("60")
+                        .spawn()
+                        .unwrap(),
+                ),
+                console_io: OwnedFd::from(console_agent_end),
+                serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
+                pty_tx,
+                pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                broadcaster_alive: Arc::new(AtomicBool::new(true)),
+                last_cpu_seconds: 0.0,
+                last_cpu_at: None,
+            },
+        );
+        drop(map);
+        WatchdogVm {
+            _console_peer: console_peer,
+            child,
+        }
+    }
+
+    fn test_watchdog_config() -> BootWatchdogConfig {
+        BootWatchdogConfig {
+            boot_marker: "systemd-logind".to_string(),
+            stall_secs: 60,
+            max_reboots: 2,
+            healthy_reset_secs: 900,
+        }
+    }
+
+    #[test]
+    fn boot_marker_scopes_to_the_current_boot() {
+        let derive = |capture: &str, marker: &str| {
+            ProcessCloudHypervisorAdapter::boot_marker_after_last_banner(capture.as_bytes(), marker)
+        };
+        // Marker after the (only) banner: boot complete.
+        assert!(derive(
+            "firmware\nLinux version 6.8.0\nsystemd-logind started\n",
+            "systemd-logind"
+        ));
+        // Marker from an EARLIER boot only: the current boot (after the
+        // last banner) is incomplete — the same-entry vm.reboot case
+        // whose writer keeps appending.
+        assert!(!derive(
+            "Linux version 6.8.0\nsystemd-logind\nprompt\nLinux version 6.8.0\npartial\n",
+            "systemd-logind"
+        ));
+        // No banner at all (frozen-at-firmware signature): the whole
+        // capture is searched.
+        assert!(derive("firmware only\nsystemd-logind\n", "systemd-logind"));
+        assert!(!derive("firmware only\n", "systemd-logind"));
+        // Degenerate marker: unsatisfiable detection must not fire.
+        assert!(derive("anything", ""));
+        // Custom marker for non-systemd guests.
+        assert!(derive("banner\nlogin:\n", "login:"));
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_reboots_a_stalled_frozen_boot() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-frozen");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        // The mock API must bind BEFORE the entry exists (reboot_vm
+        // resolves the socket path from the map, then connects).
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm = insert_watchdog_vm(
+            &adapter,
+            "vm-wd-frozen",
+            &vm_dir,
+            // The frozen-boot signature: firmware output only, no
+            // kernel banner, no marker (run 9's boot 3).
+            "[INFO] Booting with PVH Boot Protocol\n[INFO] Page tables setup\n",
+        )
+        .await;
+
+        // First pass initializes the observation state.
+        adapter.boot_watchdog_tick().await;
+        // Backdate the stall clock past the window and re-evaluate.
+        backdate_watchdog_stall(&adapter, "vm-wd-frozen", 120);
+        adapter.boot_watchdog_tick().await;
+
+        let recorded = requests.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["PUT /api/v1/vm.reboot HTTP/1.1".to_string()],
+            "the watchdog must issue exactly one recovery reboot"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_ignores_a_booted_vm() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-healthy");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm = insert_watchdog_vm(
+            &adapter,
+            "vm-wd-healthy",
+            &vm_dir,
+            // Boot complete: marker after the banner. However quiet the
+            // console goes afterwards, the watchdog must stay silent.
+            "Linux version 6.8.0\nsystemd-logind started\n",
+        )
+        .await;
+
+        adapter.boot_watchdog_tick().await;
+        backdate_watchdog_stall(&adapter, "vm-wd-healthy", 3600);
+        adapter.boot_watchdog_tick().await;
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a marker-healthy VM must never be rebooted"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_treats_console_progress_as_alive() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-slow");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm = insert_watchdog_vm(
+            &adapter,
+            "vm-wd-slow",
+            &vm_dir,
+            "Linux version 6.8.0\n[   12.3] some service starting\n",
+        )
+        .await;
+
+        adapter.boot_watchdog_tick().await;
+        // A slow-but-alive boot keeps emitting: the stall clock resets
+        // on every growth, however old the previous observation was.
+        backdate_watchdog_stall(&adapter, "vm-wd-slow", 3600);
+        std::fs::write(
+            vm_console_log(&vm_dir),
+            "Linux version 6.8.0\n[   42.0] more services\n",
+        )
+        .unwrap();
+        adapter.boot_watchdog_tick().await;
+        // And it is still within the stall window after that growth.
+        backdate_watchdog_stall(&adapter, "vm-wd-slow", 10);
+        adapter.boot_watchdog_tick().await;
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a progressing boot must not be rebooted"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_stands_down_after_the_budget() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-budget");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let mut config = test_watchdog_config();
+        config.max_reboots = 1;
+        adapter.configure_boot_watchdog(config);
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm =
+            insert_watchdog_vm(&adapter, "vm-wd-budget", &vm_dir, "firmware only, frozen\n").await;
+
+        adapter.boot_watchdog_tick().await;
+        // Episode attempt 1: fires.
+        backdate_watchdog_stall(&adapter, "vm-wd-budget", 120);
+        adapter.boot_watchdog_tick().await;
+        // Attempt 2 would exceed the budget: stands down (no request).
+        backdate_watchdog_stall(&adapter, "vm-wd-budget", 120);
+        adapter.boot_watchdog_tick().await;
+        // And stays down on subsequent passes.
+        backdate_watchdog_stall(&adapter, "vm-wd-budget", 120);
+        adapter.boot_watchdog_tick().await;
+
+        let recorded = requests.lock().unwrap().clone();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "exactly one reboot before the episode budget stands down"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_honors_the_drain_latch() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-drain");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm =
+            insert_watchdog_vm(&adapter, "vm-wd-drain", &vm_dir, "firmware only, frozen\n").await;
+
+        adapter.boot_watchdog_tick().await;
+        // Graceful agent shutdown latched: the watchdog must stand down
+        // (a reboot mid-drain would fight the exit path).
+        adapter
+            .console_draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        backdate_watchdog_stall(&adapter, "vm-wd-drain", 120);
+        adapter.boot_watchdog_tick().await;
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "the watchdog must not fire while the drain latch is set"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn boot_watchdog_skips_dead_vmm_and_dead_broadcaster() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-skip");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let requests = spawn_mock_ch_api(&vm_dir.join("vm.sock"), 8);
+        let mut vm =
+            insert_watchdog_vm(&adapter, "vm-wd-skip", &vm_dir, "firmware only, frozen\n").await;
+
+        // Dead broadcaster (capture gap): the VM is never even observed
+        // (no tracking state), and certainly not rebooted.
+        adapter
+            .vms
+            .write()
+            .await
+            .get_mut("vm-wd-skip")
+            .unwrap()
+            .broadcaster_alive
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        adapter.boot_watchdog_tick().await;
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a capture gap must not be treated as a frozen guest"
+        );
+        {
+            let guard = adapter.boot_watchdog.read().unwrap();
+            let wd = guard.as_ref().unwrap();
+            assert!(
+                !wd.vms.contains_key("vm-wd-skip"),
+                "a capture gap must not create tracking state"
+            );
+        }
+
+        // Broadcaster alive again: observed (state created)…
+        adapter
+            .vms
+            .write()
+            .await
+            .get_mut("vm-wd-skip")
+            .unwrap()
+            .broadcaster_alive
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        adapter.boot_watchdog_tick().await;
+        {
+            let guard = adapter.boot_watchdog.read().unwrap();
+            assert!(
+                guard.as_ref().unwrap().vms.contains_key("vm-wd-skip"),
+                "a live-broadcaster VM must be observed"
+            );
+        }
+
+        // …but the VMM child dead (already reaped): the lifecycle
+        // machinery's territory, not the watchdog's — and the tracking
+        // state is dropped.
+        {
+            let mut map = adapter.vms.write().await;
+            let proc = map.get_mut("vm-wd-skip").unwrap();
+            proc.child.kill(&proc.api_socket, None);
+            proc.child.wait().await;
+        }
+        adapter.boot_watchdog_tick().await;
+        {
+            let guard = adapter.boot_watchdog.read().unwrap();
+            let wd = guard.as_ref().unwrap();
+            assert!(
+                !wd.vms.contains_key("vm-wd-skip"),
+                "a dead VMM's tracking state must be dropped"
+            );
+        }
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a dead VMM must never be rebooted by the watchdog"
+        );
+
+        let _ = vm.child.start_kill();
+        let _ = vm.child.wait().await;
     }
 
     /// The crash-window residual: a LIVE VMM whose map entry is gone
