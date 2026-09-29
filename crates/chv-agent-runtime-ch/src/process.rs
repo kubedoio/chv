@@ -993,6 +993,12 @@ impl ProcessCloudHypervisorAdapter {
                 // moved: a same-VMM reboot (the watchdog's own) preserves
                 // them, a new VM life (pid change) starts a fresh
                 // episode.
+                // (Accepted residual: an Adopted entry whose pid the OS
+                // recycles to a new VMM defeats the pid anchor — a
+                // stood-down state could survive into the new life.
+                // Requires a pid collision on the same vm id with a
+                // prior stand-down; recorded in the M2.5 evidence
+                // register's watchdog limits.)
                 let stale = match wd.vms.get(&obs.vm_id) {
                     Some(state) => state.vmm_pid != obs.vmm_pid || state.watermark != obs.watermark,
                     None => false,
@@ -7012,15 +7018,27 @@ mod tests {
 
         // Shape 2 — same VMM, `reboot_vm` bumps the watermark: the
         // post-reboot boot freezes at firmware and must be caught even
-        // though the pid is unchanged and the previous evidence was
-        // complete.
-        let rebooted = format!("{old_boot}{firmware}");
-        std::fs::write(&log, format!("{rebooted}{firmware}")).unwrap();
+        // though the pid is unchanged. To pin the WATERMARK anchor
+        // specifically, the state must enter this shape with complete
+        // evidence — otherwise (entering incomplete, as after shape 1)
+        // the freeze fires even with the watermark clause deleted, and
+        // the test asserts nothing about the anchor. So: recover to a
+        // completed boot first, then reboot and freeze.
+        let recovered = format!("{firmware}{old_boot}");
+        std::fs::write(&log, &recovered).unwrap();
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            watchdog_boot_complete(&adapter, "vm-wd-gen"),
+            "precondition: the recovered boot completed (marker after its banner)"
+        );
+        // The reboot: watermark bumps to the file size at reboot time,
+        // and the new boot's frozen-at-firmware output follows it.
+        std::fs::write(&log, format!("{recovered}{firmware}")).unwrap();
         {
             let mut map = adapter.vms.write().await;
             let proc = map.get_mut("vm-wd-gen").unwrap();
             proc.boot_watermark
-                .store(rebooted.len() as u64, std::sync::atomic::Ordering::SeqCst);
+                .store(recovered.len() as u64, std::sync::atomic::Ordering::SeqCst);
         }
         adapter.boot_watchdog_tick().await;
         assert!(
