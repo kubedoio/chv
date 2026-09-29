@@ -511,6 +511,15 @@ pub struct BootWatchdogConfig {
 /// never look frozen.
 #[derive(Debug, Clone)]
 struct VmWatchState {
+    /// Generation anchor: the VMM pid this state was derived against.
+    /// A re-spawn replaces the map entry with a new pid; the state must
+    /// not survive it with stale evidence.
+    vmm_pid: Option<u32>,
+    /// Generation anchor: the entry's boot watermark this state was
+    /// derived against. `reboot_vm` bumps the watermark (a CH-level
+    /// reboot starts a new boot in the same VMM); the state must be
+    /// re-derived when that happens. See `VmProcess::boot_watermark`.
+    watermark: u64,
     /// Console bytes consumed by the watchdog so far (scan position).
     scan_offset: u64,
     /// The trailing bytes of the consumed region (at most
@@ -536,7 +545,12 @@ struct VmWatchState {
 }
 
 impl VmWatchState {
-    fn fresh(capture: &[u8], watermark: u64, config: &BootWatchdogConfig) -> Self {
+    fn fresh(
+        capture: &[u8],
+        vmm_pid: Option<u32>,
+        watermark: u64,
+        config: &BootWatchdogConfig,
+    ) -> Self {
         let boot_complete = Self::boot_complete_at_init(capture, watermark, &config.boot_marker);
         let tail_len = Self::scan_overlap(&config.boot_marker);
         let prev_tail = if capture.len() > tail_len {
@@ -545,6 +559,8 @@ impl VmWatchState {
             capture.to_vec()
         };
         Self {
+            vmm_pid,
+            watermark,
             scan_offset: capture.len() as u64,
             prev_tail,
             boot_complete,
@@ -942,8 +958,17 @@ impl ProcessCloudHypervisorAdapter {
             // Phase 1 (state lock, no awaits): decide what to read.
             enum Read {
                 None,
-                Range { start: u64, end: u64 },
-                Init,
+                Range {
+                    start: u64,
+                    end: u64,
+                },
+                /// Read the whole capture. `rederive` is set when a state
+                /// exists but is anchored to an older generation: its
+                /// evidence must be re-derived, its episode counters
+                /// preserved.
+                Init {
+                    rederive: bool,
+                },
             }
             let read = {
                 let mut guard = self
@@ -953,7 +978,27 @@ impl ProcessCloudHypervisorAdapter {
                 let Some(wd) = guard.as_mut() else {
                     return;
                 };
-                if let Some(state) = wd.vms.get_mut(&obs.vm_id) {
+                // Generation anchor: a state derived against a different
+                // VMM pid (a re-spawn replaced the entry — possibly with
+                // watermark 0, when the re-spawn appended to a truncated
+                // log) or a different boot watermark (`reboot_vm` bumped
+                // it: a CH-level reboot starts a new boot in the same
+                // VMM) is stale. Its `boot_complete` evidence belongs to
+                // a dead generation and must not satisfy the current
+                // boot — without this, a re-spawned or rebooted boot
+                // frozen BEFORE its kernel banner (the exact signature
+                // this watchdog exists for) is masked forever by the
+                // previous boot's completed evidence. The episode
+                // counters survive the re-derivation: the watchdog's own
+                // reboot bumps the watermark mid-episode, and its budget
+                // must live through that.
+                let stale = match wd.vms.get(&obs.vm_id) {
+                    Some(state) => state.vmm_pid != obs.vmm_pid || state.watermark != obs.watermark,
+                    None => false,
+                };
+                if stale {
+                    Read::Init { rederive: true }
+                } else if let Some(state) = wd.vms.get_mut(&obs.vm_id) {
                     if size < state.scan_offset {
                         // Shrink = the writer's 10 MiB wraparound, the
                         // graceful stop's in-place truncate, or a
@@ -978,21 +1023,21 @@ impl ProcessCloudHypervisorAdapter {
                         Read::None
                     }
                 } else {
-                    Read::Init
+                    Read::Init { rederive: false }
                 }
             };
             // Phase 2 (async IO): read only what the state asked for —
             // an idle console costs one metadata() call per pass.
-            let (is_init, read_start, bytes) = match read {
-                Read::None => (false, 0, Vec::new()),
+            let (is_init, rederive, read_start, bytes) = match read {
+                Read::None => (false, false, 0, Vec::new()),
                 Read::Range { start, end } => {
                     if start >= end {
-                        (false, start, Vec::new())
+                        (false, false, start, Vec::new())
                     } else {
                         match Self::read_file_range(&log_path, start, end).await {
-                            Ok(bytes) => (false, start, bytes),
+                            Ok(bytes) => (false, false, start, bytes),
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                (false, start, Vec::new())
+                                (false, false, start, Vec::new())
                             }
                             Err(e) => {
                                 warn!(
@@ -1005,9 +1050,11 @@ impl ProcessCloudHypervisorAdapter {
                         }
                     }
                 }
-                Read::Init => match tokio::fs::read(&log_path).await {
-                    Ok(bytes) => (true, 0, bytes),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (true, 0, Vec::new()),
+                Read::Init { rederive } => match tokio::fs::read(&log_path).await {
+                    Ok(bytes) => (true, rederive, 0, bytes),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        (true, rederive, 0, Vec::new())
+                    }
                     Err(e) => {
                         warn!(
                             vm_id = %obs.vm_id,
@@ -1029,10 +1076,21 @@ impl ProcessCloudHypervisorAdapter {
                     return;
                 };
                 let now = std::time::Instant::now();
-                let state = wd
-                    .vms
-                    .entry(obs.vm_id.clone())
-                    .or_insert_with(|| VmWatchState::fresh(&bytes, obs.watermark, &wd.config));
+                let state = wd.vms.entry(obs.vm_id.clone()).or_insert_with(|| {
+                    VmWatchState::fresh(&bytes, obs.vmm_pid, obs.watermark, &wd.config)
+                });
+                if rederive {
+                    // The generation changed under this state (a re-spawn,
+                    // or a watermark-bumping reboot): re-derive the
+                    // EVIDENCE from the capture, but preserve the episode
+                    // counters — the watchdog's own reboot bumps the
+                    // watermark mid-episode, and a budget reset here would
+                    // make the budget meaningless.
+                    let (reboots_fired, stood_down) = (state.reboots_fired, state.stood_down);
+                    *state = VmWatchState::fresh(&bytes, obs.vmm_pid, obs.watermark, &wd.config);
+                    state.reboots_fired = reboots_fired;
+                    state.stood_down = stood_down;
+                }
                 if is_init {
                     // `fresh` already consumed these bytes.
                 } else if !bytes.is_empty() {
@@ -1147,6 +1205,11 @@ impl ProcessCloudHypervisorAdapter {
                             vm_id = %vm_id,
                             "boot watchdog: target changed since observation (re-spawn?); declining"
                         );
+                        // Same decline contract as the state gate: the
+                        // next evaluation comes after a full stall window
+                        // (and the next pass re-anchors the state to the
+                        // new generation anyway).
+                        self.boot_watchdog_decline(&vm_id);
                         continue;
                     }
                     if self.console_draining.load(Ordering::SeqCst) {
@@ -6130,6 +6193,19 @@ mod tests {
             .contains_key(vm_id)
     }
 
+    fn watchdog_boot_complete(adapter: &ProcessCloudHypervisorAdapter, vm_id: &str) -> bool {
+        adapter
+            .boot_watchdog
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("watchdog configured")
+            .vms
+            .get(vm_id)
+            .expect("watch state exists")
+            .boot_complete
+    }
+
     fn test_watchdog_config() -> BootWatchdogConfig {
         BootWatchdogConfig {
             boot_marker: "systemd-logind".to_string(),
@@ -6849,12 +6925,99 @@ mod tests {
         backdate_watchdog_stall(&adapter, "vm-wd-split", 120);
         std::fs::write(&log, "Linux version 6.8.0\nsystemd-logind started\n").unwrap();
         adapter.boot_watchdog_tick().await;
+        // The growth alone would keep the watchdog silent (last_change
+        // resets on any growth), so assert the EVIDENCE, not just the
+        // absence of a reboot: the split marker must have completed the
+        // boot.
+        assert!(
+            watchdog_boot_complete(&adapter, "vm-wd-split"),
+            "a marker split across scans must complete the boot"
+        );
         assert_eq!(
             mock.reboot_requests(),
             0,
             "a marker split across scans must complete the boot"
         );
         teardown_watchdog_vm(&adapter, "vm-wd-split").await;
+    }
+
+    /// NEW-1 regression: the tracking state is anchored to the VMM
+    /// generation (pid) and the boot watermark. A re-spawn or a
+    /// `reboot_vm` that completes between passes must re-derive the
+    /// evidence — otherwise the previous generation's completed boot
+    /// masks a new boot frozen before its kernel banner, silently and
+    /// forever.
+    #[tokio::test]
+    async fn boot_watchdog_rederives_when_the_generation_changes() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-gen");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let mock = MockChApiHandle::spawn(&vm_dir.join("vm.sock"), 16);
+        let log = vm_console_log(&vm_dir);
+
+        // Shape 1 — re-spawn with a fresh watermark: the previous boot
+        // completed (evidence true), the entry is replaced by a new VMM
+        // (new pid) whose new boot appends firmware only and freezes.
+        let old_boot = "Linux version 6.8.0\nsystemd-logind started\n";
+        let _console_peer = insert_watchdog_vm(&adapter, "vm-wd-gen", &vm_dir, old_boot, 0).await;
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            watchdog_boot_complete(&adapter, "vm-wd-gen"),
+            "precondition: the first generation's boot completed"
+        );
+        // The re-spawn: new entry (new pid), watermark at the current
+        // file size, and the new boot's frozen-at-firmware output.
+        let firmware = "[INFO] Booting with PVH Boot Protocol\n";
+        std::fs::write(&log, format!("{old_boot}{firmware}")).unwrap();
+        {
+            let mut map = adapter.vms.write().await;
+            if let Some(mut old) = map.remove("vm-wd-gen") {
+                old.child.kill(&old.api_socket, None);
+                old.child.wait().await;
+            }
+            let (proc, peer) = watchdog_vm_process(&vm_dir, old_boot.len() as u64);
+            map.insert("vm-wd-gen".to_string(), proc);
+            drop(peer);
+        }
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            !watchdog_boot_complete(&adapter, "vm-wd-gen"),
+            "the re-spawned generation must not inherit the old boot's evidence"
+        );
+        backdate_watchdog_stall(&adapter, "vm-wd-gen", 120);
+        adapter.boot_watchdog_tick().await;
+        assert_eq!(
+            mock.reboot_requests(),
+            1,
+            "a new boot frozen before its banner after a re-spawn must be caught"
+        );
+
+        // Shape 2 — same VMM, `reboot_vm` bumps the watermark: the
+        // post-reboot boot freezes at firmware and must be caught even
+        // though the pid is unchanged and the previous evidence was
+        // complete.
+        let rebooted = format!("{old_boot}{firmware}");
+        std::fs::write(&log, format!("{rebooted}{firmware}")).unwrap();
+        {
+            let mut map = adapter.vms.write().await;
+            let proc = map.get_mut("vm-wd-gen").unwrap();
+            proc.boot_watermark
+                .store(rebooted.len() as u64, std::sync::atomic::Ordering::SeqCst);
+        }
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            !watchdog_boot_complete(&adapter, "vm-wd-gen"),
+            "a rebooted boot must not inherit the pre-reboot evidence"
+        );
+        backdate_watchdog_stall(&adapter, "vm-wd-gen", 120);
+        adapter.boot_watchdog_tick().await;
+        assert_eq!(
+            mock.reboot_requests(),
+            2,
+            "a new boot frozen before its banner after a reboot must be caught"
+        );
+        teardown_watchdog_vm(&adapter, "vm-wd-gen").await;
     }
 
     #[tokio::test]
