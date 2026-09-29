@@ -446,14 +446,20 @@ pub struct AgentConfig {
 ///
 /// Detection is marker-based: a boot is complete when `boot_marker`
 /// (default `systemd-logind`) appears in the VM's console capture after
-/// the most recent kernel banner. A console that has stalled (no new
-/// bytes) with no marker on a Running VM triggers the reboot.
+/// the current boot's kernel banner (a re-spawned VMM or an agent-driven
+/// reboot starts a fresh boot at a recorded byte offset — earlier
+/// boots' markers never count). A console that has stalled (no new
+/// bytes) with no marker on a Running VM triggers the reboot; a console
+/// that wraps or truncates (the 10 MiB capture cap, a graceful stop)
+/// never looks frozen on its own.
 ///
 /// OPT-IN by design: a marker-based detector cannot distinguish a frozen
 /// boot from a legitimately quiet guest whose image never prints the
 /// marker (non-systemd/minimal images — set `boot_marker` accordingly or
-/// leave the watchdog disabled). Reboots are bounded by `max_reboots`
-/// per unhealthy episode.
+/// leave the watchdog disabled), nor from an adopted long-running guest
+/// whose console wrapped past its banner. Reboots are bounded by
+/// `max_reboots` per unhealthy episode, and a declined or failed reboot
+/// never consumes budget it did not earn.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct BootWatchdogAgentConfig {
     /// Master switch. Default: disabled.
@@ -793,7 +799,6 @@ jwt_secret = "0123456789abcdef0123456789abcdef"
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("agent.toml");
         std::fs::write(&config_path, contents).expect("write config");
-        let _ = &dir; // keep the tempdir alive until the config is read
         Ok(load_agent_config(Some(&config_path))?)
     }
 
