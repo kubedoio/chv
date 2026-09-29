@@ -15,9 +15,22 @@
 -- restores exactly what the missing write would have persisted — it does
 -- not guess. Idempotent: `event_id` is the primary key and the NOT EXISTS
 -- guard skips assessments that already carry their event, so healthy
--- stores upgrade as a no-op. The sequence base is computed once (CTE) so
--- every backfilled row gets a distinct sequence even if the statement
--- inserts many rows.
+-- stores upgrade as a no-op. The sequence base is computed from the
+-- pre-statement max (a statement's own inserts are not visible to its
+-- scans) so every backfilled row gets a distinct, contiguous sequence
+-- even across many rows.
+--
+-- Known, accepted caveats:
+-- - Order inversion: backfilled events append at the journal's tail, so
+--   on a repaired store a resolution's recovery event sequences AFTER
+--   that operation's terminal event (the fixed writer orders them
+--   recovery-then-terminal). No validator or consumer depends on that
+--   ordering today; inserting mid-stream would require renumbering every
+--   later sequence, which is strictly worse. Audit-log readers of
+--   repaired stores must not assume recovery-assessed precedes terminal.
+-- - Scope: this migration repairs ONLY the missing-event hole. Any other
+--   integrity defect still fails validation inside the upgrade
+--   transaction (fail closed) and requires manual repair.
 WITH sequence_base(max_sequence) AS (
     SELECT coalesce(max(sequence), 0) FROM events
 )
@@ -41,5 +54,4 @@ CROSS JOIN sequence_base
 WHERE NOT EXISTS (
     SELECT 1 FROM events e
     WHERE e.event_id = a.operation_id || ':recovery-assessed:' || a.revision
-)
-ORDER BY a.operation_id, a.revision;
+);

@@ -5112,6 +5112,20 @@ mod tests {
                 ],
             )
             .unwrap();
+            // Self-enforcing replication: the fenced terminal transition
+            // must have taken exactly the one row (same fence the real
+            // resolve uses), or the fixture is not the pre-fix shape.
+            let terminal_rows: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM operations WHERE operation_id=?1 AND status='failed' AND active_attempt_token IS NULL AND completed_attempt_token='attempt-recovery'",
+                    params![id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                terminal_rows, 1,
+                "the fixture must terminal-persist the operation"
+            );
             assert_eq!(
                 conn.execute(
                     "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,(SELECT vm_id FROM operations WHERE operation_id=?2),'operation.failed',?3)",
