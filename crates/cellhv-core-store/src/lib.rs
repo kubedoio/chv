@@ -32,6 +32,8 @@ const OPERATION_REQUEST_METADATA_MIGRATION_SQL: &str =
     include_str!("../migrations/0004_operation_request_metadata.sql");
 const OPERATIONS_RECOVERY_INDEX_MIGRATION_SQL: &str =
     include_str!("../migrations/0005_operations_recovery_index.sql");
+const RECOVERY_RESOLUTION_EVENT_BACKFILL_MIGRATION_SQL: &str =
+    include_str!("../migrations/0006_recovery_resolution_event_backfill.sql");
 const MAX_RECOVERY_EVIDENCE_BYTES: usize = 16 * 1024;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -249,6 +251,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "operations_recovery_index",
         sql: OPERATIONS_RECOVERY_INDEX_MIGRATION_SQL,
+    },
+    Migration {
+        version: 6,
+        name: "recovery_resolution_event_backfill",
+        sql: RECOVERY_RESOLUTION_EVENT_BACKFILL_MIGRATION_SQL,
     },
 ];
 
@@ -1347,6 +1354,20 @@ impl CoreStore {
             params![id.as_str(), i64::try_from(revision).map_err(|_| StoreError::InvalidDomain("recovery revision exceeds SQLite range".to_owned()))?, attempt_token, recovery_classification_text(RecoveryClassification::ExitedOwned), recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy), evidence_fingerprint, evidence_json],
         )?;
         let operation = read_operation(&tx, id.as_str())?;
+        // The resolution assessment MUST carry its `operation.recovery_assessed`
+        // event like every other assessment writer: the load-time
+        // `validate_recovery_assessment_rows` check requires assessments and
+        // events to be one-to-one, and a resolution without its event left
+        // the store permanently unopenable — the agent crash-looped on every
+        // restart after an operator resolved an InspectRequired operation
+        // (found by the M2.5 run-10 qualification: section 9b's agent
+        // restart died with
+        // `Integrity("recovery assessments and recovery events are not
+        // one-to-one")` 5 ms after enabling the boot watchdog).
+        tx.execute(
+            "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,'operation.recovery_assessed',?4)",
+            params![format!("{}:recovery-assessed:{revision}", id.as_str()), id.as_str(), operation.vm_id.as_str(), canonical_json(&serde_json::json!({"revision":revision,"classification":recovery_classification_text(RecoveryClassification::ExitedOwned),"disposition":recovery_disposition_text(RecoveryDisposition::ExitedPendingPolicy),"evidence_fingerprint":evidence_fingerprint}))?],
+        )?;
         let changed = tx.execute(
             "UPDATE operations SET status=?1,result_json=?2,error_json=?3,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),active_attempt_token=NULL,completed_attempt_token=?5 WHERE operation_id=?4 AND status='running' AND active_attempt_token=?5",
             params![operation_status_text(status), result, error, id.as_str(), attempt_token],
@@ -4981,6 +5002,238 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn resolution_writes_its_recovery_event_and_the_store_reopens() {
+        // Run-10 regression: `resolve_interrupted_operation` wrote the
+        // resolution assessment without its `operation.recovery_assessed`
+        // event, so the one-to-one load-time check made every subsequent
+        // open fail — an operator resolution bricked the node's agent
+        // (crash loop at startup).
+        let (_directory, path, mut store, id) = running_recovery_store("op-resolution-event");
+        store
+            .classify_running_operations_interrupted(
+                &serde_json::json!({"source":"restart-classification"}),
+            )
+            .unwrap();
+        store
+            .resolve_interrupted_operation(
+                &id,
+                OperationStatus::Failed,
+                Some(&serde_json::json!({"code":"OPERATOR_RESOLUTION","note":"stalled"})),
+                &serde_json::json!({"source":"operator-resolution","note":"stalled"}),
+            )
+            .unwrap();
+        // Assessment revisions: 1 = restart-interruption marker,
+        // 2 = the operator resolution. Both must carry events.
+        let (assessments, events): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM operation_recovery_assessments),
+                        (SELECT count(*) FROM events WHERE kind='operation.recovery_assessed')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((assessments, events), (2, 2));
+        // The resolution event correlates with its assessment revision:
+        // same id scheme, same canonical payload the other writers record.
+        let (fingerprint, classification, disposition): (String, String, String) = store
+            .conn
+            .query_row(
+                "SELECT evidence_fingerprint,classification,disposition
+                 FROM operation_recovery_assessments WHERE revision=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let payload: serde_json::Value = store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM events WHERE event_id=?1",
+                params![format!("{}:recovery-assessed:2", id.as_str())],
+                |row| {
+                    let payload: String = row.get(0)?;
+                    Ok(serde_json::from_str(&payload).unwrap())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "revision": 2,
+                "classification": classification,
+                "disposition": disposition,
+                "evidence_fingerprint": fingerprint,
+            })
+        );
+        // THE regression: the resolved store must reopen cleanly (this is
+        // the agent's startup path).
+        drop(store);
+        CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn migration_backfills_missing_resolution_recovery_events() {
+        // The pre-fix shape on a version-5 schema: an operation resolved by
+        // `resolve_interrupted_operation` whose resolution assessment lacks
+        // its `operation.recovery_assessed` event — the exact writes the
+        // pre-fix code made (assessment + terminal status + terminal event,
+        // no recovery event), so the event sequence stays contiguous and
+        // only the one-to-one correspondence is broken. Migration 0006 must
+        // deterministically restore the missing event and leave the store
+        // openable.
+        let (_directory, path, mut store, id) = running_recovery_store("op-backfill-repair");
+        store
+            .classify_running_operations_interrupted(
+                &serde_json::json!({"source":"restart-classification"}),
+            )
+            .unwrap();
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Replicate the PRE-FIX resolve_interrupted_operation writes.
+            let evidence = canonical_json(
+                &serde_json::json!({"source":"operator-resolution","note":"prefix"}),
+            )
+            .unwrap();
+            let fingerprint = format!("{:x}", Sha256::digest(evidence.as_bytes()));
+            conn.execute(
+                "INSERT INTO operation_recovery_assessments (operation_id,revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json) VALUES (?1,2,'attempt-recovery','exited_owned','exited_pending_policy',?2,?3)",
+                params![id.as_str(), fingerprint, evidence],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE operations SET status='failed',result_json=NULL,error_json=?1,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),active_attempt_token=NULL,completed_attempt_token='attempt-recovery' WHERE operation_id=?2 AND status='running' AND active_attempt_token='attempt-recovery'",
+                params![
+                    canonical_json(&serde_json::json!({"code":"OPERATOR_RESOLUTION","note":"prefix"})).unwrap(),
+                    id.as_str()
+                ],
+            )
+            .unwrap();
+            // Self-enforcing replication: the fenced terminal transition
+            // must have taken exactly the one row (same fence the real
+            // resolve uses), or the fixture is not the pre-fix shape.
+            let terminal_rows: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM operations WHERE operation_id=?1 AND status='failed' AND active_attempt_token IS NULL AND completed_attempt_token='attempt-recovery'",
+                    params![id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                terminal_rows, 1,
+                "the fixture must terminal-persist the operation"
+            );
+            assert_eq!(
+                conn.execute(
+                    "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,(SELECT vm_id FROM operations WHERE operation_id=?2),'operation.failed',?3)",
+                    params![
+                        format!("{}:terminal", id.as_str()),
+                        id.as_str(),
+                        canonical_json(&serde_json::json!({"status":"failed"})).unwrap(),
+                    ],
+                )
+                .unwrap(),
+                1
+            );
+            // The pre-fix corruption: one more assessment than events.
+            let (assessments, events): (i64, i64) = conn
+                .query_row(
+                    "SELECT (SELECT count(*) FROM operation_recovery_assessments),
+                            (SELECT count(*) FROM events WHERE kind='operation.recovery_assessed')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((assessments, events), (2, 1));
+            // Rewind the schema to version 5 so migration 0006 is pending.
+            conn.execute_batch(
+                "DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
+            )
+            .unwrap();
+        }
+        let repaired = CoreStore::open_existing(&path)
+            .expect("the backfill migration must repair the pre-fix store");
+        // The backfilled event carries exactly the payload the writer
+        // would have recorded — derived from the assessment row, not
+        // guessed.
+        let (event_id, payload): (String, String) = repaired
+            .conn
+            .query_row(
+                "SELECT event_id,payload_json FROM events WHERE event_id=?1",
+                params![format!("{}:recovery-assessed:2", id.as_str())],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(event_id, format!("{}:recovery-assessed:2", id.as_str()));
+        let (fingerprint, classification, disposition): (String, String, String) = repaired
+            .conn
+            .query_row(
+                "SELECT evidence_fingerprint,classification,disposition
+                 FROM operation_recovery_assessments WHERE revision=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "revision": 2,
+                "classification": classification,
+                "disposition": disposition,
+                "evidence_fingerprint": fingerprint,
+            })
+        );
+        // And the repaired store reopens cleanly (idempotent second open).
+        drop(repaired);
+        CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn migration_backfill_is_a_no_op_for_healthy_stores() {
+        // A version-5 store whose assessments all carry their events must
+        // upgrade through migration 0006 without synthesizing anything.
+        let (_directory, path, mut store, id) = running_recovery_store("op-backfill-noop");
+        store
+            .classify_running_operations_interrupted(
+                &serde_json::json!({"source":"restart-classification"}),
+            )
+            .unwrap();
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
+            )
+            .unwrap();
+        }
+        let upgraded = CoreStore::open_existing(&path).unwrap();
+        let (assessments, events): (i64, i64) = upgraded
+            .conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM operation_recovery_assessments),
+                        (SELECT count(*) FROM events WHERE kind='operation.recovery_assessed')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (assessments, events),
+            (1, 1),
+            "no spurious events for a healthy store"
+        );
+        let id_count: i64 = upgraded
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE event_id=?1",
+                params![format!("{}:recovery-assessed:1", id.as_str())],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(id_count, 1, "the original event is untouched");
     }
 
     #[test]
