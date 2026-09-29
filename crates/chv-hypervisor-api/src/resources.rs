@@ -79,6 +79,36 @@ pub fn vm_config_file(vm_dir: &Path) -> PathBuf {
     vm_dir.join("vm-config.json")
 }
 
+/// The guest serial-console capture log for a VM runtime directory.
+pub fn vm_console_log(vm_dir: &Path) -> PathBuf {
+    vm_dir.join("console.log")
+}
+
+/// The previous generation of the console capture, kept by
+/// [`rotate_console_log`].
+pub fn vm_console_log_last(vm_dir: &Path) -> PathBuf {
+    vm_dir.join("console.log.last")
+}
+
+/// Rotates the console evidence one generation back
+/// (`console.log` → `console.log.last`, atomically overwriting any
+/// previous generation) instead of destroying it.
+///
+/// The force-stop and recovery paths used to delete the log outright —
+/// destroying the only record of what the guest was doing when it was
+/// killed (the M2.5 freeze investigation depended on exactly this
+/// evidence). One generation is kept: more would grow unbounded in the
+/// runtime dir, less is what is being fixed here. A missing log is a
+/// no-op (nothing to keep); other failures are returned for the caller
+/// to warn about — evidence retention must never fail the stop itself.
+pub async fn rotate_console_log(vm_dir: &Path) -> std::io::Result<()> {
+    match tokio::fs::rename(vm_console_log(vm_dir), vm_console_log_last(vm_dir)).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Legacy-compatible NIC attachment identifier: `{vm_id}-{network_id}`.
 ///
 /// This exactly matches `cellhv_nodecache_migration::legacy_network_attachment_id`
@@ -260,4 +290,37 @@ pub trait HostResourceController: Send + Sync + 'static {
         network_id: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rotate_console_log_keeps_exactly_one_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(vm_console_log(dir.path()), b"gen-2").unwrap();
+        std::fs::write(vm_console_log_last(dir.path()), b"gen-1").unwrap();
+
+        rotate_console_log(dir.path()).await.unwrap();
+
+        assert!(
+            !vm_console_log(dir.path()).exists(),
+            "the live log must be rotated away"
+        );
+        assert_eq!(
+            std::fs::read(vm_console_log_last(dir.path())).unwrap(),
+            b"gen-2",
+            "the rename must atomically overwrite the previous generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_console_log_without_a_log_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        // No console.log: nothing to keep — not an error (the stop must
+        // never fail on evidence retention).
+        rotate_console_log(dir.path()).await.unwrap();
+        assert!(!vm_console_log_last(dir.path()).exists());
+    }
 }

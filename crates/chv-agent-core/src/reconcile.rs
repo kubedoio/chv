@@ -32,7 +32,9 @@ use tracing::{debug, error, info, warn};
 // node-state health observation the state machine needs in every mode). There
 // is no way to construct a core-managed Reconciler that can express provider
 // mutation.
-pub use chv_hypervisor_api::resources::{bridge_name_for_network, vm_runtime_dir};
+pub use chv_hypervisor_api::resources::{
+    bridge_name_for_network, rotate_console_log, vm_runtime_dir,
+};
 
 /// Maximum number of VMs to reconcile concurrently within a single tick.
 ///
@@ -1718,7 +1720,12 @@ async fn reconcile_one_vm(
         }
         let vm_dir = vm_runtime_dir(runtime_dir.as_path(), &vm_id);
         let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
-        let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
+        // Rotate, never delete: the console log is the only record of
+        // what the guest was doing before the recovery (see
+        // `rotate_console_log`).
+        if let Err(e) = rotate_console_log(&vm_dir).await {
+            warn!(vm_id = %vm_id, error = %e, "failed to rotate console.log during recovery cleanup");
+        }
         let recover_op_id = format!("reconcile-vm-recover-{}", vm_id);
 
         let mut stord = match StordClient::connect(stord_socket.as_path()).await {
@@ -1801,7 +1808,10 @@ async fn reconcile_one_vm(
                 let _ = vm_runtime.delete_vm(&vm_id, Some(&op_id)).await;
                 let vm_dir = vm_runtime_dir(runtime_dir.as_path(), &vm_id);
                 let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
-                let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
+                // Rotate, never delete (see `rotate_console_log`).
+                if let Err(e) = rotate_console_log(&vm_dir).await {
+                    warn!(vm_id = %vm_id, error = %e, "failed to rotate console.log during re-creation cleanup");
+                }
                 let recreate_op_id = format!("reconcile-vm-recreate-{}", vm_id);
 
                 let mut stord = match StordClient::connect(stord_socket.as_path()).await {

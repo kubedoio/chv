@@ -13,3 +13,6 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 nix = { workspace = true, features = ["fs", "user"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
