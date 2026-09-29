@@ -55,3 +55,29 @@ ignore in the same change — the gate enforces it.
   condition and the deferred #235-adjacent work).
 - No ignore was kept "just in case"; no ignore was broadened to make Security
   green.
+
+## 6. Addendum (2026-09-30) — reconciliation with senolcolak's deeper audit (PR #301)
+
+PR #301 (rebased onto this queue) found what the cargo-deny-only view above
+missed, and its findings supersede parts of §1–§4:
+
+1. **The `cargo audit` CI job never ran cargo-audit** — it ran cargo-deny a
+   second time, and `.cargo/audit.toml` was dead config whose header falsely
+   claimed the workflow consumed it. The job now runs the real
+   `rustsec/audit-check@v2` reading `.cargo/audit.toml`. This is not
+   redundant with cargo-deny: cargo-audit walks the raw lockfile with no
+   reachability filtering.
+2. **event-listener RUSTSEC-2026-0221** (unsound `StackSlot` `Send`/`Sync`,
+   patched 5.4.2) was invisible to cargo-deny 0.20.2 but reported by
+   cargo-audit; fixed by a single-package lockfile bump to 5.4.2.
+3. **The two tools have intentionally different ignore sets** — graph
+   reachability (deny.toml) vs raw lockfile (audit.toml). Notably
+   RUSTSEC-2023-0071 (`rsa`) is correctly absent from deny.toml (unreachable)
+   but retained in audit.toml (present in Cargo.lock). §2's "ignore removed"
+   verdict for rsa is therefore deny.toml-scoped only. Reconcile each file
+   against its own tool; the old "mirrored verbatim" comments were untrue.
+4. cargo-deny's `db-path = "~/.cargo/advisory-db"` tilde non-expansion cloned
+   the advisory DB into a literal `./~` tree; the override was removed.
+
+Verification on the reconciled tree: `cargo deny --all-features check
+advisories` → ok; `cargo audit` → clean (exit 0).
