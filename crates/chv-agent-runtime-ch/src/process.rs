@@ -2387,8 +2387,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 None
             };
             if let Some(path) = log_path {
-                let _ = tokio::fs::remove_file(&path).await;
-                info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop");
+                // Rotate, never delete: the console log is the only
+                // record of what the guest was doing when it was killed
+                // (see `rotate_console_log`).
+                if let Err(e) = chv_hypervisor_api::resources::rotate_console_log(
+                    path.parent().unwrap_or(Path::new("/")),
+                )
+                .await
+                {
+                    warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to rotate console.log on force stop (evidence may be lost)");
+                } else {
+                    info!(vm_id = %vm_id, path = %path.display(), "rotated console.log → console.log.last on force stop");
+                }
             }
         } else {
             // Graceful stop: send the ACPI power button so the guest OS can
@@ -2451,8 +2461,16 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     None
                 };
                 if let Some(path) = log_path {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop after graceful timeout");
+                    // Rotate, never delete (see `rotate_console_log`).
+                    if let Err(e) = chv_hypervisor_api::resources::rotate_console_log(
+                        path.parent().unwrap_or(Path::new("/")),
+                    )
+                    .await
+                    {
+                        warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to rotate console.log on force stop after graceful timeout (evidence may be lost)");
+                    } else {
+                        info!(vm_id = %vm_id, path = %path.display(), "rotated console.log → console.log.last on force stop after graceful timeout");
+                    }
                 }
                 // Force-kill fallback after graceful-stop timeout is still a
                 // successful stop from the caller's point of view: the VM is no
@@ -2465,6 +2483,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // Clear console caches after graceful shutdown. The VmProcess stays
             // in the map so a later vm.boot can restart it; we truncate the
             // on-disk log so the existing writer task can continue appending.
+            //
+            // Truncate, NOT rotate (`rotate_console_log`): the entry —
+            // and with it the console.log writer task — SURVIVES a
+            // graceful stop. Truncating in place keeps `console.log`
+            // present (the live console view reads it) and the
+            // surviving writer's fd pointed at the live file; a rename
+            // would leave console.log absent from that view until the
+            // next start re-spawns the VM and its writer, and would
+            // point any late bytes at `.last`. The graceful session's
+            // evidence is traded for that continuity by design; only
+            // the force paths (which drop the entry and its writer)
+            // rotate.
             let (pty_scrollback, log_path) = {
                 let vms = self.vms.read().await;
                 let proc = vms.get(vm_id);
@@ -5583,11 +5613,18 @@ mod tests {
             .await
             .unwrap();
 
-        // Post-stop assertions.
+        // Post-stop assertions: the entry and its scrollback are gone,
+        // and the console evidence is ROTATED one generation back, not
+        // deleted (the M2.5 freeze investigation depended on it).
         assert!(adapter.pty_scrollback("vm-test").await.is_none());
         assert!(
             !console_log.exists(),
-            "console.log should be removed on force stop"
+            "console.log should be rotated away on force stop"
+        );
+        assert_eq!(
+            std::fs::read(vm_dir.join("console.log.last")).unwrap(),
+            b"boot log line 1\nboot log line 2\n",
+            "the previous generation's console evidence must survive the force stop"
         );
     }
 

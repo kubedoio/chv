@@ -983,6 +983,7 @@ dependencies = [
  "chv-errors",
  "nix",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
 ]
