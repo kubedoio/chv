@@ -3350,7 +3350,14 @@ impl ProcessCloudHypervisorAdapter {
     /// Returns `NotFound` when the VM demonstrably never ran on this
     /// node (no runtime dir, no persisted payload, unsafe id, or
     /// adoption never recorded a runtime root) — the misroute rule: a
-    /// wrongly-addressed op must not be silently absorbed.
+    /// wrongly-addressed op must not be silently absorbed. One
+    /// deliberate exception: while the agent's graceful shutdown is in
+    /// progress (the `console_draining` latch), the shutdown refusal
+    /// short-circuits BEFORE the NotFound checks — during that window
+    /// every start is doomed regardless of routing, and failing closed
+    /// with a retryable error (rather than touching `/proc` or the
+    /// serial socket mid-drain) is the cheaper, uniform contract (the
+    /// heal and respawn paths stand down on the same latch).
     async fn readopt_stopped_vm(
         &self,
         vm_id: &str,
@@ -3461,7 +3468,11 @@ impl ProcessCloudHypervisorAdapter {
             let mut map = self.vms.write().await;
             // Never over a tracked entry (mirrors adoption): the op lock
             // serializes lifecycle ops, but a concurrent re-adoption or
-            // split-brain peer must not replace an Owned child.
+            // split-brain peer must not replace an Owned child. Note
+            // this early return drops any freshly minted connection
+            // without an explicit abandon — unreachable in practice
+            // (start_vm only calls readopt when the map lacks the id,
+            // under the same op lock) and pre-dates the drain latch.
             if map.contains_key(vm_id) {
                 info!(
                     vm_id = %vm_id,
@@ -5263,6 +5274,15 @@ mod tests {
     /// would abortively close it, the v43 serial-manager freeze hazard
     /// `drain_and_close_consoles` exists to prevent. The start fails
     /// closed (retryable after restart) and inserts no entry.
+    ///
+    /// This exercises the PRE-CONNECT check (the latch set before the
+    /// start). The post-lock abandon branch is only reachable when the
+    /// drain latches between that check and the map-lock acquisition —
+    /// a genuinely concurrent window this test cannot pin without
+    /// fragile timing; its mechanics (drop guard + dup, abandon the
+    /// fresh connection) are the same as the respawn path's post-lock
+    /// branch, which `drain_latch_suppresses_broadcaster_reconnect`
+    /// does cover.
     #[tokio::test]
     async fn start_during_console_drain_fails_closed() {
         use super::vm_config_file;
