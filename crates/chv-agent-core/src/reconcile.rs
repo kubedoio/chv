@@ -1716,7 +1716,20 @@ async fn reconcile_one_vm(
     if record.runtime_status == "Failed" {
         warn!(vm_id = %vm_id, failures = failures, "VM in Failed state, attempting recovery via re-create");
         if let Err(e) = vm_runtime.delete_vm(&vm_id, None).await {
-            warn!(vm_id = %vm_id, error = %e, "delete_vm failed during recovery cleanup");
+            // Fail closed on anything but NotFound: the delete's
+            // liveness gate refuses (retryable Internal) while a live
+            // VMM still owns the runtime dir and cannot be proven gone
+            // — re-creating on top of it would fork a second VMM onto
+            // one disk. NotFound (the VM never ran on this node) is the
+            // only error the re-create below may recover from.
+            if !matches!(e, ChvError::NotFound { .. }) {
+                warn!(vm_id = %vm_id, error = %e, "delete_vm failed during recovery cleanup; deferring the re-create");
+                vm_runtime
+                    .record_failure(vm_id.clone(), generation.clone(), e.to_string())
+                    .await;
+                return result;
+            }
+            warn!(vm_id = %vm_id, "delete_vm NotFound during recovery cleanup; proceeding with the re-create");
         }
         let vm_dir = vm_runtime_dir(runtime_dir.as_path(), &vm_id);
         let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
@@ -1805,7 +1818,20 @@ async fn reconcile_one_vm(
                 || err_str.contains("not found")
             {
                 warn!(vm_id = %vm_id, "CH process dead, re-creating VM");
-                let _ = vm_runtime.delete_vm(&vm_id, Some(&op_id)).await;
+                if let Err(e) = vm_runtime.delete_vm(&vm_id, Some(&op_id)).await {
+                    // Fail closed on anything but NotFound (same
+                    // discipline as the Failed-state recovery above):
+                    // the delete's liveness gate refusing means a live
+                    // VMM still owns the runtime dir — re-creating on
+                    // top of it would fork a second VMM onto one disk.
+                    if !matches!(e, ChvError::NotFound { .. }) {
+                        warn!(vm_id = %vm_id, error = %e, "delete_vm failed during re-creation cleanup; deferring the re-create");
+                        vm_runtime
+                            .record_failure(vm_id.clone(), generation.clone(), e.to_string())
+                            .await;
+                        return result;
+                    }
+                }
                 let vm_dir = vm_runtime_dir(runtime_dir.as_path(), &vm_id);
                 let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
                 // Rotate, never delete (see `rotate_console_log`).
