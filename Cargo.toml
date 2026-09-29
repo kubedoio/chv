@@ -74,7 +74,7 @@ crc32fast = "1"
 moka = { version = "0.12", features = ["future"] }
 aes-gcm = "0.11"
 s3 = { package = "rust-s3", version = "0.37", default-features = false, features = ["tokio", "tokio-native-tls", "reqwest"] }
-# Shared Kubedo stretched-L2 fabric provider (ADR-021), pinned to tag v0.1.2.
-fabric-plan = { git = "https://github.com/o3kio/fabric", tag = "v0.1.2" }
-fabric-linux = { git = "https://github.com/o3kio/fabric", tag = "v0.1.2" }
-fabric-conformance = { git = "https://github.com/o3kio/fabric", tag = "v0.1.2" }
+# Shared Kubedo stretched-L2 fabric provider (ADR-021), pinned to tag v0.1.4.
+fabric-plan = { git = "https://github.com/o3kio/fabric", tag = "v0.1.4" }
+fabric-linux = { git = "https://github.com/o3kio/fabric", tag = "v0.1.4" }
+fabric-conformance = { git = "https://github.com/o3kio/fabric", tag = "v0.1.4" }
