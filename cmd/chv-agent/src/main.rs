@@ -209,7 +209,13 @@ async fn start_core_managed(
 
 async fn start_core_native(
     config: &AgentConfig,
-) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        cellhv_core_runtime_owner::CoreRuntimeOwner,
+        Arc<ProcessCloudHypervisorAdapter>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let paths = cellhv_core_startup::StartupPaths {
         node_cache: config.cache_path.clone(),
         core_database: config.core_store_path.clone(),
@@ -226,8 +232,11 @@ async fn start_core_native(
     if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
         warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
     }
+    // Keep a concrete handle for the graceful-shutdown console drain;
+    // the dyn Arc below is the one the runtime uses.
+    let process_adapter = Arc::new(process_adapter);
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
-        Arc::new(process_adapter);
+        process_adapter.clone();
     let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
@@ -239,25 +248,28 @@ async fn start_core_native(
             config.runtime_dir.clone(),
         ),
     );
-    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
-        runtime,
-        activated,
-        &config.core_api_socket_path,
-        128,
-        Duration::from_secs(2),
-        cellhv_core_runtime_owner::JournalPollerConfig {
-            scan_interval: CORE_SCAN_INTERVAL,
-            scan_timeout: CORE_SCAN_TIMEOUT,
-            drain_budget: CORE_EXECUTOR_DRAIN_BUDGET,
-        },
-    )
-    .await?)
+    Ok((
+        cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+            runtime,
+            activated,
+            &config.core_api_socket_path,
+            128,
+            Duration::from_secs(2),
+            cellhv_core_runtime_owner::JournalPollerConfig {
+                scan_interval: CORE_SCAN_INTERVAL,
+                scan_timeout: CORE_SCAN_TIMEOUT,
+                drain_budget: CORE_EXECUTOR_DRAIN_BUDGET,
+            },
+        )
+        .await?,
+        process_adapter,
+    ))
 }
 
 async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
-    let owner = start_core_native(config).await?;
+    let (owner, process_adapter) = start_core_native(config).await?;
     info!(socket = %owner.socket_path().display(), "core-native authority ready");
     let mut fatality_check = tokio::time::interval(Duration::from_millis(500));
     fatality_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -280,13 +292,32 @@ async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error:
                     tracing::error!(
                         "core journal executor terminated fatally — exiting for supervisor restart"
                     );
-                    owner.shutdown().await?;
+                    // Drain consoles even when the owner shutdown itself
+                    // errors: an early `?` here would exit the process
+                    // with live serial connections undrained — the exact
+                    // freeze hazard the drain exists to prevent.
+                    let shutdown_result = owner.shutdown().await;
+                    // VMs outlive the agent: convert process exit into a
+                    // clean close of every live serial connection so a
+                    // running guest cannot be frozen by the exit itself.
+                    process_adapter.drain_and_close_consoles().await;
+                    shutdown_result?;
                     return Err("core journal executor terminated fatally".into());
                 }
             }
         }
     }
-    owner.shutdown().await?;
+    // Same discipline on the graceful exit: drain consoles even when the
+    // owner shutdown errors, then propagate the shutdown failure.
+    let shutdown_result = owner.shutdown().await;
+    // VMs outlive the agent: convert process exit into a clean close of
+    // every live serial connection so a running guest cannot be frozen
+    // by the exit itself (cloud-hypervisor v43 serial-manager defect —
+    // see ProcessCloudHypervisorAdapter::drain_and_close_consoles).
+    // Runs AFTER the owner shutdown: the executor's bounded drain inside
+    // it can keep lifecycle ops and console traffic alive until then.
+    process_adapter.drain_and_close_consoles().await;
+    shutdown_result?;
     Ok(())
 }
 
@@ -698,7 +729,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let process_adapter = ProcessCloudHypervisorAdapter::new(&config.chv_binary_path);
+    let process_adapter = Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
     // Rebuild the in-memory VM map from on-disk runtime state before any
     // mode wiring: VMs outlive agent restarts, and lifecycle ops must not
     // fail with NotFound against VMs this node still runs. Fail-soft: an
@@ -707,8 +738,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
         warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
     }
+    // The dyn Arc is the one the runtime uses; the concrete handle stays
+    // for the graceful-shutdown console drain at process exit.
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
-        Arc::new(process_adapter);
+        process_adapter.clone();
     let vm_runtime = VmRuntime::new(adapter.clone());
 
     let cache = Arc::new(tokio::sync::Mutex::new(cache));
@@ -716,7 +749,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut core_owner = None;
     if config.authority_mode == AgentAuthorityMode::CoreManaged {
         let owner =
-            start_core_managed(&config, adapter.clone(), &cache, config.cache_path.clone()).await?;
+            match start_core_managed(&config, adapter.clone(), &cache, config.cache_path.clone())
+                .await
+            {
+                Ok(owner) => owner,
+                Err(e) => {
+                    // Adoption above already attached live consoles: exit via
+                    // the same clean-close discipline as the graceful paths
+                    // so an early-startup failure cannot freeze a running
+                    // guest.
+                    process_adapter.drain_and_close_consoles().await;
+                    return Err(e);
+                }
+            };
         core_owner = Some(owner);
     }
 
@@ -743,14 +788,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let console_bind = config.console_bind.clone();
-    let console_listener = ConsoleServer::try_bind(&console_bind).await.map_err(|e| {
-        tracing::error!(
-            bind = %console_bind,
-            error = %e,
-            "FATAL: console server cannot bind"
-        );
-        e
-    })?;
+    let console_listener = match ConsoleServer::try_bind(&console_bind).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::error!(
+                bind = %console_bind,
+                error = %e,
+                "FATAL: console server cannot bind"
+            );
+            // Adoption above already attached live consoles: exit via the
+            // same clean-close discipline as the graceful paths so an
+            // early-startup failure cannot freeze a running guest.
+            process_adapter.drain_and_close_consoles().await;
+            return Err(e.into());
+        }
+    };
     let console_server = ConsoleServer::new(vm_runtime.clone(), config.jwt_secret.clone());
     tokio::spawn(async move {
         if let Err(e) = console_server.run(console_listener).await {
@@ -889,6 +941,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(owner) = core_owner.take() {
                         let _ = owner.shutdown().await;
                     }
+                    // VMs outlive the agent: convert process exit into a
+                    // clean close of every live serial connection so a
+                    // running guest cannot be frozen by the exit itself.
+                    process_adapter.drain_and_close_consoles().await;
                     return Err("core journal executor terminated fatally".into());
                 }
                 // Watchdog tick only: skip the 5 s body's heavy work.
@@ -914,6 +970,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // and in core-managed mode this process is the sole Core
                 // authority — a clean exit here would strand the node with
                 // no supervisor recovery (mirrors the executor-fatal path).
+                process_adapter.drain_and_close_consoles().await;
                 return Err("agent gRPC server exited unexpectedly".into());
             }
         }
@@ -1365,6 +1422,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // VMs outlive the agent: convert process exit into a clean close of
+    // every live serial connection so a running guest cannot be frozen
+    // by the exit itself (cloud-hypervisor v43 serial-manager defect —
+    // see ProcessCloudHypervisorAdapter::drain_and_close_consoles).
+    // Runs as the last act: the core owner / supervisor shutdown above
+    // (and the executor's bounded drain inside it) can keep lifecycle
+    // ops and console traffic alive until this point.
+    process_adapter.drain_and_close_consoles().await;
+
     Ok(())
 }
 
@@ -1445,7 +1511,7 @@ mod tests {
     async fn core_native_http_create_survives_restart_and_excludes_second_instance() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
         assert!(start_core_native(&config).await.is_err());
         let body = serde_json::json!({"request_id":"create-1","definition":{
             "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
@@ -1459,7 +1525,7 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 202"), "{response}");
         owner.shutdown().await.unwrap();
 
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
         let response = unix_http(
             &config,
             "GET /v1/vms HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1475,7 +1541,7 @@ mod tests {
     async fn core_native_concurrent_identical_creates_commit_once() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
         let body = serde_json::json!({"request_id":"create-1","definition":{
             "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
             "compute":{"vcpus":1,"memory_bytes":1048576},"storage":[],"networks":[],
@@ -1551,7 +1617,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = core_config(&directory);
         config.node_id = "  \t ".to_owned();
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
         let response = unix_http(
             &config,
             "GET /v1/host HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1573,7 +1639,7 @@ mod tests {
         std::fs::write(&config.core_api_socket_path, b"occupied").unwrap();
         assert!(start_core_native(&config).await.is_err());
         std::fs::remove_file(&config.core_api_socket_path).unwrap();
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
         owner.shutdown().await.unwrap();
     }
 
