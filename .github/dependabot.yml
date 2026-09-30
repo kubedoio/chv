@@ -62,6 +62,14 @@ updates:
       include: "scope"
     # reviewers:
     #   - "kubedoio/chv-frontend"
+    # vitest major upgrades are deferred until after the v0.3.0 release
+    # candidate window: the 3.x → 5.x jump is a breaking test-framework
+    # migration (PR #309 failed CI) tracked in the upgrade issue. Minor and
+    # patch updates, and any security update, still come through.
+    ignore:
+      - dependency-name: "vitest"
+        update-types:
+          - "version-update:semver-major"
     groups:
       npm-security:
         applies-to: "security-updates"
