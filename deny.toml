@@ -23,37 +23,23 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # usually indicate an upstream-acknowledged problem.
 yanked = "deny"
 
+# Fail when an ignore entry no longer matches any advisory in the actual
+# dependency graph — stale exceptions are policy debt, not safety.
+unused-ignored-advisory = "deny"
+
 # Advisory ignores. EVERY entry below MUST document:
 #   (a) why the advisory is non-applicable to CHV's runtime / threat model,
 #   (b) link to upstream tracking issue (or "no upstream fix" with rationale),
 #   (c) the removal condition (target version, milestone, or upstream event).
 #
+# `unmatched = "deny"` fails the gate when an ignore no longer matches any
+# advisory in the actual dependency graph (dependency removed/upgraded), so
+# stale exceptions cannot silently accumulate — they must be removed in the
+# same change that made them unnecessary. See prompt-03 workstream C
+# (docs/evidence/production-readiness/v0.3.0-rc1/03-security-reproducibility-governance/).
+#
 # See docs/specs/adr/ for the broader supply-chain posture.
 ignore = [
-    # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
-    #   (a) Non-applicable: CHV uses sqlx with only the `sqlite` feature.
-    #       The `rsa` crate enters the lockfile because sqlx 0.8's top-level
-    #       Cargo.toml unconditionally lists `sqlx-mysql` as a dep, which
-    #       depends on `rsa`. None of that code is compiled into CHV binaries.
-    #   (b) Upstream: https://github.com/RustCrypto/RSA/issues/19 (no patch).
-    #       sqlx side: https://github.com/launchbadge/sqlx/issues/2911
-    #   (c) Remove when sqlx makes sqlx-mysql/-postgres optional.
-    "RUSTSEC-2023-0071",
-    # RUSTSEC-2026-0173 — `proc-macro-error2` 2.x unmaintained.
-    #   (a) Non-applicable at runtime: this is a proc-macro build dep pulled
-    #       by `tabled_derive` 0.11 (used by `chvctl` for CLI table rendering).
-    #       It runs only at compile time, never in shipped binaries. The
-    #       advisory is informational ("unmaintained"), not a vulnerability.
-    #       Note: `proc-macro-error2` was originally created as a maintained
-    #       fork of `proc-macro-error` (RUSTSEC-2024-0370), which is now also
-    #       unmaintained. Both are dead ends; no safe upgrade.
-    #   (b) Upstream: https://github.com/GnomedDev/proc-macro-error-2/issues/17
-    #       tabled side: https://github.com/zhiburt/tabled/issues — track a
-    #       migration to a maintained alternative (manyhow, proc-macro2-diagnostics).
-    #   (c) Remove when chvctl migrates to a tabled version that uses a
-    #       maintained proc-macro helper, or migrates off tabled entirely.
-    "RUSTSEC-2026-0173",
-
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
     #   (a) Non-applicable as vuln: informational ("unmaintained"). The crate
     #       is pulled transitively by `tonic` 0.12 for client-side TLS PEM
@@ -65,23 +51,23 @@ ignore = [
     #       gRPC stack-wide change deferred from this supply-chain PR).
     "RUSTSEC-2025-0134",
 
-    # RUSTSEC-2026-0204 — `crossbeam-epoch` v0.9.18 Display pointer dereference.
-    #   (a) Non-applicable: pulled transitively via rayon-core / criterion
-    #       (dev/benchmark dependency). Never used or shipped in production binaries.
-    #   (b) Upstream: https://github.com/crossbeam-rs/crossbeam/pull/1276
-    #   (c) Remove when criterion/rayon updates crossbeam-epoch dependency.
-    "RUSTSEC-2026-0204",
-
     # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
     #   (a) Non-applicable: CHV does not parse untrusted XML with duplicate check enabled.
+    #       quick-xml enters via rust-s3 (S3 response parsing) — responses come
+    #       from the operator-configured S3-compatible endpoint, not untrusted
+    #       input. Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0194
-    #   (c) Remove on next quick-xml dependency update.
+    #   (c) Remove when rust-s3 / the dependency chain provides quick-xml >= 0.41.0
+    #       (tracked as #177).
     "RUSTSEC-2026-0194",
 
     # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
-    #   (a) Non-applicable: CHV does not use NsReader namespace resolution on untrusted XML.
+    #   (a) Non-applicable: CHV does not use NsReader namespace resolution on
+    #       untrusted XML (same rust-s3 path as RUSTSEC-2026-0194 above).
+    #       Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0195
-    #   (c) Remove on next quick-xml dependency update.
+    #   (c) Remove when rust-s3 / the dependency chain provides quick-xml >= 0.41.0
+    #       (tracked as #177).
     "RUSTSEC-2026-0195",
 ]
 
