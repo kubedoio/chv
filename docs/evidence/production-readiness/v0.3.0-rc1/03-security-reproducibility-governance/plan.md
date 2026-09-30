@@ -257,3 +257,14 @@ commit signing is configured for all committers —
 `./scripts/github-setup/apply-branch-protection.sh --enforce` — and record the
 verification in `main-protection.md`. Prompt 03's evidence links (§1 Evidence
 matrix) all point to the merged artifacts above.
+
+**Post-merge review (2026-09-30, after #313):** two comprehensive review
+rounds ran over the merged queue — see
+[`post-merge-review.md`](post-merge-review.md). Round 1 (#314) enforced the
+missing tag ruleset, set read-only default workflow token permissions,
+enabled platform-level SHA-pin enforcement, and resolved the Dependabot
+backlog (#308/#310 merged, vitest-major deferred to #315). Round 2 (#317)
+fixed the controlplane's broken dev-feature forwarding so the
+`InsecureModeLockedOut` operator contract is satisfiable, with a CI compile
+guard. `verify-settings.sh` now reports all `[OK]` except the single
+intentional staged-enforcement warning.
