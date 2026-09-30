@@ -17,12 +17,12 @@ jobs:
   buf:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
         with:
           # buf breaking needs full git history to compare against main.
           fetch-depth: 0
 
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1 (pinned 2026-09-30)
         with:
           version: '1.45.0'
 

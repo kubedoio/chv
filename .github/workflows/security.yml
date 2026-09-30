@@ -5,17 +5,10 @@ name: Security
 # - cargo audit  -> RustSec advisory database (RUSTSEC-XXXX)
 # - cargo deny   -> licenses, banned crates, advisories, sources (see deny.toml)
 #
-# Pinned action versions are listed below the `uses:` line so maintainers can
-# verify and rotate them. Replace with full commit SHAs for stricter pinning.
-#
-#   rustsec/audit-check@v2.0.0
-#     https://github.com/marketplace/actions/rust-audit-check
-#     SHA: <maintainer: pin to a commit SHA on next review>
-#
-#   EmbarkStudios/cargo-deny-action@v2
-#     https://github.com/marketplace/actions/cargo-deny
-#     Latest tag at time of authoring: v2.0.20
-#     SHA: <maintainer: pin to a commit SHA on next review>
+# Third-party actions are pinned to immutable commit SHAs with the moving tag
+# recorded in a trailing comment (updated by Dependabot's github-actions
+# ecosystem — see .github/dependabot.yml). Do not add tag-pinned actions to
+# security- or release-critical workflows.
 
 on:
   pull_request:
@@ -50,10 +43,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
       - name: Cache cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6 (pinned 2026-09-30)
         with:
           path: |
             ~/.cargo/registry/index
@@ -64,7 +57,7 @@ jobs:
             ${{ runner.os }}-cargo-audit-
 
       - name: Run cargo audit via cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2 (pinned 2026-09-30)
         with:
           command: check advisories
           arguments: --all-features
@@ -84,10 +77,10 @@ jobs:
           - sources
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
       - name: Cache cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6 (pinned 2026-09-30)
         with:
           path: |
             ~/.cargo/registry/index
@@ -99,7 +92,7 @@ jobs:
 
       - name: Run cargo deny (${{ matrix.check }})
         # EmbarkStudios/cargo-deny-action@v2
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2 (pinned 2026-09-30)
         with:
           command: check ${{ matrix.check }}
           # deny.toml lives at the repo root.
