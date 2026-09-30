@@ -76,6 +76,15 @@ updates:
   # ---------------------------------------------------------------------------
   # GitHub Actions used by workflows under .github/workflows
   # ---------------------------------------------------------------------------
+  # Pin policy (production-readiness prompt 03, workstream F): every
+  # third-party action is pinned to an immutable commit SHA with the moving
+  # tag recorded in a trailing comment on the `uses:` line, e.g.
+  #   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+  # Dependabot recognizes the comment's tag and proposes SHA updates as new
+  # versions release — pinning does not lose updateability. New actions must
+  # be pinned the same way; never add tag-pinned actions to security- or
+  # release-critical workflows.
+  # ---------------------------------------------------------------------------
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

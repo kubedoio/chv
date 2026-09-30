@@ -53,13 +53,13 @@ jobs:
       git_sha: ${{ steps.version.outputs.git_sha }}
       should_publish: ${{ steps.version.outputs.should_publish }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
       - name: Install Rust (pinned by rust-toolchain.toml)
         uses: ./.github/actions/setup-rust
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 (pinned 2026-09-30)
 
       - name: Install protoc
         # Pinned to a recent protoc (>= 3.15) so proto3 optional fields work
@@ -67,7 +67,7 @@ jobs:
         # package ships protoc 3.12, which predates that flag becoming
         # default. The arduino/setup-protoc action installs an official
         # protobuf release binary into the runner toolchain.
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3 (pinned 2026-09-30)
         with:
           version: '25.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
           nfpm --version
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7 (pinned 2026-09-30)
         with:
           node-version: '20'
           cache: 'npm'
@@ -161,7 +161,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
         with:
           name: nightly-packages
           path: |
@@ -208,10 +208,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
       - name: Download packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8 (pinned 2026-09-30)
         with:
           name: nightly-packages
           path: dist/packages/
@@ -278,7 +278,7 @@ jobs:
           GIT_SHA: ${{ needs.build-and-package.outputs.git_sha }}
 
       - name: Update nightly GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3 (pinned 2026-09-30)
         with:
           tag_name: nightly
           name: CHV Nightly
@@ -304,10 +304,10 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       (inputs.publish_target == 'repo' || inputs.publish_target == 'both')
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
       - name: Download packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8 (pinned 2026-09-30)
         with:
           name: nightly-packages
           path: dist/packages/
