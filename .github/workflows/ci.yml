@@ -81,6 +81,13 @@ jobs:
         timeout-minutes: 2
         run: python3 -B scripts/integration/core-native-agent-smoke.py --binary target/debug/chv-agent
 
+      - name: Build chv-controlplane process smoke binary
+        run: cargo build --package chv-controlplane
+
+      - name: Test fail-closed security startup (controlplane + agent)
+        timeout-minutes: 2
+        run: python3 -B scripts/integration/security-startup-smoke.py --controlplane target/debug/chv-controlplane --agent target/debug/chv-agent
+
       - name: Validate VERSION format
         run: |
           VERSION=$(cat VERSION)

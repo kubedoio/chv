@@ -65,7 +65,6 @@ jwt_secret = \"secret\"
     let exe = env!("CARGO_BIN_EXE_chv-agent");
     let mut agent = Command::new(exe)
         .arg(config_path)
-        .env("CHV_ALLOW_INSECURE", "1")
         .env("RUST_LOG", "debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

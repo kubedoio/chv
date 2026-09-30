@@ -561,9 +561,11 @@ start_services() {
     info "  PID: $NWD_PID"
 
     # --- Agent ---
-    info "Starting chv-agent (CHV_ALLOW_INSECURE=1)..."
-    CHV_ALLOW_INSECURE=1 \
-        "${BINARY_DIR}/chv-agent" "$TEST_DIR/agent.toml" \
+    # No CHV_ALLOW_INSECURE here: this agent is unenrolled (fresh cache) with
+    # TLS paths configured, so the insecure bypass is never consulted — and a
+    # production build now refuses the env var at startup (prompt 03 / #233).
+    info "Starting chv-agent..."
+    "${BINARY_DIR}/chv-agent" "$TEST_DIR/agent.toml" \
         > "$TEST_DIR/logs/agent.log" 2>&1 &
     AGENT_PID=$!
     info "  PID: $AGENT_PID"
