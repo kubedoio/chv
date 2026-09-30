@@ -29,7 +29,7 @@ the GitHub API on 2026-09-30:
 | actions/upload-artifact | v7 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 | arduino/setup-protoc | v3 | `c65c819552d16ad3c9b72d9dfd5ba5237b9c906b` |
 | softprops/action-gh-release | v3 | `efb35369e0ad2afab669f228072c1b0d510eae64` |
-| anchore/sbom-action | v0 | `e22c389904149dbc22b58101806040fa8d37a610` |
+| anchore/sbom-action | v0 | `e22c389904149dbc22b58101806040fa8d37a610` → `3ad7283483fc7af8ff2b4ea19663c2d5ca935e26` (0.24.2, updated by Dependabot #310) |
 | actions/attest-build-provenance | v4 | `4d101475d8b20a2381f78447822ac1eab6504dd8` |
 | bufbuild/buf-setup-action | v1 | `a47c93e0b1648d5651a065437926377d060baa99` |
 | actions/cache | v6 | `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` |
@@ -66,3 +66,11 @@ monthly github-actions pass proposes updates (accepted: monitored channel,
 same trade-off as any pinned supply chain). Note some refs are moving major
 branches (`v7`, `v2`, `v0`), so the comment tags denote major versions, not
 exact releases — Dependabot resolves the exact version on update.
+
+**The table above is a 2026-09-30 snapshot, not a living registry** — the
+source of truth for current SHAs is the workflows themselves. Pinning did
+not lose updateability: the first post-pin Dependabot update (#310,
+sbom-action 0.24.0 → 0.24.2) landed the same day and flowed through the
+normal required checks. Since then the platform setting
+`actions/permissions: sha_pinning_required=true` also enforces the policy
+at the GitHub level (see post-merge-review.md, findings F1–F3).
