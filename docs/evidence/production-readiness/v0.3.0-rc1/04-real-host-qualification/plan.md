@@ -1,0 +1,183 @@
+# CHV Production-Readiness — Prompt 04 Real-Host Qualification Plan
+
+> Campaign: [production-readiness](/docs/prompts/production-readiness/README.md)
+> Prompt: [04-real-host-qualification](/docs/prompts/production-readiness/04-real-host-qualification.md)
+> Capability maturity ladder: CODED / CI-VERIFIED / KVM-VERIFIED / MULTI-HOST-VERIFIED / RELEASED / FIELD-QUALIFIED.
+> Release boundary: [../00-execution-declaration.md](../00-execution-declaration.md) §3 (frozen).
+
+---
+
+## 1. Preconditions revalidated (2026-09-30, live)
+
+| Prompt-04 precondition | Status |
+|---|---|
+| Prompts 01–03 merged | ✅ 01: merge `731a89cf` (#256); 02: through `b95b90fb` (M2.5 run 10b 62/62); 03: `2d4853ed`–`fdfe9c3d` (#302–#318, post-merge review complete) |
+| Exact candidate SHA fixed | ✅ **`fdfe9c3d`** (main, 2026-09-30). CI + Security + Nightly green on it; nightly packages `0.2.0.nightly.20260930.gfdfe9c3` (.deb + .rpm × controlplane/node/chvctl) published with CI provenance |
+| Disposable real Linux/KVM hosts | ⚠️ single shared host (below) — same-host evidence, honestly labeled; no second physical host |
+| Package-equivalent layout | ✅ nightly `.deb` artifacts exist for the candidate; `install.sh` + `kvm-smoke.sh --packages` shape reusable |
+
+Maturity frame inherited: this prompt can advance capability to
+**KVM-VERIFIED** across the claimed matrix on the qualification host.
+MULTI-HOST-VERIFIED and above remain unprovable on this infrastructure
+(declaration §5) and are reported as unproven.
+
+## 2. Qualification environment (this host, recorded honestly)
+
+| Item | Value |
+|---|---|
+| Host | **4 vCPU, 7.8 GiB RAM**, 333 GiB free disk, `/dev/kvm`, Ubuntu kernel `6.8.0-139-generic`, x86_64, root |
+| vs. M2.5 host | **Different, smaller box** (M2.5 ran on 16 vCPU / 31 GiB). All prompt-04 evidence is generated fresh on this host; M2.5 evidence is not reused as this prompt's proof |
+| LVM | `lvm`/`vgcreate`/`losetup` present — LVM storage profile testable via loopback PV |
+| Container runtime | none installed; `apt` works (used in prompt 03) — `systemd-nspawn`/`debootstrap` installable for clean-install isolation |
+| VMM | cloud-hypervisor **v43.0.0** static release binary (download verified reachable) |
+| Firmware | rust-hypervisor-firmware **0.5.0** — repo renamed to `cloud-hypervisor/rust-hypervisor-firmware`; asset URL verified reachable |
+| Guest seed | Ubuntu noble server cloud image amd64 (qcow2) — verified reachable |
+
+**Resource constraint (recorded):** 4 vCPU / 7.8 GiB bounds the matrix to
+sequential single-guest legs (guest: 2 vCPU / 1 GiB, matching M2.5). No
+concurrency, density, or scale claim may be derived from this host; results
+are baseline measurements labeled with the exact hardware.
+
+**Host-reboot recovery:** the box is shared and cannot be rebooted. The
+"host reboot" leg of the prompt's lifecycle matrix is **not provable here**
+and will be recorded as such; the closest provable subset (full four-daemon
+stack restart with the VM running, cold-start reconciliation) is exercised
+instead and labeled as a subset.
+
+## 3. Workstreams (each a reviewable PR; harness code committed, evidence recorded)
+
+> Unlike M2.5 (host-local harness, quoted in evidence), prompt 04's harnesses
+> are **committed to the repo** under `scripts/integration/qual/` — reusable,
+> reviewable, and the evidence docs reference exact script + SHA.
+
+### M4.1 — Qualification harness + environment provisioning (PR-1)
+
+`scripts/integration/qual/`:
+- `env-preflight.sh` — root, `/dev/kvm`, pinned CH version, firmware/image
+  presence + sha256, repo SHA capture, binary staging to an isolated dir
+  (release build of the candidate; embedded `--version` strings recorded);
+- `deploy.sh` — the M2.5-proven candidate-path deployment as committed code:
+  self-signed CA, server cert (SAN localhost/127.0.0.1), real mTLS
+  (pre-placed client cert only for the EnrollNode handshake, then the
+  control-plane-issued node cert CN=node id), one-time bootstrap token via
+  the loopback-only internal endpoint, admin bcrypt seeding, `0700` agent
+  runtime dir (Core `validate_paths` contract), stord path allowlist,
+  `authority_mode = "core-managed"`, **no `CHV_ALLOW_INSECURE`**;
+- shared assert helpers (forbidden-outcome assertions first-class).
+
+Exit criteria: deploy.sh brings up control-plane → token seed → stord/nwd →
+agent on this host; enrollment issues the node cert; core API socket up;
+TenantReady; teardown cleans everything.
+
+### M4.2 — Clean installation baseline (PR-2)
+
+- Download the candidate's nightly `.deb`s (`gfdfe9c3`) — CI-built,
+  package-equivalent, provenance recorded;
+- install into an isolated clean container (`systemd-nspawn`/`debootstrap`,
+  same physical host — labeled) and on throwaway dirs via
+  `kvm-smoke.sh --packages` shape;
+- assert: service users, directories + modes, sockets, config validation,
+  startup ordering, systemd unit presence from packaging;
+- capture component versions + redacted config.
+
+### M4.3 — Lifecycle & recovery on real KVM (PR-3)
+
+Via `chvctl → BFF → control-plane → agent gRPC → Core → CH v43.0` on this
+host, single guest (`qual-vm-1`, 2 vCPU / 1 GiB, firmware boot, default
+network):
+
+create → start → guest-boot evidence (console.log kernel banner + login) →
+reboot (guest-level, same CH process) → stop → start → delete; plus:
+- **agent SIGKILL while Running** (S1 replay: CH survives, convergence,
+  exactly one CH process, no duplicate state);
+- **control-plane restart while Running** (VM unaffected, reconnect);
+- **management-plane outage/reconnect** (BFF/API unavailable window,
+  deterministic operation history after);
+- **full stack restart** (all four daemons, cold reconcile) — the provable
+  subset of host-reboot recovery, labeled as such;
+- identity + operation-history determinism asserted at every leg.
+
+### M4.4 — Network qualification (PR-4)
+
+- Prompt-01's privileged host-safety suite **rebuilt as a committed script**
+  (it was host-local in prompt 01) and executed against the candidate;
+- guest path: attach → connectivity → policy allow/deny → detach → cleanup →
+  restart/reconcile, with forbidden-outcome assertions on the host stack;
+- unsupported coexistence (K8s/CNI, Docker-forwarded, multi-bridge) recorded
+  as not claimed — inherited from prompt 01, restated.
+
+### M4.5 — Storage qualification (PR-5)
+
+The prompt's reusable contract
+(`validate → provision/consume → attach → guest write/read → restart/interruption → recover → detach → cleanup → repeat`)
+for **local file** and **LVM** (loopback PV → VG → LV) — the declared storage
+profiles. Ceph RBD / iSCSI: not claimed (declaration §3 non-scope).
+
+### M4.6 — Two-stord mTLS migration (PR-6)
+
+Positive: CA-issued identities for source/destination stord; migration over
+mTLS; dirty rounds + paused final sync execute; destination data verified
+(digest). Negative (each a dedicated leg, fail-closed asserted): missing TLS
+config; wrong CA; wrong destination identity/server name; mismatched
+keypair; malformed cert/key/CA; expired certificate (constructed via
+short-lived CA); plaintext endpoint/downgrade attempt; interrupted transfer
+with deterministic retry/recovery.
+
+### M4.7 — Fault & interruption matrix (PR-7)
+
+On real KVM (reusing M2.4's fault shapes at the process level): service
+restart during active operation; migration interruption; control-plane loss;
+agent reconnect; storage/network provider restart; repeated cleanup /
+idempotent retry. Every leg asserts **forbidden outcomes** (duplicate VM
+processes, lost/duplicated authoritative state, orphaned disks/taps), not
+merely eventual success.
+
+### M4.8 — Performance & soak baseline (PR-8)
+
+Measure, don't guess, all labeled with the exact hardware and "baseline
+measurement, not a scale claim": idle CPU/RSS per daemon; lifecycle
+operation latency; bounded concurrent API workload (control-plane latency);
+migration throughput on the qualified path; control-plane DB growth; open
+fd/socket growth; log/metric cardinality; bounded steady-state soak with
+repeated operations (sequential, resource-bounded on this host).
+
+### Evidence + status (PR-9)
+
+Evidence matrix vs. prompt-04 acceptance criteria; status section; residual
+risk; campaign declaration updates if any boundary changed.
+
+## 4. Evidence matrix (prompt-04 acceptance → milestone)
+
+| Acceptance criterion | Milestone |
+|---|---|
+| exact candidate passes real-KVM lifecycle and recovery | M4.3 (host-reboot leg: recorded not-provable, subset exercised) |
+| network isolation gate passes on real Linux | M4.4 |
+| every advertised storage path has real-system evidence | M4.5 (local file + LVM only) |
+| two-stord mTLS migration passes positive + negative identity cases | M4.6 |
+| backup claim includes restore validation or is explicitly narrowed | **explicitly narrowed** — excluded from RC claims (declaration §3; no evidence needed, claim absent) |
+| interruption/retry does not duplicate or lose authoritative state | M4.7 |
+| baseline performance/soak data without unsupported scale claims | M4.8 |
+| cleanup leaves no unexplained residue | every milestone's teardown asserts + final sweep |
+
+## 5. Scope & non-scope
+
+**In scope:** the frozen release boundary (declaration §3): CH-only VMM,
+deb/rpm host profile, one VXLAN topology, local file + LVM storage,
+single-host two-stord mTLS migration, single durable Core authority,
+UI/BFF/CLI for the reference deployment.
+
+**Out of scope (unchanged from the declaration):** backup/restore as DR
+(broken no-op manager — claim excluded); multi-host migration; Ceph/iSCSI;
+K8s/CNI coexistence; NetBox; VMware import; additional VMMs; control-plane
+HA; CH newer than v43.0 (the v43 serial-console upstream defect remains the
+recorded gate above KVM-VERIFIED; machinery-side remediation is complete
+and verified per M2.5 run 10b).
+
+**Stale-docs note (from the declaration, handled here):**
+`docs/specs/component/live-migration-spec.md:212` claims dirty rounds are
+never sent — contradicted by `sender.rs`; corrected as part of M4.6 so the
+spec matches the qualified reality.
+
+## 6. Status
+
+- **PR-0 (this document): in review.** M4.1–M4.9 planned, not started.
