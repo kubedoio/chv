@@ -27,7 +27,7 @@ REPO_SLUG=""
 
 if [ -n "${REMOTE_URL}" ]; then
     if [[ "${REMOTE_URL}" =~ github\.com[:/]([^/]+)/([^/]+)(\.git)?$ ]]; then
-        REPO_SLUG="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        REPO_SLUG="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
     fi
 fi
 
@@ -89,30 +89,46 @@ echo ""
 if [ "${GH_AVAILABLE}" -eq 1 ]; then
     echo "--- 3. Live GitHub Settings ---"
 
-    # Branch protection for main
-    BP_DATA=$(gh api "repos/${REPO_SLUG}/branches/main/protection" --header "Accept: application/vnd.github+json" 2>/dev/null || true)
-    if [ -n "${BP_DATA}" ] && [ "${BP_DATA}" != "{" ]; then
-        ok "Branch protection exists for 'main'"
+    # Branch protection for main (ruleset — the mechanism actually in use;
+    # the classic branches/main/protection API 404s when only a ruleset exists)
+    MAIN_RULESET=$(gh api "repos/${REPO_SLUG}/rulesets" --paginate 2>/dev/null \
+        | jq -r '.[] | select(.name == "protect-main") | .id' 2>/dev/null | head -1)
+    if [ -n "${MAIN_RULESET}" ]; then
+        ok "Ruleset 'protect-main' (id ${MAIN_RULESET}) exists for the default branch"
+        RULESET=$(gh api "repos/${REPO_SLUG}/rulesets/${MAIN_RULESET}" 2>/dev/null || true)
 
-        if echo "${BP_DATA}" | grep -q '"enforce_admins":{.*"enabled":true'; then
-            ok "Admin enforcement is enabled"
+        ENFORCEMENT=$(echo "${RULESET}" | jq -r '.enforcement' 2>/dev/null)
+        if [ "${ENFORCEMENT}" = "active" ]; then
+            ok "protect-main enforcement is active"
         else
-            warn "Admin enforcement may not be enabled"
+            warn "protect-main enforcement is '${ENFORCEMENT}' (staged until commit signing is universal — prompt 03 workstream E; apply with apply-branch-protection.sh --enforce)"
         fi
 
-        if echo "${BP_DATA}" | grep -q '"required_pull_request_reviews"'; then
+        if echo "${RULESET}" | jq -e '.rules[] | select(.type == "pull_request")' >/dev/null 2>&1; then
             ok "PR reviews are required"
         else
             error "PR reviews are NOT required"
         fi
 
-        if echo "${BP_DATA}" | grep -q '"required_status_checks"'; then
-            ok "Status checks are required"
+        if echo "${RULESET}" | jq -e '.rules[] | select(.type == "required_signatures")' >/dev/null 2>&1; then
+            ok "Commit signatures are required (once enforced)"
         else
-            warn "Status checks may not be required"
+            warn "Commit signature requirement not present in the ruleset"
         fi
+
+        for ctx in "Rust checks" "UI checks" "E2E tests" "cargo audit" \
+                   "cargo deny (advisories)" "cargo deny (bans)" \
+                   "cargo deny (licenses)" "cargo deny (sources)"; do
+            if echo "${RULESET}" | jq -e --arg c "${ctx}" \
+                '.rules[] | select(.type == "required_status_checks")
+                 | .parameters.required_status_checks[] | select(.context == $c)' >/dev/null 2>&1; then
+                ok "required check present: ${ctx}"
+            else
+                error "required check missing: ${ctx}"
+            fi
+        done
     else
-        error "No branch protection found for 'main'"
+        error "Ruleset 'protect-main' not found for 'main'"
     fi
 
     # Tag protection
@@ -192,7 +208,7 @@ echo "========================================"
 if [ "${ERRORS}" -gt 0 ]; then
     echo ""
     echo "Critical issues found. Run the setup scripts to fix:"
-    echo "  ./scripts/github-setup/apply-branch-protection.sh"
+    echo "  ./scripts/github-setup/apply-branch-protection.sh [--enforce]"
     echo "  ./scripts/github-setup/apply-tag-protection.sh"
     exit 1
 else
