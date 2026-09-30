@@ -1,0 +1,14 @@
+# Rust toolchain pin — the single source of truth for the compiler used by
+# CI, release packaging, KVM integration, and local development (#229).
+#
+# rustup reads this file automatically: any `cargo`/`rustc` invocation from
+# the repository root resolves to (and installs, if missing) this exact
+# toolchain. CI installs it explicitly via .github/actions/setup-rust.
+#
+# Bump procedure (docs/release/PIPELINE.md — "Rust toolchain"):
+#   1. Open a PR changing only this channel pin.
+#   2. CI (fmt/check/clippy/test), Security, and package smoke must pass.
+#   3. Merge as a reviewable tooling change — never let CI drift to a
+#      different compiler than this file declares.
+[toolchain]
+channel = "1.98.1"

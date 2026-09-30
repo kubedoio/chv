@@ -120,8 +120,8 @@ jobs:
           echo "Changelog section found:"
           head -5 /tmp/changelog-section.md
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

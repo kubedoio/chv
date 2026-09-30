@@ -6,7 +6,7 @@ Thank you for contributing to CHV. This document covers development setup, code 
 
 ### Required Tools
 
-- **Rust** — latest stable via [rustup](https://rustup.rs/)
+- **Rust** — the exact toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml); install it via [rustup](https://rustup.rs/) and rustup will select the pinned version automatically for any command run in this repository
 - **Node.js 20+** and npm — for the Web UI
 - **protobuf-compiler** — for regenerating gRPC bindings when proto files change
 - **Docker** (optional) — for containerized local deployment (`docker compose up`)

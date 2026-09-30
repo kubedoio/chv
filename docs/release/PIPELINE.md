@@ -2,8 +2,8 @@
 
 **Purpose:** This is the single source of truth for the CHV release engineering pipeline. If you are an LLM agent working on releases, packaging, CI/CD, or versioning, **read this file first** before exploring the repository.
 
-**Last updated:** 2026-09-28  
-**Version:** 0.1.1  
+**Last updated:** 2026-09-30  
+**Version:** 0.1.2  
 
 ---
 
@@ -32,10 +32,44 @@
 |------|------|--------|
 | Semantic version | `VERSION` | Plain text, e.g. `0.1.0` |
 | Per-crate version | `cmd/*/Cargo.toml` | Must match `VERSION` |
+| Rust toolchain | `rust-toolchain.toml` | Exact channel pin, e.g. `1.98.1` |
 | Changelog | `CHANGELOG.md` | Keep a Changelog format |
 | Git tag | `vX.Y.Z` or `vX.Y.Z-rc.N` | Must match `VERSION` |
 
 **Rule:** All 5 binary crates (`chv-controlplane`, `chv-agent`, `chv-stord`, `chv-nwd`, `chvctl`) share the same version. CI validates this.
+
+### Rust toolchain (#229)
+
+- **Source of truth:** `rust-toolchain.toml` pins the exact compiler channel.
+  rustup resolves it automatically for local development; CI, KVM integration,
+  nightly, PR-package, and release workflows install it through the in-repo
+  composite action `.github/actions/setup-rust`, which reads the same pin and
+  never selects a toolchain on its own.
+- **Why:** a floating `stable` let CI behavior change without any repository
+  commit (new lints in generated tonic/prost output failing unrelated PRs,
+  silently changed compiler behavior in release artifacts). The pin makes the
+  compiler input of every artifact reviewable and reproducible.
+- **Generated-code policy:** handwritten Rust stays `-D warnings`; the
+  generated crates under `gen/rust/*/src/lib.rs` carry only the narrow
+  crate-root `#![allow(clippy::result_large_err)]`. Generated files are
+  regenerated (`cargo build --workspace`), never hand-patched. A new compiler
+  lint can only be addressed by (in order of preference) a generator update, a
+  new narrow crate-root allow with review rationale, or a toolchain bump —
+  never a global `allow(warnings)`.
+
+**Toolchain-bump procedure:**
+
+1. Open a PR changing **only** the `channel` value in `rust-toolchain.toml`
+   (plus, if needed, a narrow generated-code lint adjustment).
+2. CI (fmt/check/clippy/test), Security, and package smoke must pass on that
+   PR — they run the proposed toolchain.
+3. Merge as a reviewable tooling change. Never let a workflow select a
+   different toolchain than the pin declares.
+4. Cadence: bump deliberately (e.g. with each minor release line), not
+   automatically. Coordinate MSRV-sensitive migrations (e.g. the deferred
+   tonic 0.12 → 0.14 upgrade, which changes generated output and MSRV) with a
+   bump so the two changes do not fight each other.
+
 
 ---
 

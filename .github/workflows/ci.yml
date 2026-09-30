@@ -20,8 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
