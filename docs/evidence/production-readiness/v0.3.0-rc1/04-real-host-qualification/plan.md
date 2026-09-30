@@ -188,4 +188,15 @@ spec matches the qualified reality.
   to `fdfe9c3d`); deployment smoke passes errors=0 warnings=0 with
   zero-residue teardown. Two findings filed: #320 (chvctl health routes),
   #321 (SQLite WAL unlink hazard). See [m4.1-harness.md](m4.1-harness.md).
-- M4.2–M4.9: not started.
+- M4.2 (clean installation baseline): **COMPLETE** —
+  `scripts/integration/qual/clean-install.sh` committed (clean noble
+  container via debootstrap + systemd-nspawn, Legs A static + B boot;
+  errors=0 warnings=3) plus the `kvm-smoke.sh --packages` host leg
+  (PASSED, real /dev/kvm). Static packaging contract holds; control plane
+  fails CLOSED on a bare install (packages↔install.sh boundary); agent
+  unit holds the /run Core contract. Four findings filed: #323 (stord
+  unit user vs storage ownership), #324 (nwd unit /run/netns), #325
+  (postinst group-membership grep bug), #326 (packaged legacy authority
+  default). Two kvm-smoke harness bugs fixed in-repo (v1 certs, cleanup
+  abort). See [m4.2-clean-install.md](m4.2-clean-install.md).
+- M4.3–M4.9: not started.
