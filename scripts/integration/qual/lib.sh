@@ -131,9 +131,10 @@ wait_for() {
 # Forbidden-outcome residue checks (used by every teardown)
 # ---------------------------------------------------------------------------
 # count_cloud_hypervisor_processes — number of running cloud-hypervisor
-# processes on the host (excluding grep itself).
+# processes on the host (excluding grep itself). pgrep exits 1 when none
+# match (the desired state) — must not trip pipefail.
 count_cloud_hypervisor_processes() {
-    pgrep -x cloud-hypervisor 2>/dev/null | wc -l | tr -d ' '
+    { pgrep -x cloud-hypervisor 2>/dev/null || true; } | wc -l | tr -d ' '
 }
 
 # assert_no_ch_residue DESC — no cloud-hypervisor processes remain.
@@ -197,12 +198,18 @@ PYEOF
 }
 
 # sqlite_query DB SQL — print rows (pipe-separated) from a sqlite DB.
+# CRITICAL: live reads of a database the control-plane has open MUST use a
+# read-only URI — a read-write python connection that closes while the CP's
+# pool connections are idle acquires the exclusive lock, checkpoints, and
+# UNLINKS the -wal/-shm sidecars; the CP's open connections then write new
+# commits into the unlinked WAL inode (silent data loss). Verified
+# empirically with strace (M4.1 evidence §4).
 sqlite_query() {
     local db="$1" sql="$2"
     python3 - "$db" "$sql" <<'PYEOF'
 import sqlite3, sys
 db, sql = sys.argv[1], sys.argv[2]
-conn = sqlite3.connect(db)
+conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 for row in conn.execute(sql):
     print("|".join(str(c) if c is not None else "" for c in row))
 conn.close()

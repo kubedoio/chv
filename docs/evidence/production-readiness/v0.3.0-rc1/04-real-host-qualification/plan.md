@@ -180,4 +180,12 @@ spec matches the qualified reality.
 
 ## 6. Status
 
-- **PR-0 (this document): in review.** M4.1–M4.9 planned, not started.
+- **PR-0 (plan): merged (`fa2b5724`).**
+- **M4.1 (harness + environment): COMPLETE** — `scripts/integration/qual/`
+  committed (lib.sh, env-preflight.sh, deploy.sh; shellcheck-clean);
+  environment provisioned (CH v43.0.0, firmware 0.5.0 matching the M2.5
+  digest, noble guest image); candidate `baa20c0e` staged (code-identical
+  to `fdfe9c3d`); deployment smoke passes errors=0 warnings=0 with
+  zero-residue teardown. Two findings filed: #320 (chvctl health routes),
+  #321 (SQLite WAL unlink hazard). See [m4.1-harness.md](m4.1-harness.md).
+- M4.2–M4.9: not started.
