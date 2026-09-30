@@ -224,4 +224,36 @@ Ordering rationale: B before F (F pins the `@master` ref B introduces); E last
 
 ## 6. Status
 
-- **PR-0 (this document): in review.** Workstreams A–F: planned, not started.
+**Prompt 03 is functionally complete.** All six workstreams merged to `main`
+(2026-09-30).
+
+- **PR-0 (#302, `2d4853ed`)** — this plan + baseline evidence.
+- **Workstream A (#304, `30ec55ad`)** — agent insecure-mode dev gating (#253
+  mirror) + process-level fail-closed startup smoke (S1/S2/S3).
+- **Workstream B (#303, `43e436e4`)** — `rust-toolchain.toml` pin (1.98.1) +
+  composite `setup-rust` action; closed #229.
+- **Workstream C (#305, `5ca3af8a`)** — advisory-truth cleanup: removed 3
+  stale ignores, `unused-ignored-advisory = "deny"`; closed #230, #146.
+  **Superseded in part by #312** (see below) — #312 found the `cargo audit`
+  CI job had never run cargo-audit and fixed `event-listener` 5.4.2
+  (RUSTSEC-2026-0221); evidence addendum in `advisory-truth.md` §6.
+- **Workstream D (#306, `d678e478`)** — GitHub-only vulnerability reporting;
+  private reporting enabled on the repo; placeholder email removed.
+- **Workstream E (#311, `2ab969ae`)** — ruleset-based `main` protection:
+  SHA/required-check manifest, `security.yml` path filter removed, rewritten
+  `apply-branch-protection.sh` (rulesets API, `--audit`/`--enforce`, guard
+  on unsigned commits) + `verify-settings.sh`. **Live:** the `protect-main`
+  ruleset definition now requires all eight checks; **enforcement remains
+  staged/disabled** pending universal commit signing (recorded gap —
+  see `main-protection.md`).
+- **Workstream F (#307, `ef4188d6`)** — all third-party actions SHA-pinned.
+- **Reconciled #301 → #312 (`3de5069a`)** — senolcolak's deeper advisory
+  truth (real `cargo audit` job, `event-listener` 5.4.2, audit.toml/deny.toml
+  semantic separation) rebased onto the merged queue with authorship
+  preserved; closes #230, #146 on the record.
+
+**Workstream E final step (open, maintainer action):** enable enforcement once
+commit signing is configured for all committers —
+`./scripts/github-setup/apply-branch-protection.sh --enforce` — and record the
+verification in `main-protection.md`. Prompt 03's evidence links (§1 Evidence
+matrix) all point to the merged artifacts above.
