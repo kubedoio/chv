@@ -1,0 +1,49 @@
+name: Setup Rust (rust-toolchain.toml)
+description: >
+  Install the exact Rust toolchain pinned by the repository's
+  rust-toolchain.toml. Bootstraps rustup first if the runner does not
+  have it (self-hosted KVM runners). Replaces the former floating
+  dtolnay/rust-toolchain@stable usage (#229): the pin file is the single
+  source of truth — this action never selects a toolchain on its own.
+
+inputs:
+  components:
+    description: >
+      Comma-separated additional components to install for the pinned
+      toolchain (e.g. "rustfmt, clippy"). The base install is minimal
+      (rustc, rust-std, cargo) — pass fmt/clippy in jobs that run them.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Bootstrap rustup if the runner has none (self-hosted runners).
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
+            --location --silent --show-error --fail \
+            https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+          export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+        fi
+
+        # The toolchain pin is authoritative — refuse to guess a toolchain.
+        channel="$(sed -ne 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        if [ -z "$channel" ]; then
+          echo "error: rust-toolchain.toml has no channel pin" >&2
+          exit 1
+        fi
+
+        rustup toolchain install "$channel" --profile minimal --no-self-update
+
+        components="${{ inputs.components }}"
+        if [ -n "$components" ]; then
+          rustup component add --toolchain "$channel" ${components//,/ }
+        fi
+
+        # Evidence: the exact compiler this job used.
+        rustc +"$channel" --version --verbose

@@ -14,6 +14,8 @@ CHV is a Rust-first virtualization management repository with a SvelteKit fronte
 
 ## Build Commands
 
+The Rust toolchain is pinned by `rust-toolchain.toml` (single source of truth — CI and release packaging use the same pin via `.github/actions/setup-rust`). Toolchain bumps are reviewable PRs that change only that pin; see `docs/release/PIPELINE.md`.
+
 ```bash
 # Rust workspace
 cargo build --workspace
