@@ -15,15 +15,15 @@ The single source of truth for the current release is the [`VERSION`](VERSION) f
 
 ## Reporting a Vulnerability
 
-Please **do not** open a public GitHub issue for security reports. Use one of the following private channels instead.
+Please **do not** open a public GitHub issue for security reports. Use GitHub's private vulnerability reporting instead:
 
-**Preferred — GitHub Security Advisories:**
+**GitHub Security Advisories (the reporting channel):**
 
-Open a private advisory via the repository's **Security → Advisories → Report a vulnerability** workflow. This creates a private channel between you and the maintainers, and lets us collaborate on a fix and CVE assignment if applicable.
+Open a private advisory via the repository's **Security → Advisories → Report a vulnerability** page (direct link: <https://github.com/kubedoio/chv/security/advisories/new>). This creates a private channel between you and the maintainers, and lets us collaborate on a fix and CVE assignment if applicable.
 
-**Alternative — email:**
-
-Send a report to `security@<your-domain>` <!-- MAINTAINER: replace `<your-domain>` with the project's real security contact. Match the address style used in `Cargo.toml` `authors = [...]` once that field is populated. -->. PGP encryption is optional; if you want an encrypted channel, request a key in your initial message.
+> This is the project's only reporting channel. It is private, does not require
+> an email mailbox, and is verified enabled on the repository. Do not send
+> reports to individual maintainers' personal addresses.
 
 **What to include in a report:**
 
