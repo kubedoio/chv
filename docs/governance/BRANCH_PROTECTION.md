@@ -1,32 +1,41 @@
 # Branch and Tag Protection
 
-This document describes the required GitHub repository settings for the CHV project. These settings **cannot be expressed as files in the repository**; they must be configured via the GitHub UI or the `gh` CLI.
+This document describes the required GitHub repository settings for the CHV project. These settings **cannot be expressed as files in the repository**; they must be configured via the GitHub UI, the `gh` CLI, or the rulesets API.
 
-> **Status:** These rules are the intended configuration. They must be applied by a repository admin.
+> **Status (2026-09-30, prompt 03 workstream E):** the `protect-main` **ruleset**
+> (id 17358522) exists and matches the specification below, including all eight
+> required status checks. **Enforcement is staged, not active**: the ruleset
+> includes `required_signatures`, and recent `main` history mixes signed and
+> unsigned commits — enabling enforcement before commit signing is universal
+> for all committers would block legitimate PRs. Once signing is set up, run
+> `./scripts/github-setup/apply-branch-protection.sh --enforce`.
 
 ---
 
-## Branch Protection Rule: `main`
+## Branch Ruleset: `protect-main`
 
-Apply to the default branch (`main`) via **Settings → Branches → Add rule**.
+Applied to the default branch (`main`) via **Settings → Rules → Rulesets** (the
+mechanism actually in use — the legacy branch-protection API is not).
 
-| Setting | Value | Rationale |
+| Rule | Value | Rationale |
 |---------|-------|-----------|
-| **Branch name pattern** | `main` | Protects the default branch |
+| **Restrict deletions** | ✅ Enabled | Prevents accidental branch deletion |
+| **Block force pushes** | ✅ Enabled (non-fast-forward) | Prevents history rewriting |
+| **Require signed commits** | ✅ Enabled | Cryptographic provenance for every commit |
 | **Require a pull request before merging** | ✅ Enabled | No direct pushes to `main` |
-| **Require approvals** | `1` minimum | At least one human review |
+| **Required approvals** | `1` minimum | At least one human review |
 | **Dismiss stale PR approvals when new commits are pushed** | ✅ Enabled | Prevents approval hijacking |
 | **Require review from CODEOWNERS** | ✅ Enabled | Enforces the ownership model in `.github/CODEOWNERS` |
-| **Require status checks to pass** | ✅ Enabled | CI must be green |
-| **Status checks that are required** | `Rust checks`, `UI checks` | Gates from `.github/workflows/ci.yml` |
-| **Require branches to be up to date before merging** | ✅ Enabled (recommended) | Prevents merge skew |
 | **Require conversation resolution before merging** | ✅ Enabled | Ensures all review threads are addressed |
-| **Require signed commits** | ✅ Enabled | Cryptographic provenance for every commit |
-| **Include administrators** | ✅ Enabled | Admins follow the same rules |
-| **Allow force pushes** | ❌ Disabled | Prevents history rewriting |
-| **Allow deletions** | ❌ Disabled | Prevents accidental branch deletion |
+| **Extra approval for unattributed changes** | ✅ Enabled | Changes pushed by someone other than the PR author need a second look |
+| **Require status checks to pass** | ✅ Enabled | CI and Security must be green |
+| **Status checks that are required** | `Rust checks`, `UI checks`, `E2E tests`, `cargo audit`, `cargo deny (advisories)`, `cargo deny (bans)`, `cargo deny (licenses)`, `cargo deny (sources)` | Gates from `.github/workflows/ci.yml` and `.github/workflows/security.yml` |
+| **Allowed merge methods** | merge, squash, rebase | Matches current conventions |
 
-> **Note:** The `E2E tests` job is intentionally omitted from required checks. It has a 15-minute timeout and depends on the UI job; making it required would slow down merges without adding material safety beyond the build checks.
+> **Note:** every required check must report on **every** PR. For that reason
+> `security.yml` has no `pull_request` path filter — a path-filtered workflow
+> leaves its checks unreported ("Expected") on PRs outside the filter and
+> blocks their merge once the check is required.
 
 ---
 
@@ -43,34 +52,19 @@ This prevents accidental or malicious tag creation that could trigger the releas
 
 ---
 
-## Rulesets (Recommended Alternative)
-
-If the repository has access to GitHub Rulesets (preferred over legacy branch protection):
-
-Create a **Branch ruleset** named `Protect main`:
-- Targets: `main`
-- Restrict deletions: ✅
-- Require signed commits: ✅
-- Require pull request: ✅ (1 approval, dismiss stale, CODEOWNERS, resolve conversations)
-- Require status checks: ✅ (`Rust checks`, `UI checks`)
-- Block force pushes: ✅
-- Require merge queue (optional): enables batched merges for high-velocity periods
-
-Create a **Tag ruleset** named `Protect version tags`:
-- Targets: `v*`
-- Restrict creations: ✅ (roles: admin, maintain)
-- Restrict updates: ✅
-- Restrict deletions: ✅
-
----
-
 ## Automated Application
 
-Run the helper script (requires `gh` CLI and repo admin access):
+Run the helper scripts (requires `gh` CLI and repo admin access):
 
 ```bash
-# Apply branch protection
+# Update the protect-main ruleset definition (keeps current enforcement state)
 ./scripts/github-setup/apply-branch-protection.sh
+
+# Activate enforcement (gated on commit-signing readiness — see the status note above)
+./scripts/github-setup/apply-branch-protection.sh --enforce
+
+# Print the live ruleset without changing anything
+./scripts/github-setup/apply-branch-protection.sh --audit
 
 # Apply tag protection
 ./scripts/github-setup/apply-tag-protection.sh

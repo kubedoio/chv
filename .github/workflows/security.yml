@@ -23,13 +23,11 @@ name: Security
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "**/Cargo.toml"
-      - "deny.toml"
-      - ".cargo/audit.toml"
-      - ".github/workflows/security.yml"
+    # NOTE (prompt 03 workstream E): no `paths` filter here. The Security
+    # checks are required status checks on the protect-main ruleset; a
+    # path-filtered workflow would leave its checks unreported ("Expected")
+    # on PRs that do not touch the filtered paths and block their merge.
+    # The full matrix runs in ~1 minute in parallel.
   push:
     branches: [main]
   schedule:
