@@ -15,7 +15,14 @@
 [advisories]
 version = 2
 # Advisory database mirrors. Default is the official RustSec advisory-db.
-db-path = "~/.cargo/advisory-db"
+#
+# NOTE (verified 2026-09-29, cargo-deny 0.20.2): cargo-deny does NOT
+# tilde-expand `db-path` — not user-provided values and not its own default.
+# With `db-path` unset it clones the advisory DB into a literal
+# `./~/.cargo/advisory-db` relative to the working directory. The repo
+# `.gitignore` covers `~`, so this litter is harmless; leave `db-path` unset
+# so local and CI behavior stay uniform. (cargo-audit, in contrast, DOES
+# expand `~` — see .cargo/audit.toml.)
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
 # A vulnerability is a hard fail. Unmaintained crates warn so we have time to
@@ -32,13 +39,27 @@ unused-ignored-advisory = "deny"
 #   (b) link to upstream tracking issue (or "no upstream fix" with rationale),
 #   (c) the removal condition (target version, milestone, or upstream event).
 #
-# `unmatched = "deny"` fails the gate when an ignore no longer matches any
-# advisory in the actual dependency graph (dependency removed/upgraded), so
-# stale exceptions cannot silently accumulate — they must be removed in the
-# same change that made them unnecessary. See prompt-03 workstream C
-# (docs/evidence/production-readiness/v0.3.0-rc1/03-security-reproducibility-governance/).
+# Truth discipline (prompt 03): this list is reconciled against the actual
+# Cargo.lock AND cargo-deny's feature-aware dependency graph on every
+# cleanup — entries whose crate/version no longer matches are REMOVED, not
+# kept "just in case" (cargo-deny reports each non-matching ignore as
+# `advisory-not-detected`, and `unused-ignored-advisory = "deny"` above
+# turns that into a gate failure). Note the companion `.cargo/audit.toml`
+# (consumed by the real `cargo audit` CI job) walks the raw lockfile with
+# NO reachability filtering, so its ignore set is intentionally a superset
+# of this one (e.g. RUSTSEC-2023-0071): a crate can be unreachable in the
+# build graph (no deny.toml entry needed) yet still present in Cargo.lock
+# (audit.toml entry needed). Reconcile each file against its own tool.
 #
-# See docs/specs/adr/ for the broader supply-chain posture.
+# Removed 2026-09-29 (prompt 03 reconciliation, issue #230):
+#   RUSTSEC-2023-0071 (rsa) — `rsa` is unreachable in the build graph
+#     (sqlx-mysql never compiled; sqlite-only features), so cargo-deny does
+#     not encounter it. The entry REMAINS in .cargo/audit.toml because
+#     cargo-audit is lockfile-wide — see above.
+#   RUSTSEC-2026-0173 (proc-macro-error2) — the crate left the dependency
+#     graph entirely (tabled 0.22 dropped it); issue #146 closed.
+#   RUSTSEC-2026-0204 (crossbeam-epoch) — crossbeam-epoch 0.9.21 is outside
+#     the advisory's affected range.
 ignore = [
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
     #   (a) Non-applicable as vuln: informational ("unmaintained"). The crate
@@ -57,8 +78,9 @@ ignore = [
     #       from the operator-configured S3-compatible endpoint, not untrusted
     #       input. Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0194
-    #   (c) Remove when rust-s3 / the dependency chain provides quick-xml >= 0.41.0
-    #       (tracked as #177).
+    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
+    #   (c) Remove on the next quick-xml dependency update (tracked as
+    #       issue #177 — explicit debt until the rust-s3 path moves).
     "RUSTSEC-2026-0194",
 
     # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
@@ -66,8 +88,9 @@ ignore = [
     #       untrusted XML (same rust-s3 path as RUSTSEC-2026-0194 above).
     #       Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
     #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0195
-    #   (c) Remove when rust-s3 / the dependency chain provides quick-xml >= 0.41.0
-    #       (tracked as #177).
+    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
+    #   (c) Remove on the next quick-xml dependency update (tracked as
+    #       issue #177 — explicit debt until the rust-s3 path moves).
     "RUSTSEC-2026-0195",
 ]
 
