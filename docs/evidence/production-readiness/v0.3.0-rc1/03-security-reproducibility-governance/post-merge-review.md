@@ -51,3 +51,27 @@ staged on the commit-signing prerequisite (one maintainer action:
 open with removal conditions. Nothing new was introduced by this round; all
 changes are reversible (revert the PR, re-run the scripts with the previous
 definitions, or flip the two Actions-permission settings back).
+
+## 5. Review round 2 (same day, after #314 merged)
+
+Second full pass with fresh eyes over the merged prompt-03 surface.
+
+**Verified clean:** CI/Security/Nightly green on `5921f523` (including under
+the new platform settings from round 1 — SHA-pin requirement and read-only
+token default); zero unpinned third-party actions; all 7 workflows carry
+explicit permissions blocks; issue hygiene correct (#177/#235/#315 open as
+tracked debt, everything else closed); no Dependabot PR backlog.
+
+| # | Finding | Severity | Fix |
+|---|---------|----------|-----|
+| F7 | **The controlplane's dev-build operator contract was impossible to satisfy** — `InsecureModeLockedOut` (from #233/#253) tells operators to "rebuild with: cargo build --features dev", but `cmd/chv-controlplane` had no `dev` feature: it existed only on the `chv-controlplane-service` dependency and was never forwarded, so the documented command fails. Nothing in the repo ever compiled the dev path for the controlplane. | High (operator contract broken; dev-mode guidance dead end) | `cmd/chv-controlplane` now forwards the feature (`dev = ["chv-controlplane-service/dev"]`); ci.yml gained a compile guard (`cargo check -p chv-controlplane -p chv-agent --features dev`) so the forwarding cannot silently break again; CHANGELOG entry added. Verified locally: dev-feature build with `CHV_ALLOW_INSECURE=1` passes `validate_security_mode` and `validate_tls` and proceeds into bootstrap (no lockout markers), while the production-build smoke S1/S2/S3 still passes. |
+| F8 | `REPOSITORY_HARDENING.md` references and `docs/plans/*` references to the archived `task_plan.md`. | Informational | Left as-is: the hardening checklist is mechanism-agnostic and still accurate ("branch protection rule or ruleset"); the plan docs are historical records of June work and are not updated retroactively. |
+| F9 | Dependabot reruns on `main` after the ignore rule landed. | None (expected) | Confirmed no new vitest-major PR was opened; backlog empty. |
+
+No further defects found in this round: the agent gate (main.rs:586) is
+placed before all runtime wiring and its enrolled-mTLS re-check (~line 774)
+is unreachable in production builds (defense-in-depth, consistent with the
+controlplane's interceptor-level repeat); the controlplane gate
+(`peer_identity.rs::validate_security_mode`) is the same shape and is now
+actually reachable in dev builds.
+

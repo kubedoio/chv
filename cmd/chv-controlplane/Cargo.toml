@@ -9,6 +9,14 @@ publish = false
 name = "chv-controlplane"
 path = "src/main.rs"
 
+[features]
+# Forwarded to the service crate so the operator contract in the
+# `InsecureModeLockedOut` error message (#233 / PR #253) — "rebuild with:
+# cargo build --features dev" — is actually satisfiable. Without this
+# forwarding, `cargo build -p chv-controlplane --features dev` fails because
+# the feature only existed on the dependency crate.
+dev = ["chv-controlplane-service/dev"]
+
 [dependencies]
 chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
