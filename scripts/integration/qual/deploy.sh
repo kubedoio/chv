@@ -128,6 +128,19 @@ cleanup() {
     pkill -x cloud-hypervisor 2>/dev/null || true
     sleep 1
 
+    # Remove nwd-owned links this deployment created (bridges 'br-*' and taps
+    # 'tap-*' — see chv-nwd-core state.rs/executor.rs naming). Scoped by the
+    # baseline diff so pre-existing host links are never touched.
+    ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' \
+        | sort > "${TEST_DIR}/links.mid" || true
+    comm -13 "${TEST_DIR}/links.before" "${TEST_DIR}/links.mid" \
+        | grep -E '^(br-|tap-)' | grep -v '^$' > "${TEST_DIR}/links.owned" || true
+    while IFS= read -r iface; do
+        [ -n "$iface" ] || continue
+        qual_info "teardown: deleting nwd link ${iface}"
+        ip link delete "$iface" 2>/dev/null || true
+    done < "${TEST_DIR}/links.owned"
+
     # --- Forbidden-outcome residue assertions ---
     assert_no_ch_residue "teardown"
     ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' \
@@ -148,8 +161,16 @@ cleanup() {
         qual_error "teardown: FORBIDDEN new nft tables remain: $(echo "$new_tables" | tr '\n' ' ')"
     fi
 
-    rm -rf "$TEST_DIR"
-    qual_info "teardown complete (test dir removed)"
+    # Keep the test dir for post-mortem if anything failed; remove on success.
+    if [ "${QUAL_ERRORS}" -gt 0 ]; then
+        local kept
+        kept="/tmp/chv-qual-failed-$(basename "$TEST_DIR")"
+        mv "$TEST_DIR" "$kept" 2>/dev/null || kept="$TEST_DIR"
+        qual_error "teardown: test dir preserved for post-mortem: ${kept}"
+    else
+        rm -rf "$TEST_DIR"
+        qual_info "teardown complete (test dir removed)"
+    fi
     return "$rc" 2>/dev/null || exit "$rc"
 }
 trap cleanup EXIT
@@ -382,9 +403,9 @@ qual_chvctl image import ubuntu-noble --url "file://${images_dir}/${GUEST_IMAGE}
     || qual_error "image import failed"
 
 # Health check.
-qual_chvctl health overview >/dev/null 2>&1 \
-    && qual_pass "chvctl health overview OK" \
-    || qual_warn "chvctl health overview returned non-zero"
+qual_chvctl health check >/dev/null 2>&1 \
+    && qual_pass "chvctl health check OK" \
+    || qual_warn "chvctl health check returned non-zero"
 
 # ---------------------------------------------------------------------------
 # 5. Deployment map (for scenario scripts) + summary
