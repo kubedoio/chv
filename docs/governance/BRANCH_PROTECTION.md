@@ -39,14 +39,18 @@ mechanism actually in use — the legacy branch-protection API is not).
 
 ---
 
-## Tag Protection Rule
+## Tag Ruleset: `protect-tags`
 
-Apply via **Settings → Tags → Add rule**.
+Applied to version tags via **Settings → Rules → Rulesets** (managed by
+`apply-tag-protection.sh`, same mechanism as `protect-main`).
 
-| Setting | Value | Rationale |
+| Rule | Value | Rationale |
 |---------|-------|-----------|
-| **Tag name pattern** | `v*` | Protects all version tags |
-| **Restrict creations** | ✅ Enabled | Only maintainers/admins can create version tags |
+| **Tag name pattern** | `refs/tags/v*` | Protects all version tags |
+| **Restrict creations** | ✅ Enabled | Only admins/maintainers can create version tags |
+| **Restrict updates** | ✅ Enabled | Tags cannot be force-moved |
+| **Restrict deletions** | ✅ Enabled | Tags cannot be deleted |
+| **Enforcement** | ✅ Active | No signing prerequisite — no workflow creates tags; `release.yml` only reacts to tag pushes |
 
 This prevents accidental or malicious tag creation that could trigger the release workflow (`release.yml`).
 

@@ -131,20 +131,42 @@ if [ "${GH_AVAILABLE}" -eq 1 ]; then
         error "Ruleset 'protect-main' not found for 'main'"
     fi
 
-    # Tag protection
-    TP_DATA=$(gh api "repos/${REPO_SLUG}/tags/protection" --header "Accept: application/vnd.github+json" 2>/dev/null || true)
-    if [ -n "${TP_DATA}" ] && echo "${TP_DATA}" | grep -q '"pattern"'; then
-        ok "Tag protection rule(s) exist"
+    # Tag protection (ruleset — the mechanism apply-tag-protection.sh manages)
+    TAG_RULESET=$(gh api "repos/${REPO_SLUG}/rulesets" --paginate 2>/dev/null \
+        | jq -r '.[] | select(.name == "protect-tags") | .id' 2>/dev/null | head -1)
+    if [ -n "${TAG_RULESET}" ]; then
+        TAGRS=$(gh api "repos/${REPO_SLUG}/rulesets/${TAG_RULESET}" 2>/dev/null || true)
+        TAG_ENF=$(echo "${TAGRS}" | jq -r '.enforcement' 2>/dev/null)
+        if [ "${TAG_ENF}" = "active" ]; then
+            ok "Tag ruleset 'protect-tags' (id ${TAG_RULESET}) is enforced"
+        else
+            warn "Tag ruleset 'protect-tags' enforcement is '${TAG_ENF}'"
+        fi
+        for r in creation update deletion; do
+            if echo "${TAGRS}" | jq -e --arg t "$r" '.rules[] | select(.type == $t)' >/dev/null 2>&1; then
+                ok "tag rule present: ${r}"
+            else
+                error "tag rule missing: ${r}"
+            fi
+        done
     else
-        warn "No tag protection rules found (legacy API); verify in UI or use Rulesets."
+        error "Tag ruleset 'protect-tags' not found (run apply-tag-protection.sh)"
     fi
 
-    # Default workflow permissions
-    REPO_DATA=$(gh api "repos/${REPO_SLUG}" --header "Accept: application/vnd.github+json" 2>/dev/null || true)
-    if echo "${REPO_DATA}" | grep -q '"default_workflow_permissions":"read"'; then
+    # Default workflow token permissions (Actions permissions API)
+    WF_PERMS=$(gh api "repos/${REPO_SLUG}/actions/permissions/workflow" 2>/dev/null || true)
+    if echo "${WF_PERMS}" | grep -q '"default_workflow_permissions":"read"'; then
         ok "Default workflow token permissions are read-only"
     else
-        warn "Default workflow token permissions may be write-all; recommended: read-only"
+        warn "Default workflow token permissions are not read-only (repos/<slug>/actions/permissions/workflow)"
+    fi
+
+    # Actions SHA-pinning requirement (platform enforcement of the pin policy)
+    ACT_PERMS=$(gh api "repos/${REPO_SLUG}/actions/permissions" 2>/dev/null || true)
+    if echo "${ACT_PERMS}" | grep -q '"sha_pinning_required":true'; then
+        ok "Actions SHA pinning is required at the platform level"
+    else
+        warn "Actions SHA pinning is not required at the platform level"
     fi
 else
     echo "--- 3. Live GitHub Settings ---"
