@@ -88,6 +88,12 @@ jobs:
         timeout-minutes: 2
         run: python3 -B scripts/integration/security-startup-smoke.py --controlplane target/debug/chv-controlplane --agent target/debug/chv-agent
 
+      - name: Verify dev-feature gate compiles (operator contract)
+        # The InsecureModeLockedOut guidance tells operators to rebuild with
+        # `cargo build --features dev`; this guard fails if that path breaks
+        # (e.g. feature forwarding removed — prompt-03 post-merge review F7).
+        run: cargo check -p chv-controlplane -p chv-agent --features dev
+
       - name: Validate VERSION format
         run: |
           VERSION=$(cat VERSION)

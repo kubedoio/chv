@@ -50,7 +50,10 @@ temp/
 *.bak
 
 # Rust
+# `target/` plus ad-hoc alternate target dirs (e.g. `cargo build --target-dir
+# target-dev ...`) — a stray `git add -A` must never swallow build output.
 target/
+target-*/
 
 # Node
 node_modules/
