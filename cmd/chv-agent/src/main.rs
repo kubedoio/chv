@@ -572,6 +572,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     init_logger(&config.log_level)?;
 
+    // Security-mode gate (production-readiness prompt 03, workstream A;
+    // mirrors the control plane's `validate_security_mode` from #233/PR #253):
+    // `CHV_ALLOW_INSECURE=1` relaxes the enrolled-agent mTLS credential
+    // requirement and is valid only on builds compiled with the `dev` Cargo
+    // feature. Validated here — before the authority-mode branch, the cache,
+    // any listener, adapter, or runtime wiring — so a production build that
+    // requests insecure mode exits with a clean, operator-greppable error
+    // instead of running without its peer identity.
+    let allow_insecure_requested = std::env::var("CHV_ALLOW_INSECURE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if allow_insecure_requested && !cfg!(feature = "dev") {
+        return Err(
+            "CHV_ALLOW_INSECURE=1 is set but this build does not have the 'dev' Cargo feature. \
+             This env var relaxes the enrolled-agent mTLS credential requirement and must never \
+             be enabled in production. To use it for local development, rebuild with: \
+             cargo build --features dev"
+                .into(),
+        );
+    }
+
     info!(
         "{} starting (version {}, commit {}, channel {})",
         env!("CARGO_PKG_NAME"),

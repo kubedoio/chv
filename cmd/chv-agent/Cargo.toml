@@ -9,6 +9,14 @@ publish = false
 name = "chv-agent"
 path = "src/main.rs"
 
+# Development-only insecure mode. When enabled, `CHV_ALLOW_INSECURE=1` may
+# relax the enrolled-agent mTLS credential requirement (local development).
+# Production builds (no `dev` feature) refuse the env var at startup with a
+# typed error — mirroring `chv-controlplane-service`'s `validate_security_mode`
+# (#233, PR #253; production-readiness prompt 03 workstream A).
+[features]
+dev = []
+
 [dependencies]
 chv-common = { path = "../../crates/chv-common" }
 chv-config = { path = "../../crates/chv-config" }
