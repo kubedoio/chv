@@ -129,11 +129,14 @@ cleanup() {
     pkill -f "cloud-hypervisor.*${TEST_NAME}" 2>/dev/null || true
 
     # Remove temporary bridges
+    # NOTE: `|| true` is required on the whole pipeline: with pipefail, a
+    # no-match grep (no test bridges exist) would otherwise abort the EXIT
+    # trap mid-cleanup, leaving packages installed and TEST_DIR behind.
     ip link show 2>/dev/null | grep -E "${TEST_NAME}-br-" | awk -F: '{print $2}' | while read -r iface; do
         iface="$(echo "$iface" | xargs)"
         info "Removing bridge: $iface"
         ip link delete "$iface" 2>/dev/null || true
-    done
+    done || true
 
     # Remove packages if we installed them
     if [[ -n "$PACKAGE_DIR" ]]; then
@@ -403,21 +406,35 @@ generate_dev_environment() {
     openssl req -new -key "$certs_dir/server.key" \
         -out "$certs_dir/server.csr" \
         -subj "/O=CHV Integration Test/CN=localhost" 2>/dev/null
+    # NOTE: `openssl x509 -req` without -extfile emits X.509 **v1**, which
+    # rustls/webpki rejects (UnsupportedCertVersion) — every leaf cert must
+    # be explicitly v3 via an extfile (same fix as scripts/integration/qual/deploy.sh).
+    cat > "$certs_dir/server.ext" <<EOF
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:localhost, IP:127.0.0.1
+EOF
     openssl x509 -req -in "$certs_dir/server.csr" \
         -CA "$certs_dir/ca.crt" -CAkey "$certs_dir/ca.key" \
         -CAcreateserial -out "$certs_dir/server.crt" \
-        -days 1 -sha256 2>/dev/null
-    rm -f "$certs_dir/server.csr"
+        -days 1 -sha256 -extfile "$certs_dir/server.ext" 2>/dev/null
+    rm -f "$certs_dir/server.csr" "$certs_dir/server.ext"
 
     openssl genrsa -out "$certs_dir/agent-client.key" 2048 2>/dev/null
     openssl req -new -key "$certs_dir/agent-client.key" \
         -out "$certs_dir/agent-client.csr" \
         -subj "/O=CHV Integration Test/CN=kvm-test-node" 2>/dev/null
+    cat > "$certs_dir/agent-client.ext" <<EOF
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
+EOF
     openssl x509 -req -in "$certs_dir/agent-client.csr" \
         -CA "$certs_dir/ca.crt" -CAkey "$certs_dir/ca.key" \
         -CAcreateserial -out "$certs_dir/agent-client.crt" \
-        -days 1 -sha256 2>/dev/null
-    rm -f "$certs_dir/agent-client.csr"
+        -days 1 -sha256 -extfile "$certs_dir/agent-client.ext" 2>/dev/null
+    rm -f "$certs_dir/agent-client.csr" "$certs_dir/agent-client.ext"
 
     chmod 644 "$certs_dir"/*.crt
     chmod 600 "$certs_dir"/*.key
