@@ -343,6 +343,10 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/local/bin/chv-stord"
 nwd_binary_path = "/usr/local/bin/chv-nwd"
 cache_path = "/var/lib/chv/cache/agent-cache.json"
+# Single durable lifecycle authority (prompt-02 cutover): core-managed runs
+# CellHV Core as the sole authority on this node — the qualified default.
+# "legacy" is a compatibility adapter only (explicit opt-in).
+authority_mode = "core-managed"
 node_id = ""
 metrics_bind = "127.0.0.1:9901"
 bootstrap_token_path = "/etc/chv/bootstrap.token"
@@ -371,9 +375,9 @@ healthy_reset_secs = 900        # sustained health resets the budget
 socket_path = "/run/chv/nwd/api.sock"
 runtime_dir = "/run/chv/nwd"
 log_level = "info"
-bridge_name = "chvbr0"
-bridge_cidr = "10.200.0.1/24"
-upstream_iface = "ens19"
+
+# Bridge topology (bridge name, CIDR, upstream interface) is configured at
+# runtime via gRPC topology specs from the control plane, not in this file.
 ```
 
 **`/etc/chv/stord.toml`**
@@ -383,7 +387,24 @@ runtime_dir = "/var/lib/chv/storage/localdisk"
 log_level = "info"
 ```
 
-### 8. systemd Services
+### 8. Credential Encryption Key
+
+The control plane encrypts S3 backup credentials at rest
+(AES-256-GCM). Generate the key once and never regenerate it — a
+database restored without the matching key cannot read stored
+credentials:
+
+```bash
+sudo sh -c 'umask 077; printf "CHV_ENCRYPTION_KEY=%s\n" "$(openssl rand -hex 32)" > /etc/chv/encryption.env'
+sudo chmod 0600 /etc/chv/encryption.env
+```
+
+`chv-controlplane.service` loads it via `EnvironmentFile`. If the file is
+absent (or the key empty), the control plane logs a warning at startup and
+stores S3 credentials in **plaintext** — see OPERATIONS.md
+"Credential encryption key" for backup and rotation semantics.
+
+### 9. systemd Services
 
 ```bash
 sudo cp docs/examples/systemd/chv-controlplane.service /etc/systemd/system/
@@ -403,7 +424,7 @@ Service startup order:
 - `chv-stord` and `chv-nwd` — start independently
 - `chv-agent` — starts after all three above are up; enrolls with the control plane
 
-### 9. Bootstrap Token
+### 10. Bootstrap Token
 
 ```bash
 BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
@@ -425,7 +446,7 @@ sqlite3 /var/lib/chv/controlplane.db \
 sudo systemctl start chv-controlplane
 ```
 
-### 10. Web UI (nginx)
+### 11. Web UI (nginx)
 
 ```bash
 sudo cp docs/examples/nginx/chv-ui.conf /etc/nginx/sites-available/chv
@@ -435,7 +456,7 @@ sudo nginx -t
 sudo systemctl restart nginx
 ```
 
-### 11. Start Services
+### 12. Start Services
 
 ```bash
 sudo systemctl enable --now chv-controlplane

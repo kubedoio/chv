@@ -37,6 +37,11 @@ if [ -x /usr/bin/chv-controlplane ] && [ ! -f /etc/chv/encryption.env ]; then
             umask 077
             printf 'CHV_ENCRYPTION_KEY=%s\n' "$_chv_key" > /etc/chv/encryption.env
         )
+    else
+        # Not fatal (the daemon still warns at startup while the variable
+        # is unset), but say so here too instead of skipping silently.
+        echo "chv-controlplane: WARNING: failed to generate the credential encryption key;" >&2
+        echo "chv-controlplane: S3 credentials will be stored in plaintext until it is provisioned." >&2
     fi
 elif [ -x /usr/bin/chv-controlplane ] && [ -f /etc/chv/encryption.env ]; then
     # Preserved, not regenerated — but warn loudly if it is unusable.
