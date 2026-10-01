@@ -39,27 +39,36 @@ chown chv:chv /var/lib/chv /var/log/chv /run/chv || true
 install -d -m 0700 -o chv -g chv /var/lib/chv/agent /var/lib/chv/cache /run/chv/core
 install -d -m 0775 -o chv -g chv /run/chv/agent
 
-# Ensure storage directories exist and are owned by chv-stord
-mkdir -p /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm /run/chv/stord
-chown -R chv-stord:chv-stord /var/lib/chv/storage /run/chv/stord || true
-chmod 750 /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm || true
+# Storage state lives under /var/lib/chv/storage. chv-stord runs as the
+# 'chv' service user: its API socket is mode 0600 with chv-agent as the
+# only client, and cloud-hypervisor (spawned by chv-agent as 'chv') must
+# read and write volume files. The directories therefore must be writable
+# by 'chv'. Group 'chv-stord' is kept as the isolation seam for a future
+# dedicated storage-user model.
+install -d -m 0770 -o chv -g chv-stord /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm
+# Runtime dir for the systemd unit path (RuntimeDirectory=chv/stord creates
+# the same ownership); kept here so non-systemd starts also work as 'chv'.
+install -d -m 0755 -o chv -g chv /run/chv/stord
 
 # Add chv user to the kvm group if it exists (required for VM runtime)
 if getent group kvm >/dev/null 2>&1; then
-    if ! id -nG chv | grep -qw kvm; then
+    # NOTE: match the group list per-entry (`grep -qx` over one group per
+    # line). A plain `id -nG | grep -qw chv` would also match `chv-stord`
+    # (the hyphen is a word boundary) and silently skip the usermod.
+    if ! id -nG chv | tr ' ' '\n' | grep -qx kvm; then
         usermod -aG kvm chv
     fi
 fi
 
 # Add chv-stord user to the disk group for block device access
 if getent group disk >/dev/null 2>&1; then
-    if ! id -nG chv-stord | grep -qw disk; then
+    if ! id -nG chv-stord | tr ' ' '\n' | grep -qx disk; then
         usermod -aG disk chv-stord
     fi
 fi
 
 # Add chv-stord to chv group so it can traverse /var/lib/chv
-if ! id -nG chv-stord | grep -qw chv; then
+if ! id -nG chv-stord | tr ' ' '\n' | grep -qx chv; then
     usermod -aG chv chv-stord
 fi
 
