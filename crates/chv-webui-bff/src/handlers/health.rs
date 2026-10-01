@@ -108,16 +108,19 @@ pub async fn node_health(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
-    let row = sqlx::query_as::<_, (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT
             n.node_id,
@@ -138,8 +141,7 @@ pub async fn node_health(
     .await
     .map_err(|e| BffError::Internal(format!("node health: query failed: {}", e)))?;
 
-    let row = row
-        .ok_or_else(|| BffError::NotFound(format!("node {} not found", node_id)))?;
+    let row = row.ok_or_else(|| BffError::NotFound(format!("node {} not found", node_id)))?;
 
     let (
         node_id,

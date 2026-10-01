@@ -193,15 +193,13 @@ async fn seed_jwt(state: &AppState) -> String {
 
 /// Seed one node with the given observed health status.
 async fn seed_node(state: &AppState, node_id: &str, health: Option<&str>) {
-    sqlx::query(
-        "INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, ?, ?)",
-    )
-    .bind(node_id)
-    .bind(format!("host-{node_id}"))
-    .bind(format!("Node {node_id}"))
-    .execute(&state.pool)
-    .await
-    .expect("seed node");
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, ?, ?)")
+        .bind(node_id)
+        .bind(format!("host-{node_id}"))
+        .bind(format!("Node {node_id}"))
+        .execute(&state.pool)
+        .await
+        .expect("seed node");
 
     sqlx::query(
         "INSERT INTO node_observed_state (node_id, observed_generation, observed_state, \
