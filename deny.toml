@@ -72,26 +72,10 @@ ignore = [
     #       gRPC stack-wide change deferred from this supply-chain PR).
     "RUSTSEC-2025-0134",
 
-    # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
-    #   (a) Non-applicable: CHV does not parse untrusted XML with duplicate check enabled.
-    #       quick-xml enters via rust-s3 (S3 response parsing) — responses come
-    #       from the operator-configured S3-compatible endpoint, not untrusted
-    #       input. Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
-    #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0194
-    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
-    #   (c) Remove on the next quick-xml dependency update (tracked as
-    #       issue #177 — explicit debt until the rust-s3 path moves).
-    "RUSTSEC-2026-0194",
-
-    # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
-    #   (a) Non-applicable: CHV does not use NsReader namespace resolution on
-    #       untrusted XML (same rust-s3 path as RUSTSEC-2026-0194 above).
-    #       Patched in quick-xml >= 0.41.0; lockfile has 0.38.4.
-    #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0195
-    #       (fixed in quick-xml >= 0.41.0; we pin 0.38.4 via rust-s3 0.37)
-    #   (c) Remove on the next quick-xml dependency update (tracked as
-    #       issue #177 — explicit debt until the rust-s3 path moves).
-    "RUSTSEC-2026-0195",
+    # Removed 2026-10-01 (issue #177 resolved — rust-s3 replaced by
+    # object_store 0.14): RUSTSEC-2026-0194 and RUSTSEC-2026-0195 no longer
+    # require exceptions — quick-xml now resolves to 0.41.0, which is outside
+    # both advisories' affected ranges.
 ]
 
 # -----------------------------------------------------------------------------

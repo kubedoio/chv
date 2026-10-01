@@ -1,4 +1,5 @@
 use chv_errors::ChvError;
+use object_store::ObjectStoreExt;
 use tracing::{info, warn};
 
 /// Abstraction over backup artifact shipping targets.
@@ -47,8 +48,17 @@ impl BackupShipper for NfsShipper {
 
 // ── S3 Shipper ─────────────────────────────────────────────────────────────
 
+/// S3-compatible backup artifact shipper (retention deletes), backed by
+/// `object_store` (aws backend, sigv4-signed).
+///
+/// Replaces the previous `rust-s3` implementation (issue #177): rust-s3
+/// 0.37 pinned `quick-xml` 0.38.4, which carries RUSTSEC-2026-0194 and
+/// RUSTSEC-2026-0195 (fixed in quick-xml >= 0.41). The only S3 operation
+/// CHV performs is deleting shipped backup artifacts during retention
+/// cleanup, which `object_store`'s `ObjectStore::delete` covers directly.
 pub struct S3Shipper {
-    bucket: Box<s3::Bucket>,
+    bucket_name: String,
+    store: object_store::aws::AmazonS3,
 }
 
 impl S3Shipper {
@@ -59,44 +69,57 @@ impl S3Shipper {
         access_key: Option<String>,
         secret_key: Option<String>,
     ) -> Result<Self, ChvError> {
-        let region = if let Some(endpoint) = endpoint {
-            s3::Region::Custom { region, endpoint }
-        } else {
-            region
-                .parse::<s3::Region>()
-                .map_err(|e| ChvError::Internal {
-                    reason: format!("invalid S3 region: {e}"),
-                })?
-        };
+        // Seed from the environment (AWS_* variables) so deployments that
+        // relied on implicit credentials keep working, then apply explicit
+        // configuration on top. Note the previous rust-s3 default chain also
+        // consulted ~/.aws/credentials profiles and IMDS; only explicit
+        // config keys and environment variables are supported now.
+        let mut builder = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(&bucket)
+            .with_region(&region)
+            // Preserve the previous rust-s3 wire behavior: single-object
+            // `DELETE /key` requests (core S3 API, supported by every
+            // S3-compatible provider) instead of the bulk `POST /?delete`
+            // API, which not all providers implement.
+            .with_disable_bulk_delete(true);
 
-        let credentials = match (access_key, secret_key) {
-            (Some(ak), Some(sk)) => {
-                s3::creds::Credentials::new(Some(&ak), Some(&sk), None, None, None).map_err(
-                    |e| ChvError::Internal {
-                        reason: format!("invalid S3 credentials: {e}"),
-                    },
-                )?
+        if let Some(endpoint) = &endpoint {
+            // Preserve the previous `Region::Custom` behavior: plain-http
+            // endpoints (e.g. a local MinIO) are allowed.
+            if endpoint.starts_with("http://") {
+                builder = builder.with_allow_http(true);
             }
-            _ => s3::creds::Credentials::default().map_err(|e| ChvError::Internal {
-                reason: format!("failed to load default S3 credentials: {e}"),
-            })?,
-        };
+            builder = builder.with_endpoint(endpoint);
+        }
 
-        let bucket =
-            s3::Bucket::new(&bucket, region, credentials).map_err(|e| ChvError::Internal {
-                reason: format!("failed to create S3 bucket: {e}"),
-            })?;
+        if let (Some(ak), Some(sk)) = (access_key, secret_key) {
+            builder = builder.with_access_key_id(ak).with_secret_access_key(sk);
+        }
 
-        Ok(Self { bucket })
+        let store = builder.build().map_err(|e| ChvError::Internal {
+            reason: format!("failed to create S3 client: {e}"),
+        })?;
+
+        Ok(Self {
+            bucket_name: bucket,
+            store,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl BackupShipper for S3Shipper {
     async fn delete(&self, remote_path: &str) -> Result<(), ChvError> {
-        match self.bucket.delete_object(remote_path).await {
-            Ok(_) => {
-                info!(key = %remote_path, bucket = %self.bucket.name(), "S3 shipper: deleted artifact");
+        // object_store paths are '/'-delimited segments without a leading
+        // separator; empty segments (leading/trailing '/') are skipped.
+        let path = object_store::path::Path::from(remote_path);
+        match self.store.delete(&path).await {
+            Ok(()) => {
+                info!(
+                    key = %remote_path,
+                    bucket = %self.bucket_name,
+                    "S3 shipper: deleted artifact"
+                );
                 Ok(())
             }
             Err(e) => {

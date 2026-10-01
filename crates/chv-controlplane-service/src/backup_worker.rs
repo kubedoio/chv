@@ -206,14 +206,23 @@ impl BackupWorker {
                                     if Self::is_remote_destination(dest) {
                                         let ak = schedule.s3_access_key.clone();
                                         let sk = schedule.s3_secret_key.clone();
-                                        if let Ok(shipper) = shipper_from_destination(dest, ak, sk)
-                                        {
-                                            if let Err(del_err) = shipper.delete(remote_path).await
-                                            {
+                                        match shipper_from_destination(dest, ak, sk) {
+                                            Ok(shipper) => {
+                                                if let Err(del_err) =
+                                                    shipper.delete(remote_path).await
+                                                {
+                                                    warn!(
+                                                        job_id = %old_job.job_id,
+                                                        error = %del_err,
+                                                        "failed to delete remote backup artifact during count retention cleanup"
+                                                    );
+                                                }
+                                            }
+                                            Err(con_err) => {
                                                 warn!(
                                                     job_id = %old_job.job_id,
-                                                    error = %del_err,
-                                                    "failed to delete remote backup artifact during count retention cleanup"
+                                                    error = %con_err,
+                                                    "failed to build shipper for remote backup artifact cleanup"
                                                 );
                                             }
                                         }
@@ -274,14 +283,23 @@ impl BackupWorker {
                                     if Self::is_remote_destination(dest) {
                                         let ak = schedule.s3_access_key.clone();
                                         let sk = schedule.s3_secret_key.clone();
-                                        if let Ok(shipper) = shipper_from_destination(dest, ak, sk)
-                                        {
-                                            if let Err(del_err) = shipper.delete(remote_path).await
-                                            {
+                                        match shipper_from_destination(dest, ak, sk) {
+                                            Ok(shipper) => {
+                                                if let Err(del_err) =
+                                                    shipper.delete(remote_path).await
+                                                {
+                                                    warn!(
+                                                        job_id = %old_job.job_id,
+                                                        error = %del_err,
+                                                        "failed to delete remote backup artifact during retention cleanup"
+                                                    );
+                                                }
+                                            }
+                                            Err(con_err) => {
                                                 warn!(
                                                     job_id = %old_job.job_id,
-                                                    error = %del_err,
-                                                    "failed to delete remote backup artifact during retention cleanup"
+                                                    error = %con_err,
+                                                    "failed to build shipper for remote backup artifact cleanup"
                                                 );
                                             }
                                         }

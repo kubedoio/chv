@@ -37,7 +37,7 @@ metrics = { workspace = true }
 futures = "0.3"
 semver = "1"
 toml = { workspace = true }
-s3 = { workspace = true }
+object_store = { workspace = true }
 x509-parser = { version = "0.18", features = ["verify"] }
 
 [features]

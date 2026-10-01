@@ -46,17 +46,10 @@ ignore = [
     #   gRPC-stack-wide change, not in scope for this supply-chain PR).
     "RUSTSEC-2025-0134",
 
-    # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
-    #   CHV does not parse untrusted XML with duplicate check enabled.
-    #   Pulled via rust-s3 0.37 (quick-xml 0.38.4); fixed in quick-xml >= 0.41.
-    #   Removal condition: rust-s3/quick-xml update (tracked as issue #177).
-    "RUSTSEC-2026-0194",
-
-    # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
-    #   CHV does not use NsReader namespace resolution on untrusted XML.
-    #   Pulled via rust-s3 0.37 (quick-xml 0.38.4); fixed in quick-xml >= 0.41.
-    #   Removal condition: rust-s3/quick-xml update (tracked as issue #177).
-    "RUSTSEC-2026-0195",
+    # Removed 2026-10-01 (issue #177 resolved — rust-s3 replaced by
+    # object_store 0.14): RUSTSEC-2026-0194 and RUSTSEC-2026-0195 no longer
+    # require exceptions — quick-xml now resolves to 0.41.0, which is outside
+    # both advisories' affected ranges.
 ]
 informational_warnings = ["unmaintained", "unsound", "notice"]
 severity_threshold = "none"
