@@ -1,8 +1,13 @@
 //! Fail-closed startup authority selection for the NodeCache-to-Core cutover.
 //!
-//! This library is intentionally not wired into `cmd/chv-agent`. It decides
-//! which persistence authority a future startup path may activate and performs
-//! only durable migration bookkeeping; it has no VM or provider side effects.
+//! Wired into `cmd/chv-agent`'s core-managed startup (`start_core_managed`)
+//! and the runtime-owner validation path: this library decides which
+//! persistence authority a startup may activate and performs only durable
+//! migration bookkeeping; it has no VM or provider side effects. For a
+//! healthy, host-bearing Core authority the NodeCache beside the database is
+//! the live compatibility projection and its content never gates activation;
+//! fail-closed behavior is reserved for authority selection itself (identity,
+//! checksums, archives, pristine-import targets).
 
 mod identity;
 
@@ -271,7 +276,37 @@ impl StartupTransaction {
                     Some(service.host()?)
                 }
                 .map(|record| record.identity);
-                let import = cache.as_deref().map(plan).transpose()?;
+                // Plan the cache only as far as it can be USED. For a
+                // healthy, host-bearing authority the NodeCache beside the
+                // Core database is the live compatibility projection
+                // (M2.2b) — persisted downstream of Core execution and
+                // mutated at any time — so its content must not gate the
+                // activation: a cache that cannot be planned (e.g. the
+                // runtime's own deferred-report queue,
+                // `pending_control_plane`, populating exactly the field the
+                // pristine-import invariant rejects — kubedoio/chv#343)
+                // degrades to a warning and the projection is ignored,
+                // exactly like the diagnostics in
+                // `warn_about_unadopted_cache_content`. A host-less
+                // authority genuinely needs the import (the crash-recovery
+                // re-import arms in `activate_existing`), so there a plan
+                // failure stays fatal.
+                let import = match (host.is_some(), cache.as_deref()) {
+                    (_, None) => None,
+                    (true, Some(bytes)) => match plan(bytes) {
+                        Ok(import) => Some(import),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "retained NodeCache cannot be planned as an import source; \
+                                 treating it as a live compatibility projection whose content \
+                                 does not gate activation (the Core database is the authority)"
+                            );
+                            None
+                        }
+                    },
+                    (false, Some(bytes)) => Some(plan(bytes)?),
+                };
                 resolve_host_identity(HostIdentityInputs {
                     existing_core: host,
                     importable_nodecache: import.as_ref().map(|value| value.host().clone()),
@@ -441,6 +476,31 @@ fn activate_existing(
                 import.cutover(service)?;
                 Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
             }
+        }
+        // An unplannable cache (import=None) reaches these arms only for
+        // a healthy, host-bearing authority — `prepare_activation`
+        // degrades plan failures to None exactly and only there. The
+        // projection's content must not gate activation; the Core
+        // database is the authority (kubedoio/chv#343).
+        (Some(_), None, None) => {
+            if service.host_optional()?.is_some() {
+                Ok((ActivationKind::Existing, None))
+            } else {
+                // Unreachable from `prepare_activation` (a host-less
+                // authority always carries a planned import or has already
+                // failed closed) — kept as a defensive fail-closed.
+                Err(StartupError::UnsafePath(
+                    "inconsistent NodeCache activation snapshot".to_owned(),
+                ))
+            }
+        }
+        (Some(_), None, Some(marker)) if marker.cutover => {
+            // Migrated authority whose live projection cannot be planned:
+            // same contract as the cutover arm above minus the
+            // self-heal/diagnostics (both need a plannable cache) — the
+            // archived migration source alone proves the authority.
+            verify_archive(&paths.node_cache_archive, &marker.checksum)?;
+            Ok((ActivationKind::ImportedNodeCache, Some(marker.checksum)))
         }
         _ => Err(StartupError::UnsafePath(
             "inconsistent NodeCache activation snapshot".to_owned(),
@@ -894,6 +954,172 @@ mod tests {
             active.service().host().unwrap().identity.id.as_str(),
             "node-a"
         );
+    }
+
+    /// Like [`cache_bytes`], but with the runtime's deferred-report queue
+    /// non-empty — the exact live-projection state a control-plane outage
+    /// produces (the agent persists `pending_control_plane` on every defer;
+    /// the M4.3 run-4 reproduction had 28 queued) and the pristine-import
+    /// invariant rejects (kubedoio/chv#343).
+    fn cache_bytes_with_deferred_reports(node_id: &str, observed_generation: &str) -> Vec<u8> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&cache_bytes(node_id, observed_generation)).unwrap();
+        value["pending_control_plane"] = json!([{"kind": "NodeStateReport"}]);
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn healthy_authority_boots_with_unplannable_projection() {
+        // kubedoio/chv#343 regression: a healthy, host-bearing authority
+        // must boot when the NodeCache beside it (the live compatibility
+        // projection) holds deferred control-plane reports. Previously
+        // every boot ran the full import validation on the projection and
+        // failed closed with Migration(Unsupported("pending_control_plane")),
+        // bricking the agent after "outage + restart" — the exact recovery
+        // path the deferral feature exists for.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        // First boot: fresh authority, no cache (the deployment shape).
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("host-transaction".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::Fresh);
+        drop(active);
+
+        // The projection accumulates deferred reports during an outage.
+        write_private(
+            &paths.node_cache,
+            cache_bytes_with_deferred_reports("host-transaction", "9"),
+        );
+
+        // Restart must succeed: the projection's content does not gate
+        // activation; the Core database is the authority.
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("host-transaction".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::Existing);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "host-transaction"
+        );
+    }
+
+    #[test]
+    fn cutover_authority_boots_with_unplannable_projection() {
+        // Same poison, migrated-authority shape: the cutover marker and
+        // archived source exist, and the live projection has since
+        // mutated (deferred reports). The archive alone must prove the
+        // authority — the mutated, unplannable projection must neither
+        // brick the boot nor stand in for the source.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, source());
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        assert!(paths.node_cache_archive.exists());
+        drop(active);
+
+        write_private(
+            &paths.node_cache,
+            cache_bytes_with_deferred_reports("node-a", "9"),
+        );
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::ImportedNodeCache);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
+    }
+
+    #[test]
+    fn cutover_authority_with_unplannable_cache_still_requires_archive() {
+        // Fail-closed preserved: a migrated authority whose projection
+        // cannot be planned (so it cannot self-heal the archive) still
+        // refuses to boot without the archived migration source — the
+        // relaxed projection handling must not weaken authority proof.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, source());
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        drop(active);
+
+        fs::remove_file(&paths.node_cache_archive).unwrap();
+        write_private(
+            &paths.node_cache,
+            cache_bytes_with_deferred_reports("node-a", "9"),
+        );
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::ArchiveMismatch { ref path }
+                if path == &paths.node_cache_archive
+        ));
+    }
+
+    #[test]
+    fn hostless_authority_with_unplannable_cache_still_fails_closed() {
+        // The crash-recovery window (pristine, host-less migration target)
+        // genuinely needs to import the cache, so an unplannable cache
+        // stays fatal there — the fix only relaxes healthy authorities.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        {
+            let service = OperationService::create_migration_target(&paths.core_database)
+                .expect("migration target bootstrap");
+            assert!(service.is_pristine_migration_target().unwrap());
+        }
+        write_private(
+            &paths.node_cache,
+            cache_bytes_with_deferred_reports("node-a", "7"),
+        );
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::Migration(MigrationError::Unsupported(ref path))
+                if path == "pending_control_plane"
+        ));
+    }
+
+    #[test]
+    fn initial_import_of_unplannable_cache_still_fails_closed() {
+        // The (cache, no-database) import arm is unchanged: a cache with
+        // deferred reports cannot be deterministically migrated and must
+        // keep failing closed at import time.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(
+            &paths.node_cache,
+            cache_bytes_with_deferred_reports("node-a", "7"),
+        );
+        let error = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .err()
+            .expect("activation must fail");
+        assert!(matches!(
+            error,
+            StartupError::Migration(MigrationError::Unsupported(ref path))
+                if path == "pending_control_plane"
+        ));
     }
 
     #[test]
