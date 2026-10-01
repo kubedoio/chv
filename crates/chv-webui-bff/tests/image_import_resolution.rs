@@ -17,7 +17,12 @@
 //! - `file://` URIs are treated as local paths (scheme stripped);
 //! - resolution by `image_id` still works;
 //! - genuinely remote URLs are still rejected at create time;
-//! - unknown image references keep the original ref (previous behavior).
+//! - unknown image references keep the original ref (previous behavior);
+//! - import canonicalizes `file://` (and redundant leading slashes) away
+//!   and dedups on the canonical form (post-#340 hardening);
+//! - an image_id hit terminates the lookup even when the row has no
+//!   usable source — no silent resolution to a name-colliding image
+//!   (post-#340 hardening).
 
 use std::sync::Arc;
 
@@ -462,4 +467,122 @@ async fn create_keeps_unknown_image_ref() {
         image_ref, "/var/lib/chv/images/direct.img",
         "absolute-path refs pass through verbatim"
     );
+}
+
+// ---------------------------------------------------------------------------
+// post-#340 hardening (review follow-up)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn import_dedups_canonical_source_forms() {
+    // `file:///x.img` and `/x.img` are the same physical file: import
+    // canonicalizes the scheme away, so the duplicate check sees one
+    // image, not two rows whose name collisions then resolve silently.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/images/import",
+        &token,
+        r#"{"name":"img-canonical","source_url":"file:///tmp/canonical.img"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["source_url"], "/tmp/canonical.img",
+        "file:// URIs must be stored in canonical bare-path form"
+    );
+
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/images/import",
+        &token,
+        r#"{"name":"img-canonical-2","source_url":"/tmp/canonical.img"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the bare path is the same image and must be recognized as a duplicate: {body}"
+    );
+
+    // Redundant leading slashes collapse to the single root.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/images/import",
+        &token,
+        r#"{"name":"img-double","source_url":"file:////tmp/double-slash.img"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["source_url"], "/tmp/double-slash.img",
+        "redundant leading slashes must collapse ('//x' is implementation-defined under POSIX)"
+    );
+}
+
+#[tokio::test]
+async fn create_id_hit_terminates_lookup_even_without_source() {
+    // An image_id hit must not fall through to the display-name match
+    // when the id row has no usable source (empty or NULL — only
+    // reachable via out-of-band writes, import always records a
+    // source): doing so could silently resolve a DIFFERENT image whose
+    // display_name collides with the id string.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+
+    for (image_id, display_name, source_url) in [
+        ("img-empty-src", "empty-src", Some("")),
+        ("img-null-src", "null-src", None::<&str>),
+    ] {
+        sqlx::query(
+            "INSERT INTO images \
+             (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at) \
+             VALUES (?, ?, 'disk', 'qcow2', NULL, NULL, ?, '', '', 'available', NULL, datetime('now'), datetime('now'))",
+        )
+        .bind(image_id)
+        .bind(display_name)
+        .bind(source_url)
+        .execute(&state.pool)
+        .await
+        .expect("seed source-less image");
+
+        // A second image whose display_name equals the first image's
+        // image_id — the wrong-image resolution the id hit must not
+        // silently perform.
+        sqlx::query(
+            "INSERT INTO images \
+             (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at) \
+             VALUES (?, ?, 'disk', 'qcow2', NULL, NULL, '/tmp/wrong-image.img', '', '', 'available', NULL, datetime('now'), datetime('now'))",
+        )
+        .bind(format!("{image_id}-other"))
+        .bind(image_id)
+        .execute(&state.pool)
+        .await
+        .expect("seed colliding-name image");
+
+        let (status, body) = post_with_token(
+            state.clone(),
+            "/v1/vms/create",
+            &token,
+            &format!(r#"{{"name":"vm-{image_id}","image_ref":"{image_id}"}}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an id hit without a source must fail loudly, never resolve to the name-colliding image: {body}"
+        );
+
+        // And nothing was silently created from the wrong image.
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vm_desired_state WHERE image_ref = '/tmp/wrong-image.img'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("count vm_desired_state");
+        assert_eq!(stored, 0, "no VM may be created from the wrong image");
+    }
 }

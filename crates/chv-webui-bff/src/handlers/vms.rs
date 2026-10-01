@@ -371,44 +371,71 @@ pub async fn create_vm(
         // Resolve by image_id first; if that misses, by display name —
         // operators reference images by the name chosen at import
         // (kubedoio/chv#339). display_name is not unique, so the name
-        // match takes the most recently created image.
-        let mut source_url: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        // match takes the most recently created image. An image_id HIT
+        // terminates the lookup even when the row carries no usable
+        // source: falling through to the name match could silently
+        // resolve a DIFFERENT image whose display_name collides with
+        // the id string.
+        let id_row = sqlx::query_scalar::<_, Option<String>>(
             "SELECT source_url FROM images WHERE image_id = ?",
         )
         .bind(&image_ref)
         .fetch_optional(&state.pool)
         .await
-        .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
-        .flatten();
-        if source_url.is_none() {
-            source_url = sqlx::query_scalar::<_, Option<String>>(
-                // rowid tiebreaker: created_at has second granularity and
-                // imports within the same second must still resolve
-                // deterministically to the most recently inserted row.
-                "SELECT source_url FROM images WHERE display_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            )
-            .bind(&image_ref)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to look up image by name: {}", e)))?
-            .flatten();
-        }
-        if let Some(source_url) = source_url {
-            // file:// URIs are local paths (kubedoio/chv#339): strip the
-            // scheme so the local-path test accepts them.
-            let source_path = source_url.strip_prefix("file://").unwrap_or(&source_url);
-            if source_path.starts_with('/') {
-                tracing::info!(%source_path, "create_vm: resolved image_ref to local path");
-                image_ref = source_path.to_string();
-            } else {
-                tracing::warn!(%source_url, "create_vm: image source_url is not a local path, cannot use as disk seed");
+        .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?;
+        let (id_hit, source_url) = match id_row {
+            Some(source_url) => (true, source_url),
+            None => (
+                false,
+                sqlx::query_scalar::<_, Option<String>>(
+                    // rowid tiebreaker: created_at has second granularity and
+                    // imports within the same second must still resolve
+                    // deterministically to the most recently inserted row.
+                    "SELECT source_url FROM images WHERE display_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                )
+                .bind(&image_ref)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(|e| BffError::Internal(format!("failed to look up image by name: {}", e)))?
+                .flatten(),
+            ),
+        };
+        match source_url {
+            // A matched id row with an empty source cannot be a disk
+            // seed — and must NOT fall through to the name match
+            // (silent wrong-image resolution).
+            Some(source_url) if source_url.is_empty() => {
                 return Err(BffError::BadRequest(format!(
-                    "Image source is a remote URL ({}). Download the image to the node first.",
-                    source_url
+                    "Image '{}' has no source path recorded — re-import it with a source_url.",
+                    image_ref
                 )));
             }
-        } else {
-            tracing::warn!(%image_ref, "create_vm: image not found in DB, keeping original image_ref");
+            // The same holds for a NULL source on an id hit.
+            None if id_hit => {
+                return Err(BffError::BadRequest(format!(
+                    "Image '{}' has no source path recorded — re-import it with a source_url.",
+                    image_ref
+                )));
+            }
+            Some(source_url) => {
+                // file:// URIs are local paths (kubedoio/chv#339): the
+                // same canonicalization import applies (legacy rows may
+                // still carry the scheme or redundant slashes).
+                let source_path = super::images::normalize_source_url(&source_url);
+                if source_path.starts_with('/') {
+                    tracing::info!(%source_path, "create_vm: resolved image_ref to local path");
+                    image_ref = source_path;
+                } else {
+                    tracing::warn!(%source_url, "create_vm: image source_url is not a local path, cannot use as disk seed");
+                    return Err(BffError::BadRequest(format!(
+                        "Image source is a remote URL ({}). Download the image to the node first.",
+                        source_url
+                    )));
+                }
+            }
+            None => {
+                tracing::warn!(%image_ref, "create_vm: image not found in DB, keeping original image_ref");
+            }
         }
     }
 

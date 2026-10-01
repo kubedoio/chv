@@ -84,6 +84,21 @@ pub async fn list_images(
     })))
 }
 
+/// Canonical form for image source URLs: `file://` URIs collapse to
+/// bare absolute paths (the form the create-time resolution and the
+/// duplicate check compare), with redundant leading slashes removed
+/// (`file:////var/x` would otherwise store the POSIX
+/// implementation-defined `//var/x`). Genuinely remote URLs pass
+/// through unchanged.
+pub(crate) fn normalize_source_url(source_url: &str) -> String {
+    let stripped = source_url.strip_prefix("file://").unwrap_or(source_url);
+    if let Some(rest) = stripped.strip_prefix('/') {
+        format!("/{}", rest.trim_start_matches('/'))
+    } else {
+        stripped.to_string()
+    }
+}
+
 pub async fn import_image(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
@@ -95,13 +110,15 @@ pub async fn import_image(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing name".into()))?;
 
-    let source_url = payload
-        .get("source_url")
-        .and_then(|v| v.as_str())
-        // "url" alias: chvctl sends both keys (older builds sent only
-        // "url", which was silently dropped — kubedoio/chv#339).
-        .or_else(|| payload.get("url").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let source_url = normalize_source_url(
+        payload
+            .get("source_url")
+            .and_then(|v| v.as_str())
+            // "url" alias: chvctl sends both keys (older builds sent only
+            // "url", which was silently dropped — kubedoio/chv#339).
+            .or_else(|| payload.get("url").and_then(|v| v.as_str()))
+            .unwrap_or(""),
+    );
 
     let format = payload
         .get("format")
@@ -117,10 +134,12 @@ pub async fn import_image(
 
     let checksum = payload.get("checksum").and_then(|v| v.as_str());
 
-    // Check for duplicate by source_url
+    // Check for duplicate by source_url — on the canonical form, so
+    // `file:///x.img` and `/x.img` (the same physical file) cannot
+    // import as two rows whose name collision then resolves silently.
     if !source_url.is_empty() {
         let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE source_url = ?")
-            .bind(source_url)
+            .bind(&source_url)
             .fetch_one(&state.pool)
             .await
             .map_err(|e| BffError::Internal(format!("failed to check existing image: {}", e)))?;
@@ -143,7 +162,7 @@ pub async fn import_image(
     .bind(name)
     .bind(format)
     .bind(checksum)
-    .bind(source_url)
+    .bind(&source_url)
     .bind(os)
     .bind(architecture)
     .execute(&state.pool)
