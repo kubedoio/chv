@@ -3264,7 +3264,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // guest (the VMM control loop's Exit dispatch runs vmm_shutdown),
             // so once the guest reaches Shutdown the VMM process is gone —
             // there is no daemon to keep alive. The VmProcess entry
-            // deliberately STAYS in the map (with its exited child) so a
+            // deliberately STAYS in the map (with its child reaped and
+            // marked `Dead` — see the zombie-prevention note below) so a
             // later start re-spawns the VMM and re-creates the VM from the
             // payload persisted at create time (see `respawn_vmm`), and
             // stop/delete remain idempotent against the dead process. Poll
@@ -3384,6 +3385,35 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to truncate console.log")
                     }
                 }
+            }
+
+            // Reap the exited VMM child (zombie prevention). The force
+            // path reaps via `proc.child.wait()` before dropping the
+            // entry; the graceful path must too — the child HAS exited
+            // (that is what ended the loop above: guest down, CH exits
+            // with it), but nothing reaps it until the next
+            // `vm.start` runs `prove_exited`, so a VM that is stopped
+            // and never restarted leaves a zombie in the process table
+            // for the agent's lifetime (found by the M4.3
+            // qualification: orderly ~32 s guest shutdown, CH exits,
+            // /proc/<pid> lingers in state Z with an empty cmdline).
+            // Take the child out of the surviving entry — replaced
+            // with `Dead`, the truthful state for an exited VMM — and
+            // reap it in a detached task so a slow exit never blocks
+            // this op or the vms lock.
+            let reaper = {
+                let mut vms = self.vms.write().await;
+                vms.get_mut(vm_id).and_then(|proc| {
+                    match std::mem::replace(&mut proc.child, VmmChild::Dead) {
+                        VmmChild::Owned(child) => Some(child),
+                        _ => None,
+                    }
+                })
+            };
+            if let Some(mut child) = reaper {
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
             }
         }
         __guard.succeeded = true;
@@ -7756,6 +7786,79 @@ mod tests {
             post_size, 0,
             "console.log should be truncated on graceful stop"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_vm_graceful_reaps_exited_child() {
+        // Regression test for the zombie left by the graceful stop path:
+        // the child HAS exited when the stop loop ends (guest down, CH
+        // exits with it), but nothing reaped it until the next
+        // `vm.start` ran `prove_exited` — a VM stopped and never
+        // restarted leaked a zombie for the agent's lifetime. The stop
+        // must now reap the child and mark the surviving entry `Dead`.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-test");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        // Spawn a child that exits immediately and DO NOT wait for it:
+        // by the time stop_vm runs it is an unreaped zombie — exactly
+        // the leaked state the fix addresses.
+        let child = tokio::process::Command::new("true").spawn().unwrap();
+        let zombie_pid = child.id().expect("child pid before exit");
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-test".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // Graceful stop: no real CH socket, so the loop breaks via the
+        // "CH process disappeared" branch and takes the post-loop
+        // graceful path.
+        adapter
+            .stop_vm("vm-test", false, Some("op-test"))
+            .await
+            .unwrap();
+
+        // The surviving entry's child is now `Dead` (the truthful state
+        // for an exited VMM), not an unreaped `Owned` handle.
+        {
+            let vms = adapter.vms.read().await;
+            let proc = vms.get("vm-test").expect("entry survives graceful stop");
+            assert!(
+                matches!(proc.child, VmmChild::Dead),
+                "graceful stop must mark the exited child Dead"
+            );
+        }
+
+        // And the zombie is actually reaped: /proc/<pid> disappears
+        // once the detached reaper's wait() completes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::path::Path::new(&format!("/proc/{zombie_pid}")).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "zombie pid {zombie_pid} was not reaped within 5s of the graceful stop"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[test]
