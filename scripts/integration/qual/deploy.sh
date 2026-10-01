@@ -153,13 +153,16 @@ cleanup() {
     # M4.3 run 3 — an exact-name match never fires). Match the full command
     # line instead, scoped to THIS test dir (the agent spawns CH with its
     # api-socket under ${TEST_DIR}/agent/vms) so unrelated host VMs are
-    # never touched.
-    pkill -f "cloud-hypervisor.*${TEST_DIR}" 2>/dev/null || true
+    # never touched. The (^|/)…( |$) anchor around the binary name is the
+    # same self-match-proof form lib.sh uses: a process merely MENTIONING
+    # "cloud-hypervisor" mid-command-line (an editor, a logger, this very
+    # pattern's text) can never match — the token must be argv[0].
+    pkill -f "(^|/)cloud-hypervisor( |$).*${TEST_DIR}" 2>/dev/null || true
     sleep 1
     # SIGKILL fallback: a VMM whose control loop is wedged (observed in
     # M4.3 run 5: an adopted VM's graceful stop left CH alive in Shutdown
     # state, SIGTERM ineffective) must not survive teardown either.
-    pkill -9 -f "cloud-hypervisor.*${TEST_DIR}" 2>/dev/null || true
+    pkill -9 -f "(^|/)cloud-hypervisor( |$).*${TEST_DIR}" 2>/dev/null || true
     sleep 1
 
     # Remove nwd-owned links this deployment created (bridges and taps —

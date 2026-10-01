@@ -626,11 +626,19 @@ save_console_evidence "after-outage"
 # reports is recorded as residual risk in the evidence doc, not run
 # here.
 pending_reports() {
-    python3 -c "
-import json
-with open('${QUAL_AGENT_DIR}/agent-cache.json') as f:
-    print(len(json.load(f).get('pending_control_plane', [])))
-" 2>/dev/null || echo "unreadable"
+    # The cache path is env-passed, never interpolated into the Python
+    # source: a path containing quotes or backslashes must degrade to
+    # "unreadable" (and the drain timeout below), not break the parser.
+    # A partially-written cache (the agent persists on every defer)
+    # also reads as "unreadable" and simply keeps the loop waiting.
+    CHV_CACHE_FILE="${QUAL_AGENT_DIR}/agent-cache.json" python3 -c '
+import json, os
+try:
+    with open(os.environ["CHV_CACHE_FILE"]) as f:
+        print(len(json.load(f).get("pending_control_plane", [])))
+except Exception:
+    print("unreadable")
+' 2>/dev/null || echo "unreadable"
 }
 DRAIN_T0="$(date +%s)"
 DRAIN_START="$(pending_reports)"
