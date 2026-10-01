@@ -278,6 +278,11 @@ spec matches the qualified reality.
   (#340, #342, #344, #346). Harness defects found and fixed along the
   way: `pgrep -x` comm-truncation (every prior CH residue check was
   vacuously green — lib.sh + deploy.sh), missing `chvbr0`/nft teardown
-  fallbacks, the deployment-error gate reset. See
+  fallbacks, the deployment-error gate reset. A post-milestone
+  comprehensive review of the merged range produced three hardening
+  PRs (#348 stop-path SIGKILL verification, #349 image-chain lookup
+  termination/canonicalization, #350 harness robustness), the CI
+  timeout guard #352, and one tracked follow-up (#351, delete-path
+  kill refusal) — see m4.3-lifecycle.md §6. See
   [m4.3-lifecycle.md](m4.3-lifecycle.md).
 - M4.4–M4.9: not started.
