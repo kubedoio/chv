@@ -21,13 +21,16 @@
 #   sudo ./clean-install.sh [OPTIONS]
 #
 # Options:
-#   --packages DIR   .deb directory (default: /var/lib/chv/qual/packages)
-#   --keep-root      keep the container root for post-mortem
-#   --skip-boot      run Leg A only
+#   --packages DIR      .deb directory (default: /var/lib/chv/qual/packages)
+#   --expect-version S  substring binaries must report in --version
+#                       (default: fdfe9c3 — the v0.3.0-rc1 candidate)
+#   --keep-root         keep the container root for post-mortem
+#   --skip-boot         run Leg A only
 #
 # Environment:
-#   CHV_QUAL_ROOT    persistent root (default: /var/lib/chv/qual)
-#   SUITE            debootstrap suite (default: noble)
+#   CHV_QUAL_ROOT       persistent root (default: /var/lib/chv/qual)
+#   SUITE               debootstrap suite (default: noble)
+#   EXPECT_VERSION      same as --expect-version
 
 set -euo pipefail
 
@@ -38,6 +41,8 @@ source "${SCRIPT_DIR}/lib.sh"
 CHV_QUAL_ROOT="${CHV_QUAL_ROOT:-/var/lib/chv/qual}"
 PKGDIR="${CHV_QUAL_ROOT}/packages"
 SUITE="${SUITE:-noble}"
+# Binaries must report this substring in --version (candidate pin).
+EXPECT_VERSION="${EXPECT_VERSION:-fdfe9c3}"
 KEEP_ROOT=false
 SKIP_BOOT=false
 
@@ -45,6 +50,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --packages) PKGDIR="${2:?}"; shift 2 ;;
         --packages=*) PKGDIR="${1#*=}"; shift ;;
+        --expect-version) EXPECT_VERSION="${2:?}"; shift 2 ;;
+        --expect-version=*) EXPECT_VERSION="${1#*=}"; shift ;;
         --keep-root) KEEP_ROOT=true; shift ;;
         --skip-boot) SKIP_BOOT=true; shift ;;
         *) qual_die "unknown argument: $1" ;;
@@ -195,8 +202,12 @@ assert_dir_mode "state dir" var/lib/chv 755 "${chv_uid}:${chv_gid}"
 assert_dir_mode "log dir" var/log/chv 755 "${chv_uid}:${chv_gid}"
 assert_dir_mode "agent runtime dir (Core 0700 contract)" var/lib/chv/agent 700 "${chv_uid}:${chv_gid}"
 assert_dir_mode "cache dir" var/lib/chv/cache 700 "${chv_uid}:${chv_gid}"
-assert_dir_mode "storage localdisk" var/lib/chv/storage/localdisk 750 "${stord_uid}:${stord_gid}"
-assert_dir_mode "storage lvm" var/lib/chv/storage/lvm 750 "${stord_uid}:${stord_gid}"
+# Storage dirs are owned by the chv runtime user (chv-stord runs as chv:
+# 0600 API socket with chv-agent as the only client, and cloud-hypervisor
+# as chv must read/write volume files) with the chv-stord group kept as
+# the isolation seam — see #323.
+assert_dir_mode "storage localdisk" var/lib/chv/storage/localdisk 770 "${chv_uid}:${stord_gid}"
+assert_dir_mode "storage lvm" var/lib/chv/storage/lvm 770 "${chv_uid}:${stord_gid}"
 # NOTE: /run is a fresh tmpfs under systemd-nspawn, so postinst-created
 # /run/chv/* directories are not observable from the host side here; the
 # durable /run contract (tmpfiles.d + unit RuntimeDirectory) is asserted
@@ -227,12 +238,12 @@ else
     qual_error "unexpected migration count: ${n_migrations}"
 fi
 
-# --- versions (packaged binaries report the candidate SHA) ---
+# --- versions (packaged binaries report the expected build) ---
 for b in chv-controlplane chv-agent chv-stord; do
     v="$(chroot "$ROOT" "/usr/bin/${b}" --version 2>/dev/null | head -1 || true)"
     case "$v" in
-        *"gfdfe9c3"*|*"fdfe9c3"*) qual_pass "${b} --version reports candidate: ${v}" ;;
-        *) qual_error "${b} --version does not report the candidate SHA: ${v}" ;;
+        *"${EXPECT_VERSION}"*) qual_pass "${b} --version reports expected build: ${v}" ;;
+        *) qual_error "${b} --version does not report the expected build '${EXPECT_VERSION}': ${v}" ;;
     esac
 done
 
