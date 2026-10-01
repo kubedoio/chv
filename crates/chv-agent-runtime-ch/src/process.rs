@@ -184,6 +184,7 @@ impl VmmChild {
 /// `has_exited`'s safe-but-lossy "errors mean gone" default — a re-spawn
 /// may never run while any doubt remains that the old VMM is dead, or two
 /// VMMs would own one VM (and one disk).
+#[derive(Debug)]
 enum Liveness {
     Alive,
     Exited,
@@ -3387,33 +3388,73 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 }
             }
 
-            // Reap the exited VMM child (zombie prevention). The force
-            // path reaps via `proc.child.wait()` before dropping the
-            // entry; the graceful path must too — the child HAS exited
-            // (that is what ended the loop above: guest down, CH exits
-            // with it), but nothing reaps it until the next
-            // `vm.start` runs `prove_exited`, so a VM that is stopped
-            // and never restarted leaves a zombie in the process table
-            // for the agent's lifetime (found by the M4.3
-            // qualification: orderly ~32 s guest shutdown, CH exits,
-            // /proc/<pid> lingers in state Z with an empty cmdline).
-            // Take the child out of the surviving entry — replaced
-            // with `Dead`, the truthful state for an exited VMM — and
-            // reap it in a detached task so a slow exit never blocks
-            // this op or the vms lock.
-            let reaper = {
+            // Complete the stop against the PROCESS, not just the guest
+            // (#341/#345). The loop above can end on either premise:
+            // vm.info reporting a terminal state, or its dead-socket
+            // branch treating an unreachable API as "CH process
+            // disappeared". Only the first guarantees the process left.
+            // A wedged VMM (guest powered down, control loop stuck — the
+            // API dies with it, and SIGTERM routes through the same
+            // loop, so it is ineffective) ends the loop on the second
+            // premise while the process lives on: it holds the vm dir,
+            // sockets, and disk, and blocks the next start
+            // (`prove_exited` → Alive → re-spawn refused) — found by the
+            // M4.3 qualification (run 5 / issue #345: a graceful stop
+            // of an ADOPTED VM left the VMM alive and SIGTERM-immune
+            // for minutes, and a follow-up `vm start` was accepted but
+            // silently did nothing). A stop that reports success must
+            // not leave a live VMM behind: verify liveness, SIGKILL a
+            // survivor, and wait it out. Either way the surviving
+            // entry's child becomes `Dead` — the truthful state for an
+            // exited VMM — and an `Owned` child is reaped (zombie
+            // prevention: nothing else reaps it until the next
+            // `vm.start` runs `prove_exited`, so a VM stopped and never
+            // restarted would otherwise leak a zombie for the agent's
+            // lifetime).
+            let taken = {
                 let mut vms = self.vms.write().await;
-                vms.get_mut(vm_id).and_then(|proc| {
-                    match std::mem::replace(&mut proc.child, VmmChild::Dead) {
-                        VmmChild::Owned(child) => Some(child),
-                        _ => None,
-                    }
+                vms.get_mut(vm_id).map(|proc| {
+                    let api_socket = proc.api_socket.clone();
+                    let liveness = proc.child.prove_exited(&api_socket);
+                    (
+                        std::mem::replace(&mut proc.child, VmmChild::Dead),
+                        api_socket,
+                        liveness,
+                    )
                 })
             };
-            if let Some(mut child) = reaper {
-                tokio::spawn(async move {
-                    let _ = child.wait().await;
-                });
+            if let Some((mut child, api_socket, liveness)) = taken {
+                match liveness {
+                    Liveness::Exited => {
+                        // Normal completion: reap the `Owned` child in a
+                        // detached task so a slow exit never blocks this
+                        // op or the vms lock (an adopted orphan is
+                        // parented to init and reaped there).
+                        if let VmmChild::Owned(mut owned) = child {
+                            tokio::spawn(async move {
+                                let _ = owned.wait().await;
+                            });
+                        }
+                    }
+                    Liveness::Alive | Liveness::Unknown(_) => {
+                        // The wedge (or an unreadable Owned child — we
+                        // own it either way, so killing is safe). Kill
+                        // and wait HERE, under the lifecycle op lock
+                        // held for the whole stop: a concurrent start
+                        // can otherwise re-spawn against a runtime dir
+                        // the wedged VMM still holds.
+                        warn!(
+                            vm_id = %vm_id,
+                            liveness = ?liveness,
+                            "VMM still alive after the graceful stop window — a \
+                             wedged control loop (dead API socket, SIGTERM \
+                             ineffective) must not outlive a successful stop; \
+                             SIGKilling and waiting"
+                        );
+                        child.kill(&api_socket, None);
+                        child.wait().await;
+                    }
+                }
             }
         }
         __guard.succeeded = true;
@@ -7858,6 +7899,79 @@ mod tests {
                 "zombie pid {zombie_pid} was not reaped within 5s of the graceful stop"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_vm_graceful_kills_live_child_after_dead_socket_loop() {
+        // Regression test for the M4.3 run-5 wedge (issue #345): the
+        // graceful loop's dead-socket branch treats an unreachable API
+        // as "CH process disappeared" — but the process can still be
+        // alive (wedged control loop: guest powered down, API dead,
+        // SIGTERM ineffective). The stop must verify liveness after the
+        // loop and SIGKILL the survivor instead of reporting success
+        // over a live VMM that holds the VM's runtime dir and disk and
+        // blocks the next start (re-spawn refused on Alive).
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wedge");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        // A child that will NOT exit on its own: the loop below ends on
+        // the dead-socket premise while this process is still alive —
+        // exactly the wedged state.
+        let child = tokio::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .unwrap();
+        let wedged_pid = child.id().expect("child pid");
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-wedge".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // Graceful stop: no real CH socket, so the loop breaks via the
+        // dead-socket branch — over a process that is still alive.
+        adapter
+            .stop_vm("vm-wedge", false, Some("op-test"))
+            .await
+            .unwrap();
+
+        // The wedge path kills and waits SYNCHRONOUSLY inside the stop,
+        // so by the time it reports success the survivor must be gone
+        // from /proc (killed AND reaped).
+        assert!(
+            !std::path::Path::new(&format!("/proc/{wedged_pid}")).exists(),
+            "a live VMM must not outlive a successful graceful stop"
+        );
+
+        // The surviving entry's child is the truthful `Dead`.
+        {
+            let vms = adapter.vms.read().await;
+            let proc = vms.get("vm-wedge").expect("entry survives graceful stop");
+            assert!(
+                matches!(proc.child, VmmChild::Dead),
+                "graceful stop must mark the killed child Dead"
+            );
         }
     }
 
