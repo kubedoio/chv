@@ -17,6 +17,12 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
+    # Observed 2026-10-01 (PR #348, run 36884770214): an apt mirror
+    # (azure.archive.ubuntu.com) hang in the "Install protoc" step
+    # starved the job until the 6-hour GitHub cap killed it — six
+    # runner-hours for zero output. Normal runtime is ~6-13 min
+    # (cache-cold worst case well under 45); a hang must fail fast.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
@@ -173,6 +179,10 @@ jobs:
   ui:
     name: UI checks
     runs-on: ubuntu-latest
+    # Same guard as the rust job (see there): a hung install step must
+    # fail fast, not burn a runner until the 6-hour cap. Normal runtime
+    # ~1 min.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
 
