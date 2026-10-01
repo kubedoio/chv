@@ -191,7 +191,7 @@ cargo build --workspace
 | [`DESIGN.md`](./DESIGN.md) | Design system (typography, color, spacing, dark mode) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development workflow, code style, and PR process |
-| [`CLAUDE.md`](./CLAUDE.md) | Agent orientation and build rules |
+| [`AGENTS.md`](./AGENTS.md) | Agent orientation and build rules (canonical for coding agents) |
 
 ## CI / CD
 
