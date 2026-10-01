@@ -74,6 +74,14 @@ impl S3Shipper {
         // configuration on top. Note the previous rust-s3 default chain also
         // consulted ~/.aws/credentials profiles and IMDS; only explicit
         // config keys and environment variables are supported now.
+        //
+        // Environment note (standard AWS SDK semantics, but a behavioral
+        // delta vs rust-s3): from_env() also honors AWS_ENDPOINT /
+        // AWS_ENDPOINT_URL_S3, which retarget the client when no explicit
+        // endpoint is configured. Because retention cleanup issues
+        // destructive DELETEs, operators should treat those variables as
+        // authoritative redirection, not ambient noise — do not set them
+        // host-wide for unrelated tooling on a CHV control-plane host.
         let mut builder = object_store::aws::AmazonS3Builder::from_env()
             .with_bucket_name(&bucket)
             .with_region(&region)
