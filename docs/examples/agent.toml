@@ -11,8 +11,11 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/local/bin/chv-stord"
 nwd_binary_path = "/usr/local/bin/chv-nwd"
 cache_path = "/var/lib/chv/cache/agent-cache.json"
-authority_mode = "legacy"
-# CellHV Core prerequisites only; production Core mode remains disabled.
+# Single durable lifecycle authority (prompt-02 cutover): core-managed runs
+# CellHV Core as the sole authority on this node — the qualified default.
+# "legacy" keeps the agent's own provider-mutation surface and is a
+# compatibility adapter only (explicit opt-in; the agent logs a warning).
+authority_mode = "core-managed"
 core_store_path = "/var/lib/chv/agent/core.db"
 core_api_socket_path = "/run/chv/core/core-v1.sock"
 core_archive_path = "/var/lib/chv/agent/node-cache-v1.archive"

@@ -913,6 +913,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // Legacy: the full legacy provider-mutation surface (explicit opt-in).
         AgentAuthorityMode::Legacy => {
+            warn!(
+                "authority_mode=legacy: the agent keeps its own provider-mutation \
+                 surface (compatibility adapter). The qualified single-authority \
+                 deployment is core-managed; legacy requires an explicit opt-in"
+            );
             Reconciler::new_legacy(
                 cache.clone(),
                 vm_runtime.clone(),
