@@ -50,8 +50,14 @@ pub async fn execute(
             url,
             format: img_format,
         } => {
+            // "source_url" is the BFF import contract's payload key; older
+            // chvctl builds sent "url", which the server silently ignored
+            // (kubedoio/chv#339 — the URL was dropped and the image could
+            // never be resolved at vm create). The server also accepts
+            // "url" as an alias for those older clients.
             let body = json!({
                 "name": name,
+                "source_url": url,
                 "url": url,
                 "format": img_format,
             });
