@@ -241,5 +241,12 @@ spec matches the qualified reality.
   embedded copies anywhere); new permanent harness leg
   `qual/install-sh-leg.sh` covers the install.sh path on a clean
   container (25 assertions, errors=0 warnings=0) so it cannot silently
-  drift again. See [m4.2-clean-install.md](m4.2-clean-install.md) §10.
+  drift again. A round-3 fresh-eyes pass over that fix hardened the leg
+  (real exit gate, source-of-truth parity vs packaging/) and provisioned
+  the credential encryption key on both install surfaces (#335 — report
+  finding H-7, previously claimed fixed but never wired: S3 credentials
+  were plaintext on every default install; now AES-256-GCM with the key
+  minted create-if-absent and asserted by both legs). Final: clean-install
+  Legs A+B and install-sh-leg both errors=0 warnings=0. See
+  [m4.2-clean-install.md](m4.2-clean-install.md) §10.
 - M4.3–M4.9: not started.

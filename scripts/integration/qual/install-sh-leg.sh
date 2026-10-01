@@ -134,7 +134,16 @@ else
 fi
 echo "=== runtime contract ===" >> "\$out"
 stat -c 'CHECK /run/netns %a %U:%G' /run/netns >> "\$out" 2>&1 || echo "CHECK /run/netns MISSING" >> "\$out"
-for d in /var/lib/chv/storage /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm /var/lib/chv/agent/vms; do
+echo "=== credential encryption key (#335) ===" >> "\$out"
+if [ -f /etc/chv/encryption.env ]; then
+  stat -c 'CHECK /etc/chv/encryption.env %a %U:%G' /etc/chv/encryption.env >> "\$out"
+  grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' /etc/chv/encryption.env \
+    && echo "ENCKEY-FORMAT-OK" >> "\$out" \
+    || echo "ENCKEY-FORMAT-BAD" >> "\$out"
+else
+  echo "CHECK /etc/chv/encryption.env MISSING" >> "\$out"
+fi
+for d in /var/lib/chv/storage /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm /var/lib/chv/agent /var/lib/chv/agent/vms; do
   stat -c "CHECK \${d} %a %U:%G" "\$d" >> "\$out" 2>&1 || echo "CHECK \${d} MISSING" >> "\$out"
 done
 echo "=== install log tail ===" >> "\$out"
@@ -160,6 +169,33 @@ EOF
 systemd-nspawn -q -D "$ROOT" --machine="${MACHINE}-setup" systemctl enable chv-installsh-run.service \
     >/dev/null 2>&1 || qual_die "failed to enable the one-shot service in the container"
 qual_pass "one-shot install service enabled"
+
+# ---------------------------------------------------------------------------
+# Source-of-truth parity (host-side, pre-boot): the tarball's systemd/ and
+# tmpfiles/ must match packaging/ — the deb source of truth. build-release.sh
+# sources docs/examples/systemd/, so this also catches
+# docs/examples <-> packaging drift (the bug class this leg exists for);
+# diffing only inside the container (installed vs tarball) would be nearly
+# tautological.
+# ---------------------------------------------------------------------------
+PACKAGING_DIR="${SCRIPT_DIR}/../../../packaging"
+[ -d "${PACKAGING_DIR}/systemd" ] || qual_die "packaging/ source of truth not found at ${PACKAGING_DIR} (run this leg from a repository checkout)"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+tar -xzf "$TARBALL" -C "$tmpdir"
+for f in chv-controlplane.service chv-agent.service chv-stord.service chv-nwd.service; do
+    if diff -q "${tmpdir}/${TARBALL_NAME}/systemd/${f}" "${PACKAGING_DIR}/systemd/${f}" >/dev/null 2>&1; then
+        qual_pass "tarball systemd/${f} matches packaging/ (source of truth)"
+    else
+        qual_error "tarball systemd/${f} differs from packaging/${f} — release build and deb have drifted"
+    fi
+done
+if diff -q "${tmpdir}/${TARBALL_NAME}/tmpfiles/chv-node.conf" "${PACKAGING_DIR}/tmpfiles/chv-node.conf" >/dev/null 2>&1; then
+    qual_pass "tarball tmpfiles/chv-node.conf matches packaging/ (source of truth)"
+else
+    qual_error "tarball tmpfiles/chv-node.conf differs from packaging/tmpfiles/ — release build and deb have drifted"
+fi
+rm -rf "${tmpdir}"
 
 # ---------------------------------------------------------------------------
 # Boot and collect
@@ -201,10 +237,23 @@ assert_contains "lvm chv:chv-stord 0770" \
     "$RESULTS_TEXT" "CHECK /var/lib/chv/storage/lvm 770 chv:chv-stord"
 assert_contains "agent/vms 0775" \
     "$RESULTS_TEXT" "CHECK /var/lib/chv/agent/vms 775"
+assert_contains "agent dir 0700 chv:chv (deb/tmpfiles contract)" \
+    "$RESULTS_TEXT" "CHECK /var/lib/chv/agent 700 chv:chv"
+
+# Credential encryption key (#335): minted by install.sh, 0600 root, valid hex.
+assert_contains "encryption.env minted 0600 root (#335)" \
+    "$RESULTS_TEXT" "CHECK /etc/chv/encryption.env 600 root:root"
+assert_contains "CHV_ENCRYPTION_KEY is 64 hex chars (#335)" \
+    "$RESULTS_TEXT" "ENCKEY-FORMAT-OK"
+assert_not_contains "no malformed encryption key" \
+    "$RESULTS_TEXT" "ENCKEY-FORMAT-BAD"
 
 assert_not_contains "no unit diverged from the canonical copies" \
     "$RESULTS_TEXT" "UNIT-DIFFERS"
 
 qual_info "full results transcript: ${RESULTS}"
-qual_summary "install-sh-leg" || true
-exit $?
+qual_summary "install-sh-leg"
+# qual_summary returns non-zero on errors, but never let an `|| true` style
+# guard (or a trailing command) mask the gate: a regressed install path must
+# fail CI, which is the entire point of this leg.
+[ "${QUAL_ERRORS}" -gt 0 ] && exit 1 || exit 0

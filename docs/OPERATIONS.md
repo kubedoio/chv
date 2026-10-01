@@ -185,6 +185,24 @@ sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" ".backup '/backup/chv-$(date
 # keeping the last 10 backups in /var/lib/chv/backups/.
 ```
 
+#### Credential encryption key (back it up with the database)
+
+S3 backup credentials are encrypted at rest (AES-256-GCM). The key material
+lives in `/etc/chv/encryption.env` (`CHV_ENCRYPTION_KEY`, mode 0600 root),
+minted once at install time by the package postinst or `install.sh` and
+loaded by `chv-controlplane.service` via `EnvironmentFile`. It is never
+regenerated on upgrade.
+
+- **Back it up together with the database.** A database restore without the
+  matching key leaves stored S3 credentials unreadable (they are treated as
+  missing and must be re-entered in the backup schedule settings).
+- **Rotation** is manual: write a new key to `/etc/chv/encryption.env`
+  (0600 root), `systemctl restart chv-controlplane`, then re-enter the S3
+  credentials — values encrypted under the old key read as missing, not
+  corrupted, so the re-entry is safe.
+- If the file is absent, the control plane logs a warning and stores S3
+  credentials in **plaintext** — do not run production deployments that way.
+
 ## Live Database Access
 
 The control plane holds the database in WAL mode with a pool of open

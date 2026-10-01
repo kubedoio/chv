@@ -224,6 +224,21 @@ for key in NoNewPrivileges ProtectSystem ProtectHome; do
 done
 assert_file_exists "tmpfiles config present" "$ROOT/usr/lib/tmpfiles.d/chv-node.conf"
 
+# --- credential encryption key (#335): postinst mints it create-if-absent,
+# 0600 root, valid hex — without it S3 credentials are stored in plaintext
+# (see CredentialEncryption in chv-controlplane-store). ---
+enc_stat="$(stat -c '%a %u:%g' "$ROOT/etc/chv/encryption.env" 2>/dev/null || true)"
+if [ "$enc_stat" = "600 0:0" ]; then
+    qual_pass "encryption.env minted 0600 root:root (#335)"
+else
+    qual_error "encryption.env missing or wrong mode/owner (#335): '${enc_stat}'"
+fi
+if grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' "$ROOT/etc/chv/encryption.env" 2>/dev/null; then
+    qual_pass "CHV_ENCRYPTION_KEY is 64 hex chars (#335)"
+else
+    qual_error "CHV_ENCRYPTION_KEY malformed or missing (#335)"
+fi
+
 # --- binaries, conffiles, migrations ---
 for b in chv-controlplane chv-agent chv-stord chv-nwd chvctl; do
     assert_file_exists "binary present: /usr/bin/${b}" "$ROOT/usr/bin/${b}"

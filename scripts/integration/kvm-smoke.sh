@@ -480,6 +480,9 @@ EOF
 socket_path = "${agent_dir}/api.sock"
 runtime_dir = "${agent_dir}"
 log_level = "info"
+# Match the shipped configs (#326): core-managed is the qualified production
+# composition; every packaged/deployed surface sets it explicitly.
+authority_mode = "core-managed"
 control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "${stord_dir}/api.sock"
 nwd_socket = "${nwd_dir}/api.sock"
