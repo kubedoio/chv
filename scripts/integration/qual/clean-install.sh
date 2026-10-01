@@ -202,8 +202,12 @@ assert_dir_mode "state dir" var/lib/chv 755 "${chv_uid}:${chv_gid}"
 assert_dir_mode "log dir" var/log/chv 755 "${chv_uid}:${chv_gid}"
 assert_dir_mode "agent runtime dir (Core 0700 contract)" var/lib/chv/agent 700 "${chv_uid}:${chv_gid}"
 assert_dir_mode "cache dir" var/lib/chv/cache 700 "${chv_uid}:${chv_gid}"
-assert_dir_mode "storage localdisk" var/lib/chv/storage/localdisk 750 "${stord_uid}:${stord_gid}"
-assert_dir_mode "storage lvm" var/lib/chv/storage/lvm 750 "${stord_uid}:${stord_gid}"
+# Storage dirs are owned by the chv runtime user (chv-stord runs as chv:
+# 0600 API socket with chv-agent as the only client, and cloud-hypervisor
+# as chv must read/write volume files) with the chv-stord group kept as
+# the isolation seam — see #323.
+assert_dir_mode "storage localdisk" var/lib/chv/storage/localdisk 770 "${chv_uid}:${stord_gid}"
+assert_dir_mode "storage lvm" var/lib/chv/storage/lvm 770 "${chv_uid}:${stord_gid}"
 # NOTE: /run is a fresh tmpfs under systemd-nspawn, so postinst-created
 # /run/chv/* directories are not observable from the host side here; the
 # durable /run contract (tmpfiles.d + unit RuntimeDirectory) is asserted
