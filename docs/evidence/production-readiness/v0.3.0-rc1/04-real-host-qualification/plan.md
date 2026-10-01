@@ -285,4 +285,21 @@ spec matches the qualified reality.
   timeout guard #352, and one tracked follow-up (#351, delete-path
   kill refusal) — see m4.3-lifecycle.md §6. See
   [m4.3-lifecycle.md](m4.3-lifecycle.md).
-- M4.4–M4.9: not started.
+- M4.4 — COMPLETE (network qualification): prompt-01's host-safety gate
+  rebuilt as a committed script (`host-safety.sh`; candidate-identity
+  guarded) and re-proven green on the candidate's nwd code; the guest
+  path qualified end-to-end (attach → connectivity incl. cloud-init
+  seed/DHCP reservation/ping/ARP → policy attempt → nwd hard-kill with
+  supervisor recovery and idempotent re-attach → stop/start with stable
+  tap/IP → second-network fallback-CIDR collision → cleanup) with
+  host-stack forbidden-outcome assertions and an all-green teardown
+  (final run: 0 errors, 8 warnings, 77 assertions, rc=0).
+  Four candidate defects recorded with issues — #354 (N1
+  name↔network_id split with fallback-CIDR subnet collision), #355 (N2
+  no operator-reachable policy path / deployed nft table bare), #356
+  (N4 orphaned nic rows blocking network delete + N5 network delete
+  performs no host teardown); harness gains:
+  dnsmasq+genisoimage preflight, dnsmasq/nwd teardown fallbacks, run
+  logs clean of job-control noise. See
+  [m4.4-network.md](m4.4-network.md).
+- M4.5–M4.9: not started.

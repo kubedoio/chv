@@ -101,6 +101,13 @@ qual_info "test directory: $TEST_DIR"
 ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' \
     | sort > "${TEST_DIR}/links.before"
 nft list tables 2>/dev/null | sort > "${TEST_DIR}/nft-tables.before" || true
+# Baseline for the nwd dnsmasq runtime dir: the candidate hardcodes it to
+# /run/chv/nwd (chv-nwd-core dhcp.rs/dns.rs/executor.rs — NOT the nwd.toml
+# runtime_dir), so teardown must restore it only if this deployment created
+# it. A pre-existing dir (another CHV install) is left untouched.
+if [ -d /run/chv/nwd ]; then
+    echo yes > "${TEST_DIR}/nwd-runtime-dir.before"
+fi
 
 cleanup() {
     local rc=$?
@@ -165,6 +172,20 @@ cleanup() {
     pkill -9 -f "(^|/)cloud-hypervisor( |$).*${TEST_DIR}" 2>/dev/null || true
     sleep 1
 
+    # Safety net for nwd processes the PID overrides cannot reach: the
+    # agent's supervisor spawns nwd as its own child (config under
+    # ${TEST_DIR}/agent/chv-nwd.toml) whenever the deploy-started instance
+    # dies mid-scenario (verified in M4.4: SIGKILL of the external nwd is
+    # recovered by the supervisor within one reconcile tick). pids.current
+    # normally carries the new pid, but a restart racing the scenario's
+    # last update would leak it — this scoped pattern (argv[0]-anchored,
+    # config path under THIS test dir) closes that gap. Both the deploy's
+    # nwd.toml and the supervisor's agent/chv-nwd.toml live under
+    # ${TEST_DIR}, so one pattern covers both.
+    pkill -f "(^|/)chv-nwd( |$).*${TEST_DIR}" 2>/dev/null || true
+    sleep 1
+    pkill -9 -f "(^|/)chv-nwd( |$).*${TEST_DIR}" 2>/dev/null || true
+
     # Remove nwd-owned links this deployment created (bridges and taps —
     # see chv-nwd-core state.rs/executor.rs naming: 'br-<network_id>' and
     # 'tap-*', PLUS 'chvbr0' for the default network — see
@@ -196,6 +217,29 @@ cleanup() {
         fi
     done < "${TEST_DIR}/nft-tables.mid"
 
+    # Kill dnsmasq instances nwd spawned for this deployment's networks.
+    # The candidate hardcodes their config/pid location to
+    # /run/chv/nwd/dnsmasq-<network_id>.{conf,pid} (chv-nwd-core dhcp.rs/
+    # dns.rs/executor.rs), and `network delete` performs NO host teardown
+    # at all in the candidate (M4.4 finding: the delete path is DB-only),
+    # so these processes outlive both the networks and nwd itself
+    # (verified by experiment: two orphaned dnsmasq instances remained
+    # after an otherwise-clean teardown). Scoped by the conf path so a
+    # pre-existing system dnsmasq is never touched; argv[0]-anchored the
+    # same way as the CH pattern above.
+    if pgrep -f "(^|/)dnsmasq( |$).*--conf-file=/run/chv/nwd/dnsmasq-" >/dev/null 2>&1; then
+        qual_info "teardown: killing nwd-spawned dnsmasq instances"
+        pkill -f "(^|/)dnsmasq( |$).*--conf-file=/run/chv/nwd/dnsmasq-" 2>/dev/null || true
+        sleep 1
+        pkill -9 -f "(^|/)dnsmasq( |$).*--conf-file=/run/chv/nwd/dnsmasq-" 2>/dev/null || true
+    fi
+    # Restore the hardcoded dnsmasq runtime dir only if this deployment
+    # created it (see the baseline snapshot above).
+    if [ ! -f "${TEST_DIR}/nwd-runtime-dir.before" ] && [ -d /run/chv/nwd ]; then
+        rm -rf /run/chv/nwd
+        qual_info "teardown: removed /run/chv/nwd (nwd dnsmasq runtime dir)"
+    fi
+
     # --- Forbidden-outcome residue assertions ---
     # (|| true: an assertion failure must not abort the remaining cleanup —
     # every residue finding is reported, then the dir is preserved.)
@@ -216,6 +260,12 @@ cleanup() {
         qual_pass "teardown: no new nft tables remain"
     else
         qual_error "teardown: FORBIDDEN new nft tables remain: $(echo "$new_tables" | tr '\n' ' ')"
+    fi
+    if pgrep -f "(^|/)dnsmasq( |$).*--conf-file=/run/chv/nwd/dnsmasq-" >/dev/null 2>&1; then
+        qual_error "teardown: FORBIDDEN — nwd-spawned dnsmasq instances remain"
+        pgrep -af "(^|/)dnsmasq( |$).*--conf-file=/run/chv/nwd/" >&2 || true
+    else
+        qual_pass "teardown: no nwd-spawned dnsmasq remains"
     fi
 
     # Keep the test dir for post-mortem if anything failed; remove on success.
@@ -392,6 +442,7 @@ qual_info "starting chv-controlplane (first pass: run migrations)"
 "${BINARY_DIR}/chv-controlplane" "${TEST_DIR}/controlplane.toml" \
     > "${logs_dir}/controlplane.log" 2>&1 &
 CP_PID=$!
+disown "$CP_PID"
 
 DB="${cp_dir}/controlplane.db"
 # Poll helper: the sqlite query must be re-evaluated on every attempt (a
@@ -436,6 +487,7 @@ qual_info "restarting chv-controlplane (seeded DB)"
 "${BINARY_DIR}/chv-controlplane" "${TEST_DIR}/controlplane.toml" \
     >> "${logs_dir}/controlplane.log" 2>&1 &
 CP_PID=$!
+disown "$CP_PID"
 wait_for "control-plane up after seeding" 30 cp_users_table_ready \
     || qual_die "control-plane did not restart — log: $(tail -20 "${logs_dir}/controlplane.log" 2>/dev/null)"
 
@@ -446,6 +498,7 @@ qual_info "starting chv-stord"
 "${BINARY_DIR}/chv-stord" "${TEST_DIR}/stord.toml" \
     > "${logs_dir}/stord.log" 2>&1 &
 STORD_PID=$!
+disown "$STORD_PID"
 wait_for "stord socket up" 20 test -S "${stord_dir}/api.sock" \
     || qual_die "stord did not come up — log: $(tail -20 "${logs_dir}/stord.log" 2>/dev/null)"
 
@@ -453,6 +506,10 @@ qual_info "starting chv-nwd"
 "${BINARY_DIR}/chv-nwd" "${TEST_DIR}/nwd.toml" \
     > "${logs_dir}/nwd.log" 2>&1 &
 NWD_PID=$!
+# Disown: scenarios may SIGKILL this daemon (M4.4 Leg C kills nwd to
+# exercise the supervisor restart); without disown, bash prints a
+# "Killed" job-control notice into the evidence log when it reaps it.
+disown "$NWD_PID"
 wait_for "nwd socket up" 20 test -S "${nwd_dir}/api.sock" \
     || qual_die "nwd did not come up — log: $(tail -20 "${logs_dir}/nwd.log" 2>/dev/null)"
 
@@ -460,6 +517,7 @@ qual_info "starting chv-agent (authority_mode=core-managed; enrolls at startup)"
 "${BINARY_DIR}/chv-agent" "${TEST_DIR}/agent.toml" \
     > "${logs_dir}/agent.log" 2>&1 &
 AGENT_PID=$!
+disown "$AGENT_PID"
 
 # Enrollment evidence: the control-plane-issued node cert (NOT the pre-placed
 # enrollment client cert) must appear in the runtime dir.

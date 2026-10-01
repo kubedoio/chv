@@ -66,12 +66,19 @@ fi
 # 2. Host tools (apt-based; recorded in evidence)
 # ---------------------------------------------------------------------------
 # tool:package pairs (the htpasswd binary ships in apache2-utils).
+# dnsmasq + genisoimage are product-declared runtime deps (install.sh
+# installs them; nwd spawns DHCP-only dnsmasq instances and the agent
+# builds the cloud-init NoCloud seed ISO with genisoimage). Without them
+# the candidate degrades WARN-ONLY to a network-less guest (M4.4 finding
+# N3) — the preflight must ensure them so the guest-path legs can run.
 TOOL_PACKAGES=(
     "openssl:openssl"
     "curl:curl"
     "python3:python3"
     "htpasswd:apache2-utils"
     "jq:jq"
+    "dnsmasq:dnsmasq"
+    "genisoimage:genisoimage"
 )
 MISSING_PACKAGES=""
 for tp in "${TOOL_PACKAGES[@]}"; do
@@ -87,7 +94,20 @@ fi
 for tp in "${TOOL_PACKAGES[@]}"; do
     command -v "${tp%%:*}" >/dev/null 2>&1 || qual_die "required tool missing after install: ${tp%%:*} (package ${tp##*:})"
 done
-qual_pass "host tools present (openssl, curl, python3, htpasswd, jq)"
+qual_pass "host tools present (openssl, curl, python3, htpasswd, jq, dnsmasq, genisoimage)"
+
+# The dnsmasq package's systemd unit must NOT run as a host DNS resolver:
+# with its stock (all-comments) config it binds :53 broadly and forwards
+# to whatever /etc/resolv.conf points at (here: systemd-resolved's
+# 127.0.0.53 — a loop). CHV only needs the BINARY; nwd spawns its own
+# DHCP-only instances (port=0) with configs under /run/chv/nwd. Stop and
+# mask the unit so it cannot interfere (disposable qualification host —
+# recorded in the evidence, not a general recommendation).
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active dnsmasq >/dev/null 2>&1; then
+    systemctl stop dnsmasq >/dev/null 2>&1 || true
+    systemctl mask dnsmasq >/dev/null 2>&1 || true
+    qual_info "stopped+masked the system dnsmasq unit (host DNS stays on systemd-resolved)"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. cloud-hypervisor (pinned)
