@@ -69,6 +69,10 @@ The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rus
 - Use `tracing` for logging; never `println!` in library crates.
 - Keep Svelte components under ~300 lines; extract helpers when growing larger.
 - Use `mutateWithRefresh()` for all WebUI mutations; never call `invalidateAll()` or `invalidatePattern()` directly in page components
+- High-risk changes (data-loss paths, isolation/sandboxing, mTLS/authz, lifecycle
+  authority, migrations, privilege grants) require explicit PR-disclosure and
+  linked verification evidence — see the "High-risk changes" rule in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Key Files for Context
 

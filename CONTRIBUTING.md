@@ -135,6 +135,25 @@ Add quota enforcement to VM create path
 4. Update relevant specs or ADRs if the change affects architectural boundaries
 5. Open a PR with a clear description of the problem, solution, and testing performed
 
+### High-risk changes
+
+Some changes carry production risk regardless of who wrote them — the rule is
+about the change, not the author. If your PR does any of the following, say so
+explicitly in the PR description and link evidence (tests, qualification runs,
+or an evidence doc under `docs/evidence/`) that the behavior was verified, not
+just that it compiles:
+
+- create, delete, or migrate VMs, volumes, or disks (data-loss paths);
+- alter storage or network isolation (capabilities, sandboxing, firewall
+  scoping, ownership/permissions models);
+- change mTLS, authentication, or authorization boundaries;
+- modify lifecycle authority, idempotency, or crash-recovery semantics;
+- change database migrations, schema, or destructive upgrade behavior;
+- grant new privileges to a service user or unit.
+
+Reviewers should treat the absence of such a statement on a high-risk diff as
+a review defect in itself.
+
 ## Documentation
 
 - **Architecture decisions** → write or update an ADR in `docs/specs/adr/`
@@ -147,7 +166,7 @@ Add quota enforcement to VM create path
 
 - Review existing ADRs in `docs/specs/adr/` for system boundaries and invariants
 - Check `docs/plans/` for the current sprint roadmap and gap analysis
-- Read `CLAUDE.md` for agent-oriented build and architecture guidance
+- Read `AGENTS.md` for agent-oriented build and architecture guidance (canonical; `CLAUDE.md` just points there)
 
 ## Adding a new architecture resource kind
 
