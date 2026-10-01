@@ -174,16 +174,26 @@ chvctl vm resize <VM_ID> --cpu 4 --memory-mb 8192
 
 ### SQLite Database Backup
 
-The database lives at `/var/lib/chv/controlplane.db`. Back up before upgrades or migrations:
+The database lives at `/var/lib/chv/controlplane.db`. Back up before upgrades or migrations. Always open the live database read-only (see [Live Database Access](#live-database-access)):
 
 ```bash
-# Online backup (SQLite backup API)
-sqlite3 /var/lib/chv/controlplane.db ".backup '/backup/chv-$(date +%Y%m%d-%H%M%S).db'"
+# Online backup (SQLite backup API, read-only source — safe while the CP runs)
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" ".backup '/backup/chv-$(date +%Y%m%d-%H%M%S).db'"
 
 # Automated pre-migration backup (built into chv-controlplane)
 # The control plane automatically backs up the DB before running migrations,
 # keeping the last 10 backups in /var/lib/chv/backups/.
 ```
+
+## Live Database Access
+
+The control plane holds the database in WAL mode with a pool of open
+connections. Rules for touching it from outside:
+
+- **Reads — always use a read-only URI.** `sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT ..."` is safe while the control plane runs: read-only opens never remove or rewrite the WAL sidecars and cannot race control-plane transactions.
+- **Never open the live database read-write.** There is no operation that needs it: while the control plane's connection pool holds open connections, an external read-write close cannot remove the sidecars (SQLite removes `-wal`/`-shm` only when the last connection closes), but on a quiet deployment the pool can drain and an external read-write close then removes them. That is recovered transparently when the control plane reopens, but it is an avoidable risk — and a read-write open takes write locks that can block the control plane.
+- **Never manipulate the database files directly while the control plane runs** — deleting `-wal`/`-shm`, copying a file over the database, or "cleaning up" sidecars. With open control-plane connections, subsequent commits continue into the deleted inode and are **silently lost** (verified: the connection keeps accepting writes, nothing errors, the data is gone). If sidecar files are inconsistent, stop the control plane first.
+- **Manual writes (seeding, corrections):** stop the control plane, write with the plain `sqlite3` CLI, start it again. This is the pattern the qualification harness uses (`scripts/integration/qual/deploy.sh` seeds in a stop→write→restart window).
 
 ### Restore from Backup
 
@@ -256,7 +266,7 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 | Check | Command |
 |-------|---------|
 | Bootstrap token exists | `sudo cat /etc/chv/bootstrap.token` |
-| Token not expired | `sqlite3 /var/lib/chv/controlplane.db "SELECT expires_at FROM bootstrap_tokens;"` |
+| Token not expired | `sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT expires_at FROM bootstrap_tokens;"` |
 | Control plane listening | `ss -tlnp | grep 8443` |
 | Agent can reach control plane | `curl -k https://127.0.0.1:8443/health` |
 | Agent logs | `journalctl -u chv-agent -n 100 --no-pager` |
@@ -324,7 +334,7 @@ curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
 
 **Check active migrations:**
 ```bash
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT migration_id, vm_id, phase, started_at FROM migrations \
    WHERE phase NOT IN ('Completed', 'Failed', 'RolledBack');"
 ```
@@ -454,7 +464,7 @@ curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
 **Monitor drain progress:**
 ```bash
 # Check remaining VMs
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT count(*) FROM vms v JOIN vm_observed_state o ON v.vm_id = o.vm_id \
    WHERE v.node_id = '<NODE_ID>' AND o.runtime_status NOT IN ('Stopped', 'Deleted');"
 
@@ -566,7 +576,7 @@ Key Prometheus metrics to watch during live migration:
 
 ```bash
 # Check active migrations
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT migration_id, vm_id, phase, bytes_transferred, dirty_blocks_remaining \
    FROM migrations WHERE completed_at IS NULL;"
 
@@ -580,17 +590,17 @@ watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_migration'
 |---------|-----------|------------|
 | Stale FDB entries | `bridge fdb show dev vxlan<VNI>` | Trigger reconcile: restart chv-agent on affected node |
 | VXLAN interface down | `ip link show \| grep vxlan` | Check `chv-nwd` logs; verify VTEP registration in DB |
-| VNI exhaustion | `sqlite3 /var/lib/chv/controlplane.db "SELECT count(*) FROM vni_allocations WHERE released_at IS NULL;"` | Release unused VNIs or expand VNI range |
+| VNI exhaustion | `sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT count(*) FROM vni_allocations WHERE released_at IS NULL;"` | Release unused VNIs or expand VNI range |
 | Cross-node VM unreachable | `tcpdump -i <vtep_interface> udp port 4789` | Verify UDP/4789 not blocked by firewall between nodes |
 | MTU issues / fragmentation | `ping -M do -s 1400 <remote_vm_ip>` | Check `[overlay] inner_mtu` in nwd.toml; ensure outer MTU >= inner + 50 |
 
 ```bash
 # Verify VTEP registry
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT node_id, vtep_ip, vtep_port FROM vtep_entries;"
 
 # Check VNI allocation for a network
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT network_id, vni, allocated_at FROM vni_allocations WHERE network_id = '<ID>';"
 
 # Force overlay reconciliation on a node
@@ -639,8 +649,11 @@ The SQLite backup (see above) automatically includes all multi-node state:
 
 ```bash
 # VMs continue running with stale FDB — connectivity may be intermittent
-# Force full overlay rebuild:
+# Force full overlay rebuild (stop the control plane first — see
+# Live Database Access):
+sudo systemctl stop chv-controlplane
 sqlite3 /var/lib/chv/controlplane.db "DELETE FROM vtep_entries;"
+sudo systemctl start chv-controlplane
 # Then restart all agents to re-register
 ```
 
@@ -732,9 +745,12 @@ Until the periodic pruner ships (tracked in [`docs/plans/2026-06-16-snapshot-pru
 | `architecture_drift_reports` | 14 days, **but** retain latest report per architecture indefinitely | Most recent report is the user-facing "current drift" view. |
 | `inventory_snapshots` | 7 days | High churn; only the recent ones drive plan determinism. |
 
-Operators who need to free space before the pruner ships can run targeted deletes:
+Operators who need to free space before the pruner ships can run targeted
+deletes (stop the control plane first — manual writes to the live database
+are unsafe; see [Live Database Access](#live-database-access)):
 
 ```bash
+sudo systemctl stop chv-controlplane
 # Drop drift reports older than 14 days, keeping the latest per architecture
 sqlite3 /var/lib/chv/controlplane.db <<'SQL'
 DELETE FROM architecture_drift_reports
@@ -750,9 +766,12 @@ SQL
 # Drop inventory snapshots older than 7 days
 sqlite3 /var/lib/chv/controlplane.db \
   "DELETE FROM inventory_snapshots WHERE created_at < datetime('now', '-7 days');"
+
+sudo systemctl start chv-controlplane
 ```
 
-Always take a backup before manual deletes.
+Always take a backup before manual deletes, and stop the control plane
+before writing (see [Live Database Access](#live-database-access)).
 
 ### Monitoring
 
@@ -841,19 +860,20 @@ The apply state machine uses CAS guards (compare-and-set on `status`) to ensure 
 
 ```bash
 # Inspect the run
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT id, architecture_id, plan_id, status, started_at, updated_at \
    FROM architecture_apply_runs WHERE status = 'applying';"
 
 # Check that no live task is still in flight
-sqlite3 /var/lib/chv/controlplane.db \
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT operation_id, kind, state FROM operations \
    WHERE meta_json LIKE '%<APPLY_RUN_ID>%';"
 ```
 
-If the linked task is `Failed` / `Cancelled` and no controlplane process is holding the row (no recent `updated_at`), reset the run to `failed` so a retry is possible:
+If the linked task is `Failed` / `Cancelled` and no controlplane process is holding the row (no recent `updated_at`), reset the run to `failed` so a retry is possible (stop the control plane first — see [Live Database Access](#live-database-access)):
 
 ```bash
+sudo systemctl stop chv-controlplane
 sqlite3 /var/lib/chv/controlplane.db <<SQL
 UPDATE architecture_apply_runs
 SET status = 'failed',
@@ -861,6 +881,7 @@ SET status = 'failed',
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 WHERE id = '<APPLY_RUN_ID>' AND status = 'applying';
 SQL
+sudo systemctl start chv-controlplane
 ```
 
 The CAS guard makes this safe: if a live worker still owns the row, the `WHERE status = 'applying'` clause races the update without corrupting state. Always restart the controlplane first if there is any doubt.

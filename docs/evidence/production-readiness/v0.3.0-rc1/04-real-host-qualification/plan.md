@@ -188,6 +188,15 @@ spec matches the qualified reality.
   to `fdfe9c3d`); deployment smoke passes errors=0 warnings=0 with
   zero-residue teardown. Two findings filed: #320 (chvctl health routes),
   #321 (SQLite WAL unlink hazard). See [m4.1-harness.md](m4.1-harness.md).
+- M4.1 findings fix round (post-rc1, 2026-10-01): **COMPLETE** — #320
+  fixed (viewer-tier `/v1/health` routes implemented, verified live via
+  `deploy.sh --exec` scenario; see m4.1-harness.md finding 4) and #321
+  resolved by documentation + corrected mechanism record (re-verification
+  showed the external-close unlink does not reproduce while the CP holds
+  pool connections; the real loss vector is direct sidecar file
+  manipulation; OPERATIONS.md gains "Live Database Access" rules —
+  read-only URIs for live reads, stop-windows for manual writes; see
+  m4.1-harness.md finding 3).
 - M4.2 (clean installation baseline): **COMPLETE** —
   `scripts/integration/qual/clean-install.sh` committed (clean noble
   container via debootstrap + systemd-nspawn, Legs A static + B boot;
