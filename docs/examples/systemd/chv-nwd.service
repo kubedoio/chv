@@ -14,8 +14,27 @@ TimeoutStopSec=5
 RuntimeDirectory=chv/nwd
 StateDirectory=chv
 LogsDirectory=chv
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# iproute2's `ip netns add` — required for the per-network namespace on
+# the topology-apply path — performs mount operations (make-shared on
+# /run/netns, bind-mount of /proc/self/ns/net) that require CAP_SYS_ADMIN
+# (#328; verified: with only CAP_NET_ADMIN/NET_RAW the call fails
+# `mount --make-shared /run/netns: Operation not permitted`).
+#
+# Tradeoff, accepted deliberately: CAP_SYS_ADMIN can remount around
+# ProtectSystem=strict, weakening that specific sandbox wall. The exposure
+# is bounded: the daemon's only client is chv-agent via its 0600 unix
+# socket (local compromise required), CAP_NET_ADMIN already grants host
+# network-stack control, the process is non-root (DAC still applies to
+# everything it could remount writable), and NoNewPrivileges blocks
+# setuid escalation. RestrictAddressFamilies below is the compensating
+# control. A dedicated privileged netns helper remains the long-term
+# lower-privilege design if ever warranted.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+# Compensating control for CAP_SYS_ADMIN: only the address families the
+# daemon and its iproute2/dnsmasq children actually use (unix sockets,
+# IPv4/IPv6, rtnetlink/nftables netlink).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
