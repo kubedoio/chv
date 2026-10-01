@@ -5,6 +5,7 @@ pub mod clusters;
 pub mod events;
 pub mod exports;
 pub mod firewall;
+pub mod health;
 pub mod hypervisor_settings;
 pub mod images;
 pub mod imports;
