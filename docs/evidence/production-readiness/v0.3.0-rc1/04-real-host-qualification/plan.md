@@ -220,4 +220,16 @@ spec matches the qualified reality.
   corrected in place. One new finding filed during the fix round: #328
   (netns creation under the unit needs CAP_SYS_ADMIN — maintainer
   decision, M4.4). See [m4.2-clean-install.md](m4.2-clean-install.md) §8.
+- #328 follow-up (2026-10-01): **RESOLVED on main** — the capability
+  decision was made: `chv-nwd.service` grants `CAP_SYS_ADMIN` (ambient +
+  bounding) with the ProtectSystem tradeoff documented on the unit and
+  `RestrictAddressFamilies` added as a compensating control. Proven on
+  the real host via a transient unit with the exact final security
+  context (netns add/list/del as `chv`), and the clean-install legs
+  re-run errors=0 warnings=0 against packages rebuilt from the fix
+  commit. The agent-supervised fallback nwd remains bootstrap-only
+  (documented limitation). Issue #227 (firewall host-safety) was also
+  verified as already fixed by the prompt-01 work (PR #256 + hardening)
+  and closed with evidence. See
+  [m4.2-clean-install.md](m4.2-clean-install.md) §9.
 - M4.3–M4.9: not started.
