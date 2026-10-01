@@ -195,8 +195,20 @@ spec matches the qualified reality.
   (PASSED, real /dev/kvm). Static packaging contract holds; control plane
   fails CLOSED on a bare install (packages↔install.sh boundary); agent
   unit holds the /run Core contract. Four findings filed: #323 (stord
+  unit holds the /run Core contract. Four findings filed: #323 (stord
   unit user vs storage ownership), #324 (nwd unit /run/netns), #325
   (postinst group-membership grep bug), #326 (packaged legacy authority
   default). Two kvm-smoke harness bugs fixed in-repo (v1 certs, cleanup
   abort). See [m4.2-clean-install.md](m4.2-clean-install.md).
+- M4.2 fix round (post-rc1, 2026-10-01): **COMPLETE** — all four M4.2
+  findings fixed on main (stord storage ownership → chv runtime user with
+  the model documented on the unit; /run/netns via packaged tmpfiles;
+  per-entry membership guards; shipped configs default core-managed
+  authority) and re-qualified with the same harness against locally
+  rebuilt packages: Legs A+B errors=0 warnings=0 (stord/nwd units now
+  active; agent core-managed on a bare install; supervisor defers to the
+  unit daemons), kvm-smoke host leg PASSED, upgrade-path residue
+  corrected in place. One new finding filed during the fix round: #328
+  (netns creation under the unit needs CAP_SYS_ADMIN — maintainer
+  decision, M4.4). See [m4.2-clean-install.md](m4.2-clean-install.md) §8.
 - M4.3–M4.9: not started.
