@@ -78,6 +78,16 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/overview",
             post(crate::handlers::overview::get_overview),
         )
+        // Operator health surface (chvctl health ...) — read-only aggregates.
+        .route("/v1/health", get(crate::handlers::health::health))
+        .route(
+            "/v1/cluster/health",
+            get(crate::handlers::health::cluster_health),
+        )
+        .route(
+            "/v1/nodes/:node_id/health",
+            get(crate::handlers::health::node_health),
+        )
         .route("/v1/metrics", post(crate::handlers::metrics::get_metrics))
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
