@@ -268,7 +268,11 @@ All daemons run as the `chv` system user:
 
 - `chv-agent`: supplementary group `kvm`, device access `/dev/kvm rw`
 - `chv-stord`: read-write to `/var/lib/chv/storage`, `/run/chv/stord`
-- `chv-nwd`: capabilities `CAP_NET_ADMIN CAP_NET_RAW`, read-write to `/run/chv/nwd`, `/run/netns`
+- `chv-nwd`: capabilities `CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN` (the
+  last required for `ip netns add` on the topology-apply path — the
+  ProtectSystem tradeoff is documented on the unit, #328), address families
+  restricted to `AF_UNIX AF_INET AF_INET6 AF_NETLINK`, read-write to
+  `/run/chv/nwd`, `/run/netns`
 - `chv-controlplane`: read-write to `/var/lib/chv`, `/run/chv/controlplane`; read-only to `/usr/share/chv`
 
 All units use:

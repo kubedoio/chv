@@ -1,10 +1,16 @@
 # CellHV Core Native Authority Mode
 
-Status: explicit opt-in production composition; default remains legacy.
+Status: explicit opt-in production composition; the shipped default is
+`core-managed` (see below).
 
-`chv-agent` accepts `authority_mode = "legacy" | "core-native"`. Missing mode
-defaults to `legacy`, preserving the existing Controller, AgentServer,
-reconciler, provider, VMM, metrics, console, and NodeCache startup path.
+`chv-agent` accepts `authority_mode = "legacy" | "core-managed" |
+"core-native"`. A missing key defaults to `legacy` for developer/compat
+strictness (the config loader's own default; selecting it explicitly logs a
+warning), while every shipped configuration — the packaged
+`/etc/chv/agent.toml`, `docs/examples/agent.toml`, and the `install.sh`
+template — sets `core-managed`, the qualified production composition (#326).
+`legacy` preserves the legacy Controller-facing AgentServer, reconciler,
+provider, VMM, metrics, console, and NodeCache startup path.
 
 `core-native` dispatches before any legacy component is constructed. It
 requires the configured cache, Core store/archive, and native socket parents to

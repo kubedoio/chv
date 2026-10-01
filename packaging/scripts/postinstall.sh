@@ -15,6 +15,40 @@ set -e
 #   - Modify firewall rules
 #   - Wipe or format disks
 
+# Credential encryption key (#335, report finding H-7): the control plane
+# derives an AES-256-GCM key from CHV_ENCRYPTION_KEY to encrypt S3
+# credentials at rest (crates/chv-controlplane-store/src/
+# credential_crypto.rs); without it they are stored in plaintext.
+# chv-controlplane.service loads this file via EnvironmentFile. Mint once
+# and NEVER regenerate (dpkg configure on upgrade runs this again): existing
+# encrypted credentials would become unrecoverable. Key material comes from
+# /dev/urandom (no openssl dependency in the postinst environment).
+if [ -x /usr/bin/chv-controlplane ] && [ ! -f /etc/chv/encryption.env ]; then
+    mkdir -p /etc/chv
+    _chv_key="$(head -c 32 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    # Only write a well-formed key: an empty file would disable encryption
+    # and be preserved forever by the create-if-absent guard above. (If we
+    # skip entirely the variable stays unset, so the control plane still
+    # logs its plaintext warning at startup — loud, not silent.)
+    if printf '%s' "$_chv_key" | grep -qE '^[0-9a-f]{64}$'; then
+        # Subshell: umask 077 must not leak into later directory creation
+        # in this script (state/log dirs are 0755 by contract).
+        (
+            umask 077
+            printf 'CHV_ENCRYPTION_KEY=%s\n' "$_chv_key" > /etc/chv/encryption.env
+        )
+    fi
+elif [ -x /usr/bin/chv-controlplane ] && [ -f /etc/chv/encryption.env ]; then
+    # Preserved, not regenerated — but warn loudly if it is unusable.
+    if ! grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' /etc/chv/encryption.env; then
+        echo "chv-controlplane: WARNING: /etc/chv/encryption.env exists but is empty or malformed;" >&2
+        echo "chv-controlplane: S3 credentials will be stored in plaintext until it is fixed." >&2
+    fi
+fi
+if [ -f /etc/chv/encryption.env ]; then
+    chmod 0600 /etc/chv/encryption.env
+fi
+
 # Create the 'chv' system user and group if they don't exist
 if ! getent group chv >/dev/null 2>&1; then
     groupadd -r chv

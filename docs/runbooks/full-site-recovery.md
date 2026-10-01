@@ -212,7 +212,7 @@ while IFS=$'\t' read -r job_id vm_id destination; do
   aws s3 cp "s3://$BUCKET/$PREFIX/$job_id.backup" /tmp/$job_id.backup
   
   # Verify checksum
-  expected=$(sqlite3 /var/lib/chv/controlplane.db \
+  expected=$(sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
     "SELECT checksum FROM backup_jobs WHERE job_id = '$job_id';")
   actual=$(sha256sum /tmp/$job_id.backup | awk '{print $1}')
   
@@ -376,7 +376,7 @@ aws s3 ls s3://my-backup-bucket/chv/ --recursive | grep $(date +%Y%m%d)
 | Agent enrollment fails with `invalid token` | Token expired or wrong CA | Generate fresh token; verify CA cert matches |
 | VMs won't start after restore | Disk images incompatible with new CH version | Convert with `qemu-img convert`; check CH release notes |
 | Ceph volumes not visible | Wrong pool or user | Verify `stord.toml` matches old configuration |
-| Backup worker not creating jobs | Schedules not enabled | `sqlite3 /var/lib/chv/controlplane.db "SELECT schedule_id, enabled FROM backup_schedules;"` |
+| Backup worker not creating jobs | Schedules not enabled | `sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT schedule_id, enabled FROM backup_schedules;"` |
 | S3 upload fails after recovery | Credentials rotated or bucket policy changed | Update schedule with new S3 credentials |
 | High VM boot time after restore | Disk images need `virtio` drivers | Ensure VM config matches original (same disk bus) |
 

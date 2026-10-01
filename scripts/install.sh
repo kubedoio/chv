@@ -15,6 +15,10 @@
 #   INSTALL_CHV_BRIDGE_NAME     - Bridge name (default: chvbr0)
 #   INSTALL_CHV_BRIDGE_CIDR     - Bridge CIDR (default: 10.200.0.1/24)
 #   INSTALL_CHV_NO_SEED         - Set to "1" to skip default network + test VM creation
+#   INSTALL_CHV_NO_BRIDGE       - Set to "1" to skip the legacy host bridge/NAT
+#                                 bootstrap (qualified networks are created via
+#                                 the API and managed by chv-nwd as br-<net_id>;
+#                                 the pre-created chvbr0 is a dev convenience)
 #   INSTALL_CHV_WIPE            - Set to "1" to wipe the previous deployment first,
 #                                 including existing VMs and the control-plane database
 
@@ -28,6 +32,7 @@ INSTALL_CHV_TARBALL_PATH="${INSTALL_CHV_TARBALL_PATH:-}"
 INSTALL_CHV_SKIP_DEPS="${INSTALL_CHV_SKIP_DEPS:-0}"
 INSTALL_CHV_SKIP_CLOUD_HV="${INSTALL_CHV_SKIP_CLOUD_HV:-0}"
 INSTALL_CHV_NO_SEED="${INSTALL_CHV_NO_SEED:-0}"
+INSTALL_CHV_NO_BRIDGE="${INSTALL_CHV_NO_BRIDGE:-0}"
 INSTALL_CHV_WIPE="${INSTALL_CHV_WIPE:-0}"
 
 # Parse CLI flags
@@ -193,7 +198,7 @@ install_dependencies() {
     apt-get install -y -qq \
         nginx \
         qemu-kvm bridge-utils iproute2 iptables curl openssl \
-        dnsmasq coreutils tar gzip sqlite3 genisoimage
+        dnsmasq coreutils tar gzip sqlite3 genisoimage apache2-utils
 }
 
 # -----------------------------------------------------------------------------
@@ -217,7 +222,10 @@ setup_user_and_dirs() {
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
     mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
-    install -d -m 0750 -o "$CHV_USER" -g chv-stord "$CHV_DATA_DIR/agent"
+    # 0700 chv:chv matches the deb postinst and the packaged tmpfiles entry
+    # (packaging/tmpfiles/chv-node.conf), which force-resets this mode on
+    # every boot on deb installs — keep the surfaces from diverging.
+    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent"
     install -d -m 0775 -o "$CHV_USER" -g chv-stord "$CHV_DATA_DIR/agent/vms"
     install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/cache" "$CHV_RUN_DIR/core"
     install -d -m 0775 -o "$CHV_USER" -g "$CHV_USER" "$CHV_RUN_DIR/agent"
@@ -227,16 +235,18 @@ setup_user_and_dirs() {
     mkdir -p "$CHV_MIGRATIONS_DIR"
 
     chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR"/cache "$CHV_DATA_DIR"/images "$CHV_LOG_DIR" "$CHV_RUN_DIR"/controlplane "$CHV_RUN_DIR"/agent "$CHV_RUN_DIR"/nwd "$CHV_RUN_DIR"/stord
-    chown "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent"
+    chown "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR/agent"
     chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent/vms"
     # Storage dirs must be writable by 'chv': chv-stord runs as the chv
     # service user (0600 API socket with chv-agent as the only client) and
     # cloud-hypervisor (as chv) reads/writes volume files. Group chv-stord
     # is kept as the seam for a future dedicated storage-user model.
     chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR"/storage
-    chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR" "$CHV_DATA_DIR/agent"
+    chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR"
+    chmod 700 "$CHV_DATA_DIR/agent"
     chmod 775 "$CHV_DATA_DIR/agent/vms"
-    chmod 750 "$CHV_DATA_DIR"/storage
+    # Match the .deb postinst contract (#323): storage dirs chv:chv-stord 0770.
+    chmod 770 "$CHV_DATA_DIR"/storage
     chmod 770 "$CHV_DATA_DIR"/storage/localdisk
     chmod 770 "$CHV_DATA_DIR"/storage/lvm
 }
@@ -572,6 +582,12 @@ import_base_image() {
 seed_dev_resources() {
     local api_base="http://127.0.0.1:8080"
 
+    if [ "$INSTALL_CHV_NO_BRIDGE" = "1" ]; then
+        warn "Seeding the default network with INSTALL_CHV_NO_BRIDGE=1: the legacy"
+        warn "host bridge/NAT bootstrap was skipped, so guests on the seeded network"
+        warn "will have no external connectivity unless forwarding is provided out of band."
+    fi
+
     info "Seeding dev resources via API..."
 
     # Wait for API to be healthy
@@ -757,6 +773,14 @@ generate_certs() {
 # Bridge and NAT network setup
 # -----------------------------------------------------------------------------
 setup_network() {
+    # The legacy dev bootstrap: pre-create chvbr0 + NAT so the seeded default
+    # network has external connectivity. Qualified networks are created via
+    # the API and managed by chv-nwd (br-<net_id>); hosts that do not want
+    # this convenience bridge can skip it with INSTALL_CHV_NO_BRIDGE=1.
+    if [ "$INSTALL_CHV_NO_BRIDGE" = "1" ]; then
+        warn "Skipping legacy bridge/NAT bootstrap (INSTALL_CHV_NO_BRIDGE=1)."
+        return 0
+    fi
     info "Setting up bridge network ${INSTALL_CHV_BRIDGE_NAME} (${INSTALL_CHV_BRIDGE_CIDR}) on ${INSTALL_CHV_BRIDGE_IFACE}..."
 
     # Create bridge if absent
@@ -919,12 +943,55 @@ EOF
 socket_path = "/run/chv/nwd/api.sock"
 runtime_dir = "/run/chv/nwd"
 log_level = "info"
-bridge_name = "${INSTALL_CHV_BRIDGE_NAME}"
-bridge_cidr = "${INSTALL_CHV_BRIDGE_CIDR}"
-upstream_iface = "${INSTALL_CHV_BRIDGE_IFACE}"
+# Bridge topology (bridge name, CIDR, upstream interface) is configured at
+# runtime via gRPC topology specs from the control plane, not in this config
+# file. The dev-resource seeder creates the default network via the API using
+# INSTALL_CHV_BRIDGE_CIDR; nothing here reads the old bridge_* keys.
 EOF
     chmod 640 "$CHV_CONFIG_DIR/nwd.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/nwd.toml"
+}
+
+# -----------------------------------------------------------------------------
+# Credential Encryption Key (#335 / report finding H-7)
+# -----------------------------------------------------------------------------
+# The control plane derives an AES-256-GCM key from CHV_ENCRYPTION_KEY to
+# encrypt S3 credentials at rest (credential_crypto.rs); without it they are
+# stored in plaintext. chv-controlplane.service loads this file via
+# EnvironmentFile. Mint once and NEVER regenerate on reinstall: existing
+# encrypted credentials would become unrecoverable.
+create_encryption_env() {
+    if [ -f "$CHV_CONFIG_DIR/encryption.env" ]; then
+        # Never regenerate — but validate what we are preserving: an empty
+        # or malformed file disables encryption, and (unlike an unset var)
+        # an empty CHV_ENCRYPTION_KEY historically produced no runtime
+        # warning either. Warn loudly so the operator can fix it.
+        if grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' \
+            "$CHV_CONFIG_DIR/encryption.env"; then
+            info "Preserving existing credential encryption key."
+        else
+            warn "Existing ${CHV_CONFIG_DIR}/encryption.env is empty or malformed;"
+            warn "S3 credentials will be stored in PLAINTEXT until it is fixed"
+            warn "(write a 64-hex-char CHV_ENCRYPTION_KEY, chmod 0600, restart chv-controlplane)."
+        fi
+    else
+        info "Generating credential encryption key..."
+        _chv_key="$(openssl rand -hex 32 2>/dev/null || true)"
+        # Fail closed: command substitution swallows openssl's failure and
+        # yields an empty string. Writing that would poison the file — the
+        # create-if-absent guard above would then preserve the empty key on
+        # every future run, silently disabling encryption forever.
+        if ! printf '%s' "$_chv_key" | grep -qE '^[0-9a-f]{64}$'; then
+            fatal "failed to generate the credential encryption key (openssl rand -hex 32); refusing to write an empty key — S3 credentials would be stored in plaintext with no warning"
+        fi
+        # Subshell: umask 077 must not leak into later file creation.
+        (
+            umask 077
+            printf 'CHV_ENCRYPTION_KEY=%s\n' "$_chv_key" \
+                > "$CHV_CONFIG_DIR/encryption.env"
+        )
+    fi
+    chmod 0600 "$CHV_CONFIG_DIR/encryption.env"
 }
 
 # -----------------------------------------------------------------------------
@@ -945,110 +1012,53 @@ create_bootstrap_token() {
 install_systemd_services() {
     info "Installing systemd services..."
 
-    cat > /etc/systemd/system/chv-controlplane.service <<'EOF'
-[Unit]
-Description=CHV Control Plane
-After=network.target
+    # Install the canonical unit files verbatim — the same content the .deb
+    # packages ship (packaging/systemd/, mirrored into docs/examples/systemd/
+    # and the release tarball's systemd/). This is deliberately a copy from a
+    # single source of truth: install.sh previously embedded its own unit
+    # definitions, which drifted into the stale pre-#323/#328 model (stord as
+    # the isolated chv-stord user with legacy capabilities, nwd as root with
+    # no hardening) and shadowed the packaged units in /etc/systemd/system.
+    local unit_src=""
+    if [ -f "${EXTRACT_DIR}/systemd/chv-agent.service" ]; then
+        unit_src="${EXTRACT_DIR}/systemd"
+    elif [ -f "${SCRIPT_DIR}/../packaging/systemd/chv-agent.service" ]; then
+        # Running from a repository checkout (dev mode).
+        unit_src="${SCRIPT_DIR}/../packaging/systemd"
+    else
+        fatal "canonical systemd units not found (looked in ${EXTRACT_DIR}/systemd and ${SCRIPT_DIR}/../packaging/systemd); refusing to fall back to stale embedded copies"
+    fi
+    info "Installing systemd units from: ${unit_src}"
 
-[Service]
-Type=simple
-User=chv
-Group=chv
-ExecStart=/usr/bin/chv-controlplane /etc/chv/controlplane.toml
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-TimeoutStopSec=5
-RuntimeDirectory=chv/controlplane
-StateDirectory=chv
-LogsDirectory=chv
+    local unit
+    for unit in chv-controlplane chv-agent chv-stord chv-nwd; do
+        install -m 0644 "${unit_src}/${unit}.service" /etc/systemd/system/
+    done
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    cat > /etc/systemd/system/chv-stord.service <<'EOF'
-[Unit]
-Description=CHV Storage Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=chv-stord
-Group=chv-stord
-ExecStartPre=/bin/mkdir -p /run/chv/stord
-ExecStart=/usr/bin/chv-stord /etc/chv/stord.toml
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-TimeoutStopSec=5
-RuntimeDirectory=chv/stord
-LogsDirectory=chv
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run/chv/stord /var/lib/chv/storage /var/lib/chv/agent
-AmbientCapabilities=
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE
-RestrictAddressFamilies=AF_UNIX
-RestrictSUIDSGID=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    cat > /etc/systemd/system/chv-nwd.service <<'EOF'
-[Unit]
-Description=CHV Network Daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStartPre=/bin/mkdir -p /run/chv/nwd
-ExecStart=/usr/bin/chv-nwd /etc/chv/nwd.toml
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-TimeoutStopSec=5
-RuntimeDirectory=chv/nwd
-LogsDirectory=chv
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    cat > /etc/systemd/system/chv-agent.service <<'EOF'
-[Unit]
-Description=CHV Node Agent
-After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
-Wants=chv-controlplane.service chv-stord.service chv-nwd.service
-
-[Service]
-Type=simple
-User=chv
-Group=chv
-UMask=002
-ExecStartPre=+/usr/bin/install -d -m 0750 -o chv -g chv-stord /var/lib/chv/agent
-ExecStartPre=+/usr/bin/install -d -m 0775 -o chv -g chv-stord /var/lib/chv/agent/vms
-ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/cache
-ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-# Must exceed the core executor's 60s drain budget: SIGKILL before the
-# drain completes strands in-flight operations (InspectRequired) on
-# `systemctl restart`.
-TimeoutStopSec=75
-RuntimeDirectory=chv
-RuntimeDirectoryMode=0775
-StateDirectory=chv/agent
-StateDirectoryMode=0750
-ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
-LogsDirectory=chv
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    # Same tmpfiles entry the .deb ships (#324): creates /run/netns with the
+    # ownership/mode the hardened chv-nwd unit requires. Install the config
+    # so it survives reboots, then apply it immediately so the units can
+    # start without one. Fail closed like the units above: without this
+    # entry the chv-nwd unit cannot start (ReadWritePaths=/run/netns).
+    local tmpfiles_src=""
+    if [ -f "${EXTRACT_DIR}/tmpfiles/chv-node.conf" ]; then
+        tmpfiles_src="${EXTRACT_DIR}/tmpfiles/chv-node.conf"
+    elif [ -f "${SCRIPT_DIR}/../packaging/tmpfiles/chv-node.conf" ]; then
+        tmpfiles_src="${SCRIPT_DIR}/../packaging/tmpfiles/chv-node.conf"
+    fi
+    if [ -n "$tmpfiles_src" ]; then
+        mkdir -p /usr/lib/tmpfiles.d
+        install -m 0644 "$tmpfiles_src" /usr/lib/tmpfiles.d/chv-node.conf
+        # Fail closed like the missing-entry path above: a swallowed apply
+        # failure (e.g. /run/netns left with the wrong mode/owner) would
+        # only surface later as an unexplained chv-nwd start failure.
+        if ! systemd-tmpfiles --create /usr/lib/tmpfiles.d/chv-node.conf \
+            >/dev/null 2>&1; then
+            fatal "systemd-tmpfiles --create failed for chv-node.conf; the chv-nwd unit cannot start without /run/netns"
+        fi
+    else
+        fatal "canonical tmpfiles entry not found (looked in ${EXTRACT_DIR}/tmpfiles and ${SCRIPT_DIR}/../packaging/tmpfiles); the chv-nwd unit cannot start without /run/netns"
+    fi
 
     systemctl daemon-reload
 }
@@ -1227,20 +1237,20 @@ start_services() {
     chown "$CHV_USER":"$CHV_USER" /run/chv/agent/agent.crt /run/chv/agent/agent.key /run/chv/agent/ca.crt
     chmod 640 /run/chv/agent/agent.key
 
-    # Ensure storage directory ownership is correct before starting agent.
-    # The agent spawns chv-stord as a child; stord needs write access to its
-    # runtime directory. In all-in-one mode the agent-managed stord uses
-    # /var/lib/chv/agent, but the systemd unit (if ever enabled) uses
-    # /var/lib/chv/storage. Keeping both paths correctly owned prevents
-    # health-check failures that stall the node in Degraded.
+    # Ensure storage directory ownership is correct before starting stord.
+    # stord runs as the 'chv' service user (see the packaged
+    # chv-stord.service): its API socket is 0600 with chv-agent as the only
+    # client, and cloud-hypervisor (spawned by the agent as 'chv') must
+    # read/write volume files. The chv:chv-stord 0770 contract matches
+    # setup_user_and_dirs() and the .deb postinst (#323).
     if [ -d "$CHV_DATA_DIR/storage" ]; then
-        chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR/storage" 2>/dev/null || true
-        chmod 750 "$CHV_DATA_DIR/storage" "$CHV_DATA_DIR/storage/localdisk" "$CHV_DATA_DIR/storage/lvm" 2>/dev/null || true
+        chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/storage" 2>/dev/null || true
+        chmod 770 "$CHV_DATA_DIR/storage" "$CHV_DATA_DIR/storage/localdisk" "$CHV_DATA_DIR/storage/lvm" 2>/dev/null || true
     fi
     mkdir -p "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
-    chown "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent" 2>/dev/null || true
+    chown "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR/agent" 2>/dev/null || true
     chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
-    chmod 750 "$CHV_DATA_DIR/agent" 2>/dev/null || true
+    chmod 700 "$CHV_DATA_DIR/agent" 2>/dev/null || true
     chmod 775 "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
 
     systemctl enable --now chv-stord chv-nwd
@@ -1389,6 +1399,10 @@ wipe_deployment() {
           /usr/bin/chv-stord /usr/bin/chv-nwd
     # Remove nginx config
     rm -f /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
+    # Remove the tmpfiles entry installed with the units (#324). /run/netns
+    # itself is left in place: it is tmpfs (emptied at boot anyway) and other
+    # tooling may reference the directory.
+    rm -f /usr/lib/tmpfiles.d/chv-node.conf
     # Remove bridge network
     if ip link show "${INSTALL_CHV_BRIDGE_NAME}" &>/dev/null; then
         ip link set "${INSTALL_CHV_BRIDGE_NAME}" down 2>/dev/null || true
@@ -1516,6 +1530,7 @@ copy_firmware
 generate_certs
 setup_network
 install_configs
+create_encryption_env
 create_bootstrap_token
 install_systemd_services
 install_nginx
@@ -1552,8 +1567,19 @@ Node ID:        ${CHV_NODE_ID}
 Web UI:         http://${LOCAL_IP}/
 API:            http://127.0.0.1:8080/
 Database:       ${CHV_DB_PATH}
+EOF
+    if [ "$INSTALL_CHV_NO_BRIDGE" = "1" ]; then
+        cat <<EOF2
+Bridge:         skipped (INSTALL_CHV_NO_BRIDGE=1; networks are created via
+                the API and managed by chv-nwd)
+EOF2
+    else
+        cat <<EOF2
 Bridge:         ${INSTALL_CHV_BRIDGE_NAME} (${INSTALL_CHV_BRIDGE_CIDR})
 Upstream iface: ${INSTALL_CHV_BRIDGE_IFACE} (NAT enabled)
+EOF2
+    fi
+    cat <<EOF
 
 Services:
   systemctl status chv-controlplane

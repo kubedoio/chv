@@ -390,6 +390,11 @@ sudo cp docs/examples/systemd/chv-controlplane.service /etc/systemd/system/
 sudo cp docs/examples/systemd/chv-agent.service        /etc/systemd/system/
 sudo cp docs/examples/systemd/chv-stord.service        /etc/systemd/system/
 sudo cp docs/examples/systemd/chv-nwd.service          /etc/systemd/system/
+# The hardened chv-nwd unit needs /run/netns to exist (root:chv 0770).
+# The .deb ships this as a tmpfiles entry; on the tarball/manual path install
+# the same entry so it is recreated on every boot, then apply it now:
+sudo cp packaging/tmpfiles/chv-node.conf /usr/lib/tmpfiles.d/chv-node.conf
+sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/chv-node.conf
 sudo systemctl daemon-reload
 ```
 

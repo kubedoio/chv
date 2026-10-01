@@ -167,7 +167,9 @@ assert_group_member kvm chv
 assert_group_member disk chv-stord
 # Intended-but-broken: postinst's `id -nG chv-stord | grep -qw chv` matches
 # the chv-stord group name itself (hyphen is a word boundary), so
-# `usermod -aG chv chv-stord` never runs. Known finding — issue filed.
+# `usermod -aG chv chv-stord` never runs. Fixed in the postinst with a
+# per-entry `grep -qx chv` guard over /etc/group — this assertion passes
+# when fixed and warns on regression.
 if grep -E "^chv:" "$ROOT/etc/group" | grep -q ":chv-stord$"; then
     qual_pass "chv-stord is a member of chv (postinst intent)"
 else
@@ -223,6 +225,21 @@ for key in NoNewPrivileges ProtectSystem ProtectHome; do
         || qual_error "controlplane unit missing hardening key: ${key}"
 done
 assert_file_exists "tmpfiles config present" "$ROOT/usr/lib/tmpfiles.d/chv-node.conf"
+
+# --- credential encryption key (#335): postinst mints it create-if-absent,
+# 0600 root, valid hex — without it S3 credentials are stored in plaintext
+# (see CredentialEncryption in chv-controlplane-store). ---
+enc_stat="$(stat -c '%a %u:%g' "$ROOT/etc/chv/encryption.env" 2>/dev/null || true)"
+if [ "$enc_stat" = "600 0:0" ]; then
+    qual_pass "encryption.env minted 0600 root:root (#335)"
+else
+    qual_error "encryption.env missing or wrong mode/owner (#335): '${enc_stat}'"
+fi
+if grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' "$ROOT/etc/chv/encryption.env" 2>/dev/null; then
+    qual_pass "CHV_ENCRYPTION_KEY is 64 hex chars (#335)"
+else
+    qual_error "CHV_ENCRYPTION_KEY malformed or missing (#335)"
+fi
 
 # --- binaries, conffiles, migrations ---
 for b in chv-controlplane chv-agent chv-stord chv-nwd chvctl; do
