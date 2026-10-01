@@ -1,6 +1,11 @@
 # CHV Production Docker Compose Stack
 # =====================================
-# This file deploys CHV as a multi-service production stack on a single host.
+# LEGACY / UNMAINTAINED: this compose stack predates the #323 ownership
+# model (stord runs as `chv`, storage `chv:chv-stord 0770`) and the
+# prompt-02 agent authority cutover, and its ownership layout differs
+# deliberately (chv-stord:chv-stord). It is NOT part of the qualified
+# production topology — use the .deb packages or scripts/install.sh
+# (see docs/DEPLOYMENT.md). Kept for existing experimental deployments.
 #
 # Prerequisites:
 #   - Docker 24+ with Compose v2
@@ -9,7 +14,7 @@
 #   - Cloud Hypervisor binary installed on the host
 #
 # Before first start:
-#   1. Create the Linux bridge on the host (see docs/DEPLOYMENT-DOCKER.md)
+#   1. Create the Linux bridge on the host (host networking setup)
 #   2. Install Cloud Hypervisor to /usr/bin/cloud-hypervisor
 #   3. Generate a bootstrap token: openssl rand -hex 32 > bootstrap.token
 #   4. Set CHV_JWT_SECRET in your environment (or a .env file)
@@ -129,9 +134,8 @@ services:
       socket_path = "/run/chv/nwd/api.sock"
       runtime_dir = "/run/chv/nwd"
       log_level = "info"
-      bridge_name = "${CHV_BRIDGE_NAME:-chvbr0}"
-      bridge_cidr = "${CHV_BRIDGE_CIDR:-10.200.0.1/24}"
-      upstream_iface = "${CHV_BRIDGE_IFACE:-ens19}"
+      # Bridge topology is configured at runtime via gRPC topology specs
+      # from the control plane, not in this file.
       EOF
         exec chv-nwd /tmp/nwd.toml
       '
@@ -142,10 +146,6 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
-    environment:
-      CHV_BRIDGE_NAME: "${CHV_BRIDGE_NAME:-chvbr0}"
-      CHV_BRIDGE_CIDR: "${CHV_BRIDGE_CIDR:-10.200.0.1/24}"
-      CHV_BRIDGE_IFACE: "${CHV_BRIDGE_IFACE:-ens19}"
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/chv/nwd/api.sock"]
       interval: 15s

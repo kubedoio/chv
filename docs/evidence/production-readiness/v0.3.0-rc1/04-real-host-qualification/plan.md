@@ -240,7 +240,8 @@ spec matches the qualified reality.
   tmpfiles entry which install.sh installs verbatim (fail-closed, no
   embedded copies anywhere); new permanent harness leg
   `qual/install-sh-leg.sh` covers the install.sh path on a clean
-  container (25 assertions, errors=0 warnings=0) so it cannot silently
+  container (30 assertions + 7 host-side source-of-truth parity
+  checks, errors=0 warnings=0) so it cannot silently
   drift again. A round-3 fresh-eyes pass over that fix hardened the leg
   (real exit gate, source-of-truth parity vs packaging/) and provisioned
   the credential encryption key on both install surfaces (#335 — report
@@ -249,4 +250,13 @@ spec matches the qualified reality.
   minted create-if-absent and asserted by both legs). Final: clean-install
   Legs A+B and install-sh-leg both errors=0 warnings=0. See
   [m4.2-clean-install.md](m4.2-clean-install.md) §10.
+  - Round 4 (same day) closed the last silent-plaintext path (empty-key
+    mint/write guard on both surfaces + daemon warns on unset OR empty;
+    tmpfiles apply failure fatal) and re-qualified both legs green.
+  - Round 5 verified the round-4 fixes correct and swept the wider repo:
+    no MAJOR findings; fixed remaining doc-drift surfaces (DEPLOYMENT.md
+    dead nwd.toml keys + missing authority_mode + missing encryption-key
+    step; legacy docker-compose.prod.yml and examples/bootstrap.sh dead
+    keys; stale assertion count here). See
+    [m4.2-clean-install.md](m4.2-clean-install.md) §10 round-5 note.
 - M4.3–M4.9: not started.

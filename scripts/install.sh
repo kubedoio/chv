@@ -1049,9 +1049,11 @@ install_systemd_services() {
     if [ -n "$tmpfiles_src" ]; then
         mkdir -p /usr/lib/tmpfiles.d
         install -m 0644 "$tmpfiles_src" /usr/lib/tmpfiles.d/chv-node.conf
-        # Fail closed like the missing-entry path above: a swallowed apply
-        # failure (e.g. /run/netns left with the wrong mode/owner) would
-        # only surface later as an unexplained chv-nwd start failure.
+        # Fail closed on invocation/config errors (previously
+        # '2>/dev/null || true' swallowed even those). Caveat:
+        # systemd-tmpfiles can exit 0 while skipping individual entries
+        # for some failure classes — the qual legs' /run/netns mode/owner
+        # assertions bound that residual gap.
         if ! systemd-tmpfiles --create /usr/lib/tmpfiles.d/chv-node.conf \
             >/dev/null 2>&1; then
             fatal "systemd-tmpfiles --create failed for chv-node.conf; the chv-nwd unit cannot start without /run/netns"

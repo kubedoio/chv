@@ -17,10 +17,8 @@ CHV_UI_DIR="/opt/chv/ui"
 CHV_MIGRATIONS_DIR="/usr/local/share/chv/migrations"
 CHV_DB_PATH="${CHV_DATA_DIR}/controlplane.db"
 
-# Bridge/network defaults (match installer defaults)
-BRIDGE_NAME="${INSTALL_CHV_BRIDGE_NAME:-chvbr0}"
-BRIDGE_CIDR="${INSTALL_CHV_BRIDGE_CIDR:-10.200.0.1/24}"
-BRIDGE_IFACE="${INSTALL_CHV_BRIDGE_IFACE:-ens19}"
+# NOTE: bridge/NAT topology is configured at runtime via gRPC topology
+# specs from the control plane, not by this script.
 
 REPO_DIR="${1:-}"
 
@@ -130,9 +128,8 @@ cat > "$CHV_CONFIG_DIR/nwd.toml" <<EOF
 socket_path = "/run/chv/nwd/api.sock"
 runtime_dir = "/run/chv/nwd"
 log_level = "info"
-bridge_name = "${BRIDGE_NAME}"
-bridge_cidr = "${BRIDGE_CIDR}"
-upstream_iface = "${BRIDGE_IFACE}"
+# Bridge topology (bridge name, CIDR, upstream interface) is configured at
+# runtime via gRPC topology specs from the control plane, not in this file.
 EOF
 
 chmod 640 "$CHV_CONFIG_DIR/agent.toml" "$CHV_CONFIG_DIR/stord.toml" "$CHV_CONFIG_DIR/nwd.toml"
