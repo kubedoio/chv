@@ -96,6 +96,10 @@ cp docs/examples/systemd/chv-controlplane.service "${RELEASE_DIR}/systemd/"
 cp docs/examples/systemd/chv-agent.service        "${RELEASE_DIR}/systemd/"
 cp docs/examples/systemd/chv-stord.service        "${RELEASE_DIR}/systemd/"
 cp docs/examples/systemd/chv-nwd.service          "${RELEASE_DIR}/systemd/"
+# Same tmpfiles entry the .deb ships (packaging/nfpm/chv-node.yaml); the
+# tarball's install.sh installs it so the unit-boot path gets /run/netns.
+mkdir -p "${RELEASE_DIR}/tmpfiles"
+cp packaging/tmpfiles/chv-node.conf               "${RELEASE_DIR}/tmpfiles/"
 cp docs/examples/nginx/chv-ui.conf               "${RELEASE_DIR}/nginx/"
 
 cp docs/examples/controlplane.toml "${RELEASE_DIR}/controlplane.toml.example"

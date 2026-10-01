@@ -34,7 +34,7 @@ curl -s "https://controlplane.example.com/v1/backups/jobs?vm_id=<VM_ID>" \
 ### Via SQLite (direct DB access)
 
 ```bash
-sudo sqlite3 /var/lib/chv/controlplane.db \
+sudo sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT job_id, status, destination, storage_backend, checksum, size_bytes, completed_at 
    FROM backup_jobs 
    WHERE vm_id = '<VM_ID>' AND status = 'Succeeded' 
@@ -58,9 +58,9 @@ Note:
 # (or inspect the destination field directly)
 
 # If you have the schedule_id:
-SCHEDULE_ID=$(sudo sqlite3 /var/lib/chv/controlplane.db \
+SCHEDULE_ID=$(sudo sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT schedule_id FROM backup_jobs WHERE job_id = '<JOB_ID>';")
-S3_DEST=$(sudo sqlite3 /var/lib/chv/controlplane.db \
+S3_DEST=$(sudo sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT destination FROM backup_schedules WHERE schedule_id = '$SCHEDULE_ID';")
 
 # Example: s3://my-backup-bucket/chv/vm-backups/
@@ -106,7 +106,7 @@ cp /run/chv/controlplane/backups/<JOB_ID>.backup /tmp/<JOB_ID>.backup
 downloaded_checksum=$(sha256sum /tmp/<JOB_ID>.backup | awk '{print $1}')
 
 # Compare with the expected checksum from the database
-expected_checksum=$(sudo sqlite3 /var/lib/chv/controlplane.db \
+expected_checksum=$(sudo sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
   "SELECT checksum FROM backup_jobs WHERE job_id = '<JOB_ID>';")
 
 if [ "$downloaded_checksum" = "$expected_checksum" ]; then
@@ -264,10 +264,14 @@ curl -X POST https://controlplane.example.com/v1/backups/restores \
     "notes": "Manually restored from S3 artifact. Checksum verified."
   }' | jq '.restore_id'
 
-# Then mark it as succeeded (since the API stub doesn't execute):
+# Then mark it as succeeded (since the API stub doesn't execute).
+# Live-database write: stop the control plane first and restart it after
+# (see docs/OPERATIONS.md, "Live Database Access"):
+sudo systemctl stop chv-controlplane
 sudo sqlite3 /var/lib/chv/controlplane.db \
   "UPDATE backup_restores SET status = 'Succeeded', completed_at = datetime('now') 
    WHERE backup_job_id = '<JOB_ID>' AND target_vm_id = '<VM_ID>';"
+sudo systemctl start chv-controlplane
 ```
 
 ---

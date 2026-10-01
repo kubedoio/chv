@@ -232,4 +232,14 @@ spec matches the qualified reality.
   verified as already fixed by the prompt-01 work (PR #256 + hardening)
   and closed with evidence. See
   [m4.2-clean-install.md](m4.2-clean-install.md) §9.
+- Fix round 2 (2026-10-01, review-driven): **COMPLETE** — a comprehensive
+  review of the prompt-04 diff range found the install.sh path had
+  drifted (embedded stale pre-#323/#328 systemd units; pre-#323 storage
+  chown in `start_services()`; missing bcrypt apt dependency; minor doc
+  staleness). All fixed; the tarball now ships the canonical units +
+  tmpfiles entry which install.sh installs verbatim (fail-closed, no
+  embedded copies anywhere); new permanent harness leg
+  `qual/install-sh-leg.sh` covers the install.sh path on a clean
+  container (25 assertions, errors=0 warnings=0) so it cannot silently
+  drift again. See [m4.2-clean-install.md](m4.2-clean-install.md) §10.
 - M4.3–M4.9: not started.
