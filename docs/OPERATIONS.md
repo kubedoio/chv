@@ -200,8 +200,13 @@ regenerated on upgrade.
   (0600 root), `systemctl restart chv-controlplane`, then re-enter the S3
   credentials — values encrypted under the old key read as missing, not
   corrupted, so the re-entry is safe.
-- If the file is absent, the control plane logs a warning and stores S3
-  credentials in **plaintext** — do not run production deployments that way.
+- If the file is absent (or the key is present but empty), the control
+  plane logs a warning and stores S3 credentials in **plaintext** — do
+  not run production deployments that way.
+- **Upgrading a pre-#335 host:** the postinst mints the key, but a
+  *running* control plane does not re-read `EnvironmentFile` until
+  restarted — `systemctl restart chv-controlplane` after the upgrade to
+  activate encryption.
 
 ## Live Database Access
 

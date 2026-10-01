@@ -167,7 +167,9 @@ assert_group_member kvm chv
 assert_group_member disk chv-stord
 # Intended-but-broken: postinst's `id -nG chv-stord | grep -qw chv` matches
 # the chv-stord group name itself (hyphen is a word boundary), so
-# `usermod -aG chv chv-stord` never runs. Known finding — issue filed.
+# `usermod -aG chv chv-stord` never runs. Fixed in the postinst with a
+# per-entry `grep -qx chv` guard over /etc/group — this assertion passes
+# when fixed and warns on regression.
 if grep -E "^chv:" "$ROOT/etc/group" | grep -q ":chv-stord$"; then
     qual_pass "chv-stord is a member of chv (postinst intent)"
 else

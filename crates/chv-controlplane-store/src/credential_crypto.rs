@@ -41,17 +41,23 @@ pub struct CredentialEncryption {
 
 impl CredentialEncryption {
     pub fn new() -> Self {
+        // NOTE (#335 review round 4): CHV_JWT_SECRET is a legacy fallback
+        // shared with the JWT signing secret (chv-config). Rotating it
+        // invalidates credentials encrypted under it — tracked in #336;
+        // do not add new consumers.
         let key_str = std::env::var("CHV_ENCRYPTION_KEY")
             .or_else(|_| std::env::var("CHV_JWT_SECRET"))
-            .unwrap_or_else(|_| {
-                warn!(
-                    "Neither CHV_ENCRYPTION_KEY nor CHV_JWT_SECRET is set; \
-                     S3 credentials will be stored in plaintext"
-                );
-                String::new()
-            });
+            .unwrap_or_else(|_| String::new());
 
+        // Unset AND present-but-empty must both warn: an empty value (e.g. a
+        // truncated /etc/chv/encryption.env) otherwise disables encryption
+        // silently — the install-time guards warn, but the daemon must not
+        // trust them.
         if key_str.is_empty() {
+            warn!(
+                "CHV_ENCRYPTION_KEY is unset or empty; \
+                 S3 credentials will be stored in plaintext"
+            );
             return Self { cipher: None };
         }
 
@@ -274,6 +280,28 @@ mod tests {
         let decrypted = crypto
             .decrypt(&encrypted)
             .expect("no-key plaintext passthrough succeeds");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// A present-but-empty CHV_ENCRYPTION_KEY (e.g. a truncated
+    /// /etc/chv/encryption.env) must behave exactly like no key — and, as
+    /// of #335 round 4, emit the same startup warning instead of silently
+    /// disabling encryption.
+    #[test]
+    fn test_empty_key_stores_plaintext() {
+        let _g = EnvGuard::lock();
+        std::env::set_var("CHV_ENCRYPTION_KEY", "");
+        std::env::remove_var("CHV_JWT_SECRET");
+
+        let crypto = CredentialEncryption::new();
+        let plaintext = "empty-key-no-encryption";
+
+        let encrypted = crypto.encrypt(plaintext);
+        assert_eq!(encrypted, plaintext);
+
+        let decrypted = crypto
+            .decrypt(&encrypted)
+            .expect("empty-key plaintext passthrough succeeds");
         assert_eq!(decrypted, plaintext);
     }
 

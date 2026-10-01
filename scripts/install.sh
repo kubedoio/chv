@@ -962,13 +962,32 @@ EOF
 # encrypted credentials would become unrecoverable.
 create_encryption_env() {
     if [ -f "$CHV_CONFIG_DIR/encryption.env" ]; then
-        info "Preserving existing credential encryption key."
+        # Never regenerate — but validate what we are preserving: an empty
+        # or malformed file disables encryption, and (unlike an unset var)
+        # an empty CHV_ENCRYPTION_KEY historically produced no runtime
+        # warning either. Warn loudly so the operator can fix it.
+        if grep -q '^CHV_ENCRYPTION_KEY=[0-9a-f]\{64\}$' \
+            "$CHV_CONFIG_DIR/encryption.env"; then
+            info "Preserving existing credential encryption key."
+        else
+            warn "Existing ${CHV_CONFIG_DIR}/encryption.env is empty or malformed;"
+            warn "S3 credentials will be stored in PLAINTEXT until it is fixed"
+            warn "(write a 64-hex-char CHV_ENCRYPTION_KEY, chmod 0600, restart chv-controlplane)."
+        fi
     else
         info "Generating credential encryption key..."
+        _chv_key="$(openssl rand -hex 32 2>/dev/null || true)"
+        # Fail closed: command substitution swallows openssl's failure and
+        # yields an empty string. Writing that would poison the file — the
+        # create-if-absent guard above would then preserve the empty key on
+        # every future run, silently disabling encryption forever.
+        if ! printf '%s' "$_chv_key" | grep -qE '^[0-9a-f]{64}$'; then
+            fatal "failed to generate the credential encryption key (openssl rand -hex 32); refusing to write an empty key — S3 credentials would be stored in plaintext with no warning"
+        fi
         # Subshell: umask 077 must not leak into later file creation.
         (
             umask 077
-            printf 'CHV_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" \
+            printf 'CHV_ENCRYPTION_KEY=%s\n' "$_chv_key" \
                 > "$CHV_CONFIG_DIR/encryption.env"
         )
     fi
@@ -1030,7 +1049,13 @@ install_systemd_services() {
     if [ -n "$tmpfiles_src" ]; then
         mkdir -p /usr/lib/tmpfiles.d
         install -m 0644 "$tmpfiles_src" /usr/lib/tmpfiles.d/chv-node.conf
-        systemd-tmpfiles --create /usr/lib/tmpfiles.d/chv-node.conf 2>/dev/null || true
+        # Fail closed like the missing-entry path above: a swallowed apply
+        # failure (e.g. /run/netns left with the wrong mode/owner) would
+        # only surface later as an unexplained chv-nwd start failure.
+        if ! systemd-tmpfiles --create /usr/lib/tmpfiles.d/chv-node.conf \
+            >/dev/null 2>&1; then
+            fatal "systemd-tmpfiles --create failed for chv-node.conf; the chv-nwd unit cannot start without /run/netns"
+        fi
     else
         fatal "canonical tmpfiles entry not found (looked in ${EXTRACT_DIR}/tmpfiles and ${SCRIPT_DIR}/../packaging/tmpfiles); the chv-nwd unit cannot start without /run/netns"
     fi
