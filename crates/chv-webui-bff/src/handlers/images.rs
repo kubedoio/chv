@@ -98,6 +98,9 @@ pub async fn import_image(
     let source_url = payload
         .get("source_url")
         .and_then(|v| v.as_str())
+        // "url" alias: chvctl sends both keys (older builds sent only
+        // "url", which was silently dropped — kubedoio/chv#339).
+        .or_else(|| payload.get("url").and_then(|v| v.as_str()))
         .unwrap_or("");
 
     let format = payload

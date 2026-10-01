@@ -365,21 +365,41 @@ pub async fn create_vm(
         .to_string();
     tracing::info!(%image_ref, "create_vm: initial image_ref");
 
-    // If image_id is a real image UUID (not "default"), look up its source_url/path.
+    // If image_ref is a real image UUID (not "default"), look up its source_url/path.
     if image_ref != "default" && !image_ref.is_empty() {
         tracing::info!(%image_ref, "create_vm: looking up image in DB");
-        if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
+        // Resolve by image_id first; if that misses, by display name —
+        // operators reference images by the name chosen at import
+        // (kubedoio/chv#339). display_name is not unique, so the name
+        // match takes the most recently created image.
+        let mut source_url: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT source_url FROM images WHERE image_id = ?",
         )
         .bind(&image_ref)
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
-        .flatten()
-        {
-            if source_url.starts_with('/') {
-                tracing::info!(%source_url, "create_vm: resolved image_ref to local path");
-                image_ref = source_url;
+        .flatten();
+        if source_url.is_none() {
+            source_url = sqlx::query_scalar::<_, Option<String>>(
+                // rowid tiebreaker: created_at has second granularity and
+                // imports within the same second must still resolve
+                // deterministically to the most recently inserted row.
+                "SELECT source_url FROM images WHERE display_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            )
+            .bind(&image_ref)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to look up image by name: {}", e)))?
+            .flatten();
+        }
+        if let Some(source_url) = source_url {
+            // file:// URIs are local paths (kubedoio/chv#339): strip the
+            // scheme so the local-path test accepts them.
+            let source_path = source_url.strip_prefix("file://").unwrap_or(&source_url);
+            if source_path.starts_with('/') {
+                tracing::info!(%source_path, "create_vm: resolved image_ref to local path");
+                image_ref = source_path.to_string();
             } else {
                 tracing::warn!(%source_url, "create_vm: image source_url is not a local path, cannot use as disk seed");
                 return Err(BffError::BadRequest(format!(
