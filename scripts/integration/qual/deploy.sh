@@ -109,6 +109,23 @@ cleanup() {
         return "$rc" 2>/dev/null || exit "$rc"
     fi
     qual_info "teardown starting"
+    # Scenario scripts (M4.3+) restart daemons as part of their recovery
+    # legs; the restarted PIDs cannot propagate back through --exec's
+    # child process, so they record them in ${TEST_DIR}/pids.current
+    # (KEY=PID lines, same keys as the deployment map). Re-read it here so
+    # teardown always kills the CURRENT processes, not the original ones.
+    if [ -f "${TEST_DIR}/pids.current" ]; then
+        # shellcheck disable=SC1090
+        while IFS='=' read -r k v; do
+            case "$k" in
+                CP_PID) CP_PID="$v" ;;
+                STORD_PID) STORD_PID="$v" ;;
+                NWD_PID) NWD_PID="$v" ;;
+                AGENT_PID) AGENT_PID="$v" ;;
+            esac
+        done < "${TEST_DIR}/pids.current"
+        qual_info "teardown: PID overrides from pids.current: CP=${CP_PID:-} STORD=${STORD_PID:-} NWD=${NWD_PID:-} AGENT=${AGENT_PID:-}"
+    fi
     # Stop in reverse dependency order; SIGTERM then SIGKILL.
     for pid in "${AGENT_PID:-}" "${NWD_PID:-}" "${STORD_PID:-}" "${CP_PID:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
@@ -131,21 +148,50 @@ cleanup() {
         [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
     done
     # Kill any cloud-hypervisor the stack left behind (forbidden residue).
-    pkill -x cloud-hypervisor 2>/dev/null || true
+    # pkill -x cannot match "cloud-hypervisor": /proc/<pid>/comm is
+    # truncated to 15 chars (same class as the lib.sh counter bug found by
+    # M4.3 run 3 — an exact-name match never fires). Match the full command
+    # line instead, scoped to THIS test dir (the agent spawns CH with its
+    # api-socket under ${TEST_DIR}/agent/vms) so unrelated host VMs are
+    # never touched.
+    pkill -f "cloud-hypervisor.*${TEST_DIR}" 2>/dev/null || true
+    sleep 1
+    # SIGKILL fallback: a VMM whose control loop is wedged (observed in
+    # M4.3 run 5: an adopted VM's graceful stop left CH alive in Shutdown
+    # state, SIGTERM ineffective) must not survive teardown either.
+    pkill -9 -f "cloud-hypervisor.*${TEST_DIR}" 2>/dev/null || true
     sleep 1
 
-    # Remove nwd-owned links this deployment created (bridges 'br-*' and taps
-    # 'tap-*' — see chv-nwd-core state.rs/executor.rs naming). Scoped by the
-    # baseline diff so pre-existing host links are never touched.
+    # Remove nwd-owned links this deployment created (bridges and taps —
+    # see chv-nwd-core state.rs/executor.rs naming: 'br-<network_id>' and
+    # 'tap-*', PLUS 'chvbr0' for the default network — see
+    # chv-hypervisor-api resources.rs default_network_bridge_name; run 4's
+    # teardown left chvbr0 behind because the pattern only covered br-/tap-).
+    # Scoped by the baseline diff so pre-existing host links are never
+    # touched.
     ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' \
         | sort > "${TEST_DIR}/links.mid" || true
     comm -13 "${TEST_DIR}/links.before" "${TEST_DIR}/links.mid" \
-        | grep -E '^(br-|tap-)' | grep -v '^$' > "${TEST_DIR}/links.owned" || true
+        | grep -E '^(br-|tap-|chvbr)' | grep -v '^$' > "${TEST_DIR}/links.owned" || true
     while IFS= read -r iface; do
         [ -n "$iface" ] || continue
         qual_info "teardown: deleting nwd link ${iface}"
         ip link delete "$iface" 2>/dev/null || true
     done < "${TEST_DIR}/links.owned"
+
+    # Remove nft tables this deployment created (nwd's per-network firewall
+    # tables, e.g. 'table inet chv-default'). Normally nwd's own SIGTERM
+    # shutdown removes them; when it cannot (a CH process still held the
+    # bridge, as in run 4), this fallback must — scoped by the baseline
+    # diff so pre-existing host tables are never touched.
+    nft list tables 2>/dev/null | sort > "${TEST_DIR}/nft-tables.mid" || true
+    while IFS= read -r table; do
+        [ -n "$table" ] || continue
+        if ! grep -qx "$table" "${TEST_DIR}/nft-tables.before" 2>/dev/null; then
+            qual_info "teardown: deleting nft ${table}"
+            nft delete table ${table#table } 2>/dev/null || true
+        fi
+    done < "${TEST_DIR}/nft-tables.mid"
 
     # --- Forbidden-outcome residue assertions ---
     # (|| true: an assertion failure must not abort the remaining cleanup —
@@ -253,12 +299,25 @@ MIGRATIONS_DIR="${REPO_ROOT_OVERRIDE:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}/cmd
 [ -d "$MIGRATIONS_DIR" ] || qual_die "migrations dir not found: $MIGRATIONS_DIR"
 
 # --- controlplane.toml ---
+# agent_socket_pattern / agent_runtime_dir / firmware_path: the candidate's
+# defaults match the PRODUCTION layout (/run/chv/agent/api.sock,
+# /var/lib/chv/agent, /var/lib/chv/hypervisor-fw — installed there by
+# install.sh). This deployment deliberately uses a throwaway dir tree, so
+# the CP config must teach it where the agent actually lives — without
+# these, VM dispatch fails with "backend unavailable: agent — transport
+# error" (found by the M4.3 run 1; the M4.1 smoke never dispatched a VM
+# operation, so the gap was invisible). Firmware boot is the qualified
+# path (M2.5); kernel_path stays default because it is unused when the
+# spec carries a firmware.
 cat > "${TEST_DIR}/controlplane.toml" <<EOF
 grpc_bind = "127.0.0.1:8443"
 http_bind = "127.0.0.1:8080"
 log_level = "info"
 runtime_dir = "${cp_dir}"
 jwt_secret = "qual-$(openssl rand -hex 16)-jwt-secret"
+agent_socket_pattern = "${agent_dir}/api.sock"
+agent_runtime_dir = "${agent_dir}"
+firmware_path = "${CHV_QUAL_ROOT}/hypervisor-fw"
 
 [database]
 url = "sqlite://${cp_dir}/controlplane.db"
@@ -503,7 +562,6 @@ if [ "${QUAL_ERRORS}" -gt 0 ]; then
     SCENARIO_RC=1
 fi
 
-SCENARIO_RC=0
 if [ -n "$EXEC_CMD" ]; then
     qual_info "running scenario: ${EXEC_CMD}"
     # shellcheck disable=SC2086
@@ -516,6 +574,7 @@ if [ -n "$EXEC_CMD" ]; then
         QUAL_CHVCTL="$QUAL_CHVCTL" QUAL_CP_PID="$CP_PID" \
         QUAL_STORD_PID="$STORD_PID" QUAL_NWD_PID="$NWD_PID" \
         QUAL_AGENT_PID="$AGENT_PID" QUAL_NETWORK_CIDR="$NETWORK_CIDR" \
+        QUAL_GUEST_IMAGE_PATH="${CHV_QUAL_ROOT}/images/${GUEST_IMAGE}" \
         "$@"; then
         qual_pass "scenario exited 0"
     else
