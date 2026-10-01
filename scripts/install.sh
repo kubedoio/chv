@@ -226,15 +226,19 @@ setup_user_and_dirs() {
     mkdir -p "$CHV_UI_DIR"
     mkdir -p "$CHV_MIGRATIONS_DIR"
 
-    chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR"/cache "$CHV_DATA_DIR"/images "$CHV_LOG_DIR" "$CHV_RUN_DIR"/controlplane "$CHV_RUN_DIR"/agent "$CHV_RUN_DIR"/nwd
+    chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR"/cache "$CHV_DATA_DIR"/images "$CHV_LOG_DIR" "$CHV_RUN_DIR"/controlplane "$CHV_RUN_DIR"/agent "$CHV_RUN_DIR"/nwd "$CHV_RUN_DIR"/stord
     chown "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent"
     chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent/vms"
-    chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR"/storage "$CHV_RUN_DIR"/stord
+    # Storage dirs must be writable by 'chv': chv-stord runs as the chv
+    # service user (0600 API socket with chv-agent as the only client) and
+    # cloud-hypervisor (as chv) reads/writes volume files. Group chv-stord
+    # is kept as the seam for a future dedicated storage-user model.
+    chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR"/storage
     chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR" "$CHV_DATA_DIR/agent"
     chmod 775 "$CHV_DATA_DIR/agent/vms"
     chmod 750 "$CHV_DATA_DIR"/storage
-    chmod 750 "$CHV_DATA_DIR"/storage/localdisk
-    chmod 750 "$CHV_DATA_DIR"/storage/lvm
+    chmod 770 "$CHV_DATA_DIR"/storage/localdisk
+    chmod 770 "$CHV_DATA_DIR"/storage/lvm
 }
 
 # -----------------------------------------------------------------------------
@@ -884,7 +888,7 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/bin/chv-stord"
 nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
-authority_mode = "legacy"
+authority_mode = "core-managed"
 core_store_path = "${CHV_DATA_DIR}/agent/core.db"
 core_api_socket_path = "${CHV_RUN_DIR}/core/core-v1.sock"
 core_archive_path = "${CHV_DATA_DIR}/agent/node-cache-v1.archive"

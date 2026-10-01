@@ -19,7 +19,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run/chv/nwd /run/netns
+ReadWritePaths=/run/chv/nwd /run/netns /var/lib/chv
 
 [Install]
 WantedBy=multi-user.target

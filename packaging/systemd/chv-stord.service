@@ -4,6 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
+# chv-stord runs as the 'chv' service user by design: its API socket is
+# mode 0600 with chv-agent as the only client, and cloud-hypervisor
+# (spawned by chv-agent as 'chv') must read and write volume files under
+# /var/lib/chv/storage. Running as the isolated 'chv-stord' user would
+# require a group-accessible socket and group-writable volumes — tracked
+# as the future isolation direction, not the shipped model.
 User=chv
 Group=chv
 ExecStartPre=/bin/mkdir -p /run/chv/stord

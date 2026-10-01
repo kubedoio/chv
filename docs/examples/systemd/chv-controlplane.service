@@ -7,6 +7,9 @@ Type=simple
 User=chv
 Group=chv
 ExecStart=/usr/bin/chv-controlplane /etc/chv/controlplane.toml
+# Pulls in CHV_ENCRYPTION_KEY for credentials-at-rest encryption.
+# Leading '-' tolerates absence (e.g., before install.sh has run).
+EnvironmentFile=-/etc/chv/encryption.env
 Restart=on-failure
 RestartSec=5
 KillMode=mixed

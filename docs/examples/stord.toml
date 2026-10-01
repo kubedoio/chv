@@ -23,9 +23,10 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # ca_cert_path     = "/etc/chv/tls/chv-ca.crt"         # CA bundle validating the destination
 # dest_server_name = "stord-peer.internal"             # expected destination identity (DNS SAN)
 #
-# File ownership/permissions: cert and key should be owned by the chv-stord
-# service user/group with 0640 (key) / 0644 (cert, CA). PEM material is never
-# logged or returned in errors. Rotate keys by updating files and restarting
-# the daemon — startup re-validates the pair.
+# File ownership/permissions: chv-stord runs as the 'chv' service user
+# (see the packaged chv-stord.service), so cert and key should be owned by
+# root:chv or chv:chv with 0640 (key) / 0644 (cert, CA). PEM material is
+# never logged or returned in errors. Rotate keys by updating files and
+# restarting the daemon — startup re-validates the pair.
 [migration]
 enabled = false
