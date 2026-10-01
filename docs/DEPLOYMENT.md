@@ -406,7 +406,10 @@ printf '%s' "$BOOTSTRAP_TOKEN" | sudo tee /etc/chv/bootstrap.token
 sudo chmod 640 /etc/chv/bootstrap.token
 sudo chown root:chv /etc/chv/bootstrap.token
 
-# Insert token hash into SQLite database (after control plane has started)
+# Insert token hash into SQLite database (stop the control plane first —
+# manual writes to the live database are unsafe; see OPERATIONS.md
+# "Live Database Access")
+sudo systemctl stop chv-controlplane
 TOKEN_HASH=$(printf '%s' "$BOOTSTRAP_TOKEN" | sha256sum | awk '{print $1}')
 EXPIRES=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%M:%SZ')
 sqlite3 /var/lib/chv/controlplane.db \
@@ -414,6 +417,7 @@ sqlite3 /var/lib/chv/controlplane.db \
    (token_hash, description, one_time_use, expires_at, created_at)
    VALUES ('${TOKEN_HASH}', 'Manual deploy', 1,
            '${EXPIRES}', strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+sudo systemctl start chv-controlplane
 ```
 
 ### 10. Web UI (nginx)
@@ -446,9 +450,13 @@ When CHV runs on multiple hypervisor nodes, VM serial consoles must be routed to
 Each node has its `agent_ws_address` column set in the `nodes` table (e.g. `192.168.1.10:8444`).  The BFF returns a full `ws://` or `wss://` URL and the browser connects directly to the node agent.  This is the simplest setup, but it requires the browser to reach every node on the network.
 
 ```bash
-# Set a node's WebSocket address
+# Set a node's WebSocket address (stop the control plane first — manual
+# writes to the live database are unsafe; see OPERATIONS.md
+# "Live Database Access")
+sudo systemctl stop chv-controlplane
 sqlite3 /var/lib/chv/controlplane.db \
   "UPDATE nodes SET agent_ws_address = '192.168.1.10:8444' WHERE node_id = 'node-1';"
+sudo systemctl start chv-controlplane
 ```
 
 ### Proxied Mode (Default)
@@ -555,7 +563,7 @@ sudo journalctl -u chv-nwd -f
 - Verify the control plane is listening: `ss -tlnp | grep 8443`
 - Check that the token was inserted into `bootstrap_tokens` and has not expired:
   ```bash
-  sqlite3 /var/lib/chv/controlplane.db \
+  sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
     "SELECT description, expires_at, used_at FROM bootstrap_tokens;"
   ```
 - Review agent logs: `journalctl -u chv-agent -n 100`
@@ -569,8 +577,8 @@ The database is SQLite at `/var/lib/chv/controlplane.db`. It is created automati
 
 ```bash
 # Inspect the database
-sqlite3 /var/lib/chv/controlplane.db .tables
-sqlite3 /var/lib/chv/controlplane.db "SELECT * FROM nodes;"
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" .tables
+sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT * FROM nodes;"
 
 # Reset to clean state (destructive — removes all data)
 sudo systemctl stop chv-controlplane chv-agent
