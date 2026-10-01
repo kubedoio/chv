@@ -259,4 +259,25 @@ spec matches the qualified reality.
     step; legacy docker-compose.prod.yml and examples/bootstrap.sh dead
     keys; stale assertion count here). See
     [m4.2-clean-install.md](m4.2-clean-install.md) §10 round-5 note.
-- M4.3–M4.9: not started.
+- M4.3 (2026-10-01): **COMPLETE** — lifecycle & recovery on real
+  nested-KVM, six legs in one scenario
+  (`qual/m4.3-lifecycle.sh` via `deploy.sh --exec`): full lifecycle
+  (create-and-boot, guest-level reboot same-CH-pid, graceful stop,
+  re-spawn), S1 agent-SIGKILL adoption, CP restart, 60 s
+  management-plane outage, four-daemon cold restart (the labeled
+  host-reboot subset), stop → delete — identity + operation-history
+  determinism asserted at every leg. Final run: 111 PASS, 1 error =
+  the recorded product finding #345 (graceful stop of an adopted VM
+  wedges the VMM; detected + remediated in-run per the documented
+  operator escape), teardown clean. Four product defects found and
+  filed with reproductions — #339 (image import → vm create chain,
+  harness works around via absolute-path `--image`), #341 (graceful
+  stop leaks an unreaped VMM zombie), #343 (agent restart with
+  unflushed deferred reports bricks startup — Leg E gated on the
+  drain), #345 (the wedge above) — each with a narrow fix PR on main
+  (#340, #342, #344, #346). Harness defects found and fixed along the
+  way: `pgrep -x` comm-truncation (every prior CH residue check was
+  vacuously green — lib.sh + deploy.sh), missing `chvbr0`/nft teardown
+  fallbacks, the deployment-error gate reset. See
+  [m4.3-lifecycle.md](m4.3-lifecycle.md).
+- M4.4–M4.9: not started.

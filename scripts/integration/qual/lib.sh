@@ -133,8 +133,15 @@ wait_for() {
 # count_cloud_hypervisor_processes — number of running cloud-hypervisor
 # processes on the host (excluding grep itself). pgrep exits 1 when none
 # match (the desired state) — must not trip pipefail.
+#
+# NOTE: pgrep -x cannot be used here — /proc/<pid>/comm is truncated to
+# 15 chars and "cloud-hypervisor" is 16, so an exact-name match never
+# fires and the count is always 0 (found by M4.3 run 3; until then no
+# leg ever ran a CH, so the residue checks, while vacuous, never
+# recorded a false PASS). Match the executable in the full command line
+# instead.
 count_cloud_hypervisor_processes() {
-    { pgrep -x cloud-hypervisor 2>/dev/null || true; } | wc -l | tr -d ' '
+    { pgrep -f '(^|/)cloud-hypervisor( |$)' 2>/dev/null || true; } | wc -l | tr -d ' '
 }
 
 # assert_no_ch_residue DESC — no cloud-hypervisor processes remain.
@@ -146,7 +153,7 @@ assert_no_ch_residue() {
         qual_pass "$desc (no cloud-hypervisor processes)"
     else
         qual_error "$desc (FORBIDDEN: $n cloud-hypervisor process(es) remain)"
-        pgrep -ax cloud-hypervisor >&2 || true
+        pgrep -af '(^|/)cloud-hypervisor( |$)' >&2 || true
         return 1
     fi
 }
