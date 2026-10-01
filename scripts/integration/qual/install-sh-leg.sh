@@ -143,6 +143,16 @@ if [ -f /etc/chv/encryption.env ]; then
 else
   echo "CHECK /etc/chv/encryption.env MISSING" >> "\$out"
 fi
+# Runtime proof the key is actually loaded (not just present): the
+# control plane must NOT log the plaintext-fallback warning from
+# CredentialEncryption::new() (constructed at startup via
+# BackupRepository::new).
+if journalctl -u chv-controlplane --no-pager 2>/dev/null \
+    | grep -q 'S3 credentials will be stored in plaintext'; then
+  echo "ENCKEY-NOT-LOADED (plaintext warning present in CP journal)" >> "\$out"
+else
+  echo "ENCKEY-LOADED (no plaintext warning in CP journal)" >> "\$out"
+fi
 for d in /var/lib/chv/storage /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm /var/lib/chv/agent /var/lib/chv/agent/vms; do
   stat -c "CHECK \${d} %a %U:%G" "\$d" >> "\$out" 2>&1 || echo "CHECK \${d} MISSING" >> "\$out"
 done
@@ -247,6 +257,10 @@ assert_contains "CHV_ENCRYPTION_KEY is 64 hex chars (#335)" \
     "$RESULTS_TEXT" "ENCKEY-FORMAT-OK"
 assert_not_contains "no malformed encryption key" \
     "$RESULTS_TEXT" "ENCKEY-FORMAT-BAD"
+assert_contains "control plane loaded the key — no plaintext-fallback warning (#335)" \
+    "$RESULTS_TEXT" "ENCKEY-LOADED (no plaintext warning in CP journal)"
+assert_not_contains "no plaintext credential storage (#335)" \
+    "$RESULTS_TEXT" "ENCKEY-NOT-LOADED"
 
 assert_not_contains "no unit diverged from the canonical copies" \
     "$RESULTS_TEXT" "UNIT-DIFFERS"
