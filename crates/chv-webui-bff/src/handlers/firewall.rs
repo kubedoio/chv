@@ -5,23 +5,10 @@ use crate::router::AppState;
 use crate::BffError;
 
 /// Validate that a CIDR string is in IPv4 or IPv6 CIDR notation.
-/// Accepts "X.X.X.X/N" (N 0-32) or "hex:…/N" (N 0-128).
+/// Delegates to the shared engine vocabulary ([`chv_common::firewall`]) —
+/// one definition for every layer that speaks rule fields.
 fn is_valid_cidr(cidr: &str) -> bool {
-    if let Some((addr, prefix)) = cidr.split_once('/') {
-        if let Ok(n) = prefix.parse::<u32>() {
-            if addr.contains(':') {
-                // IPv6: simple check for hex+colons structure, prefix 0-128
-                return n <= 128 && addr.split(':').count() <= 8;
-            } else {
-                // IPv4: four dotted octets, prefix 0-32
-                let octets: Vec<&str> = addr.split('.').collect();
-                if octets.len() == 4 && n <= 32 {
-                    return octets.iter().all(|o| o.parse::<u8>().is_ok());
-                }
-            }
-        }
-    }
-    false
+    chv_common::firewall::is_valid_cidr(cidr)
 }
 
 #[derive(sqlx::FromRow)]

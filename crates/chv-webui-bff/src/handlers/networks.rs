@@ -669,21 +669,132 @@ pub async fn update_network(
     Ok(Json(detail))
 }
 
-/// Extract a `firewall_rules` payload that must be a JSON array (#355).
+/// Extract a `firewall_rules` payload that must be a JSON array of rules
+/// in the ENGINE vocabulary (#355, then #368's N7 trigger).
 ///
 /// The snapshot is dispatched VERBATIM to nwd at VM attach time, where a
-/// non-array (e.g. JSON `null` → the string `"null"`) fails rule parsing
-/// and bricks every subsequent VM create on the network with an opaque
-/// error. Reject at the API boundary where the operator sees it
-/// immediately; clients that mean "clear the rules" send `[]`.
+/// malformed ruleset fails rule parsing (or the attach-time policy-guard
+/// refresh) and bricks every subsequent VM create on the network with an
+/// opaque RUNTIME_UNAVAILABLE — observed live in the M4.4 re-qualification:
+/// a rule authored in the UI-era dialect (`direction: "ingress"`,
+/// `action: "allow"`) rode the spec, `set_firewall_policy` stored it, and
+/// `attach_vm_nic`'s policy-guard refresh rejected it. Reject at the API
+/// boundary where the operator sees it immediately; clients that mean
+/// "clear the rules" send `[]`.
+///
+/// The vocabulary (directions, protocols, actions, rule keys, CIDR/port
+/// field formats) is defined ONCE in [`chv_common::firewall`] — the same
+/// definition nwd's engine enforces.
 fn firewall_rules_payload(payload: &serde_json::Value) -> Result<Option<String>, BffError> {
     match payload.get("firewall_rules") {
         None => Ok(None),
-        Some(v) if v.is_array() => Ok(Some(v.to_string())),
+        Some(v) if v.is_array() => {
+            validate_firewall_ruleset(v.as_array().expect("checked is_array"))?;
+            Ok(Some(v.to_string()))
+        }
         Some(_) => Err(BffError::BadRequest(
             "firewall_rules must be an array of rules".into(),
         )),
     }
+}
+
+/// Validate every rule of a `firewall_rules` array against the engine
+/// vocabulary. Error messages name the offending rule index and teach the
+/// common UI-era alias mistakes — the operator coming from the old dialect
+/// needs the mapping, not a bare enum.
+fn validate_firewall_ruleset(rules: &[serde_json::Value]) -> Result<(), BffError> {
+    use chv_common::firewall as vocab;
+    for (index, rule) in rules.iter().enumerate() {
+        let obj = rule.as_object().ok_or_else(|| {
+            BffError::BadRequest(format!("firewall_rules[{index}] must be an object"))
+        })?;
+        for key in obj.keys() {
+            if !vocab::RULE_KEYS.contains(&key.as_str()) {
+                return Err(BffError::BadRequest(format!(
+                    "firewall_rules[{index}]: unknown field '{key}' — allowed fields are \
+                     [{}]. Common mistakes: 'source' → 'source_cidr', 'port_range' → \
+                     'dest_port', 'priority'/'description' are not part of the engine ruleset",
+                    vocab::RULE_KEYS.join(", ")
+                )));
+            }
+        }
+        for (name, allowed) in [
+            ("direction", vocab::DIRECTIONS),
+            ("protocol", vocab::PROTOCOLS),
+            ("action", vocab::ACTIONS),
+        ] {
+            let value = match obj.get(name) {
+                // A present-but-non-string value (5, null, []) is a TYPE
+                // error, not a missing field — nwd's `String` field would
+                // reject it at parse; reject it here with the same truth.
+                Some(value) => value.as_str().ok_or_else(|| {
+                    BffError::BadRequest(format!(
+                        "firewall_rules[{index}]: field '{name}' must be a string"
+                    ))
+                })?,
+                None => {
+                    return Err(BffError::BadRequest(format!(
+                        "firewall_rules[{index}]: missing required field '{name}'"
+                    )))
+                }
+            };
+            if !allowed.contains(&value) {
+                return Err(BffError::BadRequest(format!(
+                    "firewall_rules[{index}]: invalid {name} '{value}' — must be one of \
+                     [{}]. Common mistakes: 'ingress'/'egress' → 'inbound'/'outbound', \
+                     'allow'/'deny' → 'accept'/'drop'",
+                    allowed.join(", ")
+                )));
+            }
+        }
+        // The optional fields must match nwd's `Option<String>` semantics
+        // exactly: absent or JSON null → None (accepted); a non-string,
+        // non-null value → nwd rejects it at parse, so it must not persist.
+        check_optional_rule_field(
+            index,
+            "source_cidr",
+            obj.get("source_cidr"),
+            vocab::is_valid_cidr,
+        )?;
+        check_optional_rule_field(
+            index,
+            "dest_port",
+            obj.get("dest_port"),
+            vocab::is_valid_port_spec,
+        )?;
+    }
+    Ok(())
+}
+
+/// One optional rule field (`source_cidr`/`dest_port`): absent or JSON
+/// null is accepted (nwd's `Option<String>` → `None`); a non-string,
+/// non-null value is rejected with a type error (nwd's parse would reject
+/// it — the save gate must not let it persist); a string must pass the
+/// field's format check.
+fn check_optional_rule_field(
+    index: usize,
+    name: &str,
+    value: Option<&serde_json::Value>,
+    is_valid: fn(&str) -> bool,
+) -> Result<(), BffError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let text = value.as_str().ok_or_else(|| {
+        BffError::BadRequest(format!(
+            "firewall_rules[{index}]: field '{name}' must be a string"
+        ))
+    })?;
+    if !is_valid(text) {
+        return Err(BffError::BadRequest(format!(
+            "firewall_rules[{index}]: invalid {name} '{text}' \
+             (expected a.b.c.d/p IPv4 or IPv6 CIDR, or a port like 443 / range like 8080-8090)"
+        )));
+    }
+    Ok(())
 }
 
 /// Check if the user is the owner of a network or an admin.
