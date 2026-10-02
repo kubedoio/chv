@@ -453,6 +453,16 @@ async fn update_network_rejects_ui_dialect_and_malformed_rules() {
             "dest_port",
         ),
         ("non-object rule", r#""allow all""#, "must be an object"),
+        (
+            "non-string optional field (source_cidr as number)",
+            r#"{"direction":"inbound","action":"accept","protocol":"icmp","source_cidr":123}"#,
+            "must be a string",
+        ),
+        (
+            "non-string required field (direction as number)",
+            r#"{"direction":5,"action":"accept","protocol":"icmp"}"#,
+            "must be a string",
+        ),
     ];
     for (label, rule, expected_fragment) in bad_rules {
         let (status, body) = post_with_token(

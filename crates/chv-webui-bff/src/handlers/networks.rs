@@ -718,45 +718,81 @@ fn validate_firewall_ruleset(rules: &[serde_json::Value]) -> Result<(), BffError
                 )));
             }
         }
-        let field = |name: &str| obj.get(name).and_then(|v| v.as_str());
-        for (name, allowed, value) in [
-            ("direction", vocab::DIRECTIONS, field("direction")),
-            ("protocol", vocab::PROTOCOLS, field("protocol")),
-            ("action", vocab::ACTIONS, field("action")),
+        for (name, allowed) in [
+            ("direction", vocab::DIRECTIONS),
+            ("protocol", vocab::PROTOCOLS),
+            ("action", vocab::ACTIONS),
         ] {
-            match value {
+            let value = match obj.get(name) {
+                // A present-but-non-string value (5, null, []) is a TYPE
+                // error, not a missing field — nwd's `String` field would
+                // reject it at parse; reject it here with the same truth.
+                Some(value) => value.as_str().ok_or_else(|| {
+                    BffError::BadRequest(format!(
+                        "firewall_rules[{index}]: field '{name}' must be a string"
+                    ))
+                })?,
                 None => {
                     return Err(BffError::BadRequest(format!(
                         "firewall_rules[{index}]: missing required field '{name}'"
                     )))
                 }
-                Some(value) if !allowed.contains(&value) => {
-                    return Err(BffError::BadRequest(format!(
-                        "firewall_rules[{index}]: invalid {name} '{value}' — must be one of \
-                         [{}]. Common mistakes: 'ingress'/'egress' → 'inbound'/'outbound', \
-                         'allow'/'deny' → 'accept'/'drop'",
-                        allowed.join(", ")
-                    )))
-                }
-                Some(_) => {}
-            }
-        }
-        if let Some(source_cidr) = field("source_cidr") {
-            if !vocab::is_valid_cidr(source_cidr) {
+            };
+            if !allowed.contains(&value) {
                 return Err(BffError::BadRequest(format!(
-                    "firewall_rules[{index}]: invalid source_cidr '{source_cidr}' \
-                     (expected a.b.c.d/p IPv4 or IPv6 CIDR)"
+                    "firewall_rules[{index}]: invalid {name} '{value}' — must be one of \
+                     [{}]. Common mistakes: 'ingress'/'egress' → 'inbound'/'outbound', \
+                     'allow'/'deny' → 'accept'/'drop'",
+                    allowed.join(", ")
                 )));
             }
         }
-        if let Some(dest_port) = field("dest_port") {
-            if !vocab::is_valid_port_spec(dest_port) {
-                return Err(BffError::BadRequest(format!(
-                    "firewall_rules[{index}]: invalid dest_port '{dest_port}' \
-                     (expected a port like 443 or a range like 8080-8090)"
-                )));
-            }
-        }
+        // The optional fields must match nwd's `Option<String>` semantics
+        // exactly: absent or JSON null → None (accepted); a non-string,
+        // non-null value → nwd rejects it at parse, so it must not persist.
+        check_optional_rule_field(
+            index,
+            "source_cidr",
+            obj.get("source_cidr"),
+            vocab::is_valid_cidr,
+        )?;
+        check_optional_rule_field(
+            index,
+            "dest_port",
+            obj.get("dest_port"),
+            vocab::is_valid_port_spec,
+        )?;
+    }
+    Ok(())
+}
+
+/// One optional rule field (`source_cidr`/`dest_port`): absent or JSON
+/// null is accepted (nwd's `Option<String>` → `None`); a non-string,
+/// non-null value is rejected with a type error (nwd's parse would reject
+/// it — the save gate must not let it persist); a string must pass the
+/// field's format check.
+fn check_optional_rule_field(
+    index: usize,
+    name: &str,
+    value: Option<&serde_json::Value>,
+    is_valid: fn(&str) -> bool,
+) -> Result<(), BffError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let text = value.as_str().ok_or_else(|| {
+        BffError::BadRequest(format!(
+            "firewall_rules[{index}]: field '{name}' must be a string"
+        ))
+    })?;
+    if !is_valid(text) {
+        return Err(BffError::BadRequest(format!(
+            "firewall_rules[{index}]: invalid {name} '{text}' \
+             (expected a.b.c.d/p IPv4 or IPv6 CIDR, or a port like 443 / range like 8080-8090)"
+        )));
     }
     Ok(())
 }
