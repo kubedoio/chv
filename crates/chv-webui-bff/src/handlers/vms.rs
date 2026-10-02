@@ -826,13 +826,32 @@ pub async fn delete_vm(
         return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
     }
 
+    // BEGIN IMMEDIATE: serialize concurrent writers (repo standard for
+    // write txs) — the delete now writes (nic-row removal), and a
+    // DEFERRED read-then-write can hit SQLITE_BUSY_SNAPSHOT against a
+    // concurrent delete_network instead of a clean 409/200.
     let mut tx = state
         .pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE;")
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
+
+    // Remove the VM's NIC desired-state rows (#356): nothing else ever
+    // deletes them (the vms/vm_desired_state rows persist as tombstones
+    // of the desired-state lifecycle), and lingering rows permanently
+    // block `network delete` — the attached-VM count never reaches zero
+    // after a VM is deleted (409 "VM(s) still attached"; verified on
+    // real KVM by the M4.4 qualification, issue #356). Node-side the
+    // rows are pure CP bookkeeping: nwd is push-driven (RPC specs) and
+    // the agent's delete path is keyed by vm_id, so removing them here
+    // cannot strand host state.
+    sqlx::query("DELETE FROM vm_nic_desired_state WHERE vm_id = ?")
+        .bind(&vm_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to delete vm_nic_desired_state: {}", e)))?;
 
     sqlx::query(
         r#"
@@ -876,6 +895,9 @@ pub async fn delete_vm(
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     state.cache.invalidate("vms:").await;
+    // The nic-row removal changes networks-scoped attached_vms counts
+    // (#356) — the network list/detail cache must not serve them stale.
+    state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": true,
