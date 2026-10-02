@@ -351,10 +351,15 @@ VOL1_CAPACITY="$(volume_field "$VOL1_ID" capacity_bytes)"
     && qual_pass "volume row carries capacity (${VOL1_CAPACITY} bytes)" \
     || qual_warn "volume capacity missing/zero in CP DB: '${VOL1_CAPACITY}'"
 
-VOL1_PATH="$(volume_backing "$VM1_ID")"
-[ -n "$VOL1_PATH" ] && [ -f "$VOL1_PATH" ] \
-    && qual_pass "volume backing materialized on host: ${VOL1_PATH}" \
+# NOTE: wait_for evaluates its args ONCE — the backing discovery must
+# re-run per poll, hence the function (the m4.4-documented trap).
+vm_volume_backed() { [ -n "$(volume_backing "$1")" ]; }
+wait_for "volume backing materialized on host (create dispatch → stord open → seed)" \
+    "$DISPATCH_TIMEOUT" \
+    vm_volume_backed "$VM1_ID" \
     || qual_die "no volume backing file under ${VMS_DIR}/${VM1_ID}"
+VOL1_PATH="$(volume_backing "$VM1_ID")"
+qual_pass "volume backing materialized on host: ${VOL1_PATH}"
 
 # The seed conversion contract: the backing must be RAW (the qcow2 seed
 # was converted — a lingering qcow2 would still boot via CH but breaks
@@ -371,8 +376,9 @@ VOL1_SIZE="$(stat -c %s "$VOL1_PATH" 2>/dev/null || echo 0)"
     || qual_warn "backing size ${VOL1_SIZE} < requested capacity ${VOL1_CAPACITY}"
 
 # stord opened a session for the volume (the agent↔stord attach path).
-[ "$(stord_sessions "$VOL1_ID")" -ge 1 ] \
-    && qual_pass "stord session open for the volume (${STORD_DB})" \
+stord_session_open() { [ "$(stord_sessions "$VOL1_ID")" -ge 1 ]; }
+wait_for "stord session open for the volume (${STORD_DB})" "$DISPATCH_TIMEOUT" \
+    stord_session_open \
     || qual_error "no stord session row for ${VOL1_ID}"
 
 save_evidence "leg-a provisioned"
@@ -458,7 +464,9 @@ wait_for "restarted stord socket live" 20 stord_socket_live \
 VM2_ID="$(create_vm qual-stor-2 2 1024)" || qual_die "fresh provisioning failed after stord restart (Leg C)"
 qual_pass "fresh vm create accepted after stord restart (qual-stor-2: ${VM2_ID})"
 VOL2_ID="$(volume_id_of "$VM2_ID")"
-[ -n "$VOL2_ID" ] && [ "$(stord_sessions "$VOL2_ID")" -ge 1 ] \
+VM2_session_open() { [ "$(stord_sessions "$VOL2_ID")" -ge 1 ]; }
+[ -n "$VOL2_ID" ] && wait_for "restarted stord opened the new volume (session row present)" \
+    "$DISPATCH_TIMEOUT" VM2_session_open \
     && qual_pass "restarted stord opened the new volume (session row present)" \
     || qual_error "no stord session for the new volume ${VOL2_ID}"
 qual_chvctl vm start "$VM2_ID" >/dev/null || qual_die "vm start failed for ${VM2_ID}"
@@ -514,11 +522,16 @@ qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" >/dev/null 2>&1 \
     || qual_error "chvctl volume clone failed"
 
 # The clone dispatches: a copy keyed by source and target appears.
-CLONE_FILE="$(find "$STORD_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
+# (Per-poll function — wait_for evaluates args once.)
+clone_file_present() {
+    [ -n "$(find "$STORD_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)" ]
+}
 wait_for "clone copy materialized in stord runtime dir" "$DISPATCH_TIMEOUT" \
-    test -n "$CLONE_FILE" \
-    && qual_pass "clone materialized on the host (${CLONE_FILE})" \
+    clone_file_present \
+    && qual_pass "clone materialized on the host" \
     || qual_error "clone file never appeared for target ${CLONE_ID} (dispatch gap?)"
+CLONE_FILE="$(find "$STORD_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
+qual_info "clone file: ${CLONE_FILE:-none}"
 [ -n "$CLONE_FILE" ] && [ "$(stat -c %s "$CLONE_FILE" 2>/dev/null)" = "$VOL1_SIZE" ] \
     && qual_pass "clone is a full copy (size == volume)" \
     || qual_warn "clone size differs ($(stat -c "$CLONE_FILE" 2>/dev/null))"
