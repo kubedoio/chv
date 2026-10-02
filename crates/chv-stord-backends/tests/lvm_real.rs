@@ -316,6 +316,23 @@ async fn lvm_real_clone_copies_data() {
         data,
         "clone must read the origin bytes at prepare time"
     );
+
+    // Clone independence (review of #382): this backend implements
+    // prepare_clone as an LVM COW snapshot, NOT a full block copy — so
+    // the load-bearing property is that later origin writes never show
+    // through. Reading the clone only at prepare time cannot distinguish
+    // a linked clone from an independent one; overwrite the origin and
+    // assert the clone still reads the ORIGINAL bytes.
+    let overwrite = pattern(0x99, 8192);
+    backend
+        .write_block(vid, &handle, 8192, &overwrite)
+        .await
+        .expect("write after clone");
+    assert_eq!(
+        read_direct(&clone_dev, 8192, 8192),
+        data,
+        "clone must be independent of later origin writes (COW snapshot of the point-in-time state)"
+    );
 }
 
 /// resize grows the real LV (blockdev-visible).

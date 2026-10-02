@@ -37,10 +37,12 @@
 #   - VM create makes exactly ONE boot volume (no data volumes, no
 #     standalone volume-create API) — the contract's "guest write/read"
 #     is proven on the boot volume (vda).
-#   - Snapshot/clone of a RUNNING VM's volume is copy-based with no
-#     guest freeze; this scenario snapshots a STOPPED VM (deterministic
-#     content). The running-VM consistency question is recorded, not
-#     claimed.
+#   - Snapshot/clone of a RUNNING VM's volume has no guest freeze; this
+#     scenario snapshots a STOPPED VM (deterministic content). The
+#     running-VM consistency question is recorded, not claimed. (At the
+#     LVM layer both snapshot and clone are `lvcreate -s` COW snapshots
+#     — point-in-time INDEPENDENT views, not full block copies; the
+#     lvm_real tests pin the independence, not a copy mechanism.)
 #
 # Non-claims (inherited): Ceph RBD and iSCSI are declared non-scope
 # (declaration §3). Coexistence residue beyond this scenario's own
@@ -98,13 +100,6 @@ STORD_PID=${QUAL_STORD_PID}
 NWD_PID=${QUAL_NWD_PID}
 AGENT_PID=${QUAL_AGENT_PID}
 EOF
-}
-
-# stord_pid — the CURRENT stord process of this deployment (deploy-started
-# or the agent-supervisor's replacement). argv[0]-anchored and scoped to
-# this TEST_DIR (the config path) so unrelated processes can never match.
-stord_pid() {
-    pgrep -f "(^|/)chv-stord( |$).*${QUAL_TEST_DIR}" | head -1
 }
 
 # stord_socket_live — the stord api socket accepts connections.
@@ -725,9 +720,16 @@ fi
     || qual_error "qemu-img still running: $(pgrep -a qemu-img)"
 STORD_SESSIONS_LEFT="$(sqlite_query "$(stord_db)" \
     "SELECT COUNT(*) FROM sessions" 2>/dev/null | head -1)"
-[ "${STORD_SESSIONS_LEFT:-0}" = "0" ] \
-    && qual_pass "no stord sessions remain" \
-    || qual_warn "stord sessions remain (${STORD_SESSIONS_LEFT}): $(sqlite_query "$(stord_db)" 'SELECT volume_id, runtime_status FROM sessions' 2>/dev/null | head -3)"
+# No ':-0' default here (review of #382): an empty result (DB read
+# failure, relocated DB) must NOT read as "zero sessions" — that would
+# be a vacuous pass. Empty fails loud.
+if [ "${STORD_SESSIONS_LEFT}" = "0" ]; then
+    qual_pass "no stord sessions remain"
+elif [ -z "${STORD_SESSIONS_LEFT}" ]; then
+    qual_error "could not read the live stord sessions DB ($(stord_db)) — residue state unknown"
+else
+    qual_warn "stord sessions remain (${STORD_SESSIONS_LEFT}): $(sqlite_query "$(stord_db)" 'SELECT volume_id, runtime_status FROM sessions' 2>/dev/null | head -3)"
+fi
 save_evidence "leg-e cleaned"
 
 # ---------------------------------------------------------------------------
@@ -757,7 +759,10 @@ fi
 # Baseline for the residue assertions.
 LOOPS_BEFORE="$(losetup -a 2>/dev/null | cut -d: -f1 | sort)"
 
-# Build the test binary (host-safety pattern).
+# Build the test binary (host-safety pattern). NOTE: the pipeline's
+# non-zero status relies on `set -o pipefail` (line ~55) — without it
+# `tail -5` would mask a cargo failure and the find below could pick a
+# STALE test binary from a previous build. Do not remove pipefail.
 qual_info "building chv-stord-backends test binaries (cargo test --no-run)..."
 if ! (cd "$REPO_ROOT" && cargo test -p chv-stord-backends --no-run 2>&1 | tail -5); then
     qual_die "cargo test --no-run failed for chv-stord-backends"
@@ -768,10 +773,22 @@ qual_info "test binary: ${TEST_BIN}"
 
 # Provision the disposable VG (the operator model: stord consumes
 # pre-provisioned volumes; provisioning is out-of-band by design).
+# Interrupt safety (review of #382): from loop attach until the explicit
+# teardown below, an INT/TERM must not leak the loop device + VG + backing
+# file — the residue assertions only run on normal completion. The cleanup
+# is idempotent and best-effort (nothing here can touch host LVM state:
+# the VG name is uniquely ours).
 LVM_BACKING="${QUAL_TEST_DIR}/m45-lvm-backing.img"
+lvm_leg_cleanup() {
+    vgremove -f "${LVM_VG}" >/dev/null 2>&1 || true
+    losetup -d "${LVM_LOOP}" >/dev/null 2>&1 || true
+    rm -f "${LVM_BACKING}" 2>/dev/null || true
+    exit 1
+}
 truncate -s "${LVM_BACKING_MB}M" "$LVM_BACKING"
 LVM_LOOP="$(losetup -f --show "$LVM_BACKING")"
 [ -n "$LVM_LOOP" ] || qual_die "no free loop device"
+trap lvm_leg_cleanup INT TERM
 pvcreate -f "$LVM_LOOP" >/dev/null 2>&1 || qual_die "pvcreate failed"
 vgcreate "$LVM_VG" "$LVM_LOOP" >/dev/null 2>&1 || qual_die "vgcreate failed"
 qual_pass "loopback VG provisioned: ${LVM_LOOP} → ${LVM_VG} ($(vgs "$LVM_VG" --noheadings -o vg_size 2>/dev/null | tr -d ' '))"
@@ -797,6 +814,7 @@ vgremove -f "$LVM_VG" >/dev/null 2>&1 || qual_error "vgremove failed"
 pvremove "$LVM_LOOP" >/dev/null 2>&1 || qual_error "pvremove failed"
 losetup -d "$LVM_LOOP" 2>/dev/null || qual_error "losetup -d failed"
 rm -f "$LVM_BACKING"
+trap - INT TERM   # explicit teardown done — interrupts no longer need the LVM cleanup
 
 [ -z "$(vgs --noheadings -o vg_name 2>/dev/null | grep -x "$LVM_VG")" ] \
     && qual_pass "no VG residue (${LVM_VG} removed)" \
