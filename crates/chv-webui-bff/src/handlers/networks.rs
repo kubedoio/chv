@@ -266,7 +266,7 @@ pub async fn create_network(
         .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .unwrap_or(false);
 
-    let firewall_rules_json = payload.get("firewall_rules").map(|v| v.to_string());
+    let firewall_rules_json = firewall_rules_payload(&payload)?;
 
     let nat_rules_json = payload.get("nat_rules").map(|v| v.to_string());
 
@@ -504,7 +504,7 @@ pub async fn update_network(
         .get("is_default")
         .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .map(|d| if d { 1 } else { 0 });
-    let firewall_rules_json = payload.get("firewall_rules").map(|v| v.to_string());
+    let firewall_rules_json = firewall_rules_payload(&payload)?;
     let nat_rules_json = payload.get("nat_rules").map(|v| v.to_string());
     let dhcp_scope_json = payload.get("dhcp_scope").map(|v| v.to_string());
     let dns_enabled = payload
@@ -593,20 +593,53 @@ pub async fn update_network(
     // and the Core executor applies it at ATTACH time (default-deny plus
     // these rules). The DB update alone does not reach an
     // already-materialized network — say so instead of implying the
-    // rules are live on the node.
-    if firewall_rules_json.is_some() {
-        if let Some(obj) = detail.as_object_mut() {
-            obj.insert(
-                "policy_application".to_string(),
-                json!(
-                    "pending: applied when a VM spec is next dispatched to a node \
-                     (VM create or spec update); already-attached VMs are not \
-                     re-policyed until then"
-                ),
-            );
+    // rules are live on the node. Clearing the rules (`[]`) is reported
+    // differently and truthfully: empty rulesets are never dispatched
+    // (nwd would engage default-deny with no allow rules and cut the
+    // network's guests off entirely), so a policy previously applied on
+    // a live network STAYS in force until that network's host topology
+    // is torn down — nwd re-asserts the last recorded non-empty policy
+    // on every new attach.
+    if let Some(rules) = firewall_rules_json.as_deref() {
+        let note = if chv_common::firewall_ruleset_is_empty(rules) {
+            "cleared: empty rulesets are never dispatched; a policy previously \
+             applied on a live network (if any) stays in force until that \
+             network's host topology is torn down (tracked in #355)"
+        } else {
+            "pending: applied when a VM spec is next dispatched to a node \
+             (VM create or spec update); already-attached VMs are not \
+             re-policyed until then"
+        };
+        match detail.as_object_mut() {
+            Some(obj) => {
+                obj.insert("policy_application".to_string(), json!(note));
+            }
+            None => {
+                tracing::warn!(
+                    network_id = %network_id,
+                    "network detail response was not a JSON object; policy_application note dropped"
+                );
+            }
         }
     }
     Ok(Json(detail))
+}
+
+/// Extract a `firewall_rules` payload that must be a JSON array (#355).
+///
+/// The snapshot is dispatched VERBATIM to nwd at VM attach time, where a
+/// non-array (e.g. JSON `null` → the string `"null"`) fails rule parsing
+/// and bricks every subsequent VM create on the network with an opaque
+/// error. Reject at the API boundary where the operator sees it
+/// immediately; clients that mean "clear the rules" send `[]`.
+fn firewall_rules_payload(payload: &serde_json::Value) -> Result<Option<String>, BffError> {
+    match payload.get("firewall_rules") {
+        None => Ok(None),
+        Some(v) if v.is_array() => Ok(Some(v.to_string())),
+        Some(_) => Err(BffError::BadRequest(
+            "firewall_rules must be an array of rules".into(),
+        )),
+    }
 }
 
 /// Check if the user is the owner of a network or an admin.

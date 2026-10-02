@@ -295,6 +295,106 @@ async fn update_network_reports_attach_time_policy_application() {
 }
 
 #[tokio::test]
+async fn update_network_clearing_rules_reports_the_stale_policy_residual() {
+    // The honest half of the clear story (#355): `[]` never dispatches
+    // (an empty ruleset would engage default-deny with no allows), and
+    // nwd re-asserts the last recorded non-empty policy on every new
+    // attach — so a previously-applied policy STAYS in force. The
+    // response must say that instead of implying the clear took effect.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    // First apply a real ruleset...
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/update",
+        &token,
+        &format!(
+            r#"{{"network_id":"{net_id}","firewall_rules":[{{"direction":"inbound","action":"accept","protocol":"icmp"}}]}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "apply body: {body}");
+    assert!(
+        body["policy_application"]
+            .as_str()
+            .unwrap()
+            .contains("pending"),
+        "non-empty rules report pending application: {body}"
+    );
+
+    // ...then clear it.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/update",
+        &token,
+        &format!(r#"{{"network_id":"{net_id}","firewall_rules":[]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear body: {body}");
+    let note = body["policy_application"]
+        .as_str()
+        .unwrap_or_else(|| panic!("clear must carry its own note: {body}"));
+    assert!(
+        note.contains("cleared"),
+        "the note must identify the update as a clear: {note}"
+    );
+    assert!(
+        note.contains("stays in force"),
+        "the note must state the stale-policy residual: {note}"
+    );
+}
+
+#[tokio::test]
+async fn update_network_rejects_non_array_firewall_rules() {
+    // A non-array firewall_rules (JSON null, a scalar, an object) would
+    // be stored verbatim and dispatched verbatim to nwd at attach time,
+    // where it fails rule parsing and bricks every subsequent VM create
+    // on the network. Reject at the API boundary instead.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    for bad in ["null", "\"allow-all\"", "{\"rules\":[]}"] {
+        let (status, body) = post_with_token(
+            state.clone(),
+            "/v1/networks/update",
+            &token,
+            &format!(r#"{{"network_id":"{net_id}","firewall_rules":{bad}}}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "non-array firewall_rules ({bad}) must be rejected: {body}"
+        );
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("firewall_rules must be an array"),
+            "the rejection must name the field: {body}"
+        );
+    }
+
+    // Nothing was stored by the rejected updates.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT firewall_rules_json FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("query stored policy");
+    assert!(
+        stored.as_deref().unwrap_or("").is_empty(),
+        "rejected payloads must not persist: {stored:?}"
+    );
+}
+
+#[tokio::test]
 async fn update_network_without_policy_fields_carries_no_note() {
     let state = build_state().await;
     let token = seed_jwt(&state).await;

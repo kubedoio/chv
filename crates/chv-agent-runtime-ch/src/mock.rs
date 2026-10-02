@@ -145,14 +145,19 @@ impl HostResourceController for MockHostResourceController {
     async fn set_firewall_policy(
         &self,
         network_id: &str,
-        _policy_version: &str,
+        policy_version: &str,
         policy_json: &[u8],
         _operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.begin_step("policy")?;
         self.record(
             "policy",
-            &format!("{}:{}", network_id, String::from_utf8_lossy(policy_json)),
+            &format!(
+                "{}:{}:{}",
+                network_id,
+                policy_version,
+                String::from_utf8_lossy(policy_json)
+            ),
         );
         Ok(())
     }

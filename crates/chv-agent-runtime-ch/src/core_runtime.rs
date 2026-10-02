@@ -409,6 +409,11 @@ impl CloudHypervisorCoreRuntime {
         // network's guests off entirely (including DHCP) — empty keeps the
         // bare-table behavior. The version is content-derived so retries
         // are idempotent; nwd records it for later policy re-scoping only.
+        // NOTE: a create that fails AFTER this point leaves the applied
+        // policy in place — deliberately, exactly like the ensured
+        // topology: both are network-scoped (not VM-scoped) state, the
+        // create-unwind path only reverses VM-scoped effects, and nwd
+        // removes the policy at network teardown.
         if let Some(policy) = network
             .firewall_policy_json
             .as_deref()

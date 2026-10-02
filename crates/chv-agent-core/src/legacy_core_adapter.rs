@@ -244,7 +244,12 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
                     network_ref: nic.network_id,
                     mac_address: Some(nic.mac_address),
                     addressing,
-                    firewall_policy_json: nic.firewall_policy_json,
+                    // Normalize a blank snapshot to None, matching the
+                    // serde TryFrom path — the durable definition never
+                    // carries Some("") sentinels. (Empty ARRAYS ride
+                    // through; the executor's emptiness gate is the
+                    // safety net for those.)
+                    firewall_policy_json: nic.firewall_policy_json.filter(|p| !p.trim().is_empty()),
                 }
             })
             .collect(),

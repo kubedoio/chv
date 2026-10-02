@@ -428,6 +428,10 @@ pub struct NetworkAttachmentRef {
     /// keeps the bare-table behavior: nwd's policy engine engages
     /// default-deny even for an empty ruleset, which would cut a rule-less
     /// network's guests off entirely (including DHCP).
+    ///
+    /// Journal compatibility is upgrade-only: entries written by newer
+    /// binaries (carrying this field) are rejected by older binaries
+    /// (`deny_unknown_fields`); old entries without it keep parsing.
     pub firewall_policy_json: Option<String>,
 }
 
