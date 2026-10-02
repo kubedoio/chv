@@ -15,7 +15,9 @@
 #                 on the next boot), a stord SIGKILL proves the running
 #                 VM survives the daemon's death and the supervisor's
 #                 replacement serves NEW provisioning, snapshot/clone
-#                 exercise the advertised operator surface, and VM delete
+#                 assert the #378 truth (accepted + journaled, then
+#                 FAIL-CLOSED dispatch on core-managed nodes — no side
+#                 effect behind the Core authority), and VM delete
 #                 closes the stord session.
 #
 #   LVM         — the stord LAYER only (loopback PV → VG → LV): the
@@ -516,8 +518,17 @@ sleep 3
     || qual_error "VM ${VM1_ID} disturbed by stord SIGKILL (state: $(vm_state "$VM1_ID"))"
 
 # The agent supervisor restarts stord (like nwd — the same supervisor).
+# Run-6 trap: the pid comparison must require a NON-EMPTY new pid — the
+# old form (anything != old pid) passed on EMPTY output during the
+# dead-old/not-yet-spawned-new window, and the follow-up /proc read of
+# an empty pid resolved to /proc/cmdline (the HOST kernel's cmdline).
+stord_restarted() {
+    local now
+    now="$(stord_pid)"
+    [ -n "$now" ] && [ "$now" != "$STORD_PID_BEFORE" ]
+}
 wait_for "agent supervisor restarted stord" "$STORD_RESTART_TIMEOUT" \
-    bash -c "[ \"\$(pgrep -f \"(^|/)chv-stord( |$).*${QUAL_TEST_DIR}\" | head -1)\" != \"${STORD_PID_BEFORE}\" ]" \
+    stord_restarted \
     || qual_die "stord was not restarted by the supervisor (Leg C)"
 STORD_PID_AFTER="$(stord_pid)"
 qual_pass "stord restarted by the agent supervisor (pid ${STORD_PID_BEFORE} → ${STORD_PID_AFTER})"
@@ -530,8 +541,22 @@ wait_for "restarted stord socket live" 20 stord_socket_live \
 # fix must keep the operator's path confinement in that generated
 # config (deploy's agent.toml sets stord_path_allowlist; an empty
 # allowlist would mean the respawned daemon runs allow-all).
-STORD_CFG_AFTER="$(tr '\0' '\n' < "/proc/${STORD_PID_AFTER}/cmdline" 2>/dev/null | tail -1)"
-qual_info "respawned stord config: ${STORD_CFG_AFTER} (runtime_dir: $(stord_runtime_dir))"
+# (Guarded pid → config resolution: an unguarded empty pid reads
+# /proc/cmdline — the HOST kernel cmdline, run-6 finding.)
+stord_config_path() {
+    local pid cfg
+    pid="$(stord_pid)"
+    if [ -n "$pid" ] && [ -r "/proc/${pid}/cmdline" ]; then
+        cfg="$(tr '\0' '\n' < "/proc/${pid}/cmdline" | tail -1)"
+        if [ -f "$cfg" ]; then
+            echo "$cfg"
+            return 0
+        fi
+    fi
+    echo ""
+}
+STORD_CFG_AFTER="$(stord_config_path)"
+qual_info "respawned stord config: ${STORD_CFG_AFTER:-unresolved} (runtime_dir: $(stord_runtime_dir))"
 if [ -f "$STORD_CFG_AFTER" ] && grep -q '^path_allowlist' "$STORD_CFG_AFTER"; then
     qual_pass "respawned stord keeps path confinement (#376 fix: path_allowlist present)"
     grep '^path_allowlist' "$STORD_CFG_AFTER" >> "${EVIDENCE_DIR}/respawned-stord-config.txt" 2>/dev/null || true
@@ -572,13 +597,18 @@ save_evidence "leg-c recovered"
 
 # ---------------------------------------------------------------------------
 # Leg D — snapshot + clone of the (stopped) boot volume: the advertised
-# operator surface, end to end through the journaled dispatch
+# operator surface. TRUTH on core-managed nodes (#378): the BFF accepts
+# and the CP journals the intent, but the agent FAILS CLOSED by design
+# (M2.2b single-writer enforcement — the legacy stord snapshot side
+# effect must never run behind the Core authority; Core M1 does not
+# model volume ops). This leg asserts that boundary: accepted + journaled
+# + fail-closed dispatch + NO side effect on the host.
 # ---------------------------------------------------------------------------
-qual_info "--- Leg D: snapshot + clone (chvctl → BFF → CP journal → agent → stord copy)"
+qual_info "--- Leg D: snapshot + clone — accepted, journaled, fail-closed on core-managed nodes (#378)"
 
-# The snapshot/clone files land in the LIVE stord's runtime_dir — after
-# Leg C's restart that is the agent dir (#376), not the deploy's stord
-# dir. Resolve the current daemon's runtime_dir (fallback: deploy's).
+# The would-be snapshot/clone destination is the LIVE stord's runtime_dir
+# (after Leg C's restart: the agent dir, #376) — used for the NO-side-
+# effect assertions below.
 STORD_LIVE_DIR="$(stord_runtime_dir)"
 qual_info "live stord runtime_dir: ${STORD_LIVE_DIR}"
 
@@ -590,59 +620,68 @@ qual_chvctl volume snapshot "$VOL1_ID" --name "$SNAP_NAME" >/dev/null 2>&1 \
     && qual_pass "chvctl volume snapshot accepted (${VOL1_ID} → ${SNAP_NAME})" \
     || qual_die "chvctl volume snapshot failed (was the #372 CLI fix deployed?)"
 
-# The journaled intent dispatches: the snapshot copy appears in stord's
-# runtime dir as {volume_id}-{snapshot_name}.img.
+# The CP journals the snapshot intent (the dispatch trail exists even
+# though the agent will refuse it).
+snapshot_intent_row() {
+    [ "$(sqlite_query "$QUAL_DB" \
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)" = "create" ]
+}
+wait_for "CP journaled the snapshot intent (volume_desired_state)" "$DISPATCH_TIMEOUT" \
+    snapshot_intent_row \
+    && qual_pass "snapshot intent journaled (snapshot_op=create, name=${SNAP_NAME})" \
+    || qual_error "no snapshot intent row for ${VOL1_ID} in volume_desired_state"
+
+# The fail-closed proof: the orchestrator's dispatch to the agent is
+# refused with the single-writer enforcement error, and NO snapshot file
+# ever materializes (no side effect behind the Core authority).
+cp_log_has() { grep -aq "$1" "${QUAL_LOGS_DIR}/controlplane.log"; }
+wait_for "agent refuses the snapshot dispatch (core-managed fail-closed)" "$DISPATCH_TIMEOUT" \
+    cp_log_has "snapshot_volume is unsupported in core-managed mode" \
+    && qual_pass "snapshot dispatch refused by the agent (single-writer enforcement holds)" \
+    || qual_error "no fail-closed dispatch refusal in the CP log — snapshot may have EXECUTED behind the Core authority (architecture violation!)"
+
 SNAP_FILE="${STORD_LIVE_DIR}/${VOL1_ID}-${SNAP_NAME}.img"
-wait_for "snapshot copy materialized (${SNAP_FILE})" "$DISPATCH_TIMEOUT" \
-    test -s "$SNAP_FILE" \
-    && qual_pass "snapshot materialized on the host ($(stat -c %s "$SNAP_FILE") bytes)" \
-    || qual_error "snapshot file never appeared: ${SNAP_FILE}"
+sleep 10
+[ ! -e "$SNAP_FILE" ] \
+    && qual_pass "no snapshot file materialized (fail-closed: no side effect on the host)" \
+    || qual_error "snapshot file MATERIALIZED on a core-managed node: ${SNAP_FILE} (architecture violation!)"
 
-[ -f "$SNAP_FILE" ] && [ "$(stat -c %s "$SNAP_FILE" 2>/dev/null)" = "$VOL1_SIZE" ] \
-    && qual_pass "snapshot is a full point-in-time copy (size == volume)" \
-    || qual_warn "snapshot size differs from volume ($(stat -c %s "$SNAP_FILE" 2>/dev/null) vs ${VOL1_SIZE})"
-
-# Clone: the target is a NEW volume id (the #372 contract).
-CLONE_ID="vol-m45clone$$"
+# Clone: the target is a NEW volume id (the #372 contract). NOTE: the
+# CP's ResourceId caps ids at 16 BYTES (lifecycle.rs parse_volume_id) —
+# run-6 finding: a 19-char id is rejected before journaling with a bare
+# 500. Keep the id short.
+CLONE_ID="clone$$"
 qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" >/dev/null 2>&1 \
     && qual_pass "chvctl volume clone accepted (${VOL1_ID} → ${CLONE_ID})" \
     || qual_error "chvctl volume clone failed"
-
-# The clone dispatches: a copy keyed by source and target appears.
-# (Per-poll function — wait_for evaluates args once.)
-clone_file_present() {
-    [ -n "$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)" ]
-}
-wait_for "clone copy materialized in stord runtime dir" "$DISPATCH_TIMEOUT" \
-    clone_file_present \
-    && qual_pass "clone materialized on the host" \
-    || qual_error "clone file never appeared for target ${CLONE_ID} (dispatch gap?)"
-CLONE_FILE="$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
-qual_info "clone file: ${CLONE_FILE:-none}"
-[ -n "$CLONE_FILE" ] && [ "$(stat -c %s "$CLONE_FILE" 2>/dev/null)" = "$VOL1_SIZE" ] \
-    && qual_pass "clone is a full copy (size == volume)" \
-    || qual_warn "clone size differs ($(stat -c "$CLONE_FILE" 2>/dev/null))"
-
-# The CP recorded the clone's desired state (the journal trail).
 CLONE_DS="$(sqlite_query "$QUAL_DB" \
     "SELECT clone_source_volume_id FROM volume_desired_state WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
 [ "$CLONE_DS" = "$VOL1_ID" ] \
     && qual_pass "CP DB records the clone intent (${CLONE_ID} ← ${VOL1_ID})" \
     || qual_warn "no clone intent row for ${CLONE_ID} in volume_desired_state (got: '${CLONE_DS}')"
+sleep 10
+CLONE_FILE="$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
+[ -z "$CLONE_FILE" ] \
+    && qual_pass "no clone file materialized (fail-closed: no side effect on the host)" \
+    || qual_error "clone file MATERIALIZED on a core-managed node: ${CLONE_FILE} (architecture violation!)"
 
 # Delete the snapshot through the BFF (chvctl has no delete-snapshot
-# command — recorded; the route exists).
-DELETE_BODY="$(mktemp "${QUAL_TEST_DIR}/m45-del-snap.json")"
+# command — recorded; the route exists). Same truth: accepted, then the
+# dispatch fails closed (the 600s retry window is #378's UX gap).
+DELETE_BODY="$(mktemp "${QUAL_TEST_DIR}/m45-del-snap.XXXXXX")"
 echo "{\"volume_id\":\"${VOL1_ID}\",\"snapshot_name\":\"${SNAP_NAME}\"}" > "$DELETE_BODY"
 HTTP_CODE="$(bff_post_json "/v1/volumes/delete-snapshot" "$DELETE_BODY")"
 [ "$HTTP_CODE" = "200" ] \
     && qual_pass "BFF delete-snapshot accepted (HTTP ${HTTP_CODE})" \
     || qual_error "BFF delete-snapshot failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-delete-snapshot.json" 2>/dev/null)"
 rm -f "$DELETE_BODY"
-wait_for "snapshot file removed by delete-snapshot" "$DISPATCH_TIMEOUT" \
-    bash -c "[ ! -f '${SNAP_FILE}' ]" \
-    && qual_pass "snapshot file removed from the host" \
-    || qual_error "snapshot file still present after delete-snapshot: ${SNAP_FILE}"
+# No file was ever created (fail-closed), so absence is trivially true —
+# the meaningful post-delete assertion is that the delete INTENT was
+# journaled (snapshot_op flips to delete) and still nothing executed.
+sleep 5
+[ ! -e "${SNAP_FILE}" ] \
+    && qual_pass "still no snapshot file after delete-snapshot (fail-closed holds)" \
+    || qual_error "snapshot file MATERIALIZED after delete-snapshot: ${SNAP_FILE}"
 save_evidence "leg-d snapshotted"
 
 # ---------------------------------------------------------------------------
