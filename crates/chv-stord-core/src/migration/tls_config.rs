@@ -14,6 +14,10 @@
 //!   credentials, and migration actions fail as *unavailable* — the sender
 //!   already refuses to run without `MigrationTlsConfig` (no plaintext
 //!   fallback, see `migration/sender.rs`).
+//! - `enabled = false` with **any** client identity field set → startup
+//!   **error**: an operator who believes migration is disabled must not
+//!   have a half-configured identity silently ignored (fail-closed,
+//!   symmetric with the receiver half, issue #395).
 //! - `enabled = true` → all four identity inputs are required, files must be
 //!   readable, the certificate/key pair must match, and the CA bundle must
 //!   parse. Any problem is a **startup error** (fail-closed).
@@ -79,10 +83,16 @@ impl std::error::Error for MigrationTlsLoadError {
 
 /// Load and validate the migration mTLS identity from configuration fields.
 ///
-/// Returns `Ok(None)` when `enabled` is `false`. When `enabled` is `true`,
-/// requires and validates `client_cert_path`, `client_key_path`,
-/// `ca_cert_path`, and `dest_server_name`, returning a fully validated
-/// [`MigrationTlsConfig`] on success.
+/// Returns `Ok(None)` when `enabled` is `false` **and** no client identity
+/// field is configured. Setting any client field (`client_cert_path`,
+/// `client_key_path`, `ca_cert_path`, `dest_server_name`) while
+/// `enabled = false` is a startup **error**: an operator who believes
+/// migration is disabled must not have a half-configured identity silently
+/// ignored (fail-closed, symmetric with the receiver half — issue #395).
+///
+/// When `enabled` is `true`, requires and validates `client_cert_path`,
+/// `client_key_path`, `ca_cert_path`, and `dest_server_name`, returning a
+/// fully validated [`MigrationTlsConfig`] on success.
 pub fn load_migration_tls(
     enabled: bool,
     client_cert_path: Option<&Path>,
@@ -91,6 +101,18 @@ pub fn load_migration_tls(
     dest_server_name: Option<&str>,
 ) -> Result<Option<MigrationTlsConfig>, MigrationTlsLoadError> {
     if !enabled {
+        let any_set = client_cert_path.is_some()
+            || client_key_path.is_some()
+            || ca_cert_path.is_some()
+            || dest_server_name.is_some();
+        if any_set {
+            return Err(MigrationTlsLoadError::Invalid(
+                "migration client fields (client_cert_path, client_key_path, ca_cert_path, \
+                 dest_server_name) are configured but migration.enabled = false — set \
+                 migration.enabled = true or remove the client fields"
+                    .into(),
+            ));
+        }
         tracing::info!("storage migration is disabled: migration actions will be unavailable");
         return Ok(None);
     }
@@ -173,11 +195,8 @@ pub struct MigrationServerTls {
 ///   valid socket address. Any problem is a **startup error** (fail-closed) —
 ///   there is no plaintext listener and no client-auth-optional mode.
 ///
-/// Note: the client half (`load_migration_tls`) currently returns `Ok(None)`
-/// silently when `enabled = false` with client fields set — the receiver half
-/// is intentionally stricter here (an inbound listener must never surprise an
-/// operator who believes migration is off); making the client half symmetric
-/// is a recorded follow-up.
+/// Note: the client half (`load_migration_tls`) is symmetric: client fields
+/// set with `enabled = false` are likewise a startup error (issue #395).
 pub fn load_migration_server_tls(
     enabled: bool,
     listen_addr: Option<&str>,
@@ -417,6 +436,62 @@ mod tests {
         match load_migration_tls(false, None, None, None, None).expect("no error when disabled") {
             None => {}
             Some(_) => panic!("migration disabled must not produce a TLS config"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Client half enabled gating (issue #395): symmetric with the server
+    // half — client fields set while migration is disabled must be a
+    // startup error, not a silently ignored half-configuration.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn disabled_with_client_fields_is_an_error() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_migration_tls(false, Some(&cp), Some(&kp), Some(&ap), Some("stord-peer")) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = false"),
+                    "error must name the contradiction: {msg}"
+                );
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the client fields: {msg}"
+                );
+            }
+            Ok(_) => panic!("disabled migration with client fields must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_with_only_dest_server_name_is_an_error() {
+        match load_migration_tls(false, None, None, None, Some("stord-peer")) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("dest_server_name"),
+                    "error must name the client fields: {msg}"
+                );
+            }
+            Ok(_) => panic!("disabled migration with dest_server_name must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_with_only_ca_bundle_is_an_error() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (_, _, ap)) = write_all(&c, &k, &a);
+        match load_migration_tls(false, None, None, Some(&ap), None) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("ca_cert_path"),
+                    "error must name the client fields: {msg}"
+                );
+            }
+            Ok(_) => panic!("disabled migration with a CA bundle must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
         }
     }
 
