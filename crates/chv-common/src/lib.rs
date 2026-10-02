@@ -114,6 +114,36 @@ pub fn is_safe_path_component(component: &str) -> bool {
             .any(|c| c == '/' || c == '\\' || c.is_control())
 }
 
+/// Construct a bridge name for a network, guaranteed to be <= 15 chars (IFNAMSIZ limit).
+///
+/// For the "default" network, returns "chvbr0". For other networks, returns
+/// "br-{net_id}" if it fits in 15 chars, otherwise truncates net_id and appends
+/// a 4-hex-char hash suffix to avoid collisions: "br-{prefix}{hash}".
+///
+/// Relocated from `crates/chv-agent-core/src/reconcile.rs` (M2.2a) and then
+/// from `crates/chv-hypervisor-api/src/resources.rs` (#356 N5): the bridge
+/// name is now derived by the agent runtime, the legacy reconcile path, AND
+/// nwd's no-state local-teardown fallback — one definition for all three.
+pub fn bridge_name_for_network(net_id: &str) -> String {
+    if net_id == "default" {
+        return "chvbr0".to_string();
+    }
+    let candidate = format!("br-{}", net_id);
+    if candidate.len() <= 15 {
+        return candidate;
+    }
+    // "br-" (3) + up to 8 chars of net_id + 4-char hash = 15 chars total
+    let prefix: String = net_id.chars().take(8).collect();
+    let hash = {
+        let mut h: u32 = 0x811c9dc5;
+        for b in net_id.as_bytes() {
+            h = h.wrapping_mul(0x01000193) ^ (*b as u32);
+        }
+        format!("{:04x}", h & 0xffff)
+    };
+    format!("br-{}{}", prefix, hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

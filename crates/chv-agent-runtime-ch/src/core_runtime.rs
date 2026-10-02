@@ -34,9 +34,10 @@ use cellhv_core_operations::{CanonicalRequest, MutationCommand, OperationJournal
 use cellhv_core_types::{OperationKind, StorageAttachmentRef};
 use chv_errors::ChvError;
 use chv_hypervisor_api::resources::{
-    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file,
-    vm_pid_file, vm_runtime_dir, HostResourceController, DEFAULT_NIC_CIDR,
+    ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file, vm_pid_file, vm_runtime_dir,
+    HostResourceController, NetworkUsageLookup, DEFAULT_NIC_CIDR,
 };
+use chv_hypervisor_api::{bridge_name_for_network, AlwaysInUse};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,11 @@ struct VmSideEffects {
     volumes: Vec<(String, String, bool)>,
     /// `nic_id`s, in attach order.
     nics: Vec<String>,
+    /// DISTINCT `network_id`s the VM's NICs attach to, in attach order
+    /// (#356 N5) — the input to the last-detach teardown decision. In-memory
+    /// like `nics`: after a daemon restart both are gone, so a delete simply
+    /// drains nothing and no teardown fires (residue, never an outage).
+    networks: Vec<String>,
 }
 
 /// The production Cloud Hypervisor effector runtime.
@@ -129,6 +135,11 @@ pub struct CloudHypervisorCoreRuntime {
     adapter: Arc<dyn CloudHypervisorAdapter>,
     resources: Arc<dyn HostResourceController>,
     runtime_dir: PathBuf,
+    /// Durable last-detach safety check (#356 N5): answers "does any VM
+    /// other than the deleting one still use this network" from the Core
+    /// store. Defaults to fail-closed ([`AlwaysInUse`] — no teardown ever
+    /// fires) until [`Self::with_network_usage`] wires the real authority.
+    network_usage: Arc<dyn NetworkUsageLookup>,
     /// Per-VM in-memory handle map (see module docs for lifetime).
     side_effects: Mutex<HashMap<String, VmSideEffects>>,
 }
@@ -143,8 +154,18 @@ impl CloudHypervisorCoreRuntime {
             adapter,
             resources,
             runtime_dir,
+            network_usage: Arc::new(AlwaysInUse),
             side_effects: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Wire the durable network-usage authority for last-detach teardown
+    /// (#356 N5). Without this, the runtime never tears network topology
+    /// down (fail-closed default): host residue is then cleaned by network
+    /// delete / node reprovision instead.
+    pub fn with_network_usage(mut self, lookup: Arc<dyn NetworkUsageLookup>) -> Self {
+        self.network_usage = lookup;
+        self
     }
 
     /// De-envelope the canonical request into its command. A value that is not
@@ -303,6 +324,17 @@ impl CloudHypervisorCoreRuntime {
             VmSideEffects {
                 volumes: opened_volumes,
                 nics: attached_nic_ids,
+                // Distinct network ids in attach order — the last-detach
+                // teardown input (#356 N5).
+                networks: {
+                    let mut networks: Vec<String> = Vec::new();
+                    for network in &definition.networks {
+                        if !networks.contains(&network.network_ref) {
+                            networks.push(network.network_ref.clone());
+                        }
+                    }
+                    networks
+                },
             },
         );
         Ok(None)
@@ -558,6 +590,36 @@ impl CloudHypervisorCoreRuntime {
                 .await
             {
                 warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
+            }
+        }
+        // #356 N5 — last-detach host teardown. Only after a SUCCESSFUL
+        // delete (`keep_entry` is false): the VM's NICs are detached and
+        // the authority tombstoned it, so this node's claim on the
+        // network's topology (bridge / namespace / dnsmasq / nft table)
+        // may be over. The in-use check comes from the DURABLE authority
+        // (`network_usage`), never from this in-memory map: after a
+        // daemon restart the map is empty and "no entry references the
+        // network" would falsely authorize cutting a still-running
+        // pre-restart VM off its bridge. A failed check skips the
+        // teardown (residue, never an outage); a failed teardown is
+        // best-effort with a loud warning for the same reason.
+        if !keep_entry {
+            for network_id in &effects.networks {
+                if self.network_usage.network_in_use(network_id, vm_id) {
+                    continue;
+                }
+                if let Err(e) = self
+                    .resources
+                    .delete_network_topology(network_id, Some(op_id))
+                    .await
+                {
+                    warn!(
+                        vm_id,
+                        network_id,
+                        error = %e,
+                        "last-detach network teardown failed; host residue (bridge/dnsmasq/nft) remains until network delete or node reprovision"
+                    );
+                }
             }
         }
     }

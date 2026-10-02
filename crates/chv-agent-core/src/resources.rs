@@ -134,6 +134,17 @@ impl HostResourceController for AgentResourceController {
             .await
     }
 
+    async fn delete_network_topology(
+        &self,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let mut client = NwdClient::connect(&self.nwd_socket).await?;
+        client
+            .delete_network_topology(network_id, operation_id)
+            .await
+    }
+
     async fn attach_vm_nic(
         &self,
         nic_id: &str,

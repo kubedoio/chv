@@ -195,7 +195,11 @@ pub trait HypervisorAdapter: Send + Sync + 'static {
     }
 }
 
+pub use resources::AlwaysInUse;
 pub use resources::{
-    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir,
-    HostResourceController, DEFAULT_NIC_CIDR,
+    ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir, HostResourceController,
+    NetworkUsageLookup, DEFAULT_NIC_CIDR,
 };
+// Relocated to chv-common (#356 N5) so nwd's derived-names teardown fallback
+// shares the definition; re-exported here so existing imports keep working.
+pub use chv_common::bridge_name_for_network;

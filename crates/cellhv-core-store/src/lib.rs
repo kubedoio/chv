@@ -655,6 +655,27 @@ impl CoreStore {
         Ok(Self { conn })
     }
 
+    /// Open a READ-ONLY handle to an existing store (#356 N5).
+    ///
+    /// For durable observers of a store another process owns and writes
+    /// (the agent's last-detach network-usage lookup): the schema is
+    /// validated through the same read-only path `open_existing` uses, but
+    /// the retained connection stays read-only — this handle can never
+    /// mutate the authority, initialize a foreign file, or run migrations.
+    /// Pending migrations are NOT applied (a reader must not write); a
+    /// store that requires an upgrade simply opens and reports what it
+    /// sees, and callers fail closed on read errors.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        validate_database_file(path)?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        validate_openable_schema(&conn)?;
+        Ok(Self { conn })
+    }
+
     /// Establish the single durable identity for this store.
     pub fn create_host(
         &self,

@@ -108,6 +108,18 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         state: &crate::state::TopologyState,
     ) -> Result<DeleteOutcome, ChvError>;
 
+    /// Best-effort LOCAL topology teardown by derived names only (#356 N5).
+    ///
+    /// For deletes that arrive with no in-memory `TopologyTable` row (an
+    /// nwd restart wiped it): the namespace, bridge, dnsmasq files, and
+    /// nft table are all derived deterministically from `network_id`, so
+    /// the local half of the teardown can still run — mirroring the fabric
+    /// half's ownership-journal fallback. Existence checks make this a
+    /// no-op for a network that never materialized on this node; every
+    /// failure is warned and skipped (fail-open for teardown only, exactly
+    /// like the state-row path).
+    async fn delete_local_topology_by_derived_names(&self, network_id: &str);
+
     async fn health(
         &self,
         network_id: &str,
@@ -1226,6 +1238,43 @@ impl NetworkExecutor for LinuxExecutor {
         self.exposures.remove(network_id);
 
         Ok(DeleteOutcome { fabric_removed })
+    }
+
+    async fn delete_local_topology_by_derived_names(&self, network_id: &str) {
+        // Same local teardown as `delete_topology`, with every name DERIVED
+        // from `network_id` because no TopologyState row survives the nwd
+        // restart that got us here: namespace `ns-{network_id}` (the
+        // executor's own convention, see `attach_vm_nic`), bridge via the
+        // shared `bridge_name_for_network` (the same formula the agent
+        // used when it ensured the topology), dnsmasq and the nft table
+        // already keyed by `network_id`. Existence-gated and warn-only: a
+        // network that never materialized on this node is a no-op, and a
+        // teardown failure is residue (loud), never an outage.
+        info!(
+            network_id = %network_id,
+            "deleting topology by derived names (no in-memory state row)"
+        );
+
+        Self::stop_dnsmasq(network_id).await;
+
+        let namespace_name = format!("ns-{network_id}");
+        if Self::namespace_exists(&namespace_name).await {
+            if let Err(e) = Self::run_ip(&["netns", "del", &namespace_name]).await {
+                warn!(network_id, error = %e, "derived-names teardown: failed to delete namespace");
+            }
+        }
+
+        let bridge_name = chv_common::bridge_name_for_network(network_id);
+        if Self::bridge_exists(&bridge_name).await {
+            if let Err(e) = Self::run_ip(&["link", "del", "dev", &bridge_name]).await {
+                warn!(network_id, error = %e, "derived-names teardown: failed to delete bridge");
+            }
+        }
+
+        if let Ok(table) = Self::sanitized_nft_table(network_id) {
+            let _ = Self::run_nft_quiet(&["delete", "table", "inet", &table]).await;
+        }
+        self.exposures.remove(network_id);
     }
 
     async fn health(

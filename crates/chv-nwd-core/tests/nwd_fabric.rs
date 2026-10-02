@@ -158,6 +158,8 @@ impl NetworkExecutor for FabricExecutor {
         })
     }
 
+    async fn delete_local_topology_by_derived_names(&self, _network_id: &str) {}
+
     async fn delete_topology(
         &self,
         network_id: &str,

@@ -1071,6 +1071,182 @@ async fn delete_drains_side_effects_when_adapter_delete_fails() {
     );
 }
 
+/// A controllable [`NetworkUsageLookup`] for the last-detach tests: the
+/// test's model of the durable Core store's live VM list, as
+/// `(vm_id, network_id)` pairs.
+struct TestNetworkUsage {
+    vms: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl TestNetworkUsage {
+    fn new(vms: &[(&str, &str)]) -> Arc<Self> {
+        Arc::new(Self {
+            vms: std::sync::Mutex::new(
+                vms.iter()
+                    .map(|(vm, net)| ((*vm).to_owned(), (*net).to_owned()))
+                    .collect(),
+            ),
+        })
+    }
+
+    /// Model the store's accept-time tombstone: a deleted VM no longer
+    /// protects its networks.
+    fn tombstone(&self, vm_id: &str) {
+        self.vms
+            .lock()
+            .expect("vms lock")
+            .retain(|(vm, _)| vm != vm_id);
+    }
+}
+
+impl chv_hypervisor_api::NetworkUsageLookup for TestNetworkUsage {
+    fn network_in_use(&self, network_id: &str, excluding_vm: &str) -> bool {
+        self.vms
+            .lock()
+            .expect("vms lock")
+            .iter()
+            .any(|(vm, net)| vm != excluding_vm && net == network_id)
+    }
+}
+
+fn harness_with_usage(usage: Arc<dyn chv_hypervisor_api::NetworkUsageLookup>) -> Harness {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().join("runtime");
+    let adapter = Arc::new(MockCloudHypervisorAdapter::default());
+    let controller = Arc::new(MockHostResourceController::new());
+    let runtime = Arc::new(
+        CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir.clone())
+            .with_network_usage(usage),
+    );
+    Harness {
+        _dir: dir,
+        runtime_dir,
+        adapter,
+        controller,
+        runtime,
+    }
+}
+
+async fn create_for_delete_tests(h: &Harness, vm_id: &str, op_id: &str) {
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            op_id,
+            envelope(MutationCommand::CreateVm {
+                definition: definition(vm_id, 1, 1),
+            }),
+        ))
+        .await
+        .expect("create succeeds");
+}
+
+async fn delete_for_delete_tests(h: &Harness, vm_id: &str, op_id: &str) {
+    h.runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            op_id,
+            envelope(MutationCommand::DeleteVm {
+                vm_id: VmId::new(vm_id).expect("vm id"),
+            }),
+        ))
+        .await
+        .expect("delete succeeds");
+}
+
+#[tokio::test]
+async fn delete_vm_tears_down_network_topology_on_last_detach() {
+    // #356 N5: a successful delete of the node's LAST VM on a network
+    // tears the network's host topology down via nwd. The decision comes
+    // from the DURABLE usage authority — while another VM still uses the
+    // network, no teardown fires; once the last user is gone (and its
+    // delete tombstoned it in the authority), the teardown fires exactly
+    // once for the network.
+    let usage = TestNetworkUsage::new(&[("vm-a", "net-0"), ("vm-b", "net-0")]);
+    let h = harness_with_usage(usage.clone());
+    create_for_delete_tests(&h, "vm-a", "op-create-a").await;
+    create_for_delete_tests(&h, "vm-b", "op-create-b").await;
+
+    // vm-b still uses net-0: deleting vm-a must NOT tear it down.
+    delete_for_delete_tests(&h, "vm-a", "op-del-a").await;
+    assert!(
+        !calls(&h.controller)
+            .iter()
+            .any(|c| c.starts_with("net_teardown:")),
+        "a network another VM still uses must not be torn down: {:?}",
+        calls(&h.controller)
+    );
+
+    // Model the authority: vm-a's accepted delete tombstoned it. Now
+    // vm-b is the last user — deleting it must tear net-0 down.
+    usage.tombstone("vm-a");
+    delete_for_delete_tests(&h, "vm-b", "op-del-b").await;
+    let teardowns: Vec<String> = calls(&h.controller)
+        .into_iter()
+        .filter(|c| c.starts_with("net_teardown:"))
+        .collect();
+    assert_eq!(
+        teardowns,
+        vec!["net_teardown:net-0".to_string()],
+        "the last user's delete must tear the network down exactly once"
+    );
+}
+
+#[tokio::test]
+async fn delete_vm_without_a_usage_authority_never_tears_down_networks() {
+    // The fail-closed default: without `with_network_usage`, no teardown
+    // ever fires — host residue is cleaned by network delete / node
+    // reprovision instead of risking an outage on a wrong decision.
+    let h = harness(None);
+    create_for_delete_tests(&h, "vm-only", "op-create").await;
+    delete_for_delete_tests(&h, "vm-only", "op-del").await;
+    assert!(
+        !calls(&h.controller)
+            .iter()
+            .any(|c| c.starts_with("net_teardown:")),
+        "the default (fail-closed) lookup must never authorize a teardown: {:?}",
+        calls(&h.controller)
+    );
+}
+
+#[tokio::test]
+async fn failed_delete_never_tears_down_network_topology() {
+    // The store tombstones a VM when its DeleteVm is ACCEPTED — before the
+    // effector runs — so the usage authority alone cannot distinguish a
+    // deleted VM from one whose delete FAILED with its VMM still running
+    // and its taps still enslaved. The runtime must gate the teardown on
+    // the delete's SUCCESS: a failed delete keeps the entry for retry and
+    // must not tear the network down even when the authority says the
+    // network is otherwise unused.
+    let usage = TestNetworkUsage::new(&[("vm-fail", "net-0")]);
+    let h = harness_with_usage(usage.clone());
+    create_for_delete_tests(&h, "vm-fail", "op-create").await;
+    *h.adapter.fail_delete.lock().unwrap() = true;
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            "vm-fail",
+            "op-del-fail",
+            envelope(MutationCommand::DeleteVm {
+                vm_id: VmId::new("vm-fail").expect("vm id"),
+            }),
+        ))
+        .await;
+    assert!(result.is_err(), "the delete must fail: {result:?}");
+    // Even with the authority reporting the network as unused (the
+    // tombstone landed at accept), no teardown may fire.
+    usage.tombstone("vm-fail");
+    assert!(
+        !calls(&h.controller)
+            .iter()
+            .any(|c| c.starts_with("net_teardown:")),
+        "a failed delete must not tear the network down: {:?}",
+        calls(&h.controller)
+    );
+}
+
 #[tokio::test]
 async fn delete_removes_side_effects_entry_after_success() {
     let h = harness(None);
