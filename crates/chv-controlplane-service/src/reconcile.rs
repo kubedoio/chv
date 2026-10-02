@@ -476,6 +476,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 capacity_bytes: spec.capacity_bytes,
                 volume_kind: spec.volume_kind,
                 storage_class: spec.storage_class,
+                // Fragments do not carry ownership; NULL here preserves the
+                // owner a BFF creation or clone set (COALESCE in the upsert).
+                owner_id: None,
                 desired_generation: generation,
                 desired_status: None,
                 requested_by: Self::normalize_requested_by(&meta),

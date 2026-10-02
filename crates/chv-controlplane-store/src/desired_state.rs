@@ -81,6 +81,7 @@ INSERT INTO volumes (
     capacity_bytes,
     volume_kind,
     storage_class,
+    owner_id,
     updated_at
 )
 VALUES (
@@ -90,7 +91,8 @@ VALUES (
     $4,
     $5,
     $6,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
+    $7,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     node_id = EXCLUDED.node_id,
@@ -98,6 +100,12 @@ ON CONFLICT (volume_id) DO UPDATE SET
     capacity_bytes = EXCLUDED.capacity_bytes,
     volume_kind = EXCLUDED.volume_kind,
     storage_class = EXCLUDED.storage_class,
+    -- Ownership is never cleared by a re-upsert: callers that do not know
+    -- the owner (e.g. the agent volume-fragment reconcile) pass NULL and
+    -- must not strip the owner a BFF creation or clone set (#381 review:
+    -- an ownerless volume is admin-only in the BFF, so a NULL-overwrite
+    -- would lock non-admin operators out of their own clones).
+    owner_id = COALESCE(EXCLUDED.owner_id, volumes.owner_id),
     updated_at = EXCLUDED.updated_at
 "#;
 
@@ -397,7 +405,7 @@ WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 /// Read a volume's `volumes`-table summary (#380): the clone path uses it
 /// to materialize the target volume row with the source's shape.
 const GET_VOLUME_SUMMARY_SQL: &str = r#"
-SELECT node_id, display_name, capacity_bytes, volume_kind, storage_class
+SELECT node_id, display_name, capacity_bytes, volume_kind, storage_class, owner_id
 FROM volumes
 WHERE volume_id = $1
 "#;
@@ -410,6 +418,7 @@ pub struct VolumeSummaryRow {
     pub capacity_bytes: i64,
     pub volume_kind: Option<String>,
     pub storage_class: Option<String>,
+    pub owner_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -557,6 +566,7 @@ impl DesiredStateRepository {
             .bind(input.capacity_bytes)
             .bind(&input.volume_kind)
             .bind(&input.storage_class)
+            .bind(&input.owner_id)
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -928,6 +938,9 @@ pub struct VolumeDesiredStateInput {
     pub capacity_bytes: i64,
     pub volume_kind: Option<String>,
     pub storage_class: Option<String>,
+    /// Ownership for a NEW volumes row (clone materialization copies the
+    /// source's owner). NULL on conflict preserves the existing owner.
+    pub owner_id: Option<String>,
     pub desired_generation: Generation,
     pub desired_status: Option<String>,
     pub requested_by: Option<String>,
