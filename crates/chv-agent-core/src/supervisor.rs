@@ -197,10 +197,18 @@ log_level = "info"
             source: e,
         });
     }
+    // INHERIT the agent's stdio for supervisor-spawned daemons (M4.4
+    // re-qualification lesson): the daemon the supervisor respawns after a
+    // crash used to be a black box — its output went to /dev/null, so the
+    // restarted nwd's "ensuring topology"/error lines were invisible
+    // exactly when they mattered most (a guest-impacting failure was
+    // traced through the restarted daemon's missing logs). The agent's own
+    // stderr (a file under a service manager, or the deploy's log capture)
+    // carries the lines; crate-prefixed tracing lines disambiguate them.
     let mut cmd = Command::new(bin);
     cmd.arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     info!(bin = %bin.display(), config = %config_path.display(), "starting {}", name);
     let c = cmd.spawn().map_err(|e| ChvError::Io {
         path: bin.to_string_lossy().to_string(),
