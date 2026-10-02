@@ -30,10 +30,13 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # restarting the daemon — startup re-validates the pair.
 #
 # Migration receiver (server half, inbound migrations over mTLS):
-# separate fields, all-or-nothing. With NONE of them set this stord is
-# migration-source-only and never accepts inbound migrations. With ANY of
-# them set, all four are required and validated at startup (fail-closed);
-# the TCP listener then serves the migration receiver with MANDATORY
+# separate fields, all-or-nothing, and gated by enabled above — with ANY of
+# them set while enabled = false the daemon REFUSES TO START (an operator
+# who believes migration is off must not get an inbound TCP listener).
+# With NONE of them set (and enabled = true) this stord is
+# migration-source-only and never accepts inbound migrations. With ALL of
+# them set, the material is validated at startup (fail-closed) and the TCP
+# listener serves the migration receiver with MANDATORY
 # client-certificate authentication — there is no plaintext listener and
 # no client-auth-optional mode.
 #

@@ -156,16 +156,24 @@ pub struct MigrationServerTls {
 /// Load and validate the migration *receiver* mTLS material (server half of
 /// migration TLS, issue #390).
 ///
-/// The four receiver fields are **all-or-nothing**:
+/// `migration.enabled` is the single master switch, exactly as for the client
+/// half: the receiver fields take effect **only** when it is `true`.
 ///
-/// - none configured → `Ok(None)`: this stord is migration-source-only and
-///   never accepts inbound migrations (a legitimate deployment);
-/// - any configured → all four are required, files must be readable, the
-///   server certificate/key pair must match, the client CA bundle must parse
-///   and be non-empty, and `listen_addr` must be a valid socket address.
-///   Any problem is a **startup error** (fail-closed) — there is no
-///   plaintext listener and no client-auth-optional mode.
+/// - `enabled = false` (the default) with **no** receiver fields → `Ok(None)`:
+///   no listener, migrations unavailable in both directions;
+/// - `enabled = false` with **any** receiver field set → startup **error** —
+///   an operator who believes migration is disabled must not silently get an
+///   inbound TCP listener (fail-closed, explicit);
+/// - `enabled = true` with no receiver fields → `Ok(None)`: this stord is
+///   migration-source-only and never accepts inbound migrations (a legitimate
+///   deployment);
+/// - `enabled = true` with any receiver field set → all four are required,
+///   files must be readable, the server certificate/key pair must match, the
+///   client CA bundle must parse and be non-empty, and `listen_addr` must be a
+///   valid socket address. Any problem is a **startup error** (fail-closed) —
+///   there is no plaintext listener and no client-auth-optional mode.
 pub fn load_migration_server_tls(
+    enabled: bool,
     listen_addr: Option<&str>,
     server_cert_path: Option<&Path>,
     server_key_path: Option<&Path>,
@@ -176,10 +184,20 @@ pub fn load_migration_server_tls(
         || server_key_path.is_some()
         || client_ca_path.is_some();
     if !any_set {
-        tracing::info!(
-            "storage migration receiver listener not configured: this stord will not accept inbound migrations"
-        );
+        if enabled {
+            tracing::info!(
+                "storage migration receiver listener not configured: this stord will not accept inbound migrations"
+            );
+        }
         return Ok(None);
+    }
+    if !enabled {
+        return Err(MigrationTlsLoadError::Invalid(
+            "migration receiver fields (listen_addr, server_cert_path, server_key_path, \
+             client_ca_path) are configured but migration.enabled = false — set \
+             migration.enabled = true or remove the receiver fields"
+                .into(),
+        ));
     }
 
     let addr_str = listen_addr.ok_or_else(|| {
@@ -512,7 +530,7 @@ mod tests {
         key: Option<&std::path::Path>,
         ca: Option<&std::path::Path>,
     ) -> Result<Option<MigrationServerTls>, MigrationTlsLoadError> {
-        load_migration_server_tls(addr, cert, key, ca)
+        load_migration_server_tls(true, addr, cert, key, ca)
     }
 
     #[test]
@@ -520,6 +538,31 @@ mod tests {
         match load_server(None, None, None, None).expect("no error when unset") {
             None => {}
             Some(_) => panic!("unconfigured receiver must not produce server TLS material"),
+        }
+    }
+
+    #[test]
+    fn server_disabled_with_no_fields_returns_none() {
+        match load_migration_server_tls(false, None, None, None, None).expect("no error when unset")
+        {
+            None => {}
+            Some(_) => panic!("disabled + unconfigured receiver must not produce material"),
+        }
+    }
+
+    #[test]
+    fn server_disabled_with_fields_is_an_error() {
+        // `migration.enabled = false` must not silently ignore receiver
+        // fields (an operator who believes migration is off must not get an
+        // inbound TCP listener), nor silently open one.
+        match load_migration_server_tls(false, Some("127.0.0.1:50052"), None, None, None) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = false"),
+                    "error must name the contradiction: {msg}"
+                );
+            }
+            other => panic!("expected Invalid, got {:?}", other.map(|_| ())),
         }
     }
 

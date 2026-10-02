@@ -146,7 +146,8 @@ impl<B: StorageBackend> StorageServer<B> {
                         })?;
                 info!(
                     addr = %tls.listen_addr,
-                    "migration receiver mTLS listener bound"
+                    "storage migration receiver listening on {} (mTLS, client auth required)",
+                    tls.listen_addr
                 );
                 Some(serve_migration_tls(
                     listener,
@@ -169,12 +170,19 @@ impl<B: StorageBackend> StorageServer<B> {
                 reason: format!("server error: {e}"),
             }),
             // Fail fast: if either listener dies the daemon reports the error
-            // instead of limping along with half its serving surface.
+            // instead of limping along with half its serving surface. Log at
+            // the death site so operators see which listener failed even if
+            // the process exit path does not print the error.
             Some(tls_serve) => tokio::select! {
-                result = uds_serve => result.map_err(|e| ChvError::Internal {
-                    reason: format!("server error: {e}"),
+                result = uds_serve => result.map_err(|e| {
+                    tracing::error!("stord UDS server failed: {e}");
+                    ChvError::Internal {
+                        reason: format!("server error: {e}"),
+                    }
                 }),
-                result = tls_serve => result,
+                result = tls_serve => result.inspect_err(|e| {
+                    tracing::error!("stord migration TLS listener failed: {e}");
+                }),
             },
         }
     }

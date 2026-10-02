@@ -296,7 +296,10 @@ pub struct StordMigrationConfig {
     /// parsed/validated by the fail-closed startup loader
     /// (`load_migration_server_tls`); no cross-field validation in this crate.
     /// Unset (default) means this stord is migration-source-only and never
-    /// accepts inbound migrations.
+    /// accepts inbound migrations. NOTE: the receiver fields take effect only
+    /// when `migration.enabled = true`; setting any of them with
+    /// `enabled = false` is a startup error (fail-closed) — `enabled` is the
+    /// single master switch for both halves of migration TLS.
     #[serde(default)]
     pub listen_addr: Option<String>,
     /// PEM server certificate path for the migration receiver listener

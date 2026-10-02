@@ -108,22 +108,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Server half (issue #390): load + validate the migration receiver's mTLS
-    // material. The four receiver fields are all-or-nothing — a partially
-    // configured receiver, unreadable files, a mismatched keypair, an
-    // invalid/empty client CA bundle, or a bad listen address is a startup
-    // error (fail-closed). No receiver fields = source-only stord: no TCP
-    // listener is opened. Client-certificate authentication is mandatory on
-    // the listener; there is no plaintext fallback.
+    // material. `migration.enabled` is the master switch here too: receiver
+    // fields with enabled = false are a startup error (an operator who
+    // believes migration is off must not get an inbound TCP listener), and
+    // the four receiver fields are all-or-nothing — a partially configured
+    // receiver, unreadable files, a mismatched keypair, an invalid/empty
+    // client CA bundle, or a bad listen address is a startup error
+    // (fail-closed). No receiver fields = source-only stord: no TCP listener
+    // is opened. Client-certificate authentication is mandatory on the
+    // listener; there is no plaintext fallback. The "listening" log line is
+    // emitted only after the TCP socket is actually bound (see server.rs).
     let migration_server_tls = load_migration_server_tls(
+        config.migration.enabled,
         config.migration.listen_addr.as_deref(),
         config.migration.server_cert_path.as_deref(),
         config.migration.server_key_path.as_deref(),
         config.migration.client_ca_path.as_deref(),
     )?;
-    if let Some(tls) = &migration_server_tls {
+    if migration_server_tls.is_some() {
         info!(
-            "storage migration receiver listening on {} (mTLS, client auth required)",
-            tls.listen_addr
+            "storage migration receiver mTLS material validated (listener binds in server startup)"
         );
     }
 

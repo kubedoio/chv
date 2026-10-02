@@ -205,6 +205,7 @@ async fn migration_tls_listener_requires_client_certificates() {
     let key_file = tmp_file(&server_key);
     let ca_file = tmp_file(&ca.cert_pem);
     let tls = load_migration_server_tls(
+        true,
         Some(&addr.to_string()),
         Some(cert_file.path()),
         Some(key_file.path()),
