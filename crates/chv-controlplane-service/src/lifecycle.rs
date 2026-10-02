@@ -1044,6 +1044,44 @@ impl LifecycleService for LifecycleServiceImplementation {
         let source_volume_id = Self::parse_volume_id(request.source_volume_id)?;
         let target_volume_id = Self::parse_volume_id(request.target_volume_id)?;
 
+        // #380: the clone intent used to PATCH a `volume_desired_state`
+        // row for the target volume that nothing ever created — the FK
+        // violation surfaced as a bare `volume with id {target} not
+        // found`. Validate up front and materialize the target below via
+        // the same upsert the volume-fragment reconcile uses (one tx:
+        // `volumes` row with the source's shape + the VDS intent row).
+        let source = self
+            .desired_state_repo
+            .get_volume_summary(&source_volume_id)
+            .await?
+            .ok_or_else(|| {
+                ControlPlaneServiceError::NotFound(format!(
+                    "source volume {} not found",
+                    source_volume_id
+                ))
+            })?;
+        if self
+            .desired_state_repo
+            .get_volume_summary(&target_volume_id)
+            .await?
+            .is_some()
+        {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "target volume id already exists: {}",
+                target_volume_id
+            )));
+        }
+
+        let source_node_id = source
+            .node_id
+            .as_deref()
+            .map(NodeId::new)
+            .transpose()
+            .map_err(|e| {
+                ControlPlaneServiceError::InvalidArgument(format!("invalid source node id: {}", e))
+            })?
+            .or(Some(node_id.clone()));
+
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "CloneVolume",
@@ -1057,12 +1095,24 @@ impl LifecycleService for LifecycleServiceImplementation {
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
-                .set_volume_clone(&chv_controlplane_store::VolumeClonePatchInput {
+                .upsert_volume(&chv_controlplane_store::VolumeDesiredStateInput {
                     volume_id: target_volume_id.clone(),
+                    node_id: source_node_id.clone(),
+                    display_name: target_volume_id.as_str().to_string(),
+                    capacity_bytes: source.capacity_bytes,
+                    volume_kind: source.volume_kind.clone(),
+                    storage_class: source.storage_class.clone(),
                     desired_generation,
                     desired_status: None,
                     requested_by: Self::normalize_requested_by(&meta),
                     updated_by: None,
+                    attached_vm_id: None,
+                    attachment_mode: None,
+                    device_name: None,
+                    read_only: false,
+                    resize_to_bytes: None,
+                    snapshot_op: None,
+                    snapshot_name: None,
                     clone_source_volume_id: Some(source_volume_id.clone()),
                     requested_unix_ms: Self::now_ms(),
                 })

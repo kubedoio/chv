@@ -3734,3 +3734,193 @@ async fn resolve_relay_validates_payload_before_egress() {
         other => panic!("expected node-unavailable relay error, got {other:?}"),
     }
 }
+
+// ── #380: clone_volume must materialize the target volume row ──────────────
+use chv_controlplane_types::domain::{Generation, ResourceId};
+// The clone intent used to PATCH a `volume_desired_state` row for a target
+// volume that nothing ever created — the FK violation surfaced as a bare
+// `volume with id {target} not found` and `chvctl volume clone` always
+// failed. The fix validates source/target up front and upserts the target
+// (volumes row with the source's shape + the VDS intent row) in one tx.
+
+async fn clone_test_service() -> (
+    LifecycleServiceImplementation,
+    chv_controlplane_store::StorePool,
+) {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-clone-1', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let service = LifecycleServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        DesiredStateRepository::new(pool.clone()),
+    );
+    (service, pool)
+}
+
+fn clone_request(node: &str, source: &str, target: &str) -> proto::CloneVolumeRequest {
+    proto::CloneVolumeRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: node.into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: node.into(),
+        source_volume_id: source.into(),
+        target_volume_id: target.into(),
+    }
+}
+
+#[tokio::test]
+async fn clone_volume_creates_target_volume_row() {
+    let (service, pool) = clone_test_service().await;
+
+    // Seed the source volume (node + 10 GiB, local class) the way the
+    // volume-fragment reconcile would.
+    DesiredStateRepository::new(pool.clone())
+        .upsert_volume(&VolumeDesiredStateInput {
+            volume_id: ResourceId::new("vol-src-1").unwrap(),
+            node_id: Some(NodeId::new("node-clone-1").unwrap()),
+            display_name: "vol-src-1".into(),
+            capacity_bytes: 10_737_418_240,
+            volume_kind: Some("disk".into()),
+            storage_class: Some("local".into()),
+            desired_generation: Generation::new(1),
+            desired_status: None,
+            requested_by: Some("test-user".into()),
+            updated_by: None,
+            attached_vm_id: None,
+            attachment_mode: None,
+            device_name: None,
+            read_only: false,
+            resize_to_bytes: None,
+            snapshot_op: None,
+            snapshot_name: None,
+            clone_source_volume_id: None,
+            requested_unix_ms: 1000,
+        })
+        .await
+        .unwrap();
+
+    let ack = service
+        .clone_volume(clone_request("node-clone-1", "vol-src-1", "vol-dst-1"))
+        .await
+        .unwrap();
+    let result = ack.result.expect("ack must carry result meta");
+    assert_eq!(result.status, "OK", "clone must be accepted");
+
+    // The target volume row exists with the source's shape.
+    let row = sqlx::query(
+        "SELECT node_id, capacity_bytes, storage_class FROM volumes WHERE volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let node: String = sqlx::Row::get(&row, "node_id");
+    let capacity: i64 = sqlx::Row::get(&row, "capacity_bytes");
+    let class: String = sqlx::Row::get(&row, "storage_class");
+    assert_eq!(node, "node-clone-1");
+    assert_eq!(capacity, 10_737_418_240);
+    assert_eq!(class, "local");
+
+    // The desired-state intent row records the clone source.
+    let clone_source: Option<String> = sqlx::query_scalar(
+        "SELECT clone_source_volume_id FROM volume_desired_state WHERE volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(clone_source.as_deref(), Some("vol-src-1"));
+
+    // The operation was journaled and accepted.
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM operations WHERE operation_type = 'CloneVolume'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "Accepted");
+}
+
+#[tokio::test]
+async fn clone_volume_rejects_existing_target() {
+    let (service, pool) = clone_test_service().await;
+
+    for id in ["vol-src-1", "vol-dst-1"] {
+        DesiredStateRepository::new(pool.clone())
+            .upsert_volume(&VolumeDesiredStateInput {
+                volume_id: ResourceId::new(id).unwrap(),
+                node_id: Some(NodeId::new("node-clone-1").unwrap()),
+                display_name: id.into(),
+                capacity_bytes: 1024,
+                volume_kind: None,
+                storage_class: None,
+                desired_generation: Generation::new(1),
+                desired_status: None,
+                requested_by: None,
+                updated_by: None,
+                attached_vm_id: None,
+                attachment_mode: None,
+                device_name: None,
+                read_only: false,
+                resize_to_bytes: None,
+                snapshot_op: None,
+                snapshot_name: None,
+                clone_source_volume_id: None,
+                requested_unix_ms: 1000,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Clone onto an EXISTING target id must fail up front — the upsert
+    // would otherwise overwrite the existing volume's node/capacity.
+    let result = service
+        .clone_volume(clone_request("node-clone-1", "vol-src-1", "vol-dst-1"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert!(msg.contains("already exists"), "got: {msg}");
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+
+    // And no CloneVolume operation was journaled for the rejection.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE operation_type = 'CloneVolume'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "rejected clone must not journal an operation");
+}
+
+#[tokio::test]
+async fn clone_volume_rejects_missing_source() {
+    let (service, pool) = clone_test_service().await;
+
+    let result = service
+        .clone_volume(clone_request("node-clone-1", "vol-no-such", "vol-dst-2"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::NotFound(msg)) => {
+            assert!(msg.contains("vol-no-such"), "got: {msg}");
+        }
+        other => panic!("expected not-found, got {other:?}"),
+    }
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE operation_type = 'CloneVolume'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "rejected clone must not journal an operation");
+}
