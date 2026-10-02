@@ -300,6 +300,21 @@ spec matches the qualified reality.
   (N4 orphaned nic rows blocking network delete + N5 network delete
   performs no host teardown); harness gains:
   dnsmasq+genisoimage preflight, dnsmasq/nwd teardown fallbacks, run
-  logs clean of job-control noise. See
-  [m4.4-network.md](m4.4-network.md).
+  logs clean of job-control noise.
+  **Re-qualification on post-fix main (close-out, §7 of the evidence
+  doc):** after #358/#361/#359/#362/#363 fixed N1–N5 and #364
+  truth-updated the scenario, the re-run found and fixed two NEW
+  defects — N6 absent-gateway → L2-only bridge on operator networks
+  (#365) and N7 a UI-dialect firewall ruleset terminally bricking VM
+  creates at attach (#369, with save-time validation against the
+  engine vocabulary defined once in `chv_common::firewall`) — plus
+  three observability fixes (#365 effector-failure logging, #366
+  supervisor daemon stdio, #367 `CHV_QUAL_LOG_LEVEL`) and one harness
+  truth-update (#370, nwd's host-perspective policy direction
+  semantics). Final run (binaries `3e9bbcc3`, scenario `0d91291f`):
+  **0 errors, 1 warning (the deliberate N2-era record), 86 assertions,
+  rc=0**, host-safety gate green on the same build, teardown all-green.
+  Open follow-ups: #368 (transient effector failure terminally wedges
+  a journaled create — no re-drive) and #355's UI store unification.
+  See [m4.4-network.md](m4.4-network.md) §7.
 - M4.5–M4.9: not started.
