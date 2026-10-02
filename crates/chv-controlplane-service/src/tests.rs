@@ -3877,12 +3877,11 @@ async fn clone_volume_creates_target_volume_row() {
         })
         .await
         .unwrap();
-    let preserved_owner: Option<String> = sqlx::query_scalar(
-        "SELECT owner_id FROM volumes WHERE volume_id = 'vol-dst-1'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let preserved_owner: Option<String> =
+        sqlx::query_scalar("SELECT owner_id FROM volumes WHERE volume_id = 'vol-dst-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         preserved_owner.as_deref(),
         Some("user-clone-owner"),
