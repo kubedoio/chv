@@ -3795,6 +3795,10 @@ async fn clone_volume_creates_target_volume_row() {
             capacity_bytes: 10_737_418_240,
             volume_kind: Some("disk".into()),
             storage_class: Some("local".into()),
+            // #381 review: the source carries an owner (BFF-created volumes
+            // do); the clone target must inherit it or the BFF's
+            // require_volume_owner makes the clone admin-only.
+            owner_id: Some("user-clone-owner".into()),
             desired_generation: Generation::new(1),
             desired_status: None,
             requested_by: Some("test-user".into()),
@@ -3819,9 +3823,11 @@ async fn clone_volume_creates_target_volume_row() {
     let result = ack.result.expect("ack must carry result meta");
     assert_eq!(result.status, "OK", "clone must be accepted");
 
-    // The target volume row exists with the source's shape.
+    // The target volume row exists with the source's shape — including the
+    // inherited owner (#381 review: an ownerless row is admin-only in the
+    // BFF, which would lock a non-admin cloner out of their own clone).
     let row = sqlx::query(
-        "SELECT node_id, capacity_bytes, storage_class FROM volumes WHERE volume_id = 'vol-dst-1'",
+        "SELECT node_id, capacity_bytes, storage_class, owner_id FROM volumes WHERE volume_id = 'vol-dst-1'",
     )
     .fetch_one(&pool)
     .await
@@ -3829,9 +3835,11 @@ async fn clone_volume_creates_target_volume_row() {
     let node: String = sqlx::Row::get(&row, "node_id");
     let capacity: i64 = sqlx::Row::get(&row, "capacity_bytes");
     let class: String = sqlx::Row::get(&row, "storage_class");
+    let owner: Option<String> = sqlx::Row::get(&row, "owner_id");
     assert_eq!(node, "node-clone-1");
     assert_eq!(capacity, 10_737_418_240);
     assert_eq!(class, "local");
+    assert_eq!(owner.as_deref(), Some("user-clone-owner"));
 
     // The desired-state intent row records the clone source.
     let clone_source: Option<String> = sqlx::query_scalar(
@@ -3841,6 +3849,45 @@ async fn clone_volume_creates_target_volume_row() {
     .await
     .unwrap();
     assert_eq!(clone_source.as_deref(), Some("vol-src-1"));
+
+    // A later owner-unaware re-upsert (the volume-fragment reconcile
+    // shape: owner_id = NULL) must NOT strip the inherited owner.
+    DesiredStateRepository::new(pool.clone())
+        .upsert_volume(&VolumeDesiredStateInput {
+            volume_id: ResourceId::new("vol-dst-1").unwrap(),
+            node_id: Some(NodeId::new("node-clone-1").unwrap()),
+            display_name: "vol-dst-1".into(),
+            capacity_bytes: 10_737_418_240,
+            volume_kind: Some("disk".into()),
+            storage_class: Some("local".into()),
+            owner_id: None,
+            desired_generation: Generation::new(2),
+            desired_status: None,
+            requested_by: Some("fragment-reconcile".into()),
+            updated_by: None,
+            attached_vm_id: None,
+            attachment_mode: None,
+            device_name: None,
+            read_only: false,
+            resize_to_bytes: None,
+            snapshot_op: None,
+            snapshot_name: None,
+            clone_source_volume_id: None,
+            requested_unix_ms: 2000,
+        })
+        .await
+        .unwrap();
+    let preserved_owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner_id FROM volumes WHERE volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        preserved_owner.as_deref(),
+        Some("user-clone-owner"),
+        "fragment reconcile must preserve the clone-inherited owner"
+    );
 
     // The operation was journaled and accepted.
     let status: String =
@@ -3864,6 +3911,7 @@ async fn clone_volume_rejects_existing_target() {
                 capacity_bytes: 1024,
                 volume_kind: None,
                 storage_class: None,
+                owner_id: None,
                 desired_generation: Generation::new(1),
                 desired_status: None,
                 requested_by: None,

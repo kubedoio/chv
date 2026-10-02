@@ -7,6 +7,15 @@ use tracing::{debug, info, warn};
 
 const MIN_RESTART_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Quote a string for embedding in the generated daemon TOML config.
+/// Rust's `{:?}` is NOT a TOML serializer: it emits `\u{1}`-style escapes
+/// for control characters, which the `toml` crate rejects — a path
+/// containing one would make every respawned daemon die on config parse.
+/// `toml::Value`'s Display emits a valid quoted/escaped TOML string.
+fn toml_quote(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
 pub struct DaemonSupervisor {
     stord_bin: PathBuf,
     nwd_bin: PathBuf,
@@ -67,7 +76,7 @@ impl DaemonSupervisor {
             let entries: Vec<String> = self
                 .stord_path_allowlist
                 .iter()
-                .map(|p| format!("{:?}", p.to_string_lossy()))
+                .map(|p| toml_quote(&p.to_string_lossy()))
                 .collect();
             format!("path_allowlist = [{}]\n", entries.join(", "))
         };
@@ -211,12 +220,9 @@ async fn start_daemon(
     }
     let config_path = runtime_dir.join(format!("{}.toml", name));
     let toml = format!(
-        r#"socket_path = {:?}
-runtime_dir = {:?}
-log_level = "info"
-{}"#,
-        socket.to_string_lossy(),
-        runtime_dir.to_string_lossy(),
+        "socket_path = {}\nruntime_dir = {}\nlog_level = \"info\"\n{}",
+        toml_quote(&socket.to_string_lossy()),
+        toml_quote(&runtime_dir.to_string_lossy()),
         extra_config
     );
     if let Err(e) = tokio::fs::write(&config_path, toml).await {

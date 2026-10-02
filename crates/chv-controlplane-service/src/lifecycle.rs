@@ -1072,7 +1072,12 @@ impl LifecycleService for LifecycleServiceImplementation {
             )));
         }
 
-        let source_node_id = source
+        // #381 review: the clone target materializes on the SOURCE's node
+        // (coherent placement — the orchestrator resolves the dispatch node
+        // from the volumes row), so the operation record must journal that
+        // same node; journaling the raw request node left metadata that
+        // contradicted actual placement for non-BFF callers.
+        let placement_node_id = source
             .node_id
             .as_deref()
             .map(NodeId::new)
@@ -1080,12 +1085,12 @@ impl LifecycleService for LifecycleServiceImplementation {
             .map_err(|e| {
                 ControlPlaneServiceError::InvalidArgument(format!("invalid source node id: {}", e))
             })?
-            .or(Some(node_id.clone()));
+            .unwrap_or_else(|| node_id.clone());
 
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "CloneVolume",
-                node_id.clone(),
+                placement_node_id.clone(),
                 ResourceKind::Volume,
                 Some(target_volume_id.clone()),
                 &meta,
@@ -1097,11 +1102,16 @@ impl LifecycleService for LifecycleServiceImplementation {
             self.desired_state_repo
                 .upsert_volume(&chv_controlplane_store::VolumeDesiredStateInput {
                     volume_id: target_volume_id.clone(),
-                    node_id: source_node_id.clone(),
+                    node_id: Some(placement_node_id.clone()),
                     display_name: target_volume_id.as_str().to_string(),
                     capacity_bytes: source.capacity_bytes,
                     volume_kind: source.volume_kind.clone(),
                     storage_class: source.storage_class.clone(),
+                    // #381 review: the target inherits the source's owner —
+                    // an ownerless volumes row is admin-only in the BFF
+                    // (require_volume_owner), which would lock a non-admin
+                    // cloner out of the clone they just created.
+                    owner_id: source.owner_id.clone(),
                     desired_generation,
                     desired_status: None,
                     requested_by: Self::normalize_requested_by(&meta),
