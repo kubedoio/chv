@@ -238,11 +238,22 @@ pub async fn create_network(
         .unwrap_or("")
         .to_string();
 
-    let gateway = payload
-        .get("gateway")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // N6 (M4.4 re-qualification): an absent gateway must DEFAULT to the
+    // cidr's first usable host, exactly like the vm-create implicit-network
+    // fallback always did (its `10.200.0.1` default). Without this, the
+    // network's desired state carries a NULL gateway, the VM spec dispatches
+    // `gateway: ""`, and nwd's ensure skips BOTH the bridge's L3 address and
+    // dnsmasq — VMs attach to an L2-only bridge with no host↔guest
+    // connectivity and no DHCP. Pre-#354 this was masked because
+    // `vm create --network <name>` missed the name lookup and fell back to
+    // the implicit network (which carried the default); #354's correct name
+    // resolution exposed the operator-created network's missing gateway.
+    // An EXPLICIT empty string stays empty (an operator's deliberate
+    // L2-only choice); only an ABSENT field defaults.
+    let gateway = match payload.get("gateway").and_then(|v| v.as_str()) {
+        Some(gateway) => gateway.to_string(),
+        None => default_gateway_for_cidr(&cidr),
+    };
 
     let _bridge_name = payload
         .get("bridge_name")
@@ -786,4 +797,27 @@ pub async fn mutate_network(
         "network_id": response.network_id,
         "summary": response.summary,
     })))
+}
+
+/// Default gateway for a network created without an explicit one (N6):
+/// the cidr's first usable host — `10.200.0.1` for `10.200.0.0/24`, the
+/// same value the vm-create implicit-network fallback always defaulted
+/// to. `None` for a malformed or non-IPv4 cidr, or a prefix so large
+/// (/31, /32) that network|1 is not a valid host — the gateway then
+/// stays unset and the create proceeds unchanged (the existing L2-only
+/// behavior, now an explicit operator choice rather than a silent one).
+fn default_gateway_for_cidr(cidr: &str) -> String {
+    fn default_gateway_for_cidr_inner(cidr: &str) -> Option<String> {
+        let (addr, prefix) = cidr.split_once('/')?;
+        let addr: std::net::Ipv4Addr = addr.parse().ok()?;
+        let prefix: u32 = prefix.parse().ok()?;
+        if prefix > 30 {
+            // /31 and /32 have no separate host addresses; the point-to-
+            // point and host routes leave no room for a gateway.
+            return None;
+        }
+        let host = u32::from(addr) | 1;
+        Some(std::net::Ipv4Addr::from(host).to_string())
+    }
+    default_gateway_for_cidr_inner(cidr).unwrap_or_default()
 }
