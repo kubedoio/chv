@@ -27,6 +27,15 @@
 //! Fail-closed semantics (CRC mismatch, out-of-bounds rejection) are covered
 //! by the receiver/sender unit tests and the negative mTLS listener tests in
 //! `tests/migration_mtls.rs`.
+//!
+//! Since the destination-digest verification landed (issue #392), the
+//! finalize exchange carries a versioned full-volume SHA-256 digest
+//! (`"sha256:"` + 32 raw bytes) which the receiver re-computes over the
+//! destination before reporting `verified`. Because the receiver fails
+//! closed on an empty or unrecognized digest, the happy-path tests below
+//! completing at all is itself evidence that the finalize exchange carried
+//! a real, parseable checksum; the corruption test pins the other
+//! direction (garbage in the destination ⇒ Failed, never Completed).
 
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_stord_backends::{LocalFileBackend, StorageBackend};
@@ -233,6 +242,23 @@ fn spawn_auto_pause(task: Arc<MigrationTask>) {
 // Tests
 // ---------------------------------------------------------------------
 
+/// The sender records the finalize digest on the task as
+/// `"<algo>:<hex>"` once computed; happy-path tests assert the finalize
+/// exchange genuinely carried a non-empty, versioned checksum.
+fn assert_finalize_digest_observed(state: &chv_stord_core::migration::task::MigrationTaskState) {
+    assert!(
+        state.finalize_volume_digest.starts_with("sha256:"),
+        "finalize digest must be versioned, got: {}",
+        state.finalize_volume_digest
+    );
+    assert_eq!(
+        state.finalize_volume_digest.len(),
+        "sha256:".len() + 2 * 32,
+        "finalize digest must be sha256 + 64 hex chars, got: {}",
+        state.finalize_volume_digest
+    );
+}
+
 /// **Small volume** (issue #391, ack-window flush): an 8 MiB volume is 2
 /// chunks — not a multiple of the receiver's 64-chunk ack interval. Before
 /// the flush fix the sender's bulk-phase drain waited for an interval ack
@@ -270,6 +296,7 @@ async fn small_volume_completes_and_matches() {
         .expect("migration must not hang (ack-window flush regression?)")
         .expect("migration must succeed");
     assert_eq!(task.state.read().await.phase, MigrationPhase::Completed);
+    assert_finalize_digest_observed(&*task.state.read().await);
 
     let dest = std::fs::read(dest_dir.path().join("vol-e2e-small.img"))
         .expect("receiving volume file must exist");
@@ -372,6 +399,7 @@ async fn dirty_rounds_transfer_concurrent_writes() {
         state.bytes_transferred > 0,
         "dirty rounds must transfer real bytes"
     );
+    assert_finalize_digest_observed(&state);
     drop(state);
 
     // The concurrently written bytes must be present in the destination.
@@ -473,9 +501,174 @@ async fn pause_handshake_releases_final_sync() {
         .await
         .expect("migration future must not hang")
         .expect("migration task must not panic");
-    assert_eq!(task.state.read().await.phase, MigrationPhase::Completed);
+    let state = task.state.read().await;
+    assert_eq!(state.phase, MigrationPhase::Completed);
+    assert_finalize_digest_observed(&state);
+    drop(state);
 
     let dest = std::fs::read(dest_dir.path().join("vol-e2e-pause.img"))
         .expect("receiving volume file must exist");
     assert_eq!(dest, expected, "destination must match the source bytes");
+}
+
+/// **Corruption detection at finalize** (issue #392, the reason the digest
+/// exists): garbage written directly into the destination file
+/// mid-migration must be caught by the finalize digest comparison — the
+/// migration fails with the digest-mismatch error and the task ends
+/// `Failed`, never `Completed`. Before this fix the receiver replied
+/// `FinalizeAck{verified:true}` unconditionally, so a corrupted or
+/// truncated destination still reported success.
+///
+/// The corruption is injected while the sender is provably blocked in the
+/// `PausedFinalSync` handshake: at that point bulk copy *and* all dirty
+/// rounds have finished (nothing is re-sent after `FinalSync`), so every
+/// destination write has already landed and the garbage is guaranteed to
+/// still be there when the receiver computes its digest — the test is
+/// deterministic rather than a race against the bulk-copy writer. The
+/// migration is nonetheless mid-flight: the mTLS stream is open and the
+/// finalize exchange has not happened yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupted_destination_fails_at_finalize() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    // 16 MiB = 4 chunks; block 1 is pre-seeded dirty so the migration
+    // genuinely converges through a dirty round before the pause point.
+    let blocks: u64 = 4;
+    let mut expected = write_source_image(src_dir.path(), "vol.img", blocks);
+
+    let src_backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+    let volume_id = "vol-e2e-corrupt".to_string();
+    let handle = open_source_volume(&src_backend, &volume_id, "vol.img", blocks * BLOCK).await;
+
+    let d0 = vec![0xD0u8; 64 * 1024];
+    src_backend
+        .write_block(&volume_id, &handle, BLOCK, &d0)
+        .await
+        .expect("pre-seed dirty write must succeed");
+    expected[BLOCK as usize..BLOCK as usize + d0.len()].copy_from_slice(&d0);
+
+    let (addr, ca) = spawn_receiver(dest_dir.path()).await;
+
+    let (task, _pause_rx) =
+        MigrationTask::new(volume_id.clone(), handle.clone(), format!("https://{addr}"));
+
+    let sender = MigrationSender::new(src_backend, volume_id, handle)
+        .with_tls(sender_tls(&ca))
+        .with_task(task.clone());
+    let endpoint = format!("https://{addr}");
+    let migration = tokio::spawn(async move {
+        tokio::time::timeout(MIGRATION_TIMEOUT, sender.start_migration(endpoint)).await
+    });
+
+    // Wait for the pause request: bulk copy and dirty rounds are complete,
+    // the sender is blocked, and the destination holds the full image.
+    let deadline = tokio::time::Instant::now() + MIGRATION_TIMEOUT;
+    loop {
+        let state = task.state.read().await;
+        if state.needs_vm_pause {
+            assert_eq!(state.phase, MigrationPhase::PausedFinalSync);
+            break;
+        }
+        assert_ne!(
+            state.phase,
+            MigrationPhase::Failed,
+            "migration failed before the pause point: {}",
+            state.error_message
+        );
+        drop(state);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sender never requested the VM pause (stuck in bulk/dirty sync?)"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        task.state.read().await.convergence_round >= 1,
+        "migration must have run a dirty round before the corruption point"
+    );
+
+    // Corrupt the destination volume out-of-band (external to stord — the
+    // threat model is anything that mutates the assembled file: bit rot,
+    // truncation, another writer). The receiver's per-chunk CRC32 checks
+    // all passed: this damage is invisible to every pre-existing
+    // integrity mechanism and only the finalize digest can catch it.
+    let corrupt_offset = 4096usize;
+    let garbage: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+    let dest_path = dest_dir.path().join("vol-e2e-corrupt.img");
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut dest = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&dest_path)
+            .expect("receiving volume file must exist at the pause point");
+        dest.seek(SeekFrom::Start(corrupt_offset as u64))
+            .expect("seek within receiving volume");
+        dest.write_all(&garbage)
+            .expect("out-of-band corruption write");
+        dest.flush().expect("corruption must hit the disk");
+    }
+
+    // Release the sender into FinalSync/FinalizeComplete. The receiver
+    // re-computes the destination digest, sees the garbage, and must
+    // answer verified=false.
+    task.pause_tx.send(true).unwrap();
+
+    let result = migration
+        .await
+        .expect("migration task must not panic")
+        .expect("migration must not hang (finalize deadlock regression?)");
+    let status =
+        result.expect_err("migration with a corrupted destination must FAIL, not report Completed");
+    assert_eq!(
+        status.code(),
+        tonic::Code::DataLoss,
+        "digest mismatch is a data-integrity failure: {}",
+        status.message()
+    );
+    assert!(
+        status.message().contains("digest mismatch"),
+        "error must name the digest mismatch: {}",
+        status.message()
+    );
+    assert!(
+        status.message().contains("sha256:"),
+        "error must name the digest algorithm (content-free): {}",
+        status.message()
+    );
+    // The error message must stay content-free: no volume bytes leak into it.
+    assert!(
+        !status.message().contains("DEAD"),
+        "error message must not contain volume data"
+    );
+
+    let state = task.state.read().await;
+    assert_eq!(
+        state.phase,
+        MigrationPhase::Failed,
+        "task must end Failed when the destination does not verify"
+    );
+    assert!(
+        state.error_message.contains("digest mismatch"),
+        "task error message must carry the digest-mismatch reason: {}",
+        state.error_message
+    );
+    drop(state);
+
+    // The failure really was the corruption: the garbage is still in the
+    // destination, and the destination otherwise matches the source.
+    let dest = std::fs::read(&dest_path).expect("receiving volume file must exist");
+    assert_eq!(
+        &dest[corrupt_offset..corrupt_offset + garbage.len()],
+        &garbage,
+        "corrupted bytes must still be present (the mismatch was real)"
+    );
+    let mut expected_corrupted = expected;
+    expected_corrupted[corrupt_offset..corrupt_offset + garbage.len()].copy_from_slice(&garbage);
+    assert_eq!(
+        dest, expected_corrupted,
+        "destination must be the source bytes plus exactly the injected corruption"
+    );
 }

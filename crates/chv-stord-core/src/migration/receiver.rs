@@ -1,3 +1,4 @@
+use crate::migration::volume_digest;
 use chv_stord_api::chv_stord_api::{
     migration_message, Ack, AckStatus, FinalizeAck, MigrationMessage,
 };
@@ -29,6 +30,16 @@ const DEFAULT_ACK_INTERVAL: u32 = 64;
 ///   round (issue #391).
 /// - `FinalSync` and `FinalizeComplete` flush any chunks not yet
 ///   acknowledged (e.g. the bulk-copy remainder when no dirty round ran).
+///
+/// # Finalize verification
+///
+/// On `FinalizeComplete` the receiver re-computes the sender's versioned
+/// full-volume digest over the destination volume (after the final ack
+/// flush, before `FinalizeAck`) and reports the outcome in
+/// `FinalizeAck.verified`. Unparseable/unknown digest formats and
+/// unreadable destinations fail closed (`verified = false`), so the
+/// sender's `Completed` state genuinely means "destination verified"
+/// (issue #392).
 pub struct MigrationReceiver<B: StorageBackend> {
     backend: Arc<B>,
     volume_id: String,
@@ -149,11 +160,36 @@ impl<B: StorageBackend> MigrationReceiver<B> {
                     // full acknowledgment (FinalSync normally already did).
                     self.flush_pending_acks(tx).await?;
 
+                    // Destination verification (issue #392): re-compute the
+                    // sender's full-volume digest over the destination and
+                    // only then report `verified`. Per-chunk CRC32 catches
+                    // corruption *in flight*; this catches corruption of the
+                    // assembled volume (bit rot, truncation, external
+                    // modification). Fails closed: an unparseable/unknown
+                    // digest format or an unreadable destination yields
+                    // `verified = false` — `Completed` at the sender
+                    // genuinely means "destination verified".
+                    let (verified, error_message) =
+                        self.verify_destination(&fc.volume_checksum).await;
+                    if verified {
+                        info!(
+                            volume_id = %self.volume_id,
+                            blocks_received = self.blocks_received,
+                            "destination volume digest verified"
+                        );
+                    } else {
+                        error!(
+                            volume_id = %self.volume_id,
+                            error = %error_message,
+                            "destination volume digest verification failed"
+                        );
+                    }
+
                     // Send FinalizeAck
                     let ack_msg = MigrationMessage {
                         payload: Some(migration_message::Payload::FinalizeAck(FinalizeAck {
-                            verified: true,
-                            error_message: String::new(),
+                            verified,
+                            error_message,
                         })),
                     };
                     tx.send(ack_msg).await.map_err(|_| {
@@ -310,6 +346,50 @@ impl<B: StorageBackend> MigrationReceiver<B> {
             .map_err(|_| tonic::Status::internal("failed to send Ack: channel closed"))?;
         self.blocks_since_last_ack = 0;
         Ok(())
+    }
+
+    /// Verify the destination volume against the sender's finalize digest.
+    ///
+    /// Returns `(verified, error_message)` for the `FinalizeAck`. Every
+    /// failure path — unknown/unparseable digest format, unreadable
+    /// destination, digest mismatch — returns `verified = false` with a
+    /// precise, content-free message (algorithm names and hex digests
+    /// only; never volume data).
+    async fn verify_destination(&self, volume_checksum: &[u8]) -> (bool, String) {
+        let expected = match volume_digest::parse_volume_digest(volume_checksum) {
+            Ok(expected) => expected,
+            // Fail closed on unknown/unsupported digest formats so a
+            // future algorithm change is detected, not misverified.
+            Err(reason) => return (false, reason),
+        };
+        let actual = match volume_digest::compute_volume_digest(
+            self.backend.as_ref(),
+            &self.volume_id,
+            &self.handle,
+            self.size_bytes,
+        )
+        .await
+        {
+            Ok(actual) => actual,
+            Err(e) => {
+                return (
+                    false,
+                    format!("failed to compute destination volume digest: {e}"),
+                )
+            }
+        };
+        if actual == expected {
+            (true, String::new())
+        } else {
+            (
+                false,
+                format!(
+                    "destination digest mismatch: expected {}, got {}",
+                    expected.display(),
+                    actual.display()
+                ),
+            )
+        }
     }
 
     /// Flush the ack window at a phase boundary: send the outstanding Ack

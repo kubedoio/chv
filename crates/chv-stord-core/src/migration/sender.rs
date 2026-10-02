@@ -1,5 +1,6 @@
 use crate::migration::flow_control::SendWindow;
 use crate::migration::task::{MigrationPhase, MigrationTask};
+use crate::migration::volume_digest;
 use chv_stord_api::chv_stord_api::{
     migration_message, storage_migration_service_client::StorageMigrationServiceClient, AckStatus,
     BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
@@ -300,13 +301,47 @@ impl<B: StorageBackend> MigrationSender<B> {
             self.wait_for_ack(&mut inbound).await?;
         }
 
-        // Send FinalizeComplete
+        // Send FinalizeComplete. Before announcing finalization, compute a
+        // full-volume SHA-256 digest over the source (streamed through the
+        // same `read_block` path used for bulk copy — the volume is never
+        // held in memory) so the receiver can prove the *assembled*
+        // destination matches the source (issue #392). The digest is
+        // versioned (`"sha256:"` + 32 raw bytes) so a future algorithm
+        // change is detected, never misinterpreted.
+        let source_digest = volume_digest::compute_volume_digest(
+            self.backend.as_ref(),
+            &self.volume_id,
+            &self.handle,
+            volume_size,
+        )
+        .await
+        .map_err(|e| {
+            // Fail closed: without a source digest there is nothing to
+            // verify the destination against, so the migration cannot be
+            // reported complete.
+            let status =
+                tonic::Status::internal(format!("failed to compute source volume digest: {e}"));
+            if let Some(ref task) = self.task {
+                task.mark_failed(status.message().to_string());
+            }
+            status
+        })?;
+        if let Some(ref task) = self.task {
+            let mut state = task.state.write().await;
+            state.finalize_volume_digest = source_digest.display();
+        }
+        info!(
+            volume_id = %self.volume_id,
+            digest = %source_digest.display(),
+            "computed source volume digest for finalize"
+        );
+
         let finalize_msg = MigrationMessage {
             payload: Some(migration_message::Payload::FinalizeComplete(
                 FinalizeComplete {
                     total_bytes: volume_size,
                     total_chunks: sequence_num as u64,
-                    volume_checksum: Vec::new(),
+                    volume_checksum: source_digest.to_wire(),
                 },
             )),
         };
@@ -340,10 +375,23 @@ impl<B: StorageBackend> MigrationSender<B> {
                             "migration finalization failed"
                         );
                         metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "finalization_failed").increment(1);
-                        return Err(tonic::Status::internal(format!(
+                        // The destination provably does not hold the
+                        // source's bytes (digest mismatch or an
+                        // unverifiable destination) — the same integrity
+                        // class as a chunk CRC mismatch, so the same
+                        // `data_loss` code. The task must end Failed, not
+                        // Completed: `Completed` now genuinely means
+                        // "destination verified".
+                        let status = tonic::Status::data_loss(format!(
                             "finalization failed: {}",
                             ack.error_message
-                        )));
+                        ));
+                        if let Some(ref task) = self.task {
+                            let mut state = task.state.write().await;
+                            state.phase = MigrationPhase::Failed;
+                            state.error_message = status.message().to_string();
+                        }
+                        return Err(status);
                     }
                 }
                 Some(migration_message::Payload::Ack(_))

@@ -4,6 +4,7 @@ pub mod sender;
 pub mod service;
 pub mod task;
 pub mod tls_config;
+pub mod volume_digest;
 
 /// Maximum size of a single storage-migration gRPC message.
 ///

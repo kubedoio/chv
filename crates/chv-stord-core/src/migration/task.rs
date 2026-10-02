@@ -23,6 +23,11 @@ pub struct MigrationTaskState {
     pub total_bytes: u64,
     pub needs_vm_pause: bool,
     pub error_message: String,
+    /// `"<algo>:<hex>"` rendering of the full-volume digest the sender
+    /// computed at finalize (empty until then). Observability for the
+    /// destination-verification handshake (issue #392); the raw digest
+    /// never leaves the wire format's versioned encoding.
+    pub finalize_volume_digest: String,
 }
 
 /// An active disk migration tracked by the stord service.
@@ -59,6 +64,7 @@ impl MigrationTask {
                 total_bytes: 0,
                 needs_vm_pause: false,
                 error_message: String::new(),
+                finalize_volume_digest: String::new(),
             }),
             pause_tx,
         });
