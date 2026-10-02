@@ -38,6 +38,15 @@
 #       configs persist after a successful delete (asserted in Leg E;
 #       the deploy teardown is the actual cleanup).
 #
+# Dual-version truth (#354): every host-side name (bridge, nft table,
+# dnsmasq conf) is derived from each VM's ACTUAL network_id
+# (vm_nic_desired_state), never from the reference passed to
+# `vm create --network`. The frozen candidate resolves references by
+# network_id only and falls back to an implicit network named after the
+# reference (N1); post-#354 main resolves operator names to the
+# operator's network. The legs are written to be truthful against BOTH
+# builds — the N1 legs (A, F) flip from warn to pass once #354 ships.
+#
 # Non-claims (inherited from prompt 01, restated): coexistence with
 # Kubernetes/CNI, Docker-forwarded traffic, or multiple bridge-owning
 # network stacks is NOT claimed. Single node, single default bridge
@@ -69,13 +78,15 @@ AGENT_PID="$QUAL_AGENT_PID"
 VMS_DIR="${QUAL_AGENT_DIR}/vms"
 GUEST_IMAGE_PATH="${QUAL_GUEST_IMAGE_PATH:-/var/lib/chv/qual/images/noble-qual-patched.img}"
 NWD_RUNTIME_DIR="/run/chv/nwd"       # hardcoded in the candidate (chv-nwd-core dhcp.rs/dns.rs)
-DEFAULT_NET="default"
-DEFAULT_BRIDGE="chvbr0"              # default_network_bridge_name('default')
-DEFAULT_NFT_TABLE="chv-default"      # nwd's per-network nft table name
-SECOND_NET="m44x"
-SECOND_BRIDGE="br-m44x"              # bridge_name_for_network('m44x')
-SECOND_NFT_TABLE="chv-m44x"
-FALLBACK_CIDR="10.200.0.0/24"        # the implicit-create fallback (N1)
+DEFAULT_NET="default"              # network REFERENCE for vm create (Legs A–D)
+SECOND_NET="m44x"                  # network REFERENCE for Leg F's second network
+FALLBACK_CIDR="10.200.0.0/24"      # the implicit-create fallback (N1)
+# NOTE: bridges / nft tables / dnsmasq confs are NOT named after the
+# reference: nwd names them after the network_id the VM actually landed
+# on (see bridge_for_network below), which differs between the frozen
+# candidate (implicit row named after the reference) and post-#354 main
+# (the operator's resolved network). All legs derive the effective
+# names from vm_nic_desired_state.
 
 BOOT_TIMEOUT=420        # kernel banner after vm start (nested-virt margin)
 LOGIND_TIMEOUT=180      # logind lines after the banner
@@ -244,6 +255,21 @@ net_field() {
         "SELECT $2 FROM network_desired_state WHERE network_id='$1'" 2>/dev/null | head -1
 }
 
+# net_id_by_name NAME — network_id of the row with this display_name
+# (deploy/network create store operator names as display_name with a
+# generated short network_id).
+net_id_by_name() {
+    sqlite_query "$QUAL_DB" \
+        "SELECT network_id FROM networks WHERE display_name='$1' ORDER BY network_id LIMIT 1" 2>/dev/null | head -1
+}
+
+# bridge_for_network NETWORK_ID — nwd's bridge name for a network id
+# ('default' → chvbr0, anything else → br-<network_id>). Driven by the
+# VM's ACTUAL network_id, never by the vm-create reference (N1/#354).
+bridge_for_network() {
+    if [ "$1" = "default" ]; then echo "chvbr0"; else echo "br-$1"; fi
+}
+
 ping_ok() {
     local ip="$1" iface="${2:-}"
     if [ -n "$iface" ]; then
@@ -280,14 +306,16 @@ bff_token() { cat "${QUAL_CHVCTL_CONFIG_DIR}/chvctl/credentials" 2>/dev/null; }
 
 save_evidence() {
     # $1 = phase label; captures host-stack + DB state for the doc.
-    local label="$1"
+    # The network-scoped snapshot follows the FIRST VM's actual network
+    # (VM1_NET) once it exists, else the 'default' reference.
+    local label="$1" net="${VM1_NET:-$DEFAULT_NET}"
     {
         echo "### m4.4 evidence snapshot: ${label} ($(date -u +%FT%TZ))"
         echo "--- ip -br link:"; ip -br link
-        echo "--- ip -br addr (chv bridges):"; ip -br addr | grep -E 'chvbr|br-m44' || true
+        echo "--- ip -br addr (chv bridges):"; ip -br addr | grep -E 'chvbr|^br-' || true
         echo "--- ip route:"; ip route
         echo "--- nft tables:"; nft list tables 2>/dev/null || true
-        echo "--- nft table inet chv-default:"; nft list table inet chv-default 2>/dev/null || true
+        echo "--- nft table inet chv-${net}:"; nft list table inet "chv-${net}" 2>/dev/null || true
         echo "--- dnsmasq:"; pgrep -a dnsmasq || true
         echo "--- CP networks:"; sqlite_query "$QUAL_DB" \
             "SELECT network_id, cidr FROM network_desired_state" 2>/dev/null || true
@@ -295,8 +323,8 @@ save_evidence() {
             "SELECT vm_id, network_id, mac_address, ip_address FROM vm_nic_desired_state" 2>/dev/null || true
         echo
     } >> "${EVIDENCE_DIR}/host-state.txt"
-    cp "${NWD_RUNTIME_DIR}/dnsmasq-${DEFAULT_NET}.conf" \
-        "${EVIDENCE_DIR}/dnsmasq-${DEFAULT_NET}.conf" 2>/dev/null || true
+    cp "${NWD_RUNTIME_DIR}/dnsmasq-${net}.conf" \
+        "${EVIDENCE_DIR}/dnsmasq-${net}.conf" 2>/dev/null || true
 }
 
 qual_info "=== M4.4 network qualification start (node ${QUAL_NODE_ID}) ==="
@@ -319,48 +347,55 @@ VM1_MAC="$(nic_field "$VM1_ID" mac_address)"
     && qual_pass "IPAM assigned ${VM1_IP} / ${VM1_MAC}" \
     || qual_die "no IPAM assignment for ${VM1_ID}"
 
-# The implicit-network chain (N1, benign for the DEFAULT name because the
-# fallback cidr equals the deploy's): vm create looks up network_id
-# 'default', misses the deploy's named row, and creates an implicit row.
-[ "$(net_field "$DEFAULT_NET" cidr)" = "$QUAL_NETWORK_CIDR" ] \
-    && qual_pass "implicit network row '${DEFAULT_NET}' cidr ${QUAL_NETWORK_CIDR}" \
-    || qual_warn "implicit network cidr is '$(net_field "$DEFAULT_NET" cidr)', expected ${QUAL_NETWORK_CIDR}"
+# The N1/#354 resolution chain: the reference 'default' resolves to an
+# implicit network named 'default' on the frozen candidate (network_id
+# lookup misses deploy's named row) and to deploy's operator network on
+# post-#354 main. Every host-side name below follows the network the VM
+# ACTUALLY landed on — never the reference.
+VM1_NET="$(nic_field "$VM1_ID" network_id)"
+[ -n "$VM1_NET" ] || qual_die "no network_id in vm_nic_desired_state for ${VM1_ID}"
+VM1_BRIDGE="$(bridge_for_network "$VM1_NET")"
+VM1_NFT_TABLE="chv-${VM1_NET}"
+qual_info "network ref '${DEFAULT_NET}' → network_id '${VM1_NET}' (bridge ${VM1_BRIDGE}, nft table ${VM1_NFT_TABLE})"
+[ "$(net_field "$VM1_NET" cidr)" = "$QUAL_NETWORK_CIDR" ] \
+    && qual_pass "vm's network '${VM1_NET}' carries the deploy cidr ${QUAL_NETWORK_CIDR}" \
+    || qual_warn "vm's network '${VM1_NET}' cidr is '$(net_field "$VM1_NET" cidr)', expected ${QUAL_NETWORK_CIDR}"
 
 qual_chvctl vm start "$VM1_ID" >/dev/null || qual_die "vm start failed for ${VM1_ID}"
 wait_boot "$VM1_ID" || qual_die "guest did not boot (Leg A)"
 save_console_evidence "$VM1_ID" "leg-a"
 
 # Host-stack materialization assertions.
-[ -n "$(bridge_addr "$DEFAULT_BRIDGE")" ] \
-    && qual_pass "bridge ${DEFAULT_BRIDGE} exists ($(bridge_addr "$DEFAULT_BRIDGE"))" \
-    || qual_error "FORBIDDEN: bridge ${DEFAULT_BRIDGE} missing after attach"
+[ -n "$(bridge_addr "$VM1_BRIDGE")" ] \
+    && qual_pass "bridge ${VM1_BRIDGE} exists ($(bridge_addr "$VM1_BRIDGE"))" \
+    || qual_error "FORBIDDEN: bridge ${VM1_BRIDGE} missing after attach"
 VM1_TAP="$(tap_of "$VM1_ID")"
 if [ -n "$VM1_TAP" ]; then
     qual_pass "vm tap ${VM1_TAP} present in CH payload"
-    ip link show "$VM1_TAP" 2>/dev/null | grep -q "master ${DEFAULT_BRIDGE}" \
-        && qual_pass "tap ${VM1_TAP} enslaved to ${DEFAULT_BRIDGE}" \
-        || qual_error "FORBIDDEN: tap ${VM1_TAP} not enslaved to ${DEFAULT_BRIDGE}"
+    ip link show "$VM1_TAP" 2>/dev/null | grep -q "master ${VM1_BRIDGE}" \
+        && qual_pass "tap ${VM1_TAP} enslaved to ${VM1_BRIDGE}" \
+        || qual_error "FORBIDDEN: tap ${VM1_TAP} not enslaved to ${VM1_BRIDGE}"
 else
     qual_error "no tap found for ${VM1_ID} (CH payload has no NIC?)"
 fi
-nwd_dnsmasq_running "$DEFAULT_NET" \
-    && qual_pass "nwd dnsmasq running for '${DEFAULT_NET}'" \
-    || qual_error "FORBIDDEN: no dnsmasq for '${DEFAULT_NET}'"
-grep -q "^${VM1_MAC},${VM1_IP}$" "${NWD_RUNTIME_DIR}/dnsmasq-${DEFAULT_NET}.hosts" 2>/dev/null \
+nwd_dnsmasq_running "$VM1_NET" \
+    && qual_pass "nwd dnsmasq running for '${VM1_NET}'" \
+    || qual_error "FORBIDDEN: no dnsmasq for '${VM1_NET}'"
+grep -q "^${VM1_MAC},${VM1_IP}$" "${NWD_RUNTIME_DIR}/dnsmasq-${VM1_NET}.hosts" 2>/dev/null \
     && qual_pass "dhcp reservation ${VM1_MAC} → ${VM1_IP} in place" \
     || qual_error "dhcp reservation for ${VM1_IP} missing"
-nft list table inet "$DEFAULT_NFT_TABLE" >/dev/null 2>&1 \
-    && qual_pass "nft table inet ${DEFAULT_NFT_TABLE} exists" \
-    || qual_error "FORBIDDEN: nft table inet ${DEFAULT_NFT_TABLE} missing"
+nft list table inet "$VM1_NFT_TABLE" >/dev/null 2>&1 \
+    && qual_pass "nft table inet ${VM1_NFT_TABLE} exists" \
+    || qual_error "FORBIDDEN: nft table inet ${VM1_NFT_TABLE} missing"
 
 # N2 record: the deployed table is BARE (no chains → no default-deny on
 # the deployed path). Policy behavior itself is proven by host-safety.sh.
-if [ "$(nft_table_chain_count "$DEFAULT_NFT_TABLE")" -eq 0 ]; then
-    qual_warn "deployed nft table '${DEFAULT_NFT_TABLE}' is BARE (0 chains) — no default-deny on the deployed path (defect N2, issue filed)"
+if [ "$(nft_table_chain_count "$VM1_NFT_TABLE")" -eq 0 ]; then
+    qual_warn "deployed nft table '${VM1_NFT_TABLE}' is BARE (0 chains) — no default-deny on the deployed path (defect N2, issue filed)"
 else
-    qual_pass "deployed nft table '${DEFAULT_NFT_TABLE}' has $(nft_table_chain_count "$DEFAULT_NFT_TABLE") chain(s)"
+    qual_pass "deployed nft table '${VM1_NFT_TABLE}' has $(nft_table_chain_count "$VM1_NFT_TABLE") chain(s)"
 fi
-nft list table inet "$DEFAULT_NFT_TABLE" > "${EVIDENCE_DIR}/nft-${DEFAULT_NET}-leg-a.txt" 2>/dev/null || true
+nft list table inet "$VM1_NFT_TABLE" > "${EVIDENCE_DIR}/nft-${VM1_NET}-leg-a.txt" 2>/dev/null || true
 
 # Guest connectivity. The seed-ISO evidence line lands when cloud-init
 # FINISHES (~40 s in, after the logind gate) — poll for it rather than
@@ -378,8 +413,8 @@ console_has "$VM1_ID" "$VM1_IP" \
     || qual_error "guest console shows no evidence of IP ${VM1_IP}"
 if ping_ok "$VM1_IP"; then
     qual_pass "host → guest connectivity (${VM1_IP}: 2/2 icmp)"
-    ip neigh show dev "$DEFAULT_BRIDGE" | grep -q "${VM1_IP}.*${VM1_MAC}" \
-        && qual_pass "ARP entry ${VM1_IP} → ${VM1_MAC} on ${DEFAULT_BRIDGE}" \
+    ip neigh show dev "$VM1_BRIDGE" | grep -q "${VM1_IP}.*${VM1_MAC}" \
+        && qual_pass "ARP entry ${VM1_IP} → ${VM1_MAC} on ${VM1_BRIDGE}" \
         || qual_warn "no ARP entry for ${VM1_IP} (check ip neigh evidence)"
 else
     qual_error "FORBIDDEN: host → guest ping FAILED for ${VM1_IP}"
@@ -391,28 +426,31 @@ save_evidence "leg-a-after-boot"
 # ---------------------------------------------------------------------------
 qual_info "--- Leg B: BFF networks/update with firewall_rules → dispatch observation"
 
-NFT_BEFORE_B="$(nft list table inet "$DEFAULT_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
-GEN_BEFORE_B="$(net_field "$DEFAULT_NET" desired_generation)"
+NFT_BEFORE_B="$(nft list table inet "$VM1_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
+GEN_BEFORE_B="$(net_field "$VM1_NET" desired_generation)"
 TOKEN="$(bff_token)"
 [ -n "$TOKEN" ] || qual_die "no BFF token available (chvctl credentials)"
 
+# The policy target is the network the VM actually sits on (VM1_NET):
+# 'default' on the frozen candidate, the operator's resolved network on
+# post-#354 main.
 HTTP_CODE="$(curl -s -o "${EVIDENCE_DIR}/bff-update-leg-b.json" -w '%{http_code}' \
     -X POST "${QUAL_BFF_URL}/v1/networks/update" \
     -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-    -d '{"network_id":"'"$DEFAULT_NET"'","firewall_rules":[{"direction":"ingress","action":"allow","protocol":"icmp","source":"'"$QUAL_NETWORK_CIDR"'"}]}')"
+    -d '{"network_id":"'"$VM1_NET"'","firewall_rules":[{"direction":"ingress","action":"allow","protocol":"icmp","source":"'"$QUAL_NETWORK_CIDR"'"}]}')"
 [ "$HTTP_CODE" = "200" ] \
     && qual_pass "BFF accepted the firewall_rules update (HTTP ${HTTP_CODE})" \
     || qual_error "BFF networks/update failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-update-leg-b.json")"
 
-GEN_AFTER_B="$(net_field "$DEFAULT_NET" desired_generation)"
-FWRULES_AFTER_B="$(net_field "$DEFAULT_NET" firewall_rules_json)"
+GEN_AFTER_B="$(net_field "$VM1_NET" desired_generation)"
+FWRULES_AFTER_B="$(net_field "$VM1_NET" firewall_rules_json)"
 [ -n "$FWRULES_AFTER_B" ] && [ "$FWRULES_AFTER_B" != "" ] \
     && qual_pass "firewall_rules persisted to CP DB (generation ${GEN_BEFORE_B} → ${GEN_AFTER_B})" \
     || qual_error "firewall_rules NOT persisted to the CP DB"
 
 # Observation window for a (nonexistent) dispatch to reach the node.
 sleep "$POLICY_DISPATCH_WAIT"
-NFT_AFTER_B="$(nft list table inet "$DEFAULT_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
+NFT_AFTER_B="$(nft list table inet "$VM1_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
 if [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
     qual_warn "nft table UNCHANGED ${POLICY_DISPATCH_WAIT}s after the accepted update — no operator-reachable policy path in the candidate (defect N2, issue filed; policy allow/deny proven at the nwd layer by host-safety.sh)"
 else
@@ -472,12 +510,15 @@ ping_ok "$VM1_IP" \
 # Re-attach on the existing network must work (idempotent topology
 # re-ensure with nwd's in-memory table lost): a NEW VM attaches fine.
 VM2_ID="$(create_vm qual-net-2 1 512M "$DEFAULT_NET")" || qual_die "aborting Leg C"
+[ "$(nic_field "$VM2_ID" network_id)" = "$VM1_NET" ] \
+    && qual_pass "vm-2 resolved to the same network as vm-1 ('${VM1_NET}')" \
+    || qual_error "vm-2 landed on network '$(nic_field "$VM2_ID" network_id)', vm-1 on '${VM1_NET}'"
 qual_chvctl vm start "$VM2_ID" >/dev/null || qual_die "vm start failed for ${VM2_ID}"
 wait_boot "$VM2_ID" || qual_die "guest did not boot (Leg C)"
 save_console_evidence "$VM2_ID" "leg-c"
 VM2_IP="$(nic_field "$VM2_ID" ip_address)"
 VM2_TAP="$(tap_of "$VM2_ID")"
-[ -n "$VM2_TAP" ] && ip link show "$VM2_TAP" 2>/dev/null | grep -q "master ${DEFAULT_BRIDGE}" \
+[ -n "$VM2_TAP" ] && ip link show "$VM2_TAP" 2>/dev/null | grep -q "master ${VM1_BRIDGE}" \
     && qual_pass "new VM attached to existing network after nwd restart (tap ${VM2_TAP} re-ensured)" \
     || qual_error "FORBIDDEN: attach to existing network failed after nwd restart"
 ping_ok "$VM2_IP" \
@@ -504,7 +545,7 @@ if [ -n "$VM1_TAP_BEFORE_D" ] && ip link show "$VM1_TAP_BEFORE_D" >/dev/null 2>&
 else
     qual_warn "tap ${VM1_TAP_BEFORE_D} removed on stop (differs from the observed candidate behavior)"
 fi
-[ -n "$(bridge_addr "$DEFAULT_BRIDGE")" ] && nwd_dnsmasq_running "$DEFAULT_NET" \
+[ -n "$(bridge_addr "$VM1_BRIDGE")" ] && nwd_dnsmasq_running "$VM1_NET" \
     && qual_pass "network-scoped state persists across VM stop (bridge + dnsmasq)" \
     || qual_error "FORBIDDEN: network state torn down by a VM stop"
 ping_ok "$VM1_IP" \
@@ -536,44 +577,54 @@ qual_info "--- Leg F: network create + vm create --network <name> (defect N1: fa
 qual_chvctl --output json network create "$SECOND_NET" --cidr 10.99.0.0/24 >/dev/null 2>&1 \
     || qual_die "network create ${SECOND_NET} failed"
 qual_pass "operator network '${SECOND_NET}' created with cidr 10.99.0.0/24"
+SECOND_NET_ID="$(net_id_by_name "$SECOND_NET")"
+qual_info "operator network '${SECOND_NET}' has network_id '${SECOND_NET_ID}'"
 
 VM3_ID="$(create_vm qual-net-3 1 512M "$SECOND_NET")" || qual_die "aborting Leg F"
 qual_chvctl vm start "$VM3_ID" >/dev/null || qual_die "vm start failed for ${VM3_ID}"
 wait_boot "$VM3_ID" || qual_die "guest did not boot (Leg F)"
 save_console_evidence "$VM3_ID" "leg-f"
 VM3_IP="$(nic_field "$VM3_ID" ip_address)"
+VM3_NET="$(nic_field "$VM3_ID" network_id)"
+[ -n "$VM3_NET" ] || qual_die "no network_id in vm_nic_desired_state for ${VM3_ID}"
+VM3_BRIDGE="$(bridge_for_network "$VM3_NET")"
+qual_info "network ref '${SECOND_NET}' → network_id '${VM3_NET}' (bridge ${VM3_BRIDGE})"
 
-# The operator's cidr must be what materializes; the candidate uses the
-# implicit-network fallback instead (name→network_id lookup miss).
-SECOND_NET_CIDR="$(net_field "$SECOND_NET" cidr)"
-if [ "$SECOND_NET_CIDR" = "10.99.0.0/24" ]; then
-    qual_pass "second network materialized with the operator cidr (${SECOND_NET_CIDR})"
+# The operator's network is what the VM must attach to; the frozen
+# candidate misses the name (network_id-only lookup) and attaches to an
+# implicit network with the FALLBACK cidr instead (N1, issue #354).
+VM3_NET_CIDR="$(net_field "$VM3_NET" cidr)"
+if [ "$VM3_NET" = "$SECOND_NET_ID" ] && [ "$VM3_NET_CIDR" = "10.99.0.0/24" ]; then
+    qual_pass "vm-3 attached to the operator network '${VM3_NET}' with its cidr (${VM3_NET_CIDR})"
 else
-    # Known candidate defect (issue filed, N1): recorded as a WARNING,
+    # Known candidate defect (issue #354, filed): recorded as a WARNING,
     # matching the M4.3 pattern for filed defects — the scenario's hard
     # errors are reserved for outcomes not explained by filed issues.
-    qual_warn "DEFECT N1 (issue filed): vm create --network ${SECOND_NET} used cidr '${SECOND_NET_CIDR}' (implicit fallback), not the operator's 10.99.0.0/24"
+    qual_warn "DEFECT N1 (issue #354): vm create --network ${SECOND_NET} attached to '${VM3_NET}' (cidr '${VM3_NET_CIDR}'), not the operator's '${SECOND_NET_ID}' 10.99.0.0/24 — implicit fallback"
 fi
-[ "$(bridge_addr "$SECOND_BRIDGE")" = "10.200.0.1/24" ] \
-    && qual_warn "second bridge ${SECOND_BRIDGE} got the FALLBACK gateway 10.200.0.1/24 (same subnet as ${DEFAULT_BRIDGE})" \
-    || qual_info "second bridge ${SECOND_BRIDGE} addr is '$(bridge_addr "$SECOND_BRIDGE")'"
+VM3_BRIDGE_ADDR="$(bridge_addr "$VM3_BRIDGE")"
+if [ "$VM3_BRIDGE_ADDR" = "10.99.0.1/24" ]; then
+    qual_pass "second bridge ${VM3_BRIDGE} carries the operator gateway 10.99.0.1/24"
+else
+    qual_warn "DEFECT N1 (issue #354): second bridge ${VM3_BRIDGE} addr is '${VM3_BRIDGE_ADDR}' (fallback gateway on the shared subnet, not the operator's 10.99.0.1/24)"
+fi
 
 # Duplicate route for the shared subnet → host→guest on the SECOND
 # bridge is unreachable by normal routing (first route wins).
-if ip route show | grep "$FALLBACK_CIDR" | grep -q "dev ${SECOND_BRIDGE}" && \
-   ip route show | grep "$FALLBACK_CIDR" | grep -q "dev ${DEFAULT_BRIDGE}"; then
-    qual_warn "duplicate host routes for ${FALLBACK_CIDR} (on ${DEFAULT_BRIDGE} and ${SECOND_BRIDGE}) — defect N1 consequence"
+if ip route show | grep "$FALLBACK_CIDR" | grep -q "dev ${VM3_BRIDGE}" && \
+   ip route show | grep "$FALLBACK_CIDR" | grep -q "dev ${VM1_BRIDGE}"; then
+    qual_warn "duplicate host routes for ${FALLBACK_CIDR} (on ${VM1_BRIDGE} and ${VM3_BRIDGE}) — defect N1 consequence"
 else
-    qual_info "no duplicate route observed (ip route evidence in host-state.txt)"
+    qual_pass "no duplicate route for ${FALLBACK_CIDR} (each network on its own subnet)"
 fi
 if ping_ok "$VM3_IP"; then
     qual_pass "host → guest-3 directly reachable (${VM3_IP})"
 else
-    qual_warn "DEFECT N1 forbidden outcome (issue filed): host → guest-3 (${VM3_IP}, on ${SECOND_BRIDGE}) UNREACHABLE — duplicate-subnet routing"
-    if ping_ok "$VM3_IP" "$SECOND_BRIDGE"; then
-        qual_pass "forced via ${SECOND_BRIDGE}: guest-3 reachable (proves the guest/network is healthy; only routing is ambiguous)"
+    qual_warn "DEFECT N1 forbidden outcome (issue #354): host → guest-3 (${VM3_IP}, on ${VM3_BRIDGE}) UNREACHABLE — duplicate-subnet routing"
+    if ping_ok "$VM3_IP" "$VM3_BRIDGE"; then
+        qual_pass "forced via ${VM3_BRIDGE}: guest-3 reachable (proves the guest/network is healthy; only routing is ambiguous)"
     else
-        qual_error "guest-3 unreachable even forced via ${SECOND_BRIDGE} (beyond the filed N1 defect)"
+        qual_error "guest-3 unreachable even forced via ${VM3_BRIDGE} (beyond the filed N1 defect)"
     fi
 fi
 ping_ok "$VM1_IP" \
@@ -615,8 +666,13 @@ else
 fi
 
 # N4: orphaned nic rows block network delete even with all VMs deleted.
-# Known candidate defect (issue filed): recorded as a WARNING.
-DEL_OUT="$(qual_chvctl network delete "$DEFAULT_NET" 2>&1)" && RC=0 || RC=$?
+# Known candidate defect (issue filed): recorded as a WARNING. The delete
+# target is the network vm-1 actually sat on (VM1_NET): 'default' on the
+# frozen candidate, the operator's resolved network on post-#354 main —
+# i.e. on a #354 build this leg deletes the DEPLOY-SEEDED fleet 'default'
+# network (fine in the disposable qual env; the deploy teardown is the
+# real cleanup anyway).
+DEL_OUT="$(qual_chvctl network delete "$VM1_NET" 2>&1)" && RC=0 || RC=$?
 if [ "$RC" -ne 0 ] && printf '%s' "$DEL_OUT" | grep -q "still attached"; then
     qual_warn "DEFECT N4 (issue filed): network delete refused with all VMs deleted (orphaned vm_nic_desired_state rows): ${DEL_OUT}"
     # Documented operator escape (frozen-candidate workaround): drop the
@@ -639,7 +695,7 @@ conn.commit(); conn.close()
 print(n)
 PYEOF
     qual_info "operator escape: removed orphaned vm_nic_desired_state rows"
-    qual_chvctl network delete "$DEFAULT_NET" >/dev/null 2>&1 \
+    qual_chvctl network delete "$VM1_NET" >/dev/null 2>&1 \
         && qual_pass "network delete succeeds after the escape" \
         || qual_error "network delete still refused after removing orphaned rows"
 else
@@ -650,9 +706,9 @@ fi
 # leaves everything (DB-only delete).
 sleep 3
 RESIDUE=""
-[ -n "$(bridge_addr "$DEFAULT_BRIDGE")" ] && RESIDUE="${RESIDUE} bridge:${DEFAULT_BRIDGE}"
-nft list table inet "$DEFAULT_NFT_TABLE" >/dev/null 2>&1 && RESIDUE="${RESIDUE} nft:${DEFAULT_NFT_TABLE}"
-nwd_dnsmasq_running "$DEFAULT_NET" && RESIDUE="${RESIDUE} dnsmasq:${DEFAULT_NET}"
+[ -n "$(bridge_addr "$VM1_BRIDGE")" ] && RESIDUE="${RESIDUE} bridge:${VM1_BRIDGE}"
+nft list table inet "$VM1_NFT_TABLE" >/dev/null 2>&1 && RESIDUE="${RESIDUE} nft:${VM1_NFT_TABLE}"
+nwd_dnsmasq_running "$VM1_NET" && RESIDUE="${RESIDUE} dnsmasq:${VM1_NET}"
 if [ -n "$RESIDUE" ]; then
     qual_warn "DEFECT N5 (issue filed): network delete left host residue (${RESIDUE}) — DB-only delete, no node teardown (deploy teardown is the actual cleanup)"
 else
