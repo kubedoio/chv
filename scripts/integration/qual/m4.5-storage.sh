@@ -352,11 +352,19 @@ VOL1_CAPACITY="$(volume_field "$VOL1_ID" capacity_bytes)"
     || qual_warn "volume capacity missing/zero in CP DB: '${VOL1_CAPACITY}'"
 
 # NOTE: wait_for evaluates its args ONCE — the backing discovery must
-# re-run per poll, hence the function (the m4.4-documented trap).
-vm_volume_backed() { [ -n "$(volume_backing "$1")" ]; }
-wait_for "volume backing materialized on host (create dispatch → stord open → seed)" \
+# re-run per poll, hence the function (the m4.4-documented trap). The
+# wait gates on CONVERSION COMPLETION, not file existence: the local
+# backend materializes the backing as an intermediate qcow2 copy first
+# (smaller than capacity) and only reaches full size after the
+# qcow2→raw conversion + set_len (run-2 finding).
+vm_volume_ready() {
+    local p
+    p="$(volume_backing "$1")"
+    [ -n "$p" ] && [ "$(stat -c %s "$p" 2>/dev/null || echo 0)" -ge "$2" ]
+}
+wait_for "volume backing materialized + seed conversion complete (full size)" \
     "$DISPATCH_TIMEOUT" \
-    vm_volume_backed "$VM1_ID" \
+    vm_volume_ready "$VM1_ID" "${VOL1_CAPACITY:-1}" \
     || qual_die "no volume backing file under ${VMS_DIR}/${VM1_ID}"
 VOL1_PATH="$(volume_backing "$VM1_ID")"
 qual_pass "volume backing materialized on host: ${VOL1_PATH}"
