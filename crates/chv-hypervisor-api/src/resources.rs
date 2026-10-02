@@ -16,34 +16,6 @@ use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Construct a bridge name for a network, guaranteed to be <= 15 chars (IFNAMSIZ limit).
-///
-/// For the "default" network, returns "chvbr0". For other networks, returns
-/// "br-{net_id}" if it fits in 15 chars, otherwise truncates net_id and appends
-/// a 4-hex-char hash suffix to avoid collisions: "br-{prefix}{hash}".
-///
-/// Relocated verbatim from `crates/chv-agent-core/src/reconcile.rs` so the
-/// legacy reconcile path and the Core runtime share one definition (M2.2a).
-pub fn bridge_name_for_network(net_id: &str) -> String {
-    if net_id == "default" {
-        return "chvbr0".to_string();
-    }
-    let candidate = format!("br-{}", net_id);
-    if candidate.len() <= 15 {
-        return candidate;
-    }
-    // "br-" (3) + up to 8 chars of net_id + 4-char hash = 15 chars total
-    let prefix: String = net_id.chars().take(8).collect();
-    let hash = {
-        let mut h: u32 = 0x811c9dc5;
-        for b in net_id.as_bytes() {
-            h = h.wrapping_mul(0x01000193) ^ (*b as u32);
-        }
-        format!("{:04x}", h & 0xffff)
-    };
-    format!("br-{}{}", prefix, hash)
-}
-
 /// Returns the per-VM runtime directory for the given VM.
 /// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
 ///
@@ -292,6 +264,22 @@ pub trait HostResourceController: Send + Sync + 'static {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError>;
 
+    /// Demolish a network's host topology on this node (bridge, namespace,
+    /// dnsmasq, nft table — nwd's `delete_network_topology`).
+    ///
+    /// # Precondition
+    /// NO other VM on this node still uses `network_id` — the local
+    /// teardown deletes the bridge unconditionally, and a tap still
+    /// enslaved on it would cut that VM's guest off. The caller's
+    /// last-detach decision must come from a durable authority
+    /// ([`NetworkUsageLookup`]), never from in-memory state alone
+    /// (a daemon restart empties it).
+    async fn delete_network_topology(
+        &self,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
     /// Attach a NIC to a VM, returning the namespace and tap handles.
     async fn attach_vm_nic(
         &self,
@@ -311,6 +299,34 @@ pub trait HostResourceController: Send + Sync + 'static {
         network_id: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError>;
+}
+
+/// Durable answer to "does any VM other than `excluding_vm` still reference
+/// `network_id` on this node?" — the last-detach teardown safety check
+/// (#356 N5).
+///
+/// The answer MUST come from an authority that survives daemon restarts
+/// (the Core store's VM definitions). In-memory runtime state is not
+/// sufficient: after a restart it is empty, and "no entry references the
+/// network" would falsely authorize tearing down a network a still-running
+/// pre-restart VM uses — deleting its bridge would cut that VM's guest off.
+///
+/// Implementations MUST fail CLOSED (report in-use) whenever the underlying
+/// authority cannot be read: a skipped teardown leaves observable residue,
+/// a wrong teardown causes an outage.
+pub trait NetworkUsageLookup: Send + Sync + 'static {
+    fn network_in_use(&self, network_id: &str, excluding_vm: &str) -> bool;
+}
+
+/// Fail-closed [`NetworkUsageLookup`]: every network reports as in use, so
+/// no teardown ever fires. The runtime's default before
+/// `with_network_usage` wires a real authority.
+pub struct AlwaysInUse;
+
+impl NetworkUsageLookup for AlwaysInUse {
+    fn network_in_use(&self, _network_id: &str, _excluding_vm: &str) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

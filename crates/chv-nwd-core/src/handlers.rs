@@ -478,6 +478,18 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     return Ok(Response::new(Self::err_result(&e)));
                 }
             }
+            // #356 N5: with no state row, the local half (bridge /
+            // namespace / dnsmasq / nft table) used to be silently
+            // SKIPPED — the restart residue the M4.4 qualification
+            // observed. Every local name is derived deterministically
+            // from the network id, so run the local teardown by derived
+            // names (existence-gated, warn-only), mirroring the fabric
+            // half's ownership-journal fallback above. Gated on fabric
+            // ownership being determinable: an ownership error above
+            // returns first (fail closed, residue stays observable).
+            self.executor
+                .delete_local_topology_by_derived_names(&req.network_id)
+                .await;
         }
         // Drop any remembered policy so a stale firewall policy is not re-asserted
         // if a new topology with the same network_id is created later (#227 S5).

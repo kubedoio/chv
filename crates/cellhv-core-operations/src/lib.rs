@@ -315,6 +315,18 @@ impl OperationService {
         Ok(Self::new(CoreStore::open_existing(path)?))
     }
 
+    /// Open a READ-ONLY service handle onto an existing store (#356 N5).
+    ///
+    /// For durable observers of a store another process owns and writes
+    /// (the agent's last-detach network-usage lookup): same validation as
+    /// [`CoreStore::open_read_only`] — the retained connection stays
+    /// read-only, never initializes a foreign file, and never migrates.
+    /// The facade stays the single legal surface onto the store (the
+    /// architecture guard allows only this crate to depend on it).
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        Ok(Self::new(CoreStore::open_read_only(path)?))
+    }
+
     pub fn new(store: CoreStore) -> Self {
         Self { store }
     }

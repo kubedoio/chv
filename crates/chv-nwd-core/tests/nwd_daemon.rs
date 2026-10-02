@@ -47,6 +47,8 @@ impl NetworkExecutor for MockExecutor {
         })
     }
 
+    async fn delete_local_topology_by_derived_names(&self, _network_id: &str) {}
+
     async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
         Ok("healthy".to_string())
     }
@@ -214,12 +216,23 @@ impl NetworkExecutor for RecordingExecutor {
 
     async fn delete_topology(
         &self,
-        _network_id: &str,
+        network_id: &str,
         _state: &TopologyState,
     ) -> Result<DeleteOutcome, ChvError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("state_teardown:{network_id}"));
         Ok(DeleteOutcome {
             fabric_removed: None,
         })
+    }
+
+    async fn delete_local_topology_by_derived_names(&self, network_id: &str) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("derived_teardown:{network_id}"));
     }
 
     async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
@@ -1038,5 +1051,91 @@ async fn concurrent_fw_nat_applies_persist_both_halves() {
     assert_eq!(
         nat_calls, 2,
         "nat: 1 concurrent apply + 1 attach re-scope (a lost record would leave only 1)"
+    );
+}
+
+#[tokio::test]
+async fn delete_without_state_row_runs_derived_names_local_teardown() {
+    // #356 N5: a delete arriving with no in-memory TopologyTable row (an
+    // nwd restart wiped it) used to silently SKIP the local half of the
+    // teardown — bridge / namespace / dnsmasq / nft residue survived
+    // forever (the M4.4 qualification's restart-residue finding). The
+    // derived-names fallback must run exactly in that case, and ONLY in
+    // that case: a delete with a state row uses the authoritative
+    // state-row path.
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rec = RecordingExecutor {
+        calls: calls.clone(),
+    };
+    let server = NetworkServer::new(rec, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Delete a network that was never ensured on this nwd instance: no
+    // state row, so the derived-names fallback runs (a no-op against
+    // non-existent host objects, but the executor is invoked).
+    let del = client
+        .delete_network_topology(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-gone".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(del.status, "OK");
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "derived_teardown:net-gone"),
+        "a delete with no state row must run the derived-names local teardown"
+    );
+
+    // Ensure a topology so its delete takes the state-row path instead.
+    client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(TopologySpec {
+                network_id: "net-live".to_string(),
+                tenant_id: "t1".to_string(),
+                bridge_name: "br-netlive".to_string(),
+                namespace_name: "ns-netlive".to_string(),
+                subnet_cidr: "10.0.9.0/24".to_string(),
+                gateway_ip: "10.0.9.1".to_string(),
+                options: Default::default(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
+                fabric: None,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let del = client
+        .delete_network_topology(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-live".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(del.status, "OK");
+    let recorded = calls.lock().unwrap();
+    assert!(
+        recorded.iter().any(|c| c == "state_teardown:net-live"),
+        "a delete with a state row must use the state-row teardown path"
+    );
+    assert!(
+        !recorded.iter().any(|c| c == "derived_teardown:net-live"),
+        "the state-row path must not double-run the derived-names fallback"
     );
 }

@@ -148,6 +148,28 @@ fn spawn_boot_watchdog(
     );
 }
 
+/// Build the durable network-usage lookup for last-detach teardown
+/// (#356 N5): a READ-ONLY handle onto the Core store the runtime owner is
+/// about to activate. The store file exists by the time this runs (both
+/// start paths activate it first). If it cannot be opened read-only, fail
+/// closed — `AlwaysInUse` — and say so loudly: no network teardown will
+/// fire on this node until the store is readable, leaving residue instead
+/// of risking an outage.
+fn network_usage_lookup(config: &AgentConfig) -> Arc<dyn chv_hypervisor_api::NetworkUsageLookup> {
+    match chv_agent_core::network_usage::CoreStoreNetworkUsage::open(&config.core_store_path) {
+        Ok(lookup) => Arc::new(lookup),
+        Err(error) => {
+            warn!(
+                path = %config.core_store_path.display(),
+                %error,
+                "cannot open the Core store read-only for the network-usage lookup; \
+                 last-detach network teardown is disabled (fail closed) on this node"
+            );
+            Arc::new(chv_hypervisor_api::AlwaysInUse)
+        }
+    }
+}
+
 async fn start_core_managed(
     config: &AgentConfig,
     adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
@@ -217,7 +239,8 @@ async fn start_core_managed(
             adapter,
             resources,
             config.runtime_dir.clone(),
-        ),
+        )
+        .with_network_usage(network_usage_lookup(config)),
     );
     // M2.2b: wrap the single effector with the NodeCache compatibility
     // projection — Succeeded Core outcomes are projected into NodeCache and
@@ -282,7 +305,8 @@ async fn start_core_native(
             adapter,
             resources,
             config.runtime_dir.clone(),
-        ),
+        )
+        .with_network_usage(network_usage_lookup(config)),
     );
     Ok((
         cellhv_core_runtime_owner::CoreRuntimeOwner::start(

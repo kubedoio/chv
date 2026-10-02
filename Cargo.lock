@@ -683,6 +683,7 @@ dependencies = [
  "chv-common",
  "chv-config",
  "chv-errors",
+ "chv-hypervisor-api",
  "chv-observability",
  "control-plane-node-api",
  "rustls",

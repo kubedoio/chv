@@ -23,6 +23,7 @@ chv-config = { path = "../../crates/chv-config" }
 chv-observability = { path = "../../crates/chv-observability" }
 chv-agent-core = { path = "../../crates/chv-agent-core" }
 chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
+chv-hypervisor-api = { path = "../../crates/chv-hypervisor-api" }
 chv-errors = { path = "../../crates/chv-errors" }
 cellhv-core-startup = { path = "../../crates/cellhv-core-startup" }
 cellhv-core-runtime-owner = { path = "../../crates/cellhv-core-runtime-owner" }

@@ -32,8 +32,9 @@ use tracing::{debug, error, info, warn};
 // node-state health observation the state machine needs in every mode). There
 // is no way to construct a core-managed Reconciler that can express provider
 // mutation.
-pub use chv_hypervisor_api::resources::{
-    bridge_name_for_network, rotate_console_log, vm_runtime_dir,
+pub use chv_hypervisor_api::{
+    bridge_name_for_network,
+    resources::{rotate_console_log, vm_runtime_dir},
 };
 
 /// Maximum number of VMs to reconcile concurrently within a single tick.

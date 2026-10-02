@@ -162,6 +162,16 @@ impl HostResourceController for MockHostResourceController {
         Ok(())
     }
 
+    async fn delete_network_topology(
+        &self,
+        network_id: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.begin_step("net_teardown")?;
+        self.record("net_teardown", network_id);
+        Ok(())
+    }
+
     async fn attach_vm_nic(
         &self,
         nic_id: &str,

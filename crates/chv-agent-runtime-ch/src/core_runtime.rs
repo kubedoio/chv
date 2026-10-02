@@ -34,9 +34,10 @@ use cellhv_core_operations::{CanonicalRequest, MutationCommand, OperationJournal
 use cellhv_core_types::{OperationKind, StorageAttachmentRef};
 use chv_errors::ChvError;
 use chv_hypervisor_api::resources::{
-    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file,
-    vm_pid_file, vm_runtime_dir, HostResourceController, DEFAULT_NIC_CIDR,
+    ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file, vm_pid_file, vm_runtime_dir,
+    HostResourceController, NetworkUsageLookup, DEFAULT_NIC_CIDR,
 };
+use chv_hypervisor_api::{bridge_name_for_network, AlwaysInUse};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,11 @@ struct VmSideEffects {
     volumes: Vec<(String, String, bool)>,
     /// `nic_id`s, in attach order.
     nics: Vec<String>,
+    /// DISTINCT `network_id`s the VM's NICs attach to, in attach order
+    /// (#356 N5) — the input to the last-detach teardown decision. In-memory
+    /// like `nics`: after a daemon restart both are gone, so a delete simply
+    /// drains nothing and no teardown fires (residue, never an outage).
+    networks: Vec<String>,
 }
 
 /// The production Cloud Hypervisor effector runtime.
@@ -129,6 +135,11 @@ pub struct CloudHypervisorCoreRuntime {
     adapter: Arc<dyn CloudHypervisorAdapter>,
     resources: Arc<dyn HostResourceController>,
     runtime_dir: PathBuf,
+    /// Durable last-detach safety check (#356 N5): answers "does any VM
+    /// other than the deleting one still use this network" from the Core
+    /// store. Defaults to fail-closed ([`AlwaysInUse`] — no teardown ever
+    /// fires) until [`Self::with_network_usage`] wires the real authority.
+    network_usage: Arc<dyn NetworkUsageLookup>,
     /// Per-VM in-memory handle map (see module docs for lifetime).
     side_effects: Mutex<HashMap<String, VmSideEffects>>,
 }
@@ -143,8 +154,18 @@ impl CloudHypervisorCoreRuntime {
             adapter,
             resources,
             runtime_dir,
+            network_usage: Arc::new(AlwaysInUse),
             side_effects: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Wire the durable network-usage authority for last-detach teardown
+    /// (#356 N5). Without this, the runtime never tears network topology
+    /// down (fail-closed default): host residue is then cleaned by network
+    /// delete / node reprovision instead.
+    pub fn with_network_usage(mut self, lookup: Arc<dyn NetworkUsageLookup>) -> Self {
+        self.network_usage = lookup;
+        self
     }
 
     /// De-envelope the canonical request into its command. A value that is not
@@ -303,6 +324,17 @@ impl CloudHypervisorCoreRuntime {
             VmSideEffects {
                 volumes: opened_volumes,
                 nics: attached_nic_ids,
+                // Distinct network ids in attach order — the last-detach
+                // teardown input (#356 N5).
+                networks: {
+                    let mut networks: Vec<String> = Vec::new();
+                    for network in &definition.networks {
+                        if !networks.contains(&network.network_ref) {
+                            networks.push(network.network_ref.clone());
+                        }
+                    }
+                    networks
+                },
             },
         );
         Ok(None)
@@ -560,6 +592,99 @@ impl CloudHypervisorCoreRuntime {
                 warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
             }
         }
+        // #356 N5 — last-detach host teardown. Only after a SUCCESSFUL
+        // delete (`keep_entry` is false): the VM's NICs are detached and
+        // the authority tombstoned it, so this node's claim on the
+        // network's topology (bridge / namespace / dnsmasq / nft table)
+        // may be over. The in-use check comes from the DURABLE authority
+        // (`network_usage`), never from this in-memory map: after a
+        // daemon restart the map is empty and "no entry references the
+        // network" would falsely authorize cutting a still-running
+        // pre-restart VM off its bridge. A failed check skips the
+        // teardown (residue, never an outage); a failed teardown is
+        // best-effort with a loud warning for the same reason.
+        if !keep_entry {
+            for network_id in &effects.networks {
+                // Durable authority first: does any live VM (other than the
+                // deleting one) still reference the network?
+                let in_use = {
+                    // The lookup does disk I/O + JSON parsing (the Core
+                    // store's VM list); keep it OFF the async worker.
+                    let lookup = self.network_usage.clone();
+                    let network = network_id.clone();
+                    let vm = vm_id.to_string();
+                    match tokio::task::spawn_blocking(move || lookup.network_in_use(&network, &vm))
+                        .await
+                    {
+                        Ok(in_use) => in_use,
+                        Err(join_error) => {
+                            // The lookup panicked (join failure): fail closed.
+                            warn!(
+                                vm_id,
+                                network_id,
+                                error = %join_error,
+                                "network-usage lookup task failed; treating the network as in use"
+                            );
+                            continue;
+                        }
+                    }
+                };
+                if in_use {
+                    continue;
+                }
+                // In-session veto (#356 review): the store tombstones a VM
+                // when its delete is ACCEPTED, so a sibling whose delete
+                // later FAILED (retry pending, VMM still running, taps
+                // still enslaved) is invisible to the lookup — and nwd
+                // deletes the bridge unconditionally. Failed deletes
+                // retain their side-effects entry for the retry, so any
+                // OTHER retained entry referencing the network vetoes the
+                // teardown. In-memory state only ever VETOES here, never
+                // authorizes: after a daemon restart the map is empty and
+                // this guard degrades to the durable store's answer.
+                if self.session_retains_network_user(network_id, vm_id) {
+                    continue;
+                }
+                if let Err(e) = self
+                    .resources
+                    .delete_network_topology(network_id, Some(op_id))
+                    .await
+                {
+                    warn!(
+                        vm_id,
+                        network_id,
+                        error = %e,
+                        "last-detach network teardown failed; host residue (bridge/dnsmasq/nft) remains until network delete or node reprovision"
+                    );
+                }
+            }
+        }
+    }
+
+    /// In-session veto for last-detach teardown: true when any OTHER VM's
+    /// retained side-effects entry still references `network_id`.
+    ///
+    /// A failed delete keeps its entry (the retry needs the handles) while
+    /// the durable authority has already tombstoned the VM at accept — this
+    /// map is the only in-process signal that such a VM's host effects (VMM,
+    /// enslaved taps) are still live. Veto-only by design: an unreadable map
+    /// also vetoes (fail closed), and the map is NEVER used to authorize a
+    /// teardown — after a daemon restart it is empty and the decision
+    /// degrades to the durable store's answer. Residual, documented: a VM
+    /// tombstoned pre-restart whose delete then failed and whose VMM was
+    /// adopted after the restart is invisible to both authorities; its
+    /// network can be torn down by a sibling's successful delete.
+    fn session_retains_network_user(&self, network_id: &str, excluding_vm: &str) -> bool {
+        let Ok(map) = self.side_effects.lock() else {
+            warn!(
+                network_id,
+                "side-effects mutex poisoned during teardown veto check; vetoing teardown"
+            );
+            return true;
+        };
+        map.iter().any(|(vm, effects)| {
+            vm.as_str() != excluding_vm && effects.networks.iter().any(|n| n == network_id)
+        })
     }
 
     async fn delete_vm(
