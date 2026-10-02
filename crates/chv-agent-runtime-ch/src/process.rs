@@ -1507,6 +1507,24 @@ fn build_cpus_config(config: &VmConfig) -> serde_json::Value {
     cpus
 }
 
+/// The cloud-init NoCloud `meta-data` document. Both values are quoted so
+/// they are always YAML STRINGS: `gen_short_id` emits 8 hex chars, so ~2.3%
+/// of ids are all digits — an unquoted all-digit YAML scalar types as an
+/// int, which crashes cloud-init 26.1's metadata standardization
+/// (`'int' object has no attribute 'replace'`) and discards the ENTIRE
+/// NoCloud datasource: userdata and network-config are then silently
+/// never applied (#374).
+///
+/// NOTE: the quoting is not escape-aware — it is only correct for inputs
+/// made of `gen_short_id`'s alphabet ([0-9a-f]). If this is ever reused
+/// with values that may contain `"` or `\`, escape or reject them first.
+fn cloud_init_meta_data(vm_id: &str) -> String {
+    format!(
+        "instance-id: \"{}\"\nlocal-hostname: \"{}\"\n",
+        vm_id, vm_id
+    )
+}
+
 async fn build_cloud_init_seed(
     vm_dir: &Path,
     vm_id: &str,
@@ -1521,7 +1539,13 @@ async fn build_cloud_init_seed(
             source: e,
         })?;
 
-    let meta_data = format!("instance-id: {}\nlocal-hostname: {}\n", vm_id, vm_id);
+    // The values MUST be quoted: gen_short_id emits 8 hex chars, so ~2.3%
+    // of ids are all digits — and an unquoted all-digit YAML scalar types
+    // as an int, which crashes cloud-init's metadata standardization
+    // ('int' object has no attribute 'replace') and discards the ENTIRE
+    // NoCloud datasource: userdata and network-config are then silently
+    // never applied (#374).
+    let meta_data = cloud_init_meta_data(vm_id);
     tokio::fs::write(seed_dir.join("meta-data"), meta_data.as_bytes())
         .await
         .map_err(|e| ChvError::Io {
@@ -4875,6 +4899,7 @@ impl ProcessCloudHypervisorAdapter {
 #[cfg(test)]
 mod tests {
     use super::build_cpus_config;
+    use super::cloud_init_meta_data;
     use super::parse_http_status;
     use super::ProcessCloudHypervisorAdapter;
     use super::SerialTransport;
@@ -4892,6 +4917,43 @@ mod tests {
     fn parse_http_status_extracts_200() {
         let bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         assert_eq!(parse_http_status(bytes), Some(200));
+    }
+
+    // #374: an all-digit vm_id must stay a YAML STRING in the NoCloud
+    // seed's meta-data. Unquoted, `local-hostname: 74074613` parses as an
+    // int and crashes cloud-init 26.1's metadata standardization — the
+    // entire datasource is then discarded and userdata/network-config are
+    // silently never applied. Found by the M4.5 storage scenario (run 2):
+    // the VM's id was all digits; M4.4's VMs (ids containing letters) never
+    // triggered it.
+    #[test]
+    fn cloud_init_meta_data_is_string_typed_for_all_digit_ids() {
+        let meta_data = cloud_init_meta_data("74074613");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&meta_data).expect("meta-data must be valid YAML");
+        assert!(
+            parsed["local-hostname"].is_string(),
+            "local-hostname must be a YAML string, got: {:?}",
+            parsed["local-hostname"]
+        );
+        assert!(
+            parsed["instance-id"].is_string(),
+            "instance-id must be a YAML string, got: {:?}",
+            parsed["instance-id"]
+        );
+        assert_eq!(parsed["local-hostname"].as_str(), Some("74074613"));
+        assert_eq!(parsed["instance-id"].as_str(), Some("74074613"));
+    }
+
+    // Control for #374: ids containing letters were always strings — the
+    // hostname VALUE must be unchanged by the fix (only its YAML type).
+    #[test]
+    fn cloud_init_meta_data_preserves_the_hostname_value() {
+        let meta_data = cloud_init_meta_data("17b2c9d5");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&meta_data).expect("meta-data must be valid YAML");
+        assert_eq!(parsed["local-hostname"].as_str(), Some("17b2c9d5"));
+        assert_eq!(parsed["instance-id"].as_str(), Some("17b2c9d5"));
     }
 
     #[test]
