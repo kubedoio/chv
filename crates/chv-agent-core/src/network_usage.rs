@@ -10,10 +10,11 @@
 //! unconditional in nwd's local teardown, so a wrong decision cuts that
 //! VM's guest off the network.
 //!
-//! This reads the store through a READ-ONLY connection
-//! ([`cellhv_core_store::CoreStore::open_read_only`]) held next to the
-//! executor's read-write authority: WAL mode lets the short `list_vms`
-//! reads coexist with the single-writer poller's transactions.
+//! This reads the store through its single legal facade —
+//! `OperationService::open_read_only`
+//! ([`cellhv_core_operations::OperationService`]) — held next to the
+//! executor's read-write authority: WAL mode lets the short `vms()` reads
+//! coexist with the single-writer poller's transactions.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -21,9 +22,9 @@ use std::sync::Mutex;
 use chv_hypervisor_api::NetworkUsageLookup;
 use tracing::warn;
 
-/// [`NetworkUsageLookup`] backed by a read-only Core store handle.
+/// [`NetworkUsageLookup`] backed by a read-only Core store facade.
 pub struct CoreStoreNetworkUsage {
-    store: Mutex<cellhv_core_store::CoreStore>,
+    service: Mutex<cellhv_core_operations::OperationService>,
 }
 
 impl CoreStoreNetworkUsage {
@@ -31,9 +32,11 @@ impl CoreStoreNetworkUsage {
     ///
     /// Errors when the file is absent, foreign, or unreadable — the caller
     /// then wires a fail-closed lookup instead (never a fail-open one).
-    pub fn open(path: &Path) -> Result<Self, cellhv_core_store::StoreError> {
+    pub fn open(path: &Path) -> Result<Self, cellhv_core_operations::OperationServiceError> {
         Ok(Self {
-            store: Mutex::new(cellhv_core_store::CoreStore::open_read_only(path)?),
+            service: Mutex::new(cellhv_core_operations::OperationService::open_read_only(
+                path,
+            )?),
         })
     }
 }
@@ -44,8 +47,8 @@ impl NetworkUsageLookup for CoreStoreNetworkUsage {
         // observable residue; a wrong teardown causes an outage. A poisoned
         // mutex likewise reports in-use instead of panicking — this runs on
         // a blocking-pool thread whose panic would take the executor down.
-        let vms = match self.store.lock() {
-            Ok(store) => match store.list_vms() {
+        let vms = match self.service.lock() {
+            Ok(service) => match service.vms() {
                 Ok(vms) => vms,
                 Err(error) => {
                     warn!(
@@ -62,7 +65,7 @@ impl NetworkUsageLookup for CoreStoreNetworkUsage {
                     network_id,
                     excluding_vm,
                     error = %poisoned,
-                    "network-usage store lock poisoned; treating the network as in use (fail closed)"
+                    "network-usage service lock poisoned; treating the network as in use (fail closed)"
                 );
                 return true;
             }

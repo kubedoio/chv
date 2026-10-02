@@ -704,7 +704,6 @@ dependencies = [
  "cellhv-core-fs",
  "cellhv-core-operations",
  "cellhv-core-startup",
- "cellhv-core-store",
  "cellhv-core-types",
  "cellhv-nodecache-migration",
  "chv-agent-runtime-ch",

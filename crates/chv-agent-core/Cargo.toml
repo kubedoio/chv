@@ -12,7 +12,6 @@ chv-observability = { path = "../chv-observability" }
 chv-config = { path = "../chv-config" }
 chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 cellhv-core-types = { path = "../cellhv-core-types" }
-cellhv-core-store = { path = "../cellhv-core-store" }
 cellhv-core-operations = { path = "../cellhv-core-operations" }
 cellhv-core-executor = { path = "../cellhv-core-executor" }
 cellhv-nodecache-migration = { path = "../cellhv-nodecache-migration" }
