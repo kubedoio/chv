@@ -41,7 +41,13 @@ pub async fn list_networks(
             n.display_name AS name,
             COALESCE(nos.exposure_status, 'private') AS exposure,
             COALESCE(nos.health_status, 'unknown') AS health,
-            (SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = n.network_id) AS attached_vms,
+            -- attached_vms mirrors the delete gate's liveness predicate
+            -- (#356): only VMs that are not being deleted count.
+            (SELECT COUNT(*) FROM vm_nic_desired_state nv
+             JOIN vms v ON v.vm_id = nv.vm_id
+             LEFT JOIN vm_desired_state vds ON vds.vm_id = v.vm_id
+             WHERE nv.network_id = n.network_id
+               AND (vds.desired_status IS NULL OR vds.desired_status != 'Deleting')) AS attached_vms,
             COALESCE(
                 (SELECT operation_type FROM operations
                  WHERE resource_kind = 'network' AND resource_id = n.network_id
@@ -165,7 +171,9 @@ pub async fn get_network(
                    FROM vm_nic_desired_state nv
                    JOIN vms v ON nv.vm_id = v.vm_id
                    LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
-                   WHERE nv.network_id = ?"#,
+                   LEFT JOIN vm_desired_state vds ON vds.vm_id = v.vm_id
+                   WHERE nv.network_id = ?
+                     AND (vds.desired_status IS NULL OR vds.desired_status != 'Deleting')"#,
             )
             .bind(&r.network_id)
             .fetch_all(&state.pool)
@@ -349,13 +357,38 @@ pub async fn delete_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_network_owner(&mut conn, &network_id, &claims.sub, claims.role == "admin").await?;
+    drop(conn);
 
-    let attached_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?")
-            .bind(&network_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to count attached vms: {}", e)))?;
+    // Attached-VM gate (#356): count only LIVE VMs — nic rows linger
+    // after `vm delete` in pre-#356 data (the vms/vm_desired_state rows
+    // persist as 'Deleting' tombstones), and a raw nic-row count made
+    // network delete permanently refuse with "N VM(s) still attached"
+    // (verified on real KVM by the M4.4 qualification, issue #356). A
+    // VM whose deletion was accepted (desired_status 'Deleting') no
+    // longer blocks the network it is leaving.
+    // BEGIN IMMEDIATE: serialize concurrent writers — the count→GC→delete
+    // sequence must not race a concurrent delete_vm (DEFERRED
+    // read-then-write can surface SQLITE_BUSY_SNAPSHOT as a 500 instead
+    // of the clean 409/200 contract).
+    let mut tx = state
+        .pool
+        .begin_with("BEGIN IMMEDIATE;")
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    let attached_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM vm_nic_desired_state nv
+        JOIN vms v ON v.vm_id = nv.vm_id
+        LEFT JOIN vm_desired_state vds ON vds.vm_id = v.vm_id
+        WHERE nv.network_id = ?
+          AND (vds.desired_status IS NULL OR vds.desired_status != 'Deleting')
+        "#,
+    )
+    .bind(&network_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to count attached vms: {}", e)))?;
 
     if attached_count > 0 {
         return Err(BffError::Conflict(format!(
@@ -367,7 +400,7 @@ pub async fn delete_network(
     let exists =
         sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
             .bind(&network_id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
 
@@ -378,11 +411,40 @@ pub async fn delete_network(
         )));
     }
 
+    // Stale-row GC (#356): drop this network's nic rows whose VM is
+    // gone or deleting — required for the NIC table, not cosmetic:
+    // vm_nic_desired_state has network_id REFERENCES networks ON DELETE
+    // RESTRICT, so leaving them would turn the delete below into an FK
+    // violation (500) instead of the clean 409/200 contract. (Known
+    // remaining FK hazard, pre-existing and out of scope here:
+    // vni_allocations.network_id has no ON DELETE action either —
+    // overlay networks that ever allocated a VNI still FK-fail the
+    // delete; tracked with the host-teardown work in #356 part 2/#355.)
+    sqlx::query(
+        r#"
+        DELETE FROM vm_nic_desired_state
+        WHERE network_id = ?
+          AND vm_id NOT IN (
+              SELECT v.vm_id FROM vms v
+              JOIN vm_desired_state vds ON vds.vm_id = v.vm_id
+              WHERE vds.desired_status != 'Deleting'
+          )
+        "#,
+    )
+    .bind(&network_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to gc stale nic rows: {}", e)))?;
+
     sqlx::query("DELETE FROM networks WHERE network_id = ?")
         .bind(&network_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete network: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
