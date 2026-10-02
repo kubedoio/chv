@@ -613,64 +613,139 @@ pub async fn create_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
 
-    // Insert network if not exists
-    let network_exists: Option<String> =
+    // Resolve the --network reference (#354): look the reference up by
+    // network_id first, then by display_name — the operator-facing
+    // handle `network create` returns and the only handle a human
+    // knows. The previous id-only lookup always missed name references
+    // (network create stores a generated short network_id) and silently
+    // created an implicit network with the fallback CIDR 10.200.0.0/24:
+    // the operator's chosen cidr was ignored, and a second such network
+    // collided on the subnet — duplicate host routes, breaking
+    // host→guest connectivity for the second bridge (verified on real
+    // KVM by the M4.4 qualification, issue #354).
+    let mut resolved_network_id: Option<String> =
         sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
             .bind(&network_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
 
-    if network_exists.is_none() {
-        let network_cidr = payload
-            .get("network_cidr")
-            .and_then(|v| v.as_str())
-            .unwrap_or("10.200.0.0/24");
-        let network_gateway = payload
-            .get("network_gateway")
-            .and_then(|v| v.as_str())
-            .unwrap_or("10.200.0.1");
-
-        sqlx::query(
+    if resolved_network_id.is_none() {
+        // Name hits prefer fleet-wide networks (node_id IS NULL — the
+        // operator-created shape) over node-scoped rows (legacy implicit
+        // networks), then break ties by network_id: deterministic. Note
+        // the id lookup above is unscoped and always wins over names, so
+        // a legacy implicit row whose network_id equals the reference
+        // (e.g. an implicit 'default') keeps shadowing a same-named
+        // operator network — the pre-#354 single-network behavior.
+        resolved_network_id = sqlx::query_scalar(
             r#"
-            INSERT INTO networks (network_id, node_id, display_name, updated_at)
-            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            SELECT network_id FROM networks
+            WHERE display_name = ? AND (node_id IS NULL OR node_id = ?)
+            ORDER BY (node_id IS NULL) DESC, network_id
+            LIMIT 1
             "#,
         )
         .bind(&network_id)
         .bind(&node_id)
-        .bind(format!("network-{}", network_id))
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO network_desired_state (
-                network_id, desired_generation, desired_status,
-                cidr, gateway, dhcp_enabled, ipam_mode, is_default,
-                requested_by, requested_at, updated_at
-            )
-            VALUES (?, 1, 'Pending', ?, ?, 1, 'internal', 0, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-            "#,
-        )
-        .bind(&network_id)
-        .bind(network_cidr)
-        .bind(network_gateway)
-        .bind(&requested_by)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
+        .map_err(|e| BffError::Internal(format!("failed to resolve network by name: {}", e)))?;
     }
 
-    // Fetch network CIDR for IP generation
+    let network_id = match resolved_network_id {
+        Some(id) => id,
+        None => {
+            let network_cidr = payload
+                .get("network_cidr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("10.200.0.0/24");
+            let network_gateway = payload
+                .get("network_gateway")
+                .and_then(|v| v.as_str())
+                .unwrap_or("10.200.0.1");
+
+            // Collision guard (#354): an implicit network must never
+            // silently share a SUBNET with an existing network usable on
+            // this node — the host would end up with duplicate/ambiguous
+            // routes for the subnet and host→guest connectivity to one
+            // of the bridges would break. Overlap is checked properly
+            // (e.g. 10.200.1.0/24 inside 10.200.0.0/23 counts), not by
+            // exact string equality.
+            let existing: Vec<(String, String)> = sqlx::query_as(
+                r#"
+                SELECT n.network_id, nds.cidr FROM network_desired_state nds
+                JOIN networks n ON n.network_id = nds.network_id
+                WHERE nds.cidr IS NOT NULL AND nds.cidr != ''
+                  AND (n.node_id IS NULL OR n.node_id = ?)
+                "#,
+            )
+            .bind(&node_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| {
+                BffError::Internal(format!("failed to check network cidr collisions: {}", e))
+            })?;
+
+            if let Some((other, other_cidr)) = existing
+                .iter()
+                .find(|(_, cidr)| cidrs_overlap(cidr, network_cidr))
+            {
+                return Err(BffError::Conflict(format!(
+                    "network '{}': refusing to implicitly create a network with cidr {} — \
+                     network '{}' already uses overlapping cidr {} on this node; create the \
+                     network with a distinct cidr first, or pass network_cidr explicitly",
+                    network_id, network_cidr, other, other_cidr
+                )));
+            }
+
+            sqlx::query(
+                r#"
+                INSERT INTO networks (network_id, node_id, display_name, updated_at)
+                VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                "#,
+            )
+            .bind(&network_id)
+            .bind(&node_id)
+            .bind(format!("network-{}", network_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO network_desired_state (
+                    network_id, desired_generation, desired_status,
+                    cidr, gateway, dhcp_enabled, ipam_mode, is_default,
+                    requested_by, requested_at, updated_at
+                )
+                VALUES (?, 1, 'Pending', ?, ?, 1, 'internal', 0, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                "#,
+            )
+            .bind(&network_id)
+            .bind(network_cidr)
+            .bind(network_gateway)
+            .bind(&requested_by)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
+
+            network_id
+        }
+    };
+
+    // Fetch network CIDR for IP generation. A networks row without a
+    // network_desired_state row (legacy/partial data) is tolerated:
+    // empty cidr → generate_ip's deterministic fallback, same as the
+    // pre-#354 id-hit path.
     let network_cidr: String = sqlx::query_scalar(
         "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?",
     )
     .bind(&network_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| BffError::Internal(format!("failed to fetch network cidr: {}", e)))?;
+    .map_err(|e| BffError::Internal(format!("failed to fetch network cidr: {}", e)))?
+    .unwrap_or_default();
 
     // Insert NIC
     let nic_id = format!("{}-{}", vm_id, network_id);
@@ -1406,6 +1481,44 @@ pub(crate) fn generate_mac(vm_id: &str, network_id: &str) -> String {
     )
 }
 
+/// Do two CIDR strings denote overlapping IPv4 subnets? Used by the
+/// create_vm implicit-network collision guard (#354): a duplicate route
+/// hazard exists for ANY shared subnet, not just exact string matches
+/// (10.200.1.0/24 inside 10.200.0.0/23 is just as ambiguous on the
+/// host). Lenient parse in the same style as `generate_ip`: unparseable
+/// or empty cidrs never overlap (no false refusals from dirty data).
+pub(crate) fn cidrs_overlap(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Option<(u32, u32)> {
+        let (base, prefix) = s.split_once('/').unwrap_or((s, "24"));
+        let prefix: u32 = prefix.parse().ok()?;
+        if prefix > 32 {
+            return None;
+        }
+        let mut octets = base.split('.');
+        let mut addr = 0u32;
+        for _ in 0..4 {
+            let octet: u8 = octets.next()?.trim().parse().ok()?;
+            addr = (addr << 8) | octet as u32;
+        }
+        if octets.next().is_some() {
+            return None;
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            0xFFFFFFFFu32 << (32 - prefix)
+        };
+        Some((addr & mask, mask))
+    };
+    match (parse(a), parse(b)) {
+        (Some((net_a, mask_a)), Some((net_b, mask_b))) => {
+            let common = mask_a & mask_b; // the shorter prefix (wider net)
+            (net_a & common) == (net_b & common)
+        }
+        _ => false,
+    }
+}
+
 /// Deterministically generate an IP within the given CIDR from vm_id + network_id.
 /// Skips .0 (network), .1 (gateway), and .255 (broadcast for /24).
 pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
@@ -1457,6 +1570,52 @@ pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
         (host_u32 & 0xFF) as u8,
     ];
     format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
+}
+
+#[cfg(test)]
+mod cidr_overlap_tests {
+    //! Unit tests for the implicit-network collision guard's subnet
+    //! overlap check (#354): the hazard is ANY shared subnet, not an
+    //! exact cidr string match.
+    use super::cidrs_overlap;
+
+    #[test]
+    fn identical_cidrs_overlap() {
+        assert!(cidrs_overlap("10.200.0.0/24", "10.200.0.0/24"));
+    }
+
+    #[test]
+    fn distinct_subnets_do_not_overlap() {
+        assert!(!cidrs_overlap("10.200.0.0/24", "10.99.0.0/24"));
+        assert!(!cidrs_overlap("10.200.0.0/24", "10.201.0.0/24"));
+    }
+
+    #[test]
+    fn supernet_contains_subnet() {
+        assert!(cidrs_overlap("10.200.0.0/23", "10.200.1.0/24"));
+        assert!(cidrs_overlap("10.200.1.0/24", "10.200.0.0/23"));
+        assert!(cidrs_overlap("10.200.0.0/16", "10.200.250.7/24"));
+    }
+
+    #[test]
+    fn host_bits_are_masked_off() {
+        // A sloppy cidr with host bits set still denotes its subnet.
+        assert!(cidrs_overlap("10.200.0.9/24", "10.200.0.0/24"));
+    }
+
+    #[test]
+    fn default_route_overlaps_everything() {
+        assert!(cidrs_overlap("0.0.0.0/0", "10.200.0.0/24"));
+    }
+
+    #[test]
+    fn unparseable_or_empty_never_overlaps() {
+        // Dirty data must not produce false refusals.
+        assert!(!cidrs_overlap("", "10.200.0.0/24"));
+        assert!(!cidrs_overlap("not-a-cidr", "10.200.0.0/24"));
+        assert!(!cidrs_overlap("10.200.0.0/99", "10.200.0.0/24"));
+        assert!(!cidrs_overlap("10.200.0.0/24", "10.200.0.0.5/24"));
+    }
 }
 
 #[cfg(test)]
