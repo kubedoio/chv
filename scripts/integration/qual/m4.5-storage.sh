@@ -660,10 +660,13 @@ CLONE_DS="$(sqlite_query "$QUAL_DB" \
 [ "$CLONE_DS" = "$VOL1_ID" ] \
     && qual_pass "CP DB records the clone intent (${CLONE_ID} ← ${VOL1_ID})" \
     || qual_warn "no clone intent row for ${CLONE_ID} in volume_desired_state (got: '${CLONE_DS}')"
-# Comprehensive-review follow-up: the target must INHERIT the source's
-# owner — an ownerless volumes row is admin-only in the BFF
+# Comprehensive-review follow-up (#387): the target must INHERIT the
+# source's owner — an ownerless volumes row is admin-only in the BFF
 # (require_volume_owner), which would lock a non-admin cloner out of the
-# clone they just created.
+# clone they just created. MERGE-ORDER CONSTRAINT: this assertion
+# requires #387 (clone owner inheritance) to be merged and deployed
+# before this scenario runs green — against a pre-#387 build it fails
+# with owner mismatch (source set, clone empty).
 SOURCE_OWNER="$(sqlite_query "$QUAL_DB" \
     "SELECT owner_id FROM volumes WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)"
 CLONE_OWNER="$(sqlite_query "$QUAL_DB" \
