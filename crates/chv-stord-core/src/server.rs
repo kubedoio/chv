@@ -2,6 +2,7 @@ use crate::handlers::StorageServiceImpl;
 use crate::migration::sender::MigrationTlsConfig;
 use crate::migration::service::StorageMigrationServiceImpl;
 use crate::migration::tls_config::MigrationServerTls;
+use crate::migration::MAX_MIGRATION_MESSAGE_SIZE_BYTES;
 use crate::session::SessionTable;
 use crate::store::SessionStore;
 use chv_errors::ChvError;
@@ -162,7 +163,10 @@ impl<B: StorageBackend> StorageServer<B> {
             .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(health_service)
             .add_service(StorageServiceServer::new(self.inner))
-            .add_service(StorageMigrationServiceServer::new(self.migration_service))
+            .add_service(
+                StorageMigrationServiceServer::new(self.migration_service)
+                    .max_decoding_message_size(MAX_MIGRATION_MESSAGE_SIZE_BYTES),
+            )
             .serve_with_incoming(uds_stream);
 
         match tls_serve {
@@ -222,7 +226,12 @@ pub async fn serve_migration_tls<B: StorageBackend>(
         .map_err(|e| ChvError::Internal {
             reason: format!("migration TLS server config error: {e}"),
         })?
-        .add_service(StorageMigrationServiceServer::new(service))
+        .add_service(
+            StorageMigrationServiceServer::new(service)
+                // BlockChunks carry a full 4 MiB migration block plus
+                // protobuf overhead, exceeding tonic's 4 MiB default.
+                .max_decoding_message_size(MAX_MIGRATION_MESSAGE_SIZE_BYTES),
+        )
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(|e| ChvError::Internal {

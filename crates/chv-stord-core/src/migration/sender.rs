@@ -45,8 +45,11 @@ pub struct MigrationTlsConfig {
 ///
 /// Flow control: the sender maintains a sliding window of at most
 /// `send_window_size` (default 16) unacknowledged chunks. The receiver
-/// sends an acknowledgment for every chunk written, allowing the sender
-/// to track `last_acknowledged_offset` for stream resumability.
+/// sends an `Ack` every 64 chunks while streaming and flushes the ack
+/// window at stream boundaries (`RoundComplete`, `FinalSync`, and before
+/// `FinalizeAck`), so the sender's per-phase drains complete for arbitrary
+/// chunk counts. `RoundComplete` is always answered with an `Ack` carrying
+/// the receiver's cumulative sequence number (the round acknowledgment).
 pub struct MigrationSender<B: StorageBackend> {
     backend: Arc<B>,
     volume_id: String,
@@ -142,19 +145,12 @@ impl<B: StorageBackend> MigrationSender<B> {
         } else {
             return Err(tonic::Status::failed_precondition(
                 "mTLS is required for storage migration — tls_config must be provided. \
-                 Set migration.tls.cert_path, migration.tls.key_path, and migration.tls.ca_path in stord config.",
+                 Set migration.client_cert_path, migration.client_key_path, \
+                 migration.ca_cert_path, and migration.dest_server_name in stord config.",
             ));
         };
 
         let mut client = StorageMigrationServiceClient::new(channel);
-
-        // Set up outgoing message channel
-        let (tx, rx) = mpsc::channel::<MigrationMessage>(256);
-        let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-
-        // Start the bidirectional stream
-        let response = client.stream_blocks(rx_stream).await?;
-        let mut inbound = response.into_inner();
 
         // Get volume size
         let volume_size = self
@@ -163,7 +159,20 @@ impl<B: StorageBackend> MigrationSender<B> {
             .await
             .map_err(|e| tonic::Status::internal(format!("failed to get volume size: {e}")))?;
 
-        // Send InitMigration
+        // Set up outgoing message channel
+        let (tx, rx) = mpsc::channel::<MigrationMessage>(256);
+        let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        // Send InitMigration *before* awaiting the stream response.
+        //
+        // The tonic client future for a bidirectional RPC resolves only
+        // when the server sends its response headers, and the server sends
+        // them only once the handler returns — which for this service
+        // happens after it has read the first message (InitMigration) and
+        // created the receiving volume. Sending Init first is therefore
+        // required for the handshake to make progress at all; queuing it
+        // in the outgoing channel is safe because the ReceiverStream is
+        // polled as soon as the request starts.
         let init_msg = MigrationMessage {
             payload: Some(migration_message::Payload::Init(InitMigration {
                 volume_id: self.volume_id.clone(),
@@ -176,6 +185,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         tx.send(init_msg)
             .await
             .map_err(|_| tonic::Status::internal("failed to send InitMigration: channel closed"))?;
+
+        // Start the bidirectional stream
+        let response = client.stream_blocks(rx_stream).await?;
+        let mut inbound = response.into_inner();
 
         info!(
             volume_id = %self.volume_id,
@@ -278,6 +291,15 @@ impl<B: StorageBackend> MigrationSender<B> {
             .await
             .map_err(|_| tonic::Status::internal("failed to send FinalSync: channel closed"))?;
 
+        // The receiver flushes its ack window at FinalSync; drain whatever
+        // is still outstanding (e.g. the bulk-copy remainder when no dirty
+        // round ran) before announcing finalization, so that every chunk
+        // has been acknowledged before the migration can be reported
+        // complete (fail-closed).
+        while self.send_window.last_ack_sequence() < sequence_num {
+            self.wait_for_ack(&mut inbound).await?;
+        }
+
         // Send FinalizeComplete
         let finalize_msg = MigrationMessage {
             payload: Some(migration_message::Payload::FinalizeComplete(
@@ -292,41 +314,51 @@ impl<B: StorageBackend> MigrationSender<B> {
             tonic::Status::internal("failed to send FinalizeComplete: channel closed")
         })?;
 
-        // Wait for FinalizeAck
-        let ack_msg = inbound
-            .message()
-            .await?
-            .ok_or_else(|| tonic::Status::internal("stream closed before FinalizeAck"))?;
+        // Wait for FinalizeAck. Boundary acks flushed by the receiver
+        // (round acknowledgments, the FinalSync flush) may still be in
+        // flight; they are expected here and processed normally — a
+        // CRC-mismatch Ack still fails the migration (fail-closed).
+        loop {
+            let ack_msg = inbound
+                .message()
+                .await?
+                .ok_or_else(|| tonic::Status::internal("stream closed before FinalizeAck"))?;
 
-        match ack_msg.payload {
-            Some(migration_message::Payload::FinalizeAck(ref ack)) => {
-                if ack.verified {
-                    if let Some(ref task) = self.task {
-                        let mut state = task.state.write().await;
-                        state.phase = MigrationPhase::Completed;
+            match ack_msg.payload {
+                Some(migration_message::Payload::FinalizeAck(ref ack)) => {
+                    if ack.verified {
+                        if let Some(ref task) = self.task {
+                            let mut state = task.state.write().await;
+                            state.phase = MigrationPhase::Completed;
+                        }
+                        info!(volume_id = %self.volume_id, "migration finalized successfully");
+                        return Ok(());
+                    } else {
+                        error!(
+                            volume_id = %self.volume_id,
+                            error = %ack.error_message,
+                            "migration finalization failed"
+                        );
+                        metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "finalization_failed").increment(1);
+                        return Err(tonic::Status::internal(format!(
+                            "finalization failed: {}",
+                            ack.error_message
+                        )));
                     }
-                    info!(volume_id = %self.volume_id, "migration finalized successfully");
-                } else {
-                    error!(
-                        volume_id = %self.volume_id,
-                        error = %ack.error_message,
-                        "migration finalization failed"
-                    );
-                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "finalization_failed").increment(1);
-                    return Err(tonic::Status::internal(format!(
-                        "finalization failed: {}",
-                        ack.error_message
-                    )));
+                }
+                Some(migration_message::Payload::Ack(_))
+                | Some(migration_message::Payload::Backpressure(_)) => {
+                    // In-flight acknowledgment from a phase boundary; the
+                    // migration is not finalized until FinalizeAck arrives.
+                    self.handle_inbound_message(ack_msg)?;
+                }
+                _ => {
+                    return Err(tonic::Status::internal(
+                        "unexpected message; expected FinalizeAck",
+                    ));
                 }
             }
-            _ => {
-                return Err(tonic::Status::internal(
-                    "unexpected message; expected FinalizeAck",
-                ));
-            }
         }
-
-        Ok(())
     }
 
     /// Perform the bulk copy phase: read all blocks and stream them to the receiver.
@@ -334,6 +366,20 @@ impl<B: StorageBackend> MigrationSender<B> {
     /// The sender computes CRC32 for each chunk and respects the send window.
     /// When the window is full (default 16 in-flight), the sender blocks
     /// until acknowledgments are received from the destination.
+    ///
+    /// Note: there is deliberately no drain at the end of this phase. The
+    /// receiver cannot know the bulk phase ended until it sees the next
+    /// boundary message (`RoundStart` or `FinalSync`), which the sender only
+    /// sends after this method returns — a drain here could deadlock until
+    /// the 30 s timeout whenever the chunk count is not a multiple of the
+    /// receiver's ack interval (issue #391). Instead, every chunk is
+    /// awaited at the next boundary: the receiver flushes its ack window at
+    /// `RoundComplete` and `FinalSync`, and the sender drains after those
+    /// messages (see `dirty_sync_rounds` and the post-FinalSync drain in
+    /// `start_migration`). Fail-closed semantics are unchanged: a
+    /// CRC-mismatch or write-error Ack surfaces at those drains (or at the
+    /// FinalizeAck wait) and fails the migration before it can be reported
+    /// complete.
     async fn bulk_copy(
         &mut self,
         tx: &mpsc::Sender<MigrationMessage>,
@@ -395,11 +441,6 @@ impl<B: StorageBackend> MigrationSender<B> {
             }
 
             offset += self.block_size;
-        }
-
-        // Drain all remaining in-flight acks before completing the phase
-        while self.send_window.last_ack_sequence() < sequence_num {
-            self.wait_for_ack(inbound).await?;
         }
 
         Ok(sequence_num)
@@ -532,11 +573,6 @@ impl<B: StorageBackend> MigrationSender<B> {
                 }
             }
 
-            // Drain all remaining in-flight acks for this round
-            while self.send_window.last_ack_sequence() < *sequence_num {
-                self.wait_for_ack(inbound).await?;
-            }
-
             // Step 4: Send RoundComplete
             let round_complete_msg = MigrationMessage {
                 payload: Some(migration_message::Payload::RoundComplete(RoundComplete {
@@ -549,11 +585,20 @@ impl<B: StorageBackend> MigrationSender<B> {
                 tonic::Status::internal("failed to send RoundComplete: channel closed")
             })?;
 
-            // Step 5: Wait for round acknowledgment from the receiver
-            let round_ack_msg = inbound.message().await?.ok_or_else(|| {
-                tonic::Status::internal("stream closed before round acknowledgment")
-            })?;
-            self.handle_inbound_message(round_ack_msg)?;
+            // Step 5: Wait for the round acknowledgment and drain the
+            // round. The receiver answers RoundComplete with an `Ack`
+            // carrying its highest processed sequence number — by stream
+            // ordering that includes every chunk of this round — which
+            // both flushes its ack window (chunks below the ack interval
+            // would otherwise never be acknowledged) and satisfies this
+            // wait. Interval acks may complete the drain first (chunk count
+            // a multiple of the interval); the round `Ack` is then simply
+            // consumed by a later phase's waits. Before this protocol fix
+            // the receiver sent nothing for RoundComplete and the sender
+            // blocked forever (issue #391).
+            while self.send_window.last_ack_sequence() < *sequence_num {
+                self.wait_for_ack(inbound).await?;
+            }
 
             // Note: dirty bitmap was already cleared atomically in step 1 via
             // snapshot_and_clear_dirty_bitmap, so no separate clear needed here.
@@ -890,6 +935,21 @@ mod tests {
             "error message should mention mTLS requirement: {}",
             status.message()
         );
+        // The message must cite the real config keys (issue #391): the
+        // [migration] section fields, not the nonexistent [migration.tls]
+        // subsection it previously pointed operators at.
+        for key in [
+            "migration.client_cert_path",
+            "migration.client_key_path",
+            "migration.ca_cert_path",
+            "migration.dest_server_name",
+        ] {
+            assert!(
+                status.message().contains(key),
+                "error message should cite config key {key}: {}",
+                status.message()
+            );
+        }
     }
 
     #[test]

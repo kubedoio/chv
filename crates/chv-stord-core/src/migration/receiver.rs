@@ -14,6 +14,21 @@ const DEFAULT_ACK_INTERVAL: u32 = 64;
 /// The receiver is created when an incoming stream starts with InitMigration.
 /// It creates a receiving volume, acknowledges readiness, then processes
 /// incoming BlockChunk messages, writing data to the volume.
+///
+/// # Acknowledgment protocol
+///
+/// The receiver sends an `Ack` every `ack_interval` chunks while streaming,
+/// and additionally at stream boundaries so the sender's per-phase drains
+/// complete for *arbitrary* chunk counts (not just multiples of the
+/// interval):
+///
+/// - `RoundComplete` is always answered with an `Ack` carrying the highest
+///   sequence number processed so far. By stream ordering that equals the
+///   sender's cumulative sequence number at round end, so this one message
+///   is both the round acknowledgment and the ack-window flush for the
+///   round (issue #391).
+/// - `FinalSync` and `FinalizeComplete` flush any chunks not yet
+///   acknowledged (e.g. the bulk-copy remainder when no dirty round ran).
 pub struct MigrationReceiver<B: StorageBackend> {
     backend: Arc<B>,
     volume_id: String,
@@ -23,6 +38,8 @@ pub struct MigrationReceiver<B: StorageBackend> {
     blocks_received: u32,
     blocks_since_last_ack: u32,
     last_sequence_num: u32,
+    /// Byte offset of the last processed chunk (carried by boundary acks).
+    last_offset: u64,
 }
 
 impl<B: StorageBackend> MigrationReceiver<B> {
@@ -37,6 +54,7 @@ impl<B: StorageBackend> MigrationReceiver<B> {
             blocks_received: 0,
             blocks_since_last_ack: 0,
             last_sequence_num: 0,
+            last_offset: 0,
         }
     }
 
@@ -89,12 +107,22 @@ impl<B: StorageBackend> MigrationReceiver<B> {
                     );
                 }
                 Some(migration_message::Payload::RoundComplete(ref rc)) => {
-                    debug!(
+                    info!(
                         round_num = rc.round_num,
                         blocks_sent = rc.blocks_sent,
                         bytes_sent = rc.bytes_sent,
                         "dirty sync round complete"
                     );
+                    // Acknowledge the round (issue #391): the sender waits
+                    // for this Ack after sending RoundComplete. It carries
+                    // the highest sequence number processed so far — by
+                    // stream ordering that includes every chunk of the
+                    // round — so it simultaneously flushes the ack window
+                    // and satisfies the sender's round-wait. Sent
+                    // unconditionally: even when the interval acks already
+                    // covered the round (chunk count a multiple of the
+                    // interval), the sender may still be draining.
+                    self.send_ack(AckStatus::AckOk, tx).await?;
                 }
                 Some(migration_message::Payload::FinalSync(ref fs)) => {
                     info!(
@@ -102,6 +130,11 @@ impl<B: StorageBackend> MigrationReceiver<B> {
                         vm_paused = fs.vm_paused,
                         "received FinalSync"
                     );
+                    // Flush the ack window at the phase boundary so the
+                    // sender's post-FinalSync drain completes for chunk
+                    // counts that are not a multiple of ack_interval (e.g.
+                    // the bulk-copy remainder when no dirty round ran).
+                    self.flush_pending_acks(tx).await?;
                 }
                 Some(migration_message::Payload::FinalizeComplete(ref fc)) => {
                     info!(
@@ -110,6 +143,11 @@ impl<B: StorageBackend> MigrationReceiver<B> {
                         total_chunks = fc.total_chunks,
                         "received FinalizeComplete"
                     );
+
+                    // Defense in depth: flush any still-unacknowledged
+                    // chunks before the final verdict so the sender observes
+                    // full acknowledgment (FinalSync normally already did).
+                    self.flush_pending_acks(tx).await?;
 
                     // Send FinalizeAck
                     let ack_msg = MigrationMessage {
@@ -188,7 +226,8 @@ impl<B: StorageBackend> MigrationReceiver<B> {
                     computed_crc,
                     "CRC mismatch"
                 );
-                // Send Ack with mismatch status
+                // Send Ack with mismatch status (fail-closed: the sender
+                // treats AckCrcMismatch as a data-loss error).
                 let ack_msg = MigrationMessage {
                     payload: Some(migration_message::Payload::Ack(Ack {
                         last_offset: chunk.offset,
@@ -239,22 +278,60 @@ impl<B: StorageBackend> MigrationReceiver<B> {
 
         self.blocks_received += 1;
         self.blocks_since_last_ack += 1;
+        self.last_offset = chunk.offset;
 
         // Send Ack every ack_interval blocks
         if self.blocks_since_last_ack >= self.ack_interval {
-            let ack_msg = MigrationMessage {
-                payload: Some(migration_message::Payload::Ack(Ack {
-                    last_offset: chunk.offset,
-                    last_sequence_num: chunk.sequence_num,
-                    status: AckStatus::AckOk.into(),
-                })),
-            };
-            tx.send(ack_msg)
-                .await
-                .map_err(|_| tonic::Status::internal("failed to send Ack: channel closed"))?;
-            self.blocks_since_last_ack = 0;
+            self.send_ack(AckStatus::AckOk, tx).await?;
         }
 
         Ok(())
+    }
+
+    /// Send an `Ack` covering everything processed so far.
+    ///
+    /// `last_sequence_num`/`last_offset` are the receiver's cumulative
+    /// progress; the sender uses them to slide its send window and to
+    /// complete its per-phase drain loops.
+    async fn send_ack(
+        &mut self,
+        status: AckStatus,
+        tx: &mpsc::Sender<MigrationMessage>,
+    ) -> Result<(), tonic::Status> {
+        let ack_msg = MigrationMessage {
+            payload: Some(migration_message::Payload::Ack(Ack {
+                last_offset: self.last_offset,
+                last_sequence_num: self.last_sequence_num,
+                status: status.into(),
+            })),
+        };
+        tx.send(ack_msg)
+            .await
+            .map_err(|_| tonic::Status::internal("failed to send Ack: channel closed"))?;
+        self.blocks_since_last_ack = 0;
+        Ok(())
+    }
+
+    /// Flush the ack window at a phase boundary: send the outstanding Ack
+    /// if any chunks are unacknowledged.
+    ///
+    /// The sender drains each phase until its last acknowledged sequence
+    /// equals the last sequence it sent. Without this flush, any phase
+    /// whose chunk count is not a multiple of `ack_interval` would leave
+    /// the sender waiting until its 30 s timeout (issue #391).
+    async fn flush_pending_acks(
+        &mut self,
+        tx: &mpsc::Sender<MigrationMessage>,
+    ) -> Result<(), tonic::Status> {
+        if self.blocks_since_last_ack == 0 {
+            return Ok(());
+        }
+        debug!(
+            volume_id = %self.volume_id,
+            pending = self.blocks_since_last_ack,
+            sequence = self.last_sequence_num,
+            "flushing ack window at phase boundary"
+        );
+        self.send_ack(AckStatus::AckOk, tx).await
     }
 }
