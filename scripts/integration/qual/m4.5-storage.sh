@@ -249,7 +249,8 @@ userdata = (
     "  - [ sh, -c, 'if [ -f /var/lib/m45.marker ]; then "
     "echo \"M45-MARKER-READBACK:$(cat /var/lib/m45.marker)\" > /dev/console; fi' ]\n"
     "runcmd:\n"
-    "  - [ sh, -c, 'echo \"{marker}\" > /var/lib/m45.marker; "
+    "  - [ sh, -c, "
+    f"'echo \"{marker}\" > /var/lib/m45.marker; "
     "echo \"M45-MARKER-WRITTEN:$(cat /var/lib/m45.marker)\" > /dev/console' ]\n"
 )
 print(json.dumps({
