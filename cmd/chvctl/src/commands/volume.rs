@@ -12,15 +12,15 @@ pub enum VolumeCommands {
     Snapshot {
         /// Volume identifier
         volume_id: String,
-        /// Snapshot name
+        /// Snapshot name (required — the BFF rejects the request without it)
         #[arg(long)]
-        name: Option<String>,
+        name: String,
     },
     /// Clone a volume
     Clone {
         /// Source volume identifier
         volume_id: String,
-        /// Name for the cloned volume
+        /// Target volume id for the clone (the new volume's id)
         #[arg(long)]
         name: String,
     },
@@ -46,16 +46,17 @@ pub async fn execute(
             );
         }
         VolumeCommands::Snapshot { volume_id, name } => {
-            let mut body = json!({ "volume_id": volume_id });
-            if let Some(n) = name {
-                body["name"] = json!(n);
-            }
+            // Field names are the BFF/proto contract (#372): the request
+            // is rejected without a snapshot_name.
+            let body = json!({ "volume_id": volume_id, "snapshot_name": name });
             let resp = client.post("/v1/volumes/snapshot", &body).await?;
             println!("Snapshot created.");
             output::print_value(&resp, format);
         }
         VolumeCommands::Clone { volume_id, name } => {
-            let body = json!({ "volume_id": volume_id, "name": name });
+            // Field names are the BFF/proto contract (#372): the clone
+            // target is a full volume id, not a display name.
+            let body = json!({ "source_volume_id": volume_id, "target_volume_id": name });
             let resp = client.post("/v1/volumes/clone", &body).await?;
             println!("Volume cloned.");
             output::print_value(&resp, format);
