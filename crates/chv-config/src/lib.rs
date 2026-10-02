@@ -291,6 +291,28 @@ pub struct StordMigrationConfig {
     /// Must match the destination certificate's DNS SAN / identity.
     #[serde(default)]
     pub dest_server_name: Option<String>,
+    /// TCP address for the migration receiver mTLS listener (server half,
+    /// issue #390), e.g. `"127.0.0.1:50052"`. Kept as a raw String here and
+    /// parsed/validated by the fail-closed startup loader
+    /// (`load_migration_server_tls`); no cross-field validation in this crate.
+    /// Unset (default) means this stord is migration-source-only and never
+    /// accepts inbound migrations. NOTE: the receiver fields take effect only
+    /// when `migration.enabled = true`; setting any of them with
+    /// `enabled = false` is a startup error (fail-closed) — `enabled` is the
+    /// single master switch for both halves of migration TLS.
+    #[serde(default)]
+    pub listen_addr: Option<String>,
+    /// PEM server certificate path for the migration receiver listener
+    /// (validated at startup, all-or-nothing with the other receiver fields).
+    #[serde(default)]
+    pub server_cert_path: Option<PathBuf>,
+    /// PEM server private key path for the migration receiver listener.
+    #[serde(default)]
+    pub server_key_path: Option<PathBuf>,
+    /// PEM CA bundle used to authenticate migration peers (client
+    /// certificates) on the receiver listener.
+    #[serde(default)]
+    pub client_ca_path: Option<PathBuf>,
 }
 
 /// iSCSI backend configuration embedded in StordConfig.
@@ -1017,5 +1039,73 @@ default_fabric_mtu = 1430
         materialize_agent_jwt_secret(&mut config);
         assert_eq!(config.authority_mode, AgentAuthorityMode::CoreNative);
         assert_eq!(config.jwt_secret, "short");
+    }
+
+    #[test]
+    fn stord_migration_receiver_fields_parse_with_defaults_and_overrides() {
+        let base = r#"
+socket_path = "/run/chv/stord/api.sock"
+runtime_dir = "/var/lib/chv/storage/localdisk"
+log_level = "info"
+"#;
+
+        // Without any receiver fields (and even with the client half set):
+        // the four receiver fields stay raw Option::None — validation is the
+        // startup loader's job, not this crate's.
+        let cfg = load_stord_config_from_str(base).expect("parse without receiver fields");
+        assert!(!cfg.migration.enabled);
+        assert_eq!(cfg.migration.listen_addr, None);
+        assert_eq!(cfg.migration.server_cert_path, None);
+        assert_eq!(cfg.migration.server_key_path, None);
+        assert_eq!(cfg.migration.client_ca_path, None);
+
+        // With receiver fields set: every field round-trips as configured
+        // (listen_addr stays a String; it is parsed by the fail-closed
+        // startup loader, so even an invalid value must parse here).
+        let cfg = load_stord_config_from_str(
+            r#"
+socket_path = "/run/chv/stord/api.sock"
+runtime_dir = "/var/lib/chv/storage/localdisk"
+log_level = "info"
+
+[migration]
+enabled = true
+client_cert_path = "/etc/chv/tls/stord-client.crt"
+client_key_path = "/etc/chv/tls/stord-client.key"
+ca_cert_path = "/etc/chv/tls/chv-ca.crt"
+dest_server_name = "stord-peer.internal"
+listen_addr = "127.0.0.1:50052"
+server_cert_path = "/etc/chv/tls/stord-server.crt"
+server_key_path = "/etc/chv/tls/stord-server.key"
+client_ca_path = "/etc/chv/tls/chv-ca.crt"
+"#,
+        )
+        .expect("parse with receiver fields");
+        assert!(cfg.migration.enabled);
+        assert_eq!(
+            cfg.migration.listen_addr.as_deref(),
+            Some("127.0.0.1:50052")
+        );
+        assert_eq!(
+            cfg.migration.server_cert_path,
+            Some(PathBuf::from("/etc/chv/tls/stord-server.crt"))
+        );
+        assert_eq!(
+            cfg.migration.server_key_path,
+            Some(PathBuf::from("/etc/chv/tls/stord-server.key"))
+        );
+        assert_eq!(
+            cfg.migration.client_ca_path,
+            Some(PathBuf::from("/etc/chv/tls/chv-ca.crt"))
+        );
+    }
+
+    fn load_stord_config_from_str(
+        contents: &str,
+    ) -> Result<StordConfig, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("stord.toml");
+        std::fs::write(&config_path, contents).expect("write config");
+        Ok(load_stord_config(Some(&config_path))?)
     }
 }

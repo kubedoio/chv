@@ -30,3 +30,7 @@ x509-parser = "0.18"
 tempfile = { workspace = true }
 tower = { workspace = true }
 hyper-util = { workspace = true }
+# Loopback mTLS tests install the rustls ring crypto provider, exactly like
+# `cmd/chv-stord` does at startup (required before any tonic/rustls TLS
+# connection can be established).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

@@ -84,6 +84,19 @@ impl From<ReceivingVolumeError> for Status {
 
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<MigrationMessage, Status>> + Send>>;
 
+/// Cheap clone so the migration service can be served simultaneously on the
+/// Unix socket and on the mTLS TCP receiver listener (issue #390): all state
+/// is shared (`Arc` backend) or immutable, and per-stream receiver state is
+/// created fresh in `stream_blocks`.
+impl<B: StorageBackend> Clone for StorageMigrationServiceImpl<B> {
+    fn clone(&self) -> Self {
+        Self {
+            backend: Arc::clone(&self.backend),
+            runtime_dir: self.runtime_dir.clone(),
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl<B: StorageBackend> StorageMigrationService for StorageMigrationServiceImpl<B> {
     type StreamBlocksStream = ResponseStream;

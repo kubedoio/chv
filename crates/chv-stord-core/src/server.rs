@@ -1,6 +1,7 @@
 use crate::handlers::StorageServiceImpl;
 use crate::migration::sender::MigrationTlsConfig;
 use crate::migration::service::StorageMigrationServiceImpl;
+use crate::migration::tls_config::MigrationServerTls;
 use crate::session::SessionTable;
 use crate::store::SessionStore;
 use chv_errors::ChvError;
@@ -12,14 +13,17 @@ use nix::unistd::{chown, Group};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio::net::{TcpListener, UnixListener};
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::transport::Server;
 use tracing::info;
 
 pub struct StorageServer<B: StorageBackend> {
     inner: StorageServiceImpl<B>,
     migration_service: StorageMigrationServiceImpl<B>,
+    /// Validated material for the migration receiver mTLS TCP listener
+    /// (issue #390). `None` = source-only stord: no TCP listener is opened.
+    migration_server_tls: Option<MigrationServerTls>,
 }
 
 impl<B: StorageBackend> StorageServer<B> {
@@ -33,6 +37,7 @@ impl<B: StorageBackend> StorageServer<B> {
         device_allowlist: Vec<String>,
         migration_dest_allowlist: Vec<String>,
         migration_tls: Option<MigrationTlsConfig>,
+        migration_server_tls: Option<MigrationServerTls>,
         store: Option<SessionStore>,
     ) -> Self {
         let backend = Arc::new(backend);
@@ -55,6 +60,7 @@ impl<B: StorageBackend> StorageServer<B> {
         Self {
             inner,
             migration_service,
+            migration_server_tls,
         }
     }
 
@@ -126,15 +132,100 @@ impl<B: StorageBackend> StorageServer<B> {
 
         info!(socket = %socket_path.display(), "starting chv-stord server");
 
-        Server::builder()
+        // Migration receiver mTLS TCP listener (issue #390). Binding happens
+        // here, before the UDS server starts, so a bind failure is a startup
+        // error (fail-closed) rather than a silent missing listener.
+        let tls_serve = match self.migration_server_tls {
+            Some(tls) => {
+                let listener =
+                    TcpListener::bind(tls.listen_addr)
+                        .await
+                        .map_err(|e| ChvError::Io {
+                            path: tls.listen_addr.to_string(),
+                            source: e,
+                        })?;
+                info!(
+                    addr = %tls.listen_addr,
+                    "storage migration receiver listening on {} (mTLS, client auth required)",
+                    tls.listen_addr
+                );
+                Some(serve_migration_tls(
+                    listener,
+                    tls,
+                    self.migration_service.clone(),
+                ))
+            }
+            None => None,
+        };
+
+        let uds_serve = Server::builder()
             .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(health_service)
             .add_service(StorageServiceServer::new(self.inner))
             .add_service(StorageMigrationServiceServer::new(self.migration_service))
-            .serve_with_incoming(uds_stream)
-            .await
-            .map_err(|e| ChvError::Internal {
+            .serve_with_incoming(uds_stream);
+
+        match tls_serve {
+            None => uds_serve.await.map_err(|e| ChvError::Internal {
                 reason: format!("server error: {e}"),
-            })
+            }),
+            // Fail fast: if either listener dies the daemon reports the error
+            // instead of limping along with half its serving surface. Log at
+            // the death site so operators see which listener failed even if
+            // the process exit path does not print the error.
+            Some(tls_serve) => tokio::select! {
+                result = uds_serve => result.map_err(|e| {
+                    tracing::error!("stord UDS server failed: {e}");
+                    ChvError::Internal {
+                        reason: format!("server error: {e}"),
+                    }
+                }),
+                result = tls_serve => result.inspect_err(|e| {
+                    tracing::error!("stord migration TLS listener failed: {e}");
+                }),
+            },
+        }
     }
+}
+
+/// Serve `StorageMigrationService` on an already-bound TCP listener with
+/// mandatory client-certificate (mTLS) authentication.
+///
+/// # What enforces mandatory client auth
+///
+/// The `ServerTlsConfig` is built with `client_ca_root(...)` and *without*
+/// `client_auth_optional(true)` (tonic 0.12). Internally tonic then builds a
+/// rustls `WebPkiClientVerifier` **without** `allow_unauthenticated()` and
+/// installs it via `ServerConfig::with_client_cert_verifier`, so the TLS
+/// handshake itself fails unless the peer presents a certificate that chains
+/// to `tls.client_ca_pem`. This is the same mechanism the control plane uses
+/// (`cmd/chv-controlplane/src/bootstrap.rs`).
+///
+/// This function is also the seam exercised by the loopback mTLS proof tests
+/// (`tests/migration_mtls.rs`), which assert that clients without a valid
+/// identity are rejected at the TLS layer.
+pub async fn serve_migration_tls<B: StorageBackend>(
+    listener: TcpListener,
+    tls: MigrationServerTls,
+    service: StorageMigrationServiceImpl<B>,
+) -> Result<(), ChvError> {
+    let identity = tonic::transport::Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone());
+    let tls_config = tonic::transport::ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(tonic::transport::Certificate::from_pem(
+            tls.client_ca_pem.clone(),
+        ));
+
+    Server::builder()
+        .layer(chv_observability::GrpcMetricsLayer::new())
+        .tls_config(tls_config)
+        .map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS server config error: {e}"),
+        })?
+        .add_service(StorageMigrationServiceServer::new(service))
+        .serve_with_incoming(TcpListenerStream::new(listener))
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS server error: {e}"),
+        })
 }

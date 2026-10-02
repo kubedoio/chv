@@ -4,6 +4,10 @@
 //! be able to supply the existing [`MigrationTlsConfig`] capability (previously
 //! hard-coded as `None` in `cmd/chv-stord`).
 //!
+//! It also hosts the *server half* of migration mTLS (issue #390):
+//! [`load_migration_server_tls`] loads the material for the migration
+//! receiver's TLS TCP listener.
+//!
 //! # Fail-closed semantics
 //!
 //! - `enabled = false` → `Ok(None)`: the daemon starts without migration
@@ -13,6 +17,10 @@
 //! - `enabled = true` → all four identity inputs are required, files must be
 //!   readable, the certificate/key pair must match, and the CA bundle must
 //!   parse. Any problem is a **startup error** (fail-closed).
+//! - Receiver (server) fields are all-or-nothing: none set → `Ok(None)`
+//!   (source-only stord, a legitimate deployment); *partially* set, an
+//!   unreadable file, a mismatched keypair, an invalid/empty client CA
+//!   bundle, or an unparseable `listen_addr` → **startup error**.
 //!
 //! # Security rules honored here
 //!
@@ -22,6 +30,7 @@
 
 use crate::migration::sender::MigrationTlsConfig;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 
 /// Errors produced while loading/validating the migration TLS identity.
@@ -122,6 +131,122 @@ pub fn load_migration_tls(
         key_pem,
         ca_pem,
         dest_domain: dest.to_string(),
+    }))
+}
+
+/// Validated server-side mTLS material for the migration receiver listener.
+///
+/// Only produced by [`load_migration_server_tls`], which enforces the
+/// fail-closed invariants (all-or-nothing presence, readable files, matching
+/// keypair, non-empty CA bundle, parseable listen address).
+#[derive(Debug, Clone)]
+pub struct MigrationServerTls {
+    /// TCP address the migration receiver listener binds.
+    pub listen_addr: SocketAddr,
+    /// Server certificate PEM presented to migration peers.
+    pub cert_pem: Vec<u8>,
+    /// Server private key PEM.
+    pub key_pem: Vec<u8>,
+    /// CA bundle PEM used to authenticate migration peer client
+    /// certificates. Client-certificate authentication is mandatory on the
+    /// listener built from this material (see `server.rs`).
+    pub client_ca_pem: Vec<u8>,
+}
+
+/// Load and validate the migration *receiver* mTLS material (server half of
+/// migration TLS, issue #390).
+///
+/// `migration.enabled` is the master switch, exactly as for the client
+/// half: the receiver fields take effect **only** when it is `true`.
+///
+/// - `enabled = false` (the default) with **no** receiver fields → `Ok(None)`:
+///   no listener, migrations unavailable in both directions;
+/// - `enabled = false` with **any** receiver field set → startup **error** —
+///   an operator who believes migration is disabled must not silently get an
+///   inbound TCP listener (fail-closed, explicit);
+/// - `enabled = true` with no receiver fields → `Ok(None)`: this stord is
+///   migration-source-only and never accepts inbound migrations (a legitimate
+///   deployment);
+/// - `enabled = true` with any receiver field set → all four are required,
+///   files must be readable, the server certificate/key pair must match, the
+///   client CA bundle must parse and be non-empty, and `listen_addr` must be a
+///   valid socket address. Any problem is a **startup error** (fail-closed) —
+///   there is no plaintext listener and no client-auth-optional mode.
+///
+/// Note: the client half (`load_migration_tls`) currently returns `Ok(None)`
+/// silently when `enabled = false` with client fields set — the receiver half
+/// is intentionally stricter here (an inbound listener must never surprise an
+/// operator who believes migration is off); making the client half symmetric
+/// is a recorded follow-up.
+pub fn load_migration_server_tls(
+    enabled: bool,
+    listen_addr: Option<&str>,
+    server_cert_path: Option<&Path>,
+    server_key_path: Option<&Path>,
+    client_ca_path: Option<&Path>,
+) -> Result<Option<MigrationServerTls>, MigrationTlsLoadError> {
+    let any_set = listen_addr.is_some()
+        || server_cert_path.is_some()
+        || server_key_path.is_some()
+        || client_ca_path.is_some();
+    if !any_set {
+        if enabled {
+            tracing::info!(
+                "storage migration receiver listener not configured: this stord will not accept inbound migrations"
+            );
+        }
+        return Ok(None);
+    }
+    if !enabled {
+        return Err(MigrationTlsLoadError::Invalid(
+            "migration receiver fields (listen_addr, server_cert_path, server_key_path, \
+             client_ca_path) are configured but migration.enabled = false — set \
+             migration.enabled = true or remove the receiver fields"
+                .into(),
+        ));
+    }
+
+    let addr_str = listen_addr.ok_or_else(|| {
+        MigrationTlsLoadError::Missing(
+            "migration.listen_addr is required when any migration receiver field is set".into(),
+        )
+    })?;
+    let cert_path = server_cert_path.ok_or_else(|| {
+        MigrationTlsLoadError::Missing(
+            "migration.server_cert_path is required when any migration receiver field is set"
+                .into(),
+        )
+    })?;
+    let key_path = server_key_path.ok_or_else(|| {
+        MigrationTlsLoadError::Missing(
+            "migration.server_key_path is required when any migration receiver field is set".into(),
+        )
+    })?;
+    let ca_path = client_ca_path.ok_or_else(|| {
+        MigrationTlsLoadError::Missing(
+            "migration.client_ca_path is required when any migration receiver field is set".into(),
+        )
+    })?;
+
+    let listen_addr = addr_str.trim().parse::<SocketAddr>().map_err(|_| {
+        MigrationTlsLoadError::Invalid(format!(
+            "migration.listen_addr {addr_str:?} is not a valid socket address \
+                 (expected \"host:port\", e.g. \"127.0.0.1:50052\")"
+        ))
+    })?;
+
+    let cert_pem = read_identity_file(cert_path, "server certificate")?;
+    let key_pem = read_identity_file(key_path, "server key")?;
+    let client_ca_pem = read_identity_file(ca_path, "client CA bundle")?;
+
+    validate_keypair(&cert_pem, &key_pem)?;
+    validate_ca_bundle(&client_ca_pem)?;
+
+    Ok(Some(MigrationServerTls {
+        listen_addr,
+        cert_pem,
+        key_pem,
+        client_ca_pem,
     }))
 }
 
@@ -399,5 +524,198 @@ mod tests {
             Ok(_) => panic!("expected an Invalid error, but a TLS config was produced"),
             Err(other) => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Server half (migration receiver listener, issue #390)
+    // -----------------------------------------------------------------
+
+    fn load_server(
+        addr: Option<&str>,
+        cert: Option<&std::path::Path>,
+        key: Option<&std::path::Path>,
+        ca: Option<&std::path::Path>,
+    ) -> Result<Option<MigrationServerTls>, MigrationTlsLoadError> {
+        load_migration_server_tls(true, addr, cert, key, ca)
+    }
+
+    #[test]
+    fn server_no_fields_returns_none() {
+        match load_server(None, None, None, None).expect("no error when unset") {
+            None => {}
+            Some(_) => panic!("unconfigured receiver must not produce server TLS material"),
+        }
+    }
+
+    #[test]
+    fn server_disabled_with_no_fields_returns_none() {
+        match load_migration_server_tls(false, None, None, None, None).expect("no error when unset")
+        {
+            None => {}
+            Some(_) => panic!("disabled + unconfigured receiver must not produce material"),
+        }
+    }
+
+    #[test]
+    fn server_disabled_with_fields_is_an_error() {
+        // `migration.enabled = false` must not silently ignore receiver
+        // fields (an operator who believes migration is off must not get an
+        // inbound TCP listener), nor silently open one.
+        match load_migration_server_tls(false, Some("127.0.0.1:50052"), None, None, None) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = false"),
+                    "error must name the contradiction: {msg}"
+                );
+            }
+            other => panic!("expected Invalid, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn server_only_listen_addr_fails() {
+        match load_server(Some("127.0.0.1:50052"), None, None, None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("server_cert_path"),
+                    "unexpected message: {msg}"
+                );
+            }
+            Ok(_) => panic!("partial receiver config must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_missing_listen_addr_fails() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_server(None, Some(&cp), Some(&kp), Some(&ap)) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(msg.contains("listen_addr"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("partial receiver config must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_missing_client_ca_fails() {
+        let (c, k, _a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, _)) = write_all(&c, &k, &[]);
+        match load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(msg.contains("client_ca_path"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("partial receiver config must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_invalid_listen_addr_fails() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_server(
+            Some("not a socket address"),
+            Some(&cp),
+            Some(&kp),
+            Some(&ap),
+        ) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(msg.contains("listen_addr"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("invalid listen_addr must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_unreadable_file_fails() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (_, kp, ap)) = write_all(&c, &k, &a);
+        let missing = std::path::PathBuf::from("/nonexistent/chv-migration-server-cert.pem");
+        match load_server(
+            Some("127.0.0.1:50052"),
+            Some(&missing),
+            Some(&kp),
+            Some(&ap),
+        ) {
+            Err(MigrationTlsLoadError::Unreadable { path, .. }) => {
+                assert_eq!(path, missing);
+            }
+            Ok(_) => panic!("expected an Unreadable error, but server TLS material was produced"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_mismatched_keypair_fails() {
+        let (c, k, a) = mismatched_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), Some(&ap)) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("does not match"),
+                    "expected mismatch message, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected an Invalid error, but server TLS material was produced"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_garbage_client_ca_fails() {
+        let (c, k, _a) = matching_pair("node-a");
+        let bad_ca = tmp_file(b"garbage not a pem\n");
+        let ((_c, _k, _a), (cp, kp, _)) = write_all(&c, &k, &[]);
+        match load_server(
+            Some("127.0.0.1:50052"),
+            Some(&cp),
+            Some(&kp),
+            Some(bad_ca.path()),
+        ) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(msg.contains("CA bundle"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("expected an Invalid error, but server TLS material was produced"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_empty_client_ca_fails() {
+        let (c, k, _a) = matching_pair("node-a");
+        let empty_ca = tmp_file(b"");
+        let ((_c, _k, _a), (cp, kp, _)) = write_all(&c, &k, &[]);
+        match load_server(
+            Some("127.0.0.1:50052"),
+            Some(&cp),
+            Some(&kp),
+            Some(empty_ca.path()),
+        ) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(msg.contains("no certificates"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("expected an Invalid error, but server TLS material was produced"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_valid_full_set_loads() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        let mat = load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), Some(&ap))
+            .expect("valid receiver material should load")
+            .expect("configured receiver must produce server TLS material");
+        assert_eq!(
+            mat.listen_addr,
+            "127.0.0.1:50052".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert!(mat.cert_pem == c, "server cert PEM must be preserved");
+        assert!(mat.key_pem == k, "server key PEM must be preserved");
+        assert!(mat.client_ca_pem == a, "client CA PEM must be preserved");
     }
 }
