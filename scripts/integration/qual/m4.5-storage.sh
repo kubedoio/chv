@@ -221,9 +221,32 @@ volume_field() {
         "SELECT $2 FROM volumes WHERE volume_id='$1'" 2>/dev/null | head -1
 }
 
-# stord_sessions VOLUME_ID — open session rows for the volume in stord.db.
+# stord_sessions VOLUME_ID — open session rows for the volume in the LIVE
+# stord's stord.db. #376 truth: the supervisor-respawned stord runs with
+# runtime_dir = the AGENT dir, not the deploy's stord dir — the sessions
+# DB relocates on restart. Resolve the CURRENT stord's config (its argv)
+# per call so the query always targets the live daemon's DB; fall back to
+# the deploy's path (pre-restart / unresolvable).
+stord_pid() {
+    pgrep -f "(^|/)chv-stord( |$).*${QUAL_TEST_DIR}" 2>/dev/null | head -1
+}
+stord_runtime_dir() {
+    local pid cfg
+    pid="$(stord_pid)"
+    if [ -n "$pid" ] && [ -r "/proc/${pid}/cmdline" ]; then
+        cfg="$(tr '\0' '\n' < "/proc/${pid}/cmdline" | tail -1)"
+        if [ -f "$cfg" ] && grep -q '^runtime_dir' "$cfg" 2>/dev/null; then
+            awk -F'"' '/^runtime_dir/ { print $2; exit }' "$cfg"
+            return 0
+        fi
+    fi
+    echo "$STORD_DIR"
+}
+stord_db() {
+    echo "$(stord_runtime_dir)/stord.db"
+}
 stord_sessions() {
-    sqlite_query "$STORD_DB" \
+    sqlite_query "$(stord_db)" \
         "SELECT COUNT(*) FROM sessions WHERE volume_id='$1'" 2>/dev/null | head -1
 }
 
@@ -275,12 +298,15 @@ data = json.load(open(sys.argv[1]))
 print(data.get("vm_id") or data.get("id") or "")' "${EVIDENCE_DIR}/vm-create-${name}.json"
 }
 
-# create_vm NAME CPU MEM → VM_ID via chvctl (no userdata; the M4.3/M4.4
-# shape, used where guest write/read is not the point).
+# create_vm NAME CPU MEM_MB → VM_ID via chvctl (no userdata; the M4.3/M4.4
+# shape, used where guest write/read is not the point). NOTE: chvctl's
+# --memory takes a SIZE STRING (parse_size_bytes: bare numbers are BYTES
+# — run-5 finding: --memory 1024 created a VM with 1024 BYTES of RAM,
+# which CH accepts but can never boot) — always suffix with M here.
 create_vm() {
     local name="$1" cpu="$2" mem="$3" out vm_id
     out="$(qual_chvctl --output json vm create "$name" \
-        --cpu "$cpu" --memory "$mem" --image "$GUEST_IMAGE_PATH" \
+        --cpu "$cpu" --memory "${mem}M" --image "$GUEST_IMAGE_PATH" \
         --network "$DEFAULT_NET" 2>&1)" \
         || { qual_error "vm create ${name} failed: ${out}"; return 1; }
     vm_id="$(printf '%s\n' "$out" | python3 -c '
@@ -314,11 +340,20 @@ save_evidence() {
         echo "### m4.5 evidence snapshot: ${label} ($(date -u +%FT%TZ))"
         echo "--- vm dirs and volume backings:"
         find "$VMS_DIR" -maxdepth 2 -name '*.img' -printf '%p %s bytes\n' 2>/dev/null || true
-        echo "--- stord runtime dir:"
+        echo "--- stord runtime dir (deploy's):"
         ls -la "$STORD_DIR" 2>/dev/null || true
-        echo "--- stord sessions:"
+        echo "--- stord sessions (deploy's stord.db):"
         sqlite_query "$STORD_DB" \
             "SELECT volume_id, vm_id, runtime_status FROM sessions" 2>/dev/null || true
+        # #376: after a supervisor restart the LIVE stord runs with
+        # runtime_dir = the agent dir — capture both DBs when they differ.
+        if [ "$(stord_db)" != "$STORD_DB" ]; then
+            echo "--- live stord runtime_dir ($(stord_runtime_dir)):"
+            ls -la "$(stord_runtime_dir)" 2>/dev/null || true
+            echo "--- stord sessions (live stord.db):"
+            sqlite_query "$(stord_db)" \
+                "SELECT volume_id, vm_id, runtime_status FROM sessions" 2>/dev/null || true
+        fi
         echo "--- CP volumes:"
         sqlite_query "$QUAL_DB" \
             "SELECT volume_id, node_id, capacity_bytes FROM volumes" 2>/dev/null || true
@@ -386,7 +421,7 @@ VOL1_SIZE="$(stat -c %s "$VOL1_PATH" 2>/dev/null || echo 0)"
 
 # stord opened a session for the volume (the agent↔stord attach path).
 stord_session_open() { [ "$(stord_sessions "$VOL1_ID")" -ge 1 ]; }
-wait_for "stord session open for the volume (${STORD_DB})" "$DISPATCH_TIMEOUT" \
+wait_for "stord session open for the volume (live stord.db)" "$DISPATCH_TIMEOUT" \
     stord_session_open \
     || qual_error "no stord session row for ${VOL1_ID}"
 
@@ -489,6 +524,21 @@ qual_pass "stord restarted by the agent supervisor (pid ${STORD_PID_BEFORE} → 
 wait_for "restarted stord socket live" 20 stord_socket_live \
     || qual_error "restarted stord socket not accepting"
 
+# #376 truth, asserted: the supervisor respawns stord with a GENERATED
+# config (runtime_dir = the agent dir — the sessions DB relocates from
+# the deploy's stord dir; recorded in the evidence doc). The #376/#377
+# fix must keep the operator's path confinement in that generated
+# config (deploy's agent.toml sets stord_path_allowlist; an empty
+# allowlist would mean the respawned daemon runs allow-all).
+STORD_CFG_AFTER="$(tr '\0' '\n' < "/proc/${STORD_PID_AFTER}/cmdline" 2>/dev/null | tail -1)"
+qual_info "respawned stord config: ${STORD_CFG_AFTER} (runtime_dir: $(stord_runtime_dir))"
+if [ -f "$STORD_CFG_AFTER" ] && grep -q '^path_allowlist' "$STORD_CFG_AFTER"; then
+    qual_pass "respawned stord keeps path confinement (#376 fix: path_allowlist present)"
+    grep '^path_allowlist' "$STORD_CFG_AFTER" >> "${EVIDENCE_DIR}/respawned-stord-config.txt" 2>/dev/null || true
+else
+    qual_warn "respawned stord config has NO path_allowlist (#376: the daemon runs allow-all after restart)"
+fi
+
 # Recovery must serve NEW provisioning (the repeat of the contract): a
 # fresh VM create goes through the restarted stord's open/attach.
 VM2_ID="$(create_vm qual-stor-2 2 1024)" || qual_die "fresh provisioning failed after stord restart (Leg C)"
@@ -513,8 +563,9 @@ save_console_evidence "$VM2_ID" leg-c
 qual_chvctl vm delete "$VM2_ID" >/dev/null || qual_error "vm delete failed for ${VM2_ID}"
 wait_vm_stopped "$VM2_ID" || qual_error "vm ${VM2_ID} did not stop for delete"
 wait_for "vm ${VM2_ID}: CH gone" 30 vm_ch_gone "$VM2_ID" || true
+vm2_session_closed() { [ "$(stord_sessions "$VOL2_ID")" = "0" ]; }
 wait_for "stord session for ${VOL2_ID} closed on delete" "$DISPATCH_TIMEOUT" \
-    bash -c "[ \"\$(sqlite_query '${STORD_DB}' \"SELECT COUNT(*) FROM sessions WHERE volume_id='${VOL2_ID}'\" 2>/dev/null | head -1)\" = \"0\" ]" \
+    vm2_session_closed \
     && qual_pass "stord session closed on VM delete (detach/close contract)" \
     || qual_error "stord session for ${VOL2_ID} NOT closed on VM delete"
 save_evidence "leg-c recovered"
@@ -524,6 +575,12 @@ save_evidence "leg-c recovered"
 # operator surface, end to end through the journaled dispatch
 # ---------------------------------------------------------------------------
 qual_info "--- Leg D: snapshot + clone (chvctl → BFF → CP journal → agent → stord copy)"
+
+# The snapshot/clone files land in the LIVE stord's runtime_dir — after
+# Leg C's restart that is the agent dir (#376), not the deploy's stord
+# dir. Resolve the current daemon's runtime_dir (fallback: deploy's).
+STORD_LIVE_DIR="$(stord_runtime_dir)"
+qual_info "live stord runtime_dir: ${STORD_LIVE_DIR}"
 
 qual_chvctl vm stop "$VM1_ID" >/dev/null || qual_error "vm stop failed for ${VM1_ID}"
 wait_vm_stopped "$VM1_ID" || qual_die "vm did not stop (Leg D)"
@@ -535,7 +592,7 @@ qual_chvctl volume snapshot "$VOL1_ID" --name "$SNAP_NAME" >/dev/null 2>&1 \
 
 # The journaled intent dispatches: the snapshot copy appears in stord's
 # runtime dir as {volume_id}-{snapshot_name}.img.
-SNAP_FILE="${STORD_DIR}/${VOL1_ID}-${SNAP_NAME}.img"
+SNAP_FILE="${STORD_LIVE_DIR}/${VOL1_ID}-${SNAP_NAME}.img"
 wait_for "snapshot copy materialized (${SNAP_FILE})" "$DISPATCH_TIMEOUT" \
     test -s "$SNAP_FILE" \
     && qual_pass "snapshot materialized on the host ($(stat -c %s "$SNAP_FILE") bytes)" \
@@ -554,13 +611,13 @@ qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" >/dev/null 2>&1 \
 # The clone dispatches: a copy keyed by source and target appears.
 # (Per-poll function — wait_for evaluates args once.)
 clone_file_present() {
-    [ -n "$(find "$STORD_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)" ]
+    [ -n "$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)" ]
 }
 wait_for "clone copy materialized in stord runtime dir" "$DISPATCH_TIMEOUT" \
     clone_file_present \
     && qual_pass "clone materialized on the host" \
     || qual_error "clone file never appeared for target ${CLONE_ID} (dispatch gap?)"
-CLONE_FILE="$(find "$STORD_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
+CLONE_FILE="$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
 qual_info "clone file: ${CLONE_FILE:-none}"
 [ -n "$CLONE_FILE" ] && [ "$(stat -c %s "$CLONE_FILE" 2>/dev/null)" = "$VOL1_SIZE" ] \
     && qual_pass "clone is a full copy (size == volume)" \
@@ -597,8 +654,9 @@ qual_chvctl vm delete "$VM1_ID" >/dev/null || qual_error "vm delete failed for $
 wait_vm_stopped "$VM1_ID" || qual_error "vm ${VM1_ID} did not stop for delete"
 wait_for "vm ${VM1_ID}: CH gone" 30 vm_ch_gone "$VM1_ID" || true
 
+vm1_session_closed() { [ "$(stord_sessions "$VOL1_ID")" = "0" ]; }
 wait_for "stord session for ${VOL1_ID} closed on delete" "$DISPATCH_TIMEOUT" \
-    bash -c "[ \"\$(sqlite_query '${STORD_DB}' \"SELECT COUNT(*) FROM sessions WHERE volume_id='${VOL1_ID}'\" 2>/dev/null | head -1)\" = \"0\" ]" \
+    vm1_session_closed \
     && qual_pass "stord session closed on VM delete" \
     || qual_error "stord session for ${VOL1_ID} NOT closed on VM delete"
 
@@ -626,11 +684,11 @@ fi
 [ -z "$(pgrep -x qemu-img 2>/dev/null)" ] \
     && qual_pass "no leaked qemu-img conversion processes" \
     || qual_error "qemu-img still running: $(pgrep -a qemu-img)"
-STORD_SESSIONS_LEFT="$(sqlite_query "$STORD_DB" \
+STORD_SESSIONS_LEFT="$(sqlite_query "$(stord_db)" \
     "SELECT COUNT(*) FROM sessions" 2>/dev/null | head -1)"
 [ "${STORD_SESSIONS_LEFT:-0}" = "0" ] \
     && qual_pass "no stord sessions remain" \
-    || qual_warn "stord sessions remain (${STORD_SESSIONS_LEFT}): $(sqlite_query "$STORD_DB" 'SELECT volume_id, runtime_status FROM sessions' 2>/dev/null | head -3)"
+    || qual_warn "stord sessions remain (${STORD_SESSIONS_LEFT}): $(sqlite_query "$(stord_db)" 'SELECT volume_id, runtime_status FROM sessions' 2>/dev/null | head -3)"
 save_evidence "leg-e cleaned"
 
 # ---------------------------------------------------------------------------
