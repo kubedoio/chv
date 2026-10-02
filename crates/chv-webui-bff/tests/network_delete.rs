@@ -371,6 +371,56 @@ async fn network_delete_succeeds_after_vm_delete() {
 }
 
 #[tokio::test]
+async fn network_delete_clears_vni_allocations() {
+    // The last #356 FK hazard: vni_allocations references
+    // networks(network_id) with no ON DELETE action, so an overlay
+    // network that ever allocated a VNI (active OR soft-released rows)
+    // FK-failed the delete — un-deletable forever. The delete tx now
+    // soft-releases then drops the rows.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    // Seed both shapes: an active allocation and a previously
+    // soft-released one — the FK blocks on either.
+    sqlx::query(
+        "INSERT INTO vni_allocations (vni, network_id, allocated_at, binding_generation) \
+         VALUES (100, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 1)",
+    )
+    .bind(&net_id)
+    .execute(&state.pool)
+    .await
+    .expect("seed active vni allocation");
+    sqlx::query(
+        "INSERT INTO vni_allocations (vni, network_id, allocated_at, released_at, binding_generation) \
+         VALUES (200, ?, strftime('%Y-%m-%dT00:00:00Z','now'), strftime('%Y-%m-%dT00:00:00Z','now'), 1)",
+    )
+    .bind(&net_id)
+    .execute(&state.pool)
+    .await
+    .expect("seed released vni allocation");
+
+    let (status, body) = delete_network(&state, &token, &net_id).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "network delete must succeed despite vni_allocations rows, body: {body}"
+    );
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vni_allocations WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("count vni allocations");
+    assert_eq!(
+        remaining, 0,
+        "the network's vni allocation rows must be gone"
+    );
+}
+
+#[tokio::test]
 async fn network_delete_refuses_while_vm_attached() {
     let state = build_state().await;
     let token = seed_jwt(&state).await;

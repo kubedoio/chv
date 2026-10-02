@@ -415,11 +415,7 @@ pub async fn delete_network(
     // gone or deleting — required for the NIC table, not cosmetic:
     // vm_nic_desired_state has network_id REFERENCES networks ON DELETE
     // RESTRICT, so leaving them would turn the delete below into an FK
-    // violation (500) instead of the clean 409/200 contract. (Known
-    // remaining FK hazard, pre-existing and out of scope here:
-    // vni_allocations.network_id has no ON DELETE action either —
-    // overlay networks that ever allocated a VNI still FK-fail the
-    // delete; tracked with the host-teardown work in #356 part 2/#355.)
+    // violation (500) instead of the clean 409/200 contract.
     sqlx::query(
         r#"
         DELETE FROM vm_nic_desired_state
@@ -435,6 +431,43 @@ pub async fn delete_network(
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to gc stale nic rows: {}", e)))?;
+
+    // VNI allocations (#356, the last FK hazard): vni_allocations
+    // references networks(network_id) with no ON DELETE action, so ANY
+    // row — soft-released or not — FK-failed the delete below; overlay
+    // networks that ever allocated a VNI could never be deleted. Two
+    // statements, in order:
+    //   1. soft-release active rows (same bookkeeping as
+    //      Store::release_vni: allocation history keeps its release
+    //      timestamp);
+    //   2. delete the rows — the FK leaves no other choice under this
+    //      schema (network_id is NOT NULL, so ON DELETE SET NULL is not
+    //      expressible either).
+    // Tradeoff, accepted and documented: the 24h VNI-reuse quarantine
+    // (the allocation query's released_at window) cannot survive the
+    // network's deletion under this schema — the rows ARE the
+    // quarantine. Network delete is an explicit operator action gated
+    // on zero live attachments and preceded by the last-detach host
+    // teardown (#362), so immediate reuse is the bounded residual; a
+    // schema change (nullable reference or a side quarantine table)
+    // would be needed to do better.
+    sqlx::query(
+        r#"
+        UPDATE vni_allocations
+        SET released_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE network_id = ? AND released_at IS NULL
+        "#,
+    )
+    .bind(&network_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to release vni allocations: {}", e)))?;
+
+    sqlx::query("DELETE FROM vni_allocations WHERE network_id = ?")
+        .bind(&network_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to delete vni allocations: {}", e)))?;
 
     sqlx::query("DELETE FROM networks WHERE network_id = ?")
         .bind(&network_id)
