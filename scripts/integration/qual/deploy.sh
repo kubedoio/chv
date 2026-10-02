@@ -415,6 +415,12 @@ storage_base_dir = "${agent_dir}/storage"
 console_bind = "127.0.0.1:8444"
 bootstrap_token_path = "${agent_dir}/bootstrap-token"
 
+# #376: preserve stord's path confinement across supervisor respawns —
+# the agent writes this into the generated chv-stord.toml when it has to
+# respawn a dead stord. Mirrors the operator-shaped allowlist in
+# stord.toml below (volume locators + the seed-image dir).
+stord_path_allowlist = ["${agent_dir}", "${stord_dir}", "${images_dir}"]
+
 tls_cert_path = "${certs_dir}/enroll-client.crt"
 tls_key_path = "${certs_dir}/enroll-client.key"
 ca_cert_path = "${certs_dir}/ca.crt"

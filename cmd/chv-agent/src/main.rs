@@ -966,6 +966,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
         config.runtime_dir.clone(),
+        config.stord_path_allowlist.clone(),
     );
 
     if let Err(e) = supervisor.start_all().await {

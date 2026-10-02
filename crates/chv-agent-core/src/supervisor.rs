@@ -13,6 +13,13 @@ pub struct DaemonSupervisor {
     pub(crate) stord_socket: PathBuf,
     pub(crate) nwd_socket: PathBuf,
     runtime_dir: PathBuf,
+    /// Paths written into the generated chv-stord.toml's `path_allowlist`
+    /// when the supervisor respawns stord (#376). Empty keeps the historical
+    /// behavior (the key is omitted; stord then treats an absent allowlist
+    /// as allow-all) — deployments relying on stord's path confinement must
+    /// configure it in the agent config so the respawned daemon keeps the
+    /// operator's posture.
+    stord_path_allowlist: Vec<PathBuf>,
     stord_child: Option<Child>,
     nwd_child: Option<Child>,
     stord_last_restart: Option<Instant>,
@@ -26,6 +33,7 @@ impl DaemonSupervisor {
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
         runtime_dir: PathBuf,
+        stord_path_allowlist: Vec<PathBuf>,
     ) -> Self {
         Self {
             stord_bin,
@@ -33,6 +41,7 @@ impl DaemonSupervisor {
             stord_socket,
             nwd_socket,
             runtime_dir,
+            stord_path_allowlist,
             stord_child: None,
             nwd_child: None,
             stord_last_restart: None,
@@ -47,6 +56,21 @@ impl DaemonSupervisor {
     }
 
     pub async fn start_stord(&mut self) -> Result<(), ChvError> {
+        // #376: the generated stord config must preserve the operator's
+        // path confinement when configured. An empty allowlist omits the
+        // key (stord then allows all paths — the documented pre-#376
+        // behavior, kept as the default so respawns never break volume
+        // locators or seed paths the operator has not allowlisted).
+        let stord_extra_config = if self.stord_path_allowlist.is_empty() {
+            String::new()
+        } else {
+            let entries: Vec<String> = self
+                .stord_path_allowlist
+                .iter()
+                .map(|p| format!("{:?}", p.to_string_lossy()))
+                .collect();
+            format!("path_allowlist = [{}]\n", entries.join(", "))
+        };
         start_daemon(
             &self.stord_bin,
             &self.stord_socket,
@@ -54,6 +78,7 @@ impl DaemonSupervisor {
             &mut self.stord_child,
             &mut self.stord_last_restart,
             "chv-stord",
+            &stord_extra_config,
         )
         .await
     }
@@ -66,6 +91,7 @@ impl DaemonSupervisor {
             &mut self.nwd_child,
             &mut self.nwd_last_restart,
             "chv-nwd",
+            "",
         )
         .await
     }
@@ -168,6 +194,7 @@ async fn start_daemon(
     child: &mut Option<Child>,
     last_restart: &mut Option<Instant>,
     name: &str,
+    extra_config: &str,
 ) -> Result<(), ChvError> {
     if child.is_some() {
         return Ok(());
@@ -187,9 +214,10 @@ async fn start_daemon(
         r#"socket_path = {:?}
 runtime_dir = {:?}
 log_level = "info"
-"#,
+{}"#,
         socket.to_string_lossy(),
-        runtime_dir.to_string_lossy()
+        runtime_dir.to_string_lossy(),
+        extra_config
     );
     if let Err(e) = tokio::fs::write(&config_path, toml).await {
         return Err(ChvError::Io {
@@ -285,6 +313,7 @@ mod tests {
             PathBuf::from("dummy"),
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
+            vec![],
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -305,6 +334,7 @@ mod tests {
             PathBuf::from("dummy"),
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
+            vec![],
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -326,6 +356,7 @@ mod tests {
             PathBuf::from("dummy"),
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
+            vec![],
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -354,6 +385,7 @@ mod tests {
             PathBuf::from("dummy"),
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
+            vec![],
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -383,5 +415,60 @@ mod tests {
         assert!(supervisor.stord_child.is_none());
         // nwd should NOT have been restarted (throttled)
         assert!(supervisor.nwd_child.is_none());
+    }
+
+    // #376: the supervisor-generated chv-stord.toml must preserve the
+    // operator's path confinement when configured — a respawned stord used
+    // to silently drop path_allowlist (stord then allows all locator
+    // paths), so the fresh daemon was confined and the respawned one was
+    // not. Empty must keep the historical shape (key omitted).
+    #[tokio::test]
+    async fn supervisor_generated_stord_config_carries_path_allowlist() {
+        let dir = fake_daemon_dir();
+        fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+        fake_daemon_script(&dir.nwd_bin, "sleep 10").await;
+        let allowlist = vec![
+            PathBuf::from("/var/lib/chv/storage"),
+            PathBuf::from("/var/lib/chv/images"),
+        ];
+        let mut supervisor = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            dir.runtime_dir.clone(),
+            allowlist.clone(),
+        );
+        supervisor.start_stord().await.unwrap();
+        supervisor.start_nwd().await.unwrap();
+        let config_path = dir.runtime_dir.join("chv-stord.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            config.contains("path_allowlist = [\"/var/lib/chv/storage\", \"/var/lib/chv/images\"]"),
+            "generated stord config must carry the configured allowlist, got:\n{config}"
+        );
+
+        // The nwd config must NOT carry the stord allowlist.
+        let nwd_config = std::fs::read_to_string(dir.runtime_dir.join("chv-nwd.toml")).unwrap();
+        assert!(!nwd_config.contains("path_allowlist"));
+
+        // Empty allowlist keeps the historical shape: key omitted, not an
+        // empty list (stord's absent-vs-empty distinction is none today,
+        // but the generated file must stay byte-compatible with pre-#376).
+        let mut unconfigured = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            dir.runtime_dir.clone(),
+            vec![],
+        );
+        // Drop the socket so start_daemon spawns (the fake is alive but
+        // 'dummy' sockets never existed, so it always spawns).
+        unconfigured.start_stord().await.unwrap();
+        let config2 = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!config2.contains("path_allowlist"));
+        supervisor.shutdown().await;
+        unconfigured.shutdown().await;
     }
 }

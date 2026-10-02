@@ -428,6 +428,15 @@ pub struct AgentConfig {
     pub bootstrap_token_path: Option<PathBuf>,
     #[serde(default = "default_storage_base_dir")]
     pub storage_base_dir: PathBuf,
+    /// Paths preserved in the supervisor-generated chv-stord.toml's
+    /// `path_allowlist` when the agent respawns stord (#376). Empty omits
+    /// the key — stord then allows all locator paths (the pre-#376
+    /// behavior, kept as the default). Deployments relying on stord's
+    /// path confinement set this to mirror their stord config (it must
+    /// cover the volume locator dir, e.g. storage_base_dir, and any
+    /// image/seed dirs the control plane references).
+    #[serde(default)]
+    pub stord_path_allowlist: Vec<PathBuf>,
     #[serde(default = "default_console_bind")]
     pub console_bind: String,
     #[serde(default = "default_agent_jwt_secret")]
@@ -538,6 +547,7 @@ impl Default for AgentConfig {
             ca_cert_path: None,
             bootstrap_token_path: None,
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
+            stord_path_allowlist: vec![],
             console_bind: default_console_bind(),
             jwt_secret: default_agent_jwt_secret(),
             watchdog: BootWatchdogAgentConfig::default(),
