@@ -156,7 +156,7 @@ pub struct MigrationServerTls {
 /// Load and validate the migration *receiver* mTLS material (server half of
 /// migration TLS, issue #390).
 ///
-/// `migration.enabled` is the single master switch, exactly as for the client
+/// `migration.enabled` is the master switch, exactly as for the client
 /// half: the receiver fields take effect **only** when it is `true`.
 ///
 /// - `enabled = false` (the default) with **no** receiver fields → `Ok(None)`:
@@ -172,6 +172,12 @@ pub struct MigrationServerTls {
 ///   client CA bundle must parse and be non-empty, and `listen_addr` must be a
 ///   valid socket address. Any problem is a **startup error** (fail-closed) —
 ///   there is no plaintext listener and no client-auth-optional mode.
+///
+/// Note: the client half (`load_migration_tls`) currently returns `Ok(None)`
+/// silently when `enabled = false` with client fields set — the receiver half
+/// is intentionally stricter here (an inbound listener must never surprise an
+/// operator who believes migration is off); making the client half symmetric
+/// is a recorded follow-up.
 pub fn load_migration_server_tls(
     enabled: bool,
     listen_addr: Option<&str>,
