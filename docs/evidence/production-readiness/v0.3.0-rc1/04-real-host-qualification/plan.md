@@ -327,8 +327,9 @@ spec matches the qualified reality.
   path confinement and relocates runtime_dir (#376/#377), and volume clone
   could never succeed because the target volume row was never created
   (#380/#381) — and recorded two boundaries as issues: snapshot/clone
-  accepted-then-fails-closed on core-managed nodes (#378, 600 s retry UX
-  gap) and LVM unreachable from the VM lifecycle (#379, design decision;
+  accepted-then-fails-closed on core-managed nodes (#378, accepted-then-silent
+  dispatch-retry UX gap) and LVM unreachable from the VM lifecycle (#379, design
+  decision;
   LVM is qualified at the stord layer only, 7/7 root-gated real-LVM tests).
   Open follow-ups carried: #368, #355, plus #378/#379/#380 residuals noted
   in the evidence doc.
