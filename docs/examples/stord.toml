@@ -28,5 +28,19 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # root:chv or chv:chv with 0640 (key) / 0644 (cert, CA). PEM material is
 # never logged or returned in errors. Rotate keys by updating files and
 # restarting the daemon — startup re-validates the pair.
+#
+# Migration receiver (server half, inbound migrations over mTLS):
+# separate fields, all-or-nothing. With NONE of them set this stord is
+# migration-source-only and never accepts inbound migrations. With ANY of
+# them set, all four are required and validated at startup (fail-closed);
+# the TCP listener then serves the migration receiver with MANDATORY
+# client-certificate authentication — there is no plaintext listener and
+# no client-auth-optional mode.
+#
+# listen_addr      = "127.0.0.1:50052"                  # receiver bind address
+# server_cert_path = "/etc/chv/tls/stord-server.crt"    # receiver certificate (PEM)
+# server_key_path  = "/etc/chv/tls/stord-server.key"    # receiver private key (PEM)
+# client_ca_path   = "/etc/chv/tls/chv-ca.crt"          # CA authenticating migration peers
+#
 [migration]
 enabled = false
