@@ -1508,12 +1508,16 @@ fn build_cpus_config(config: &VmConfig) -> serde_json::Value {
 }
 
 /// The cloud-init NoCloud `meta-data` document. Both values are quoted so
-/// they are always YAML STRINGS: `gen_short_id` emits 8 hex chars, so ~23%
+/// they are always YAML STRINGS: `gen_short_id` emits 8 hex chars, so ~2.3%
 /// of ids are all digits — an unquoted all-digit YAML scalar types as an
 /// int, which crashes cloud-init 26.1's metadata standardization
 /// (`'int' object has no attribute 'replace'`) and discards the ENTIRE
 /// NoCloud datasource: userdata and network-config are then silently
 /// never applied (#374).
+///
+/// NOTE: the quoting is not escape-aware — it is only correct for inputs
+/// made of `gen_short_id`'s alphabet ([0-9a-f]). If this is ever reused
+/// with values that may contain `"` or `\`, escape or reject them first.
 fn cloud_init_meta_data(vm_id: &str) -> String {
     format!(
         "instance-id: \"{}\"\nlocal-hostname: \"{}\"\n",
@@ -1535,7 +1539,7 @@ async fn build_cloud_init_seed(
             source: e,
         })?;
 
-    // The values MUST be quoted: gen_short_id emits 8 hex chars, so ~23%
+    // The values MUST be quoted: gen_short_id emits 8 hex chars, so ~2.3%
     // of ids are all digits — and an unquoted all-digit YAML scalar types
     // as an int, which crashes cloud-init's metadata standardization
     // ('int' object has no attribute 'replace') and discards the ENTIRE
