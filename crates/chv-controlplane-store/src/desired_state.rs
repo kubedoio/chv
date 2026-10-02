@@ -394,37 +394,23 @@ ON CONFLICT (volume_id) DO UPDATE SET
 WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
-const PATCH_VOLUME_CLONE_SQL: &str = r#"
-INSERT INTO volume_desired_state (
-    volume_id,
-    desired_generation,
-    desired_status,
-    requested_by,
-    updated_by,
-    clone_source_volume_id,
-    requested_at,
-    updated_at
-)
-VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
-)
-ON CONFLICT (volume_id) DO UPDATE SET
-    desired_generation = EXCLUDED.desired_generation,
-    desired_status = EXCLUDED.desired_status,
-    requested_by = EXCLUDED.requested_by,
-    updated_by = EXCLUDED.updated_by,
-    clone_source_volume_id = EXCLUDED.clone_source_volume_id,
-    requested_at = EXCLUDED.requested_at,
-    updated_at = EXCLUDED.updated_at
-WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
+/// Read a volume's `volumes`-table summary (#380): the clone path uses it
+/// to materialize the target volume row with the source's shape.
+const GET_VOLUME_SUMMARY_SQL: &str = r#"
+SELECT node_id, display_name, capacity_bytes, volume_kind, storage_class
+FROM volumes
+WHERE volume_id = $1
 "#;
+
+/// Row shape returned by [`DesiredStateRepository::get_volume_summary`].
+#[derive(sqlx::FromRow, Clone, Debug)]
+pub struct VolumeSummaryRow {
+    pub node_id: Option<String>,
+    pub display_name: String,
+    pub capacity_bytes: i64,
+    pub volume_kind: Option<String>,
+    pub storage_class: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct DesiredStateRepository {
@@ -722,40 +708,21 @@ impl DesiredStateRepository {
         Ok(())
     }
 
-    pub async fn set_volume_clone(&self, input: &VolumeClonePatchInput) -> Result<(), StoreError> {
-        let generation = generation_to_i64(input.desired_generation)?;
-        let result = sqlx::query(PATCH_VOLUME_CLONE_SQL)
-            .bind(input.volume_id.as_str())
-            .bind(generation)
-            .bind(&input.desired_status)
-            .bind(&input.requested_by)
-            .bind(&input.updated_by)
-            .bind(
-                input
-                    .clone_source_volume_id
-                    .as_ref()
-                    .map(ResourceId::as_str),
-            )
-            .bind(input.requested_unix_ms)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| match &e {
-                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                    StoreError::NotFound {
-                        entity: "volume",
-                        id: input.volume_id.to_string(),
-                    }
-                }
-                _ => StoreError::from(e),
-            })?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "volume",
-                id: input.volume_id.to_string(),
-                incoming: generation,
-            });
-        }
-        Ok(())
+    /// Read a volume's `volumes`-table summary (node, size, class). Used by
+    /// the clone path to materialize the target volume row with the
+    /// source's shape (#380: the clone intent used to PATCH a
+    /// `volume_desired_state` row for a target volume that nothing ever
+    /// created — the FK violation surfaced as a bare
+    /// `volume with id {target} not found`).
+    pub async fn get_volume_summary(
+        &self,
+        volume_id: &ResourceId,
+    ) -> Result<Option<VolumeSummaryRow>, StoreError> {
+        let row = sqlx::query_as::<_, VolumeSummaryRow>(GET_VOLUME_SUMMARY_SQL)
+            .bind(volume_id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
     }
 
     pub async fn upsert_network(&self, input: &NetworkDesiredStateInput) -> Result<(), StoreError> {
@@ -1007,17 +974,6 @@ pub struct VolumeSnapshotPatchInput {
     pub updated_by: Option<String>,
     pub snapshot_op: Option<String>,
     pub snapshot_name: Option<String>,
-    pub requested_unix_ms: i64,
-}
-
-#[derive(Clone)]
-pub struct VolumeClonePatchInput {
-    pub volume_id: ResourceId,
-    pub desired_generation: Generation,
-    pub desired_status: Option<String>,
-    pub requested_by: Option<String>,
-    pub updated_by: Option<String>,
-    pub clone_source_volume_id: Option<ResourceId>,
     pub requested_unix_ms: i64,
 }
 

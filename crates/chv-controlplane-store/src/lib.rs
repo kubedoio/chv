@@ -36,8 +36,7 @@ pub use db::{
 pub use desired_state::{
     DesiredStateRepository, NetworkDesiredStateInput, NetworkStatusPatchInput, VmDesiredStateInput,
     VmPowerStatePatchInput, VmResourcesPatchInput, VolumeAttachmentPatchInput,
-    VolumeClonePatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
-    VolumeSnapshotPatchInput,
+    VolumeDesiredStateInput, VolumeResizePatchInput, VolumeSnapshotPatchInput, VolumeSummaryRow,
 };
 pub use events::{EventAppendInput, EventRepository};
 pub use hypervisor_settings::{HypervisorSettingsRepository, HypervisorSettingsRow};
