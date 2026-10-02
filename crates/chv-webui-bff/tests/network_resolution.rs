@@ -386,6 +386,30 @@ async fn network_create_defaults_absent_gateway() {
             .await
             .expect("query gateway");
     assert_eq!(stored.as_deref(), Some(""));
+
+    // JSON null is NOT an explicit empty string — it means "no value",
+    // same as absent, and defaults (pinned: pre-fix it silently
+    // persisted "" instead).
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/create",
+        &token,
+        r#"{"name":"tenant-null","cidr":"10.80.0.0/24","gateway":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create body: {body}");
+    let net_id = body["network_id"].as_str().expect("network_id").to_string();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT gateway FROM network_desired_state WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("query gateway");
+    assert_eq!(
+        stored.as_deref(),
+        Some("10.80.0.1"),
+        "JSON null must default like an absent field"
+    );
 }
 
 #[tokio::test]
