@@ -423,21 +423,42 @@ wait_vm_stopped "$VM1_ID" || qual_die "vm did not stop (Leg B)"
     || qual_warn "stord session for ${VOL1_ID} gone at stop (re-open on start would be the truth to record)"
 
 qual_chvctl vm start "$VM1_ID" >/dev/null || qual_die "vm re-start failed for ${VM1_ID}"
-wait_boot "$VM1_ID" || qual_die "guest did not re-boot (Leg B)"
+
+# Boot detection on the SECOND boot cannot count kernel banners: the
+# graceful stop TRUNCATES console.log (agent: "truncated console.log on
+# graceful stop") and the agent re-spawns CH quickly, so the fresh log
+# may already contain boot 2's banner when a snapshot is taken (run-4
+# finding: banner_before=1 with only one more boot coming → false
+# timeout). Instead wait for the boot-2 evidence directly: logind lines
+# in the truncated log (boot 1's are gone), then THE contract — the
+# readback, which only a boot with the persisted marker file can print.
+wait_for "vm ${VM1_ID}: re-booted (logind lines in the fresh console)" \
+    "$LOGIND_TIMEOUT" \
+    console_has "$VM1_ID" "systemd-logind" \
+    || qual_die "guest did not re-boot (Leg B)"
 
 # THE guest read: bootcmd (every boot) cats the marker the FIRST boot
 # wrote — proving the bytes survived the stop/start cycle on the same
-# volume.
+# volume. This cannot false-positive: boot 1's bootcmd ran before the
+# marker existed, and boot 1's console was truncated at the stop — a
+# READBACK line in the current log can only come from boot 2 reading
+# the persisted file. It also proves start did NOT re-seed the volume
+# (a re-seed would delete the marker file).
 wait_for "guest read the marker back (console)" "$LOGIND_TIMEOUT" \
     console_has "$VM1_ID" "M45-MARKER-READBACK:${M45_MARKER}" \
     || qual_die "marker read-back never appeared in the guest console (Leg B)"
 qual_pass "guest READ BACK the same marker after restart: ${M45_MARKER}"
 
-# runcmd is per-instance: the second boot must NOT have re-written it
-# (a re-write would mean the volume was re-seeded — data loss).
-[ "$(console_count "$VM1_ID" "M45-MARKER-WRITTEN")" -eq 1 ] \
-    && qual_pass "marker written exactly once (per-instance runcmd; no re-seed on start)" \
-    || qual_error "marker written $(console_count "$VM1_ID" "M45-MARKER-WRITTEN") times — start re-seeds the volume?!"
+# runcmd is per-instance: boot 2 must NOT have re-written the marker
+# (its console is fresh post-truncation, so zero WRITTEN lines is the
+# expected shape; any WRITTEN line means runcmd re-ran or the console
+# was not truncated — either way worth recording).
+WRITTEN_ON_BOOT2="$(console_count "$VM1_ID" "M45-MARKER-WRITTEN")"
+if [ "$WRITTEN_ON_BOOT2" -eq 0 ]; then
+    qual_pass "runcmd did not re-run on the second boot (per-instance; no re-seed)"
+else
+    qual_warn "M45-MARKER-WRITTEN appeared ${WRITTEN_ON_BOOT2}x in the second boot's console — runcmd re-ran (per-instance violation?) or the console was not truncated"
+fi
 save_console_evidence "$VM1_ID" leg-b
 save_evidence "leg-b restarted"
 
