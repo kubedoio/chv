@@ -80,7 +80,13 @@ LOGIND_TIMEOUT=180      # logind lines after the banner
 STOP_TIMEOUT=240        # graceful stop
 STORD_RESTART_TIMEOUT=90  # agent supervisor restart of a killed stord
 DISPATCH_TIMEOUT=60     # journaled intent → observable host effect
-LVM_VG="chvqual-m45"    # disposable VG for the LVM leg
+LVM_VG="chvqual-m45"    # disposable VG for the LVM leg (FIXED name: single-
+                        # run assumption — two concurrent scenarios on one
+                        # host would collide on vgcreate/lvcreate and a
+                        # dying run's vgremove could tear down the other's
+                        # VG. The fixed name doubles as stale-VG recovery:
+                        # a leftover chvqual-m45 from an aborted run is
+                        # removed by this run's cleanup.)
 LVM_BACKING_MB=256      # loopback PV size (sparse file)
 
 # Persistent evidence artifacts (deploy.sh removes TEST_DIR on success).
@@ -648,12 +654,25 @@ sleep 10
 CLONE_ID="clone$$"
 qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" >/dev/null 2>&1 \
     && qual_pass "chvctl volume clone accepted (${VOL1_ID} → ${CLONE_ID})" \
-    || qual_error "chvctl volume clone failed"
+    || qual_die "chvctl volume clone failed (was the #372 CLI fix deployed?)"
 CLONE_DS="$(sqlite_query "$QUAL_DB" \
     "SELECT clone_source_volume_id FROM volume_desired_state WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
 [ "$CLONE_DS" = "$VOL1_ID" ] \
     && qual_pass "CP DB records the clone intent (${CLONE_ID} ← ${VOL1_ID})" \
     || qual_warn "no clone intent row for ${CLONE_ID} in volume_desired_state (got: '${CLONE_DS}')"
+# Comprehensive-review follow-up: the target must INHERIT the source's
+# owner — an ownerless volumes row is admin-only in the BFF
+# (require_volume_owner), which would lock a non-admin cloner out of the
+# clone they just created.
+SOURCE_OWNER="$(sqlite_query "$QUAL_DB" \
+    "SELECT owner_id FROM volumes WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)"
+CLONE_OWNER="$(sqlite_query "$QUAL_DB" \
+    "SELECT owner_id FROM volumes WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
+if [ -n "${SOURCE_OWNER}" ] && [ "${CLONE_OWNER}" = "${SOURCE_OWNER}" ]; then
+    qual_pass "clone target inherits the source owner (${CLONE_OWNER}) — BFF ownership model holds"
+else
+    qual_error "clone target owner mismatch (source='${SOURCE_OWNER}', clone='${CLONE_OWNER}') — a non-admin cloner could not mutate the clone"
+fi
 sleep 10
 CLONE_FILE="$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
 [ -z "$CLONE_FILE" ] \
@@ -670,9 +689,18 @@ HTTP_CODE="$(bff_post_json "/v1/volumes/delete-snapshot" "$DELETE_BODY")"
     && qual_pass "BFF delete-snapshot accepted (HTTP ${HTTP_CODE})" \
     || qual_error "BFF delete-snapshot failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-delete-snapshot.json" 2>/dev/null)"
 rm -f "$DELETE_BODY"
-# No file was ever created (fail-closed), so absence is trivially true —
-# the meaningful post-delete assertion is that the delete INTENT was
-# journaled (snapshot_op flips to delete) and still nothing executed.
+# Comprehensive-review follow-up: actually assert the delete INTENT was
+# journaled — snapshot_op flips create → delete in the CP's
+# delete_volume_snapshot accept path. Absence of the file is trivially
+# true (nothing was ever created), so this is the load-bearing check.
+snap_delete_journaled() {
+    [ "$(sqlite_query "$QUAL_DB" \
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)" = "delete" ]
+}
+wait_for "CP journaled the delete intent (snapshot_op=delete)" "$DISPATCH_TIMEOUT" \
+    snap_delete_journaled \
+    && qual_pass "delete intent journaled (snapshot_op create → delete)" \
+    || qual_error "snapshot_op never flipped to delete for ${VOL1_ID} — the delete intent was not journaled"
 sleep 5
 [ ! -e "${SNAP_FILE}" ] \
     && qual_pass "still no snapshot file after delete-snapshot (fail-closed holds)" \
@@ -767,7 +795,7 @@ qual_info "building chv-stord-backends test binaries (cargo test --no-run)..."
 if ! (cd "$REPO_ROOT" && cargo test -p chv-stord-backends --no-run 2>&1 | tail -5); then
     qual_die "cargo test --no-run failed for chv-stord-backends"
 fi
-TEST_BIN="$(find "${REPO_ROOT}/target/debug/deps" -maxdepth 1 -name 'lvm_real-*' -type f -executable 2>/dev/null | sort | tail -1)"
+TEST_BIN="$(find "${REPO_ROOT}/target/debug/deps" -maxdepth 1 -name 'lvm_real-*' -type f -executable -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
 [ -n "$TEST_BIN" ] || qual_die "could not locate the lvm_real test binary under target/debug/deps"
 qual_info "test binary: ${TEST_BIN}"
 
@@ -779,16 +807,29 @@ qual_info "test binary: ${TEST_BIN}"
 # is idempotent and best-effort (nothing here can touch host LVM state:
 # the VG name is uniquely ours).
 LVM_BACKING="${QUAL_TEST_DIR}/m45-lvm-backing.img"
+LVM_LOOP=""
+# Idempotent, best-effort cleanup — safe on ANY exit path and safe to run
+# twice. Nothing here can touch host LVM state: the VG name is uniquely
+# ours (see the LVM_VG comment above).
 lvm_leg_cleanup() {
     vgremove -f "${LVM_VG}" >/dev/null 2>&1 || true
-    losetup -d "${LVM_LOOP}" >/dev/null 2>&1 || true
+    [ -n "${LVM_LOOP}" ] && losetup -d "${LVM_LOOP}" >/dev/null 2>&1 || true
     rm -f "${LVM_BACKING}" 2>/dev/null || true
-    exit 1
 }
+# From backing-file creation until the explicit teardown below, ANY exit —
+# a provisioning qual_die (no free loop, pvcreate/vgcreate failure), an
+# INT/TERM, or a later failure — must not leak the backing file, loop
+# device, or a half-built VG. The EXIT trap owns cleanup on every exit
+# path; INT/TERM route through `exit 1` so it fires exactly once.
+# (Comprehensive-review follow-up: the previous INT/TERM-only trap missed
+# the qual_die provisioning failures — exactly where residue is created,
+# and a half-failed vgcreate left the FIXED VG name behind, poisoning the
+# next run's vgcreate.)
+trap lvm_leg_cleanup EXIT
+trap 'exit 1' INT TERM
 truncate -s "${LVM_BACKING_MB}M" "$LVM_BACKING"
 LVM_LOOP="$(losetup -f --show "$LVM_BACKING")"
 [ -n "$LVM_LOOP" ] || qual_die "no free loop device"
-trap lvm_leg_cleanup INT TERM
 pvcreate -f "$LVM_LOOP" >/dev/null 2>&1 || qual_die "pvcreate failed"
 vgcreate "$LVM_VG" "$LVM_LOOP" >/dev/null 2>&1 || qual_die "vgcreate failed"
 qual_pass "loopback VG provisioned: ${LVM_LOOP} → ${LVM_VG} ($(vgs "$LVM_VG" --noheadings -o vg_size 2>/dev/null | tr -d ' '))"
@@ -814,7 +855,7 @@ vgremove -f "$LVM_VG" >/dev/null 2>&1 || qual_error "vgremove failed"
 pvremove "$LVM_LOOP" >/dev/null 2>&1 || qual_error "pvremove failed"
 losetup -d "$LVM_LOOP" 2>/dev/null || qual_error "losetup -d failed"
 rm -f "$LVM_BACKING"
-trap - INT TERM   # explicit teardown done — interrupts no longer need the LVM cleanup
+trap - INT TERM EXIT   # explicit teardown done — no exit path needs the LVM cleanup anymore
 
 [ -z "$(vgs --noheadings -o vg_name 2>/dev/null | grep -x "$LVM_VG")" ] \
     && qual_pass "no VG residue (${LVM_VG} removed)" \
