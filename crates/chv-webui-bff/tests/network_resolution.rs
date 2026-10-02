@@ -320,6 +320,75 @@ async fn seed_network_row(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn network_create_defaults_absent_gateway() {
+    // N6 (M4.4 re-qualification): a network created WITHOUT a gateway must
+    // default to the cidr's first usable host — the same default the
+    // vm-create implicit-network fallback always carried. A NULL gateway
+    // dispatches `gateway: ""` in the VM spec, and nwd's ensure then skips
+    // both the bridge's L3 address and dnsmasq: VMs attach to an L2-only
+    // bridge with no connectivity and no DHCP.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+
+    // Absent gateway → defaulted to the cidr's .1 (persisted, and visible
+    // in the create response's detail).
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/create",
+        &token,
+        r#"{"name":"tenant-gw","cidr":"10.77.0.0/24"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create body: {body}");
+    let net_id = body["network_id"].as_str().expect("network_id").to_string();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT gateway FROM network_desired_state WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("query gateway");
+    assert_eq!(stored.as_deref(), Some("10.77.0.1"));
+
+    // Explicit gateway → kept verbatim.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/create",
+        &token,
+        r#"{"name":"tenant-explicit","cidr":"10.78.0.0/24","gateway":"10.78.0.254"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create body: {body}");
+    let net_id = body["network_id"].as_str().expect("network_id").to_string();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT gateway FROM network_desired_state WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("query gateway");
+    assert_eq!(stored.as_deref(), Some("10.78.0.254"));
+
+    // Explicit EMPTY gateway → an operator's deliberate L2-only choice,
+    // kept empty (never silently defaulted).
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/create",
+        &token,
+        r#"{"name":"tenant-l2","cidr":"10.79.0.0/24","gateway":""}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create body: {body}");
+    let net_id = body["network_id"].as_str().expect("network_id").to_string();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT gateway FROM network_desired_state WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("query gateway");
+    assert_eq!(stored.as_deref(), Some(""));
+}
+
+#[tokio::test]
 async fn vm_create_resolves_network_by_display_name() {
     let state = build_state().await;
     let token = seed_jwt(&state).await;

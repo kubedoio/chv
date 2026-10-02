@@ -179,7 +179,15 @@ impl CloudHypervisorCoreRuntime {
     }
 
     /// Map an effector error to the closed public-safe [`RuntimeFailure`] set.
+    ///
+    /// The mapping is also the LAST place the underlying reason exists —
+    /// the journal persists only the public-safe code, so a terminally
+    /// failed operation would otherwise be SILENT in the agent log (the
+    /// M4.4 re-qualification spent a full forensic session on exactly
+    /// that: a create failed RUNTIME_UNAVAILABLE with zero log lines).
+    /// Log the reason here, at warn, before dropping it.
     fn map_err(e: ChvError) -> RuntimeFailure {
+        warn!(error = ?e, "vm runtime effector failed; mapping to public-safe failure code");
         match e {
             ChvError::NotFound { .. } => RuntimeFailure::NotFound,
             ChvError::AlreadyExists { .. } | ChvError::Conflict { .. } => RuntimeFailure::Conflict,
