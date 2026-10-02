@@ -317,4 +317,19 @@ spec matches the qualified reality.
   Open follow-ups: #368 (transient effector failure terminally wedges
   a journaled create — no re-drive) and #355's UI store unification.
   See [m4.4-network.md](m4.4-network.md) §7.
-- M4.5–M4.9: not started.
+- **M4.5 — storage qualification: COMPLETE** (scenario PR #382, squash
+  `1463e5d6`; evidence [m4.5-storage.md](m4.5-storage.md)). Final run
+  (binaries `1e1c7222` = #382 content): **94 passes, 0 errors, 2 warnings
+  (both Leg E's deliberate M2.5-retention records), rc=0**; host-safety
+  (loop/LV/VG residue) all-green on the same build. The milestone found and
+  fixed three product defects — all-digit VM ids crash cloud-init's NoCloud
+  datasource (#374/#375), the supervisor-respawned stord silently loses its
+  path confinement and relocates runtime_dir (#376/#377), and volume clone
+  could never succeed because the target volume row was never created
+  (#380/#381) — and recorded two boundaries as issues: snapshot/clone
+  accepted-then-fails-closed on core-managed nodes (#378, 600 s retry UX
+  gap) and LVM unreachable from the VM lifecycle (#379, design decision;
+  LVM is qualified at the stord layer only, 7/7 root-gated real-LVM tests).
+  Open follow-ups carried: #368, #355, plus #378/#379/#380 residuals noted
+  in the evidence doc.
+- M4.6–M4.9: not started.
