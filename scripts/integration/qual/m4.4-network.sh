@@ -47,6 +47,17 @@
 # operator's network. The legs are written to be truthful against BOTH
 # builds — the N1 legs (A, F) flip from warn to pass once #354 ships.
 #
+# Post-fix flips (re-qualification): all four recorded defects are FIXED
+# on main — N1 (#354, PR #358), N2 (#355 part 1, PR #361: the policy
+# snapshot rides the VM spec and the Core executor applies it at attach
+# time — Leg B's response carries policy_application=pending, and the
+# table materializes on the NEXT VM spec dispatch, observed in Leg C),
+# N4 (#356 part 1, PR #359), N5 (#356 part 2, PR #362: last-detach host
+# teardown fires on the VM delete of the network's last user — Leg E's
+# residue check should find nothing). The warn branches below remain
+# for truth against the frozen candidate; a post-fix build must flip
+# them to passes.
+#
 # Non-claims (inherited from prompt 01, restated): coexistence with
 # Kubernetes/CNI, Docker-forwarded traffic, or multiple bridge-owning
 # network stacks is NOT claimed. Single node, single default bridge
@@ -448,10 +459,26 @@ FWRULES_AFTER_B="$(net_field "$VM1_NET" firewall_rules_json)"
     && qual_pass "firewall_rules persisted to CP DB (generation ${GEN_BEFORE_B} → ${GEN_AFTER_B})" \
     || qual_error "firewall_rules NOT persisted to the CP DB"
 
-# Observation window for a (nonexistent) dispatch to reach the node.
+# Observation window: on post-#355 main the table is EXPECTED to be
+# unchanged here — the update alone dispatches nothing; the response
+# says so honestly (policy_application=pending, applied at the next VM
+# spec dispatch). The dispatch observation happens in Leg C (vm-2's
+# create is the first dispatch after this update). On the frozen
+# candidate the table is unchanged because no policy path exists at
+# all (defect N2).
 sleep "$POLICY_DISPATCH_WAIT"
 NFT_AFTER_B="$(nft list table inet "$VM1_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
-if [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
+POLICY_NOTE_B="$(python3 -c \
+    "import json; print(json.load(open('${EVIDENCE_DIR}/bff-update-leg-b.json')).get('policy_application', ''))" \
+    2>/dev/null || true)"
+if [ -n "$POLICY_NOTE_B" ]; then
+    qual_pass "update honestly reports pending application (post-#355): ${POLICY_NOTE_B}"
+    if [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
+        qual_pass "nft table unchanged until the next dispatch (by design)"
+    else
+        qual_warn "nft table changed ${POLICY_DISPATCH_WAIT}s after the update with no dispatch (unexpected on post-#355 main)"
+    fi
+elif [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
     qual_warn "nft table UNCHANGED ${POLICY_DISPATCH_WAIT}s after the accepted update — no operator-reachable policy path in the candidate (defect N2, issue filed; policy allow/deny proven at the nwd layer by host-safety.sh)"
 else
     qual_pass "nft table changed after the update (dispatch observed)"
@@ -524,6 +551,25 @@ VM2_TAP="$(tap_of "$VM2_ID")"
 ping_ok "$VM2_IP" \
     && qual_pass "host → guest-2 connectivity (${VM2_IP})" \
     || qual_error "FORBIDDEN: host → guest-2 ping FAILED for ${VM2_IP}"
+
+# N2 flip (#355 part 1): vm-2's create is the first VM spec DISPATCH
+# after Leg B's firewall_rules update. On post-#355 main the policy
+# snapshot travels with the spec and the Core executor applies it via
+# nwd between topology-ensure and NIC attach — the table gains the
+# default-deny + operator chains HERE (it stayed bare at vm-1's create
+# because no rules existed yet, and through Leg B because an update
+# alone dispatches nothing). On the frozen candidate it stays bare
+# (defect N2). Assert the operator's rule is verbatim in the table,
+# not just that chains exist.
+VM2_CHAINS_C="$(nft_table_chain_count "$VM1_NFT_TABLE")"
+nft list table inet "$VM1_NFT_TABLE" > "${EVIDENCE_DIR}/nft-${VM1_NET}-leg-c.txt" 2>/dev/null || true
+if [ "$VM2_CHAINS_C" -gt 0 ] && grep -q "icmp" "${EVIDENCE_DIR}/nft-${VM1_NET}-leg-c.txt" 2>/dev/null; then
+    qual_pass "attach-time policy materialized on the next dispatch (vm-2 create): ${VM2_CHAINS_C} chain(s), operator icmp rule present in inet ${VM1_NFT_TABLE}"
+elif [ "$VM2_CHAINS_C" -gt 0 ]; then
+    qual_warn "nft table gained ${VM2_CHAINS_C} chain(s) on the dispatch but the operator icmp rule is not verbatim (partial policy application?)"
+else
+    qual_warn "nft table still BARE after a post-update VM dispatch — attach-time policy path absent (defect N2, issue filed)"
+fi
 save_evidence "leg-c-after-nwd-restart"
 
 # ---------------------------------------------------------------------------
@@ -665,7 +711,29 @@ else
     qual_error "FORBIDDEN: taps remain 30s after vm deletes: $(echo "$LEFTOVER_TAPS" | tr '\n' ' ')"
 fi
 
+# N5 flip (#356 part 2 / PR #362): the last-detach host teardown fires on
+# the VM DELETE of the network's last user — vm-2's delete here (vm-3 is
+# on the second network). On post-#362 main the bridge, nft table, and
+# dnsmasq for VM1_NET are demolished by now; on the frozen candidate
+# they persist until the deploy teardown (defect N5). The Core store
+# gates the decision (no other VM on the node uses the network), so this
+# is also the negative-proof: nothing tears down while a VM is still
+# attached (Leg D's stop/start above already exercised that window).
+LAST_DETACH_RESIDUE=""
+[ -n "$(bridge_addr "$VM1_BRIDGE")" ] && LAST_DETACH_RESIDUE="${LAST_DETACH_RESIDUE} bridge:${VM1_BRIDGE}"
+nft list table inet "$VM1_NFT_TABLE" >/dev/null 2>&1 && LAST_DETACH_RESIDUE="${LAST_DETACH_RESIDUE} nft:${VM1_NFT_TABLE}"
+nwd_dnsmasq_running "$VM1_NET" && LAST_DETACH_RESIDUE="${LAST_DETACH_RESIDUE} dnsmasq:${VM1_NET}"
+if [ -z "$LAST_DETACH_RESIDUE" ]; then
+    qual_pass "last-detach teardown fired on the last VM delete (post-#362): no host state for ${VM1_NET}"
+else
+    qual_warn "DEFECT N5 (issue filed): last VM deleted but host state remains (${LAST_DETACH_RESIDUE}) — no node teardown on vm delete"
+fi
+save_evidence "leg-e-after-vm-deletes"
+
 # N4: orphaned nic rows block network delete even with all VMs deleted.
+# Fixed on main (#356 part 1, PR #359): vm delete removes its nic rows,
+# so this delete should take the CLEAN branch on a post-#359 build. The
+# escape below remains for the frozen candidate.
 # Known candidate defect (issue filed): recorded as a WARNING. The delete
 # target is the network vm-1 actually sat on (VM1_NET): 'default' on the
 # frozen candidate, the operator's resolved network on post-#354 main —
@@ -702,7 +770,9 @@ else
     qual_pass "network delete did not hit the orphaned-rows block (rc=${RC}: ${DEL_OUT})"
 fi
 
-# N5: the successful delete must leave NO host state; the candidate
+# N5: the successful delete must leave NO host state. Post-#362 main the
+# teardown already fired at the last VM delete (asserted above); this is
+# the end-state gate after the network delete itself. The candidate
 # leaves everything (DB-only delete).
 sleep 3
 RESIDUE=""
