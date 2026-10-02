@@ -448,10 +448,20 @@ TOKEN="$(bff_token)"
 # validates firewall_rules at save time and rejects the UI-era dialect
 # (ingress/allow/source) that used to ride the spec verbatim and brick
 # the next VM create at attach time (N7).
+#
+# Direction semantics (nwd firewall.rs, proven by the run-3 post-mortem):
+# 'inbound' rules land in chv-policy-in/chv-policy-fwd and match traffic
+# FROM the guest arriving on the tap; the host's ping REQUESTS leave via
+# the tap (OUTPUT path → chv-policy-out), which default-denies without an
+# 'outbound' rule — an inbound-only ruleset therefore cuts host→guest
+# pings (12 dropped requests observed in the run-3 nft dump counters).
+# Conntrack established/related accept sits at each chain head, so
+# replies to allowed flows always pass. The truthful "icmp works between
+# host and guests" ruleset needs BOTH directions, scoped to the subnet.
 HTTP_CODE="$(curl -s -o "${EVIDENCE_DIR}/bff-update-leg-b.json" -w '%{http_code}' \
     -X POST "${QUAL_BFF_URL}/v1/networks/update" \
     -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-    -d '{"network_id":"'"$VM1_NET"'","firewall_rules":[{"direction":"inbound","action":"accept","protocol":"icmp","source_cidr":"'"$QUAL_NETWORK_CIDR"'"}]}')"
+    -d '{"network_id":"'"$VM1_NET"'","firewall_rules":[{"direction":"inbound","action":"accept","protocol":"icmp","source_cidr":"'"$QUAL_NETWORK_CIDR"'"},{"direction":"outbound","action":"accept","protocol":"icmp","source_cidr":"'"$QUAL_NETWORK_CIDR"'"}]}')"
 [ "$HTTP_CODE" = "200" ] \
     && qual_pass "BFF accepted the firewall_rules update (HTTP ${HTTP_CODE})" \
     || qual_error "BFF networks/update failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-update-leg-b.json")"
