@@ -1248,6 +1248,64 @@ async fn failed_delete_never_tears_down_network_topology() {
 }
 
 #[tokio::test]
+async fn sibling_failed_delete_vetoes_last_detach_teardown() {
+    // The store tombstones a VM at DeleteVm ACCEPT time, so a sibling whose
+    // delete then FAILED (retry pending, VMM still running, taps still
+    // enslaved on the shared bridge) is invisible to the durable usage
+    // authority. Its retained side-effects entry must VETO this VM's
+    // teardown — otherwise a successful delete here would tear the bridge
+    // out from under the failed-delete VM's live VMM.
+    let usage = TestNetworkUsage::new(&[("vm-a", "net-0"), ("vm-b", "net-0")]);
+    let h = harness_with_usage(usage.clone());
+    create_for_delete_tests(&h, "vm-a", "op-create-a").await;
+    create_for_delete_tests(&h, "vm-b", "op-create-b").await;
+
+    // vm-a's delete is accepted (the authority tombstones it) but the
+    // effector FAILS: the runtime retains vm-a's entry for the retry.
+    usage.tombstone("vm-a");
+    *h.adapter.fail_delete.lock().unwrap() = true;
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            "vm-a",
+            "op-del-a-fail",
+            envelope(MutationCommand::DeleteVm {
+                vm_id: VmId::new("vm-a").expect("vm id"),
+            }),
+        ))
+        .await;
+    assert!(result.is_err(), "vm-a's delete must fail: {result:?}");
+    *h.adapter.fail_delete.lock().unwrap() = false;
+
+    // vm-b deletes successfully. The authority now sees nobody on net-0
+    // (both tombstoned) — the in-session veto is the only guard left.
+    usage.tombstone("vm-b");
+    delete_for_delete_tests(&h, "vm-b", "op-del-b").await;
+    assert!(
+        !calls(&h.controller)
+            .iter()
+            .any(|c| c.starts_with("net_teardown:")),
+        "a sibling failed-delete's retained entry must veto the teardown: {:?}",
+        calls(&h.controller)
+    );
+
+    // Control: once the failed delete is retried successfully (its entry
+    // drains away), a subsequent last user WOULD tear down. Delete vm-a
+    // again successfully — net-0 is now truly unused.
+    delete_for_delete_tests(&h, "vm-a", "op-del-a-retry").await;
+    let teardowns: Vec<String> = calls(&h.controller)
+        .into_iter()
+        .filter(|c| c.starts_with("net_teardown:"))
+        .collect();
+    assert_eq!(
+        teardowns,
+        vec!["net_teardown:net-0".to_string()],
+        "after the failed delete's successful retry, the teardown must fire"
+    );
+}
+
+#[tokio::test]
 async fn delete_removes_side_effects_entry_after_success() {
     let h = harness(None);
     let vm_id = "vm-entries";

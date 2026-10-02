@@ -605,7 +605,44 @@ impl CloudHypervisorCoreRuntime {
         // best-effort with a loud warning for the same reason.
         if !keep_entry {
             for network_id in &effects.networks {
-                if self.network_usage.network_in_use(network_id, vm_id) {
+                // Durable authority first: does any live VM (other than the
+                // deleting one) still reference the network?
+                let in_use = {
+                    // The lookup does disk I/O + JSON parsing (the Core
+                    // store's VM list); keep it OFF the async worker.
+                    let lookup = self.network_usage.clone();
+                    let network = network_id.clone();
+                    let vm = vm_id.to_string();
+                    match tokio::task::spawn_blocking(move || lookup.network_in_use(&network, &vm))
+                        .await
+                    {
+                        Ok(in_use) => in_use,
+                        Err(join_error) => {
+                            // The lookup panicked (join failure): fail closed.
+                            warn!(
+                                vm_id,
+                                network_id,
+                                error = %join_error,
+                                "network-usage lookup task failed; treating the network as in use"
+                            );
+                            continue;
+                        }
+                    }
+                };
+                if in_use {
+                    continue;
+                }
+                // In-session veto (#356 review): the store tombstones a VM
+                // when its delete is ACCEPTED, so a sibling whose delete
+                // later FAILED (retry pending, VMM still running, taps
+                // still enslaved) is invisible to the lookup — and nwd
+                // deletes the bridge unconditionally. Failed deletes
+                // retain their side-effects entry for the retry, so any
+                // OTHER retained entry referencing the network vetoes the
+                // teardown. In-memory state only ever VETOES here, never
+                // authorizes: after a daemon restart the map is empty and
+                // this guard degrades to the durable store's answer.
+                if self.session_retains_network_user(network_id, vm_id) {
                     continue;
                 }
                 if let Err(e) = self
@@ -622,6 +659,32 @@ impl CloudHypervisorCoreRuntime {
                 }
             }
         }
+    }
+
+    /// In-session veto for last-detach teardown: true when any OTHER VM's
+    /// retained side-effects entry still references `network_id`.
+    ///
+    /// A failed delete keeps its entry (the retry needs the handles) while
+    /// the durable authority has already tombstoned the VM at accept — this
+    /// map is the only in-process signal that such a VM's host effects (VMM,
+    /// enslaved taps) are still live. Veto-only by design: an unreadable map
+    /// also vetoes (fail closed), and the map is NEVER used to authorize a
+    /// teardown — after a daemon restart it is empty and the decision
+    /// degrades to the durable store's answer. Residual, documented: a VM
+    /// tombstoned pre-restart whose delete then failed and whose VMM was
+    /// adopted after the restart is invisible to both authorities; its
+    /// network can be torn down by a sibling's successful delete.
+    fn session_retains_network_user(&self, network_id: &str, excluding_vm: &str) -> bool {
+        let Ok(map) = self.side_effects.lock() else {
+            warn!(
+                network_id,
+                "side-effects mutex poisoned during teardown veto check; vetoing teardown"
+            );
+            return true;
+        };
+        map.iter().any(|(vm, effects)| {
+            vm.as_str() != excluding_vm && effects.networks.iter().any(|n| n == network_id)
+        })
     }
 
     async fn delete_vm(

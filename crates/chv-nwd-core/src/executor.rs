@@ -1249,7 +1249,10 @@ impl NetworkExecutor for LinuxExecutor {
         // used when it ensured the topology), dnsmasq and the nft table
         // already keyed by `network_id`. Existence-gated and warn-only: a
         // network that never materialized on this node is a no-op, and a
-        // teardown failure is residue (loud), never an outage.
+        // teardown failure is residue (loud), never an outage. The nft
+        // lock mirrors the state-row path so a concurrent firewall apply
+        // cannot race the table delete.
+        let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %network_id,
             "deleting topology by derived names (no in-memory state row)"

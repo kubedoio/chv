@@ -483,8 +483,10 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             // SKIPPED — the restart residue the M4.4 qualification
             // observed. Every local name is derived deterministically
             // from the network id, so run the local teardown by derived
-            // names (existence-gated, warn-only) exactly like the fabric
-            // half's ownership-journal fallback above.
+            // names (existence-gated, warn-only), mirroring the fabric
+            // half's ownership-journal fallback above. Gated on fabric
+            // ownership being determinable: an ownership error above
+            // returns first (fail closed, residue stays observable).
             self.executor
                 .delete_local_topology_by_derived_names(&req.network_id)
                 .await;

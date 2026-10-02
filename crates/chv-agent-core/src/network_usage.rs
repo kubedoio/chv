@@ -41,22 +41,44 @@ impl CoreStoreNetworkUsage {
 impl NetworkUsageLookup for CoreStoreNetworkUsage {
     fn network_in_use(&self, network_id: &str, excluding_vm: &str) -> bool {
         // Fail CLOSED on any read error: a skipped teardown leaves
-        // observable residue; a wrong teardown causes an outage.
-        let vms = match self.store.lock().expect("store lock").list_vms() {
-            Ok(vms) => vms,
-            Err(error) => {
+        // observable residue; a wrong teardown causes an outage. A poisoned
+        // mutex likewise reports in-use instead of panicking — this runs on
+        // a blocking-pool thread whose panic would take the executor down.
+        let vms = match self.store.lock() {
+            Ok(store) => match store.list_vms() {
+                Ok(vms) => vms,
+                Err(error) => {
+                    warn!(
+                        network_id,
+                        excluding_vm,
+                        %error,
+                        "network-usage lookup failed; treating the network as in use (fail closed)"
+                    );
+                    return true;
+                }
+            },
+            Err(poisoned) => {
                 warn!(
                     network_id,
                     excluding_vm,
-                    %error,
-                    "network-usage lookup failed; treating the network as in use (fail closed)"
+                    error = %poisoned,
+                    "network-usage store lock poisoned; treating the network as in use (fail closed)"
                 );
                 return true;
             }
         };
-        // `excluding_vm` is required by construction: the journal executor
-        // runs the DeleteVm effector BEFORE the store applies the
-        // tombstone, so the deleting VM itself is still listed here.
+        // Tombstone ordering (verified in cellhv-core-store): the store
+        // applies a DeleteVm's tombstone when the operation is ACCEPTED —
+        // BEFORE the effector runs — so the deleting VM is already absent
+        // from `list_vms()` here and `excluding_vm` is belt-and-braces.
+        // Correctness of last-detach therefore DEPENDS on tombstone-at-
+        // accept: if the ordering ever changed to tombstone-at-finish, the
+        // deleting VM would be listed during its own drain and teardown
+        // would silently stop firing (fail-closed degradation, no outage).
+        // The flip side — a VM whose delete was accepted and then FAILED
+        // is also absent (tombstoned) while its VMM may still run — is
+        // why the runtime gates teardown on the delete's success and adds
+        // an in-session retained-entry veto; see core_runtime.rs.
         vms.iter().any(|vm| {
             vm.id.as_str() != excluding_vm
                 && vm
