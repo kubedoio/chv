@@ -63,6 +63,25 @@ pub fn fnv1a_hash(input: &str) -> u64 {
     hash
 }
 
+/// Is a firewall policy snapshot semantically EMPTY (#355)? True for a
+/// blank string or a JSON array with only whitespace between the
+/// brackets (hand-rolled to keep this crate serde-free). Empty policies
+/// are never applied: nwd's engine engages default-deny even for an
+/// empty ruleset, which would cut a rule-less network's guests off
+/// entirely (including DHCP). Anything else — including unparseable
+/// text — is NOT empty: it flows to nwd, whose validation fails loudly
+/// on garbage instead of silently dropping the operator's config.
+pub fn firewall_ruleset_is_empty(policy_json: &str) -> bool {
+    let trimmed = policy_json.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    match trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(inner) => inner.chars().all(char::is_whitespace),
+        None => false,
+    }
+}
+
 /// Validate that `id` contains only lowercase hex characters (a-f, 0-9).
 /// Returns `true` if the id is non-empty and matches `^[a-f0-9]+$`.
 pub fn validate_id(id: &str) -> bool {
@@ -98,6 +117,34 @@ pub fn is_safe_path_component(component: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firewall_ruleset_is_empty_matches_blank_and_empty_arrays() {
+        // #355: blank strings and empty JSON arrays are semantically
+        // empty — they must never engage default-deny-with-no-allows.
+        for empty in ["", "   ", "\n", "[]", "[ ]", "[\n\t]"] {
+            assert!(
+                firewall_ruleset_is_empty(empty),
+                "{empty:?} must be treated as empty"
+            );
+        }
+        // Real rules, whitespace-only strings inside brackets, non-array
+        // shapes, and garbage are NOT empty — they flow to nwd, whose
+        // validation fails loudly on garbage instead of silently dropping
+        // the operator's config.
+        for non_empty in [
+            r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#,
+            "[{}]",
+            "null",
+            "{",
+            "allow-all",
+        ] {
+            assert!(
+                !firewall_ruleset_is_empty(non_empty),
+                "{non_empty:?} must NOT be treated as empty"
+            );
+        }
+    }
 
     #[test]
     fn gen_short_id_is_8_hex_chars() {

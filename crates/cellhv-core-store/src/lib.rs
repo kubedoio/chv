@@ -3365,6 +3365,7 @@ mod tests {
                 network_ref: "network-1".to_owned(),
                 mac_address: None,
                 addressing: None,
+                firewall_policy_json: None,
             }],
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,

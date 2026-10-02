@@ -478,9 +478,12 @@ pub async fn update_network(
     let exists =
         sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
             .bind(&network_id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+    // Release the pooled connection before opening the write transaction —
+    // single-connection pools (tests) would otherwise deadlock the begin().
+    drop(conn);
 
     if exists.is_none() {
         return Err(BffError::NotFound(format!(
@@ -580,12 +583,30 @@ pub async fn update_network(
 
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
-    get_network(
+    let Json(mut detail) = get_network(
         BearerToken(claims),
         State(state),
         axum::Json(json!({ "network_id": network_id })),
     )
-    .await
+    .await?;
+    // Honest reporting (#355): firewall policy travels with the VM spec
+    // and the Core executor applies it at ATTACH time (default-deny plus
+    // these rules). The DB update alone does not reach an
+    // already-materialized network — say so instead of implying the
+    // rules are live on the node.
+    if firewall_rules_json.is_some() {
+        if let Some(obj) = detail.as_object_mut() {
+            obj.insert(
+                "policy_application".to_string(),
+                json!(
+                    "pending: applied when a VM spec is next dispatched to a node \
+                     (VM create or spec update); already-attached VMs are not \
+                     re-policyed until then"
+                ),
+            );
+        }
+    }
+    Ok(Json(detail))
 }
 
 /// Check if the user is the owner of a network or an admin.

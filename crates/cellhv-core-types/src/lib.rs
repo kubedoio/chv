@@ -420,6 +420,15 @@ pub struct NetworkAttachmentRef {
     /// Per-NIC addressing for networks with control-plane-assigned addresses
     /// (internal IPAM). Absent means the executor's topology defaults apply.
     pub addressing: Option<NicAddressing>,
+    /// Operator-configured firewall policy for the network — the
+    /// `network_desired_state.firewall_rules_json` snapshot taken when the
+    /// control plane built this spec (#355). The executor applies it via nwd
+    /// after the network's topology is ensured, so default-deny + the
+    /// operator's rules materialize when a network is used. Absent (or empty)
+    /// keeps the bare-table behavior: nwd's policy engine engages
+    /// default-deny even for an empty ruleset, which would cut a rule-less
+    /// network's guests off entirely (including DHCP).
+    pub firewall_policy_json: Option<String>,
 }
 
 /// Addressing assigned by the control plane for one NIC: the VM's address in
@@ -458,6 +467,8 @@ struct RawNetworkAttachmentRef {
     mac_address: Option<String>,
     #[serde(default)]
     addressing: Option<NicAddressing>,
+    #[serde(default)]
+    firewall_policy_json: Option<String>,
 }
 
 impl TryFrom<RawNetworkAttachmentRef> for NetworkAttachmentRef {
@@ -469,6 +480,10 @@ impl TryFrom<RawNetworkAttachmentRef> for NetworkAttachmentRef {
             network_ref: raw.network_ref,
             mac_address: raw.mac_address,
             addressing: raw.addressing,
+            // An empty (or whitespace) policy is semantically absent —
+            // normalize here so the durable definition never carries
+            // Some("") sentinel values.
+            firewall_policy_json: raw.firewall_policy_json.filter(|p| !p.trim().is_empty()),
         };
         value.validate()?;
         Ok(value)
@@ -1076,6 +1091,7 @@ mod tests {
                     cidr: "10.200.0.0/24".to_string(),
                     gateway: "10.200.0.1".to_string(),
                 }),
+                firewall_policy_json: None,
             }],
             requested_power_state: RequestedPowerState::Stopped,
             observed_power_state: ObservedPowerState::Unknown,
@@ -1286,6 +1302,7 @@ mod tests {
             network_ref: "network".to_owned(),
             mac_address: None,
             addressing: None,
+            firewall_policy_json: None,
         });
         assert!(definition.validate().is_err());
         assert!(
@@ -1372,6 +1389,54 @@ mod tests {
                 "accepted path-unsafe network value at {pointer}: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn network_attachment_policy_snapshot_roundtrip_and_normalization() {
+        // #355: the firewall policy snapshot rides on the attachment.
+        // Absent must keep parsing (old journal entries), an empty string
+        // normalizes to None (no Some("") sentinels in durable state),
+        // and a real snapshot round-trips verbatim.
+        let base = serde_json::json!({
+            "id": "vm-1", "name": "test",
+            "boot": {"kernel": "kernel-ref", "firmware": null, "initial_disk": null},
+            "compute": {"vcpus": 2, "memory_bytes": 1024},
+            "storage": [], "requested_power_state": "stopped",
+            "observed_power_state": "unknown", "resource_version": 1,
+            "networks": [{"attachment_id": "nic-0", "network_ref": "network-1", "mac_address": null}]
+        });
+
+        // Absent (pre-#355 journal entries) → None.
+        let parsed = serde_json::from_value::<VmDefinition>(base.clone())
+            .expect("old journal shape must still parse");
+        assert_eq!(parsed.networks[0].firewall_policy_json, None);
+
+        // Empty / whitespace-only → normalized to None.
+        for empty in ["", "   "] {
+            let mut candidate = base.clone();
+            candidate["networks"][0]["firewall_policy_json"] = serde_json::json!(empty);
+            let parsed =
+                serde_json::from_value::<VmDefinition>(candidate).expect("empty policy must parse");
+            assert_eq!(
+                parsed.networks[0].firewall_policy_json, None,
+                "empty policy must normalize to None"
+            );
+        }
+
+        // A real snapshot round-trips verbatim.
+        let policy = r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+        let mut candidate = base.clone();
+        candidate["networks"][0]["firewall_policy_json"] = serde_json::json!(policy);
+        let parsed = serde_json::from_value::<VmDefinition>(candidate).expect("policy must parse");
+        assert_eq!(
+            parsed.networks[0].firewall_policy_json.as_deref(),
+            Some(policy)
+        );
+        let reserialized = serde_json::to_value(&parsed).expect("serialize back");
+        assert_eq!(
+            reserialized["networks"][0]["firewall_policy_json"],
+            serde_json::json!(policy)
+        );
     }
 
     #[test]

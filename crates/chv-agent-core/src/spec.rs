@@ -48,6 +48,12 @@ pub struct NicSpec {
     pub cidr: String,
     #[serde(default)]
     pub gateway: String,
+    /// Operator-configured firewall policy for the network (the CP's
+    /// `firewall_rules_json` snapshot). Applied by the Core executor at
+    /// attach time when non-empty (#355); absent keeps the bare-table
+    /// behavior.
+    #[serde(default)]
+    pub firewall_policy_json: Option<String>,
 }
 
 impl VmSpec {
@@ -171,6 +177,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_vm_spec_nic_firewall_policy_snapshot() {
+        // #355: the CP attaches the network's firewall_rules_json to the
+        // nic spec; it must deserialize (absent → None for pre-#355
+        // specs).
+        let with_policy = r#"{
+            "name": "test-vm",
+            "cpus": 1,
+            "memory_bytes": 512,
+            "kernel_path": "/var/lib/chv/vmlinux",
+            "disks": [],
+            "nics": [
+                {
+                    "network_id": "net-1",
+                    "mac_address": "aa:bb:cc:dd:ee:ff",
+                    "ip_address": "10.0.0.2",
+                    "firewall_policy_json": "[{\"direction\":\"inbound\",\"action\":\"accept\",\"protocol\":\"icmp\"}]"
+                }
+            ]
+        }"#;
+        let spec = VmSpec::from_json(with_policy).unwrap();
+        assert_eq!(
+            spec.nics[0].firewall_policy_json.as_deref(),
+            Some("[{\"direction\":\"inbound\",\"action\":\"accept\",\"protocol\":\"icmp\"}]")
+        );
+        assert!(spec.validate().is_ok());
+
+        let without_policy = with_policy.replace(
+            ",\n                    \"firewall_policy_json\": \"[{\\\"direction\\\":\\\"inbound\\\",\\\"action\\\":\\\"accept\\\",\\\"protocol\\\":\\\"icmp\\\"}]\"",
+            "",
+        );
+        let spec = VmSpec::from_json(&without_policy).unwrap();
+        assert_eq!(spec.nics[0].firewall_policy_json, None);
+    }
+
+    #[test]
     fn reject_zero_cpus() {
         let spec = VmSpec {
             name: "test".to_string(),
@@ -231,6 +272,7 @@ mod tests {
                 tap_name: "tap0".to_string(),
                 cidr: "".to_string(),
                 gateway: "".to_string(),
+                firewall_policy_json: None,
             }],
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,

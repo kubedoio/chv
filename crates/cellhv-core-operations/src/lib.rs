@@ -1238,6 +1238,7 @@ mod tests {
                 network_ref: "network-1".to_owned(),
                 mac_address: None,
                 addressing: None,
+                firewall_policy_json: None,
             },
         };
         let err = service

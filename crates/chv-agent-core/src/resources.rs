@@ -116,6 +116,24 @@ impl HostResourceController for AgentResourceController {
             .await
     }
 
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: &[u8],
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let mut client = NwdClient::connect(&self.nwd_socket).await?;
+        client
+            .set_firewall_policy(
+                network_id,
+                policy_version,
+                policy_json.to_vec(),
+                operation_id,
+            )
+            .await
+    }
+
     async fn attach_vm_nic(
         &self,
         nic_id: &str,

@@ -233,6 +233,10 @@ fn convert_vm(
             network_ref: nic.network_id,
             mac_address: Some(nic.mac_address),
             addressing,
+            // Legacy nodecache entries carry no policy snapshot —
+            // attach-time policy application (#355) applies only to specs
+            // dispatched after the field existed.
+            firewall_policy_json: None,
         });
     }
     validate_attachment_projection(id, &storage, &networks, observed)?;

@@ -860,6 +860,7 @@ mod tests {
                 network_ref: "net-0".to_string(),
                 mac_address: Some("02:00:00:00:00:01".to_string()),
                 addressing: None,
+                firewall_policy_json: None,
             }],
             requested_power_state: RequestedPowerState::Running,
             observed_power_state: ObservedPowerState::Unknown,
@@ -928,12 +929,14 @@ mod tests {
                 network_ref: "net-0".to_string(),
                 mac_address: None,
                 addressing: None,
+                firewall_policy_json: None,
             },
             NetworkAttachmentRef {
                 attachment_id: "nic-1".to_string(),
                 network_ref: "net-0".to_string(),
                 mac_address: None,
                 addressing: None,
+                firewall_policy_json: None,
             },
         ];
         let mut cache = NodeCache::new("node-1");
@@ -979,6 +982,7 @@ mod tests {
                 cidr: "10.200.0.0/24".to_string(),
                 gateway: "10.200.0.1".to_string(),
             }),
+            firewall_policy_json: None,
         }];
         def.cloud_init_userdata = Some("#cloud-config".to_string());
         def.hypervisor_tuning = Some(cellhv_core_types::HypervisorTuning {
@@ -1048,6 +1052,7 @@ mod tests {
             network_ref: "net-1".to_string(),
             mac_address: None,
             addressing: None,
+            firewall_policy_json: None,
         }];
         let mut cache = NodeCache::new("node-1");
         cache.project_vm(&def, "core-rebuild".to_string(), "core".to_string());
