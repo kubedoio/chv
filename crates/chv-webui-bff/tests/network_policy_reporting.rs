@@ -395,6 +395,157 @@ async fn update_network_rejects_non_array_firewall_rules() {
 }
 
 #[tokio::test]
+async fn update_network_rejects_ui_dialect_and_malformed_rules() {
+    // N7's trigger (M4.4 re-qualification, #368): a rule authored in the
+    // UI-era dialect — `direction: "ingress"`, `action: "allow"`, the
+    // `source` field — was persisted verbatim, rode the VM spec (#355),
+    // passed `set_firewall_policy`, and then detonated in nwd's
+    // attach-time policy-guard refresh: the VM create failed
+    // RUNTIME_UNAVAILABLE with no operator-visible cause. The engine
+    // vocabulary is the contract; every dialect or malformed shape is
+    // rejected at the API boundary with a message that teaches the
+    // mapping.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    // (label, rule JSON, substring the 400 must contain)
+    let bad_rules: &[(&str, &str, &str)] = &[
+        (
+            "UI dialect direction",
+            r#"{"direction":"ingress","action":"accept","protocol":"icmp"}"#,
+            "ingress",
+        ),
+        (
+            "UI dialect action",
+            r#"{"direction":"inbound","action":"allow","protocol":"icmp"}"#,
+            "allow",
+        ),
+        (
+            "UI dialect source field",
+            r#"{"direction":"inbound","action":"accept","protocol":"icmp","source":"10.99.0.0/24"}"#,
+            "source",
+        ),
+        (
+            "UI dialect port field",
+            r#"{"direction":"inbound","action":"accept","protocol":"tcp","port_range":"8080-8090"}"#,
+            "port_range",
+        ),
+        (
+            "unknown protocol",
+            r#"{"direction":"inbound","action":"accept","protocol":"gre"}"#,
+            "protocol",
+        ),
+        (
+            "missing action",
+            r#"{"direction":"inbound","protocol":"icmp"}"#,
+            "action",
+        ),
+        (
+            "malformed source cidr",
+            r#"{"direction":"inbound","action":"accept","protocol":"icmp","source_cidr":"10.99.0.0"}"#,
+            "source_cidr",
+        ),
+        (
+            "service-name port",
+            r#"{"direction":"inbound","action":"accept","protocol":"tcp","dest_port":"ssh"}"#,
+            "dest_port",
+        ),
+        ("non-object rule", r#""allow all""#, "must be an object"),
+    ];
+    for (label, rule, expected_fragment) in bad_rules {
+        let (status, body) = post_with_token(
+            state.clone(),
+            "/v1/networks/update",
+            &token,
+            &format!(r#"{{"network_id":"{net_id}","firewall_rules":[{rule}]}}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{label} must be rejected: {body}"
+        );
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected_fragment),
+            "{label} rejection must name the offender ({expected_fragment}): {body}"
+        );
+    }
+
+    // The create path shares the same gate.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/create",
+        &token,
+        r#"{"name":"tenant-b","cidr":"10.98.0.0/24","firewall_rules":[{"direction":"egress","action":"deny","protocol":"tcp"}]}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dialect rules must be rejected at create too: {body}"
+    );
+
+    // Nothing was stored by the rejected payloads.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT firewall_rules_json FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("query stored policy");
+    assert!(
+        stored.as_deref().unwrap_or("").is_empty(),
+        "rejected payloads must not persist: {stored:?}"
+    );
+}
+
+#[tokio::test]
+async fn update_network_accepts_full_engine_vocabulary() {
+    // The positive shape: every optional field, both directions, all
+    // port forms — accepted and persisted verbatim for the attach-time
+    // snapshot.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/update",
+        &token,
+        &format!(
+            r#"{{"network_id":"{net_id}","firewall_rules":[
+                {{"direction":"inbound","action":"accept","protocol":"tcp","source_cidr":"10.99.0.0/24","dest_port":"443"}},
+                {{"direction":"inbound","action":"accept","protocol":"udp","dest_port":"53"}},
+                {{"direction":"outbound","action":"drop","protocol":"all"}},
+                {{"direction":"outbound","action":"reject","protocol":"sctp","source_cidr":"fd00::/8","dest_port":"8080-8090"}}
+            ]}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update body: {body}");
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT firewall_rules_json FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("query stored policy");
+    let stored = stored.unwrap_or_default();
+    for fragment in ["\"443\"", "\"53\"", "fd00::/8", "8080-8090"] {
+        assert!(
+            stored.contains(fragment),
+            "engine-vocabulary rule field {fragment} must persist verbatim: {stored}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn update_network_without_policy_fields_carries_no_note() {
     let state = build_state().await;
     let token = seed_jwt(&state).await;

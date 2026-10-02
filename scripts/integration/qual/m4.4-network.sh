@@ -444,11 +444,14 @@ TOKEN="$(bff_token)"
 
 # The policy target is the network the VM actually sits on (VM1_NET):
 # 'default' on the frozen candidate, the operator's resolved network on
-# post-#354 main.
+# post-#354 main. The rule uses the ENGINE vocabulary (#368): the BFF
+# validates firewall_rules at save time and rejects the UI-era dialect
+# (ingress/allow/source) that used to ride the spec verbatim and brick
+# the next VM create at attach time (N7).
 HTTP_CODE="$(curl -s -o "${EVIDENCE_DIR}/bff-update-leg-b.json" -w '%{http_code}' \
     -X POST "${QUAL_BFF_URL}/v1/networks/update" \
     -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-    -d '{"network_id":"'"$VM1_NET"'","firewall_rules":[{"direction":"ingress","action":"allow","protocol":"icmp","source":"'"$QUAL_NETWORK_CIDR"'"}]}')"
+    -d '{"network_id":"'"$VM1_NET"'","firewall_rules":[{"direction":"inbound","action":"accept","protocol":"icmp","source_cidr":"'"$QUAL_NETWORK_CIDR"'"}]}')"
 [ "$HTTP_CODE" = "200" ] \
     && qual_pass "BFF accepted the firewall_rules update (HTTP ${HTTP_CODE})" \
     || qual_error "BFF networks/update failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-update-leg-b.json")"

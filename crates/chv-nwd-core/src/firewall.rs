@@ -12,9 +12,9 @@ pub struct FirewallRule {
     pub action: String,
 }
 
-const ALLOWED_PROTOCOLS: &[&str] = &["tcp", "udp", "icmp", "sctp", "all"];
-const ALLOWED_ACTIONS: &[&str] = &["accept", "drop", "reject"];
-const ALLOWED_DIRECTIONS: &[&str] = &["inbound", "outbound"];
+const ALLOWED_PROTOCOLS: &[&str] = chv_common::firewall::PROTOCOLS;
+const ALLOWED_ACTIONS: &[&str] = chv_common::firewall::ACTIONS;
+const ALLOWED_DIRECTIONS: &[&str] = chv_common::firewall::DIRECTIONS;
 
 fn validate_rule(rule: &FirewallRule) -> Result<(), ChvError> {
     if !ALLOWED_DIRECTIONS.contains(&rule.direction.as_str()) {
@@ -64,24 +64,11 @@ fn validate_rule(rule: &FirewallRule) -> Result<(), ChvError> {
 }
 
 fn is_valid_cidr(cidr: &str) -> bool {
-    let parts: Vec<&str> = cidr.splitn(2, '/').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    match parts[0].parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(_)) => parts[1].parse::<u8>().map(|p| p <= 32).unwrap_or(false),
-        Ok(std::net::IpAddr::V6(_)) => parts[1].parse::<u8>().map(|p| p <= 128).unwrap_or(false),
-        Err(_) => false,
-    }
+    chv_common::firewall::is_valid_cidr(cidr)
 }
 
 fn is_valid_port_spec(port: &str) -> bool {
-    if port.contains('-') {
-        let parts: Vec<&str> = port.splitn(2, '-').collect();
-        parts.len() == 2 && parts[0].parse::<u16>().is_ok() && parts[1].parse::<u16>().is_ok()
-    } else {
-        port.parse::<u16>().is_ok()
-    }
+    chv_common::firewall::is_valid_port_spec(port)
 }
 
 /// Policy chains (plain, non-hook) that carry CHV default-deny semantics inside
