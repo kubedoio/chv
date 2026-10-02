@@ -925,6 +925,11 @@ tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 console_bind = "127.0.0.1:8444"
 jwt_secret = "${JWT_SECRET}"
+
+# #376: preserve stord's path confinement across agent-supervisor
+# respawns — mirrors stord.toml's path_allowlist below so a respawned
+# stord keeps the operator's posture instead of running allow-all.
+stord_path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/storage/lvm", "${CHV_DATA_DIR}/agent"]
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
