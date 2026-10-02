@@ -47,6 +47,12 @@ source "${SCRIPT_DIR}/lib.sh"
 
 CHV_QUAL_ROOT="${CHV_QUAL_ROOT:-/var/lib/chv/qual}"
 BINARY_DIR="${CHV_QUAL_ROOT}/bin"
+# Per-service log level for the generated configs (default: info — the
+# evidence shape). CHV_QUAL_LOG_LEVEL=debug is the diagnosis shape: the
+# agent's client spans (RPC names + error reasons) and the CP's dispatch
+# loop become visible. Applied to every service config so one run captures
+# the whole chain consistently.
+LOG_LEVEL="${CHV_QUAL_LOG_LEVEL:-info}"
 TEST_DIR=""
 SKIP_CLEANUP=false
 EXEC_CMD=""
@@ -365,7 +371,7 @@ MIGRATIONS_DIR="${REPO_ROOT_OVERRIDE:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}/cmd
 cat > "${TEST_DIR}/controlplane.toml" <<EOF
 grpc_bind = "127.0.0.1:8443"
 http_bind = "127.0.0.1:8080"
-log_level = "info"
+log_level = "${LOG_LEVEL}"
 runtime_dir = "${cp_dir}"
 jwt_secret = "qual-$(openssl rand -hex 16)-jwt-secret"
 agent_socket_pattern = "${agent_dir}/api.sock"
@@ -391,7 +397,7 @@ EOF
 cat > "${TEST_DIR}/agent.toml" <<EOF
 socket_path = "${agent_dir}/api.sock"
 runtime_dir = "${agent_dir}"
-log_level = "info"
+log_level = "${LOG_LEVEL}"
 authority_mode = "core-managed"
 core_api_socket_path = "${agent_dir}/core.sock"
 core_store_path = "${agent_dir}/core.db"
@@ -418,7 +424,7 @@ EOF
 cat > "${TEST_DIR}/stord.toml" <<EOF
 socket_path = "${stord_dir}/api.sock"
 runtime_dir = "${stord_dir}"
-log_level = "info"
+log_level = "${LOG_LEVEL}"
 path_allowlist = ["${agent_dir}", "${stord_dir}", "${images_dir}"]
 EOF
 
@@ -426,7 +432,7 @@ EOF
 cat > "${TEST_DIR}/nwd.toml" <<EOF
 socket_path = "${nwd_dir}/api.sock"
 runtime_dir = "${nwd_dir}"
-log_level = "info"
+log_level = "${LOG_LEVEL}"
 EOF
 
 # Agent runtime dir MUST be 0700 for the Core-authority startup validation
