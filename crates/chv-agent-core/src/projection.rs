@@ -536,6 +536,7 @@ mod tests {
                         network_ref: "net-0".to_string(),
                         mac_address: None,
                         addressing: None,
+                        firewall_policy_json: None,
                     }];
                     def
                 },
@@ -623,6 +624,7 @@ mod tests {
                         network_ref: "net-0".to_string(),
                         mac_address: None,
                         addressing: None,
+                        firewall_policy_json: None,
                     },
                 },
             ),

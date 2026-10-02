@@ -142,6 +142,26 @@ impl HostResourceController for MockHostResourceController {
         Ok(())
     }
 
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: &[u8],
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.begin_step("policy")?;
+        self.record(
+            "policy",
+            &format!(
+                "{}:{}:{}",
+                network_id,
+                policy_version,
+                String::from_utf8_lossy(policy_json)
+            ),
+        );
+        Ok(())
+    }
+
     async fn attach_vm_nic(
         &self,
         nic_id: &str,

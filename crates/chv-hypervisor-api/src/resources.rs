@@ -271,6 +271,27 @@ pub trait HostResourceController: Send + Sync + 'static {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError>;
 
+    /// Apply the network's firewall policy on the node (default-deny plus
+    /// the operator's rules) via nwd.
+    ///
+    /// # Precondition
+    /// [`Self::ensure_network_topology`] succeeded for `network_id` — nwd
+    /// scopes the policy to the CHV-owned interfaces of the ensured
+    /// topology and fails closed without them.
+    ///
+    /// Callers apply the policy ONLY when the network carries a non-empty
+    /// policy snapshot: nwd engages default-deny even for an empty
+    /// ruleset, which would cut a rule-less network's guests off entirely
+    /// (including DHCP). `policy_version` is nwd bookkeeping (recorded for
+    /// later re-scoping); a content-derived value keeps retries idempotent.
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: &[u8],
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
     /// Attach a NIC to a VM, returning the namespace and tap handles.
     async fn attach_vm_nic(
         &self,

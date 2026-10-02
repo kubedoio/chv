@@ -1239,8 +1239,10 @@ impl Orchestrator {
                 })
                 .collect();
 
-        let mut network_configs: std::collections::HashMap<String, (String, String)> =
-            std::collections::HashMap::new();
+        let mut network_configs: std::collections::HashMap<
+            String,
+            (String, String, Option<String>),
+        > = std::collections::HashMap::new();
         let unique_network_ids: Vec<&str> = nic_rows
             .iter()
             .map(|n| n.network_id.as_str())
@@ -1254,7 +1256,7 @@ impl Orchestrator {
                 .collect::<Vec<_>>()
                 .join(",");
             let query_str = format!(
-                "SELECT network_id, cidr, gateway FROM network_desired_state WHERE network_id IN ({})",
+                "SELECT network_id, cidr, gateway, firewall_rules_json FROM network_desired_state WHERE network_id IN ({})",
                 placeholders
             );
             let mut query = sqlx::query_as::<_, NetworkDesiredStateWithIdRow>(&query_str);
@@ -1270,7 +1272,16 @@ impl Orchestrator {
             for nr in net_rows {
                 network_configs.insert(
                     nr.network_id,
-                    (nr.cidr.unwrap_or_default(), nr.gateway.unwrap_or_default()),
+                    (
+                        nr.cidr.unwrap_or_default(),
+                        nr.gateway.unwrap_or_default(),
+                        // Only carry a SEMANTICALLY non-empty snapshot
+                        // (#355): an empty ruleset must not ride the spec
+                        // — nwd would engage default-deny with no allow
+                        // rules and cut the network's guests off.
+                        nr.firewall_rules_json
+                            .filter(|p| !chv_common::firewall_ruleset_is_empty(p)),
+                    ),
                 );
             }
         }
@@ -1278,7 +1289,7 @@ impl Orchestrator {
         let nics: Vec<AgentNicSpec> = nic_rows
             .into_iter()
             .map(|n| {
-                let (cidr, gateway) = network_configs
+                let (cidr, gateway, firewall_policy_json) = network_configs
                     .get(&n.network_id)
                     .cloned()
                     .unwrap_or_default();
@@ -1288,6 +1299,7 @@ impl Orchestrator {
                     ip_address: n.ip_address.unwrap_or_default(),
                     cidr,
                     gateway,
+                    firewall_policy_json,
                 }
             })
             .collect();
@@ -1508,6 +1520,7 @@ struct NetworkDesiredStateWithIdRow {
     network_id: String,
     cidr: Option<String>,
     gateway: Option<String>,
+    firewall_rules_json: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1544,6 +1557,13 @@ struct AgentNicSpec {
     ip_address: String,
     cidr: String,
     gateway: String,
+    /// The network's firewall_rules_json snapshot at dispatch time (#355):
+    /// the Core executor applies it at attach time (default-deny + the
+    /// operator's rules) so a policy actually materializes on the deployed
+    /// path. Only included when the operator stored rules — an empty
+    /// ruleset would engage default-deny with no allows and cut the
+    /// network's guests off entirely.
+    firewall_policy_json: Option<String>,
 }
 
 fn now_unix_ms() -> i64 {
@@ -1656,6 +1676,82 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert operation");
+    }
+
+    /// #355: the VM spec fragment carries the network's firewall policy
+    /// snapshot — non-empty only, so the Core executor can apply
+    /// default-deny + the operator's rules at attach time. An empty
+    /// ruleset must NOT ride the spec: nwd engages default-deny even for
+    /// an empty ruleset, which would cut a rule-less network's guests
+    /// off entirely (including DHCP).
+    #[tokio::test]
+    async fn build_agent_vm_spec_carries_network_firewall_policy_snapshot() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_vm(&pool, "vm-spec", "node-a").await;
+        let policy = r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+        for (idx, (network_id, rules)) in [("net-with-policy", policy), ("net-bare", "[]")]
+            .into_iter()
+            .enumerate()
+        {
+            seed_network(&pool, network_id, "node-a").await;
+            sqlx::query(
+                "INSERT INTO network_desired_state \
+                 (network_id, desired_generation, desired_status, cidr, gateway, dhcp_enabled, \
+                  ipam_mode, is_default, firewall_rules_json) \
+                 VALUES (?, 1, 'Pending', '10.200.0.0/24', '10.200.0.1', 1, 'internal', 0, ?)",
+            )
+            .bind(network_id)
+            .bind(rules)
+            .execute(&pool)
+            .await
+            .expect("seed network desired state");
+            sqlx::query(
+                "INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address) \
+                 VALUES (?, 'vm-spec', ?, ?)",
+            )
+            .bind(format!("nic-{network_id}"))
+            .bind(network_id)
+            .bind(format!("02:00:00:00:00:{idx:02x}"))
+            .execute(&pool)
+            .await
+            .expect("seed vm nic");
+        }
+
+        let orchestrator = Orchestrator::new(
+            pool.clone(),
+            OperationRepository::new(pool.clone()),
+            String::new(),
+            "/kernel".to_string(),
+            String::new(),
+            NodeClientPool::new(),
+            crate::convergence_metrics::new_shared(),
+        );
+        let spec_json = orchestrator
+            .build_agent_vm_spec("vm-spec")
+            .await
+            .expect("build agent vm spec");
+        let spec: serde_json::Value = serde_json::from_str(&spec_json).expect("spec json");
+        let nics = spec["nics"].as_array().expect("nics array");
+        assert_eq!(nics.len(), 2, "both nics must ride the spec: {spec}");
+
+        let by_network = |id: &str| {
+            nics.iter()
+                .find(|n| n["network_id"] == id)
+                .unwrap_or_else(|| panic!("nic for {id} missing: {spec}"))
+                .clone()
+        };
+        assert_eq!(
+            by_network("net-with-policy")["firewall_policy_json"].as_str(),
+            Some(policy),
+            "a non-empty policy snapshot must ride the spec"
+        );
+        assert_eq!(
+            by_network("net-bare")["firewall_policy_json"].as_str(),
+            None,
+            "an empty ruleset must NOT ride the spec (default-deny with no allows \
+             would cut the network's guests off)"
+        );
     }
 
     /// End-to-end check that the production claim SQL atomically:

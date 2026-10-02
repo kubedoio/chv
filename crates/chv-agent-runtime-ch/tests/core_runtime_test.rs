@@ -37,6 +37,7 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
             network_ref: format!("net-{i}"),
             mac_address: Some(format!("02:00:00:00:00:{i:02x}")),
             addressing: None,
+            firewall_policy_json: None,
         })
         .collect();
     VmDefinition {
@@ -285,6 +286,170 @@ async fn create_vm_carries_provisioning_hints_addressing_and_tuning() {
         .expect("tuning must reach the hypervisor config");
     assert_eq!(overrides.cpu_nested, Some(true));
     assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
+}
+
+#[tokio::test]
+async fn create_vm_applies_attach_time_firewall_policy() {
+    // #355: a policy snapshot carried on the network attachment is
+    // applied via nwd AFTER the topology is ensured (nwd scopes the
+    // policy to the ensured topology's CHV-owned interfaces and fails
+    // closed without them) and BEFORE the NIC attaches (no guest traffic
+    // outside the CHV boundary). The recorded policy is the snapshot
+    // verbatim.
+    let h = harness(None);
+    let vm_id = "vm-policy";
+    let policy = r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+    let mut def = definition(vm_id, 1, 1);
+    def.networks[0].firewall_policy_json = Some(policy.to_string());
+    let command = MutationCommand::CreateVm { definition: def };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-policy",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+
+    let calls = h.controller.calls.lock().expect("calls lock").clone();
+    let ensure = calls
+        .iter()
+        .position(|c| c.starts_with("ensure:net-0"))
+        .expect("topology ensure must be recorded");
+    let policy_at = calls
+        .iter()
+        .position(|c| c.starts_with("policy:net-0:") && c.ends_with(policy))
+        .expect("policy application must be recorded with the snapshot verbatim");
+    let attach = calls
+        .iter()
+        .position(|c| c.starts_with("attach_nic:"))
+        .expect("nic attach must be recorded");
+    assert!(
+        ensure < policy_at && policy_at < attach,
+        "policy must apply after ensure and before the nic attaches: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn policy_version_is_content_derived_and_stable_across_nics_and_retries() {
+    // The policy_version passed to nwd is bookkeeping for later
+    // re-scoping, but it must be CONTENT-derived so that retries (and
+    // multiple NICs on the same network within one create) are
+    // idempotent — the same snapshot always yields the same version.
+    // One set_firewall_policy is issued per NIC (network-scoped RPC,
+    // cheap and idempotent).
+    let h = harness(None);
+    let policy = r#"[{"direction":"inbound","action":"accept","protocol":"tcp"}]"#;
+
+    // Two NICs on DIFFERENT networks (net-0, net-1) carrying the SAME
+    // snapshot, in one create.
+    let vm_id = "vm-two-nics";
+    let mut def = definition(vm_id, 1, 2);
+    def.networks[0].firewall_policy_json = Some(policy.to_string());
+    def.networks[1].firewall_policy_json = Some(policy.to_string());
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-two-nics",
+            envelope(MutationCommand::CreateVm { definition: def }),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+
+    // A retry-equivalent: a second VM with the same snapshot.
+    let vm_id = "vm-two-nics-2";
+    let mut def = definition(vm_id, 1, 1);
+    def.networks[0].firewall_policy_json = Some(policy.to_string());
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-two-nics-2",
+            envelope(MutationCommand::CreateVm { definition: def }),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+
+    let calls = h.controller.calls.lock().expect("calls lock").clone();
+    let policy_calls: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.starts_with("policy:") && c.ends_with(policy))
+        .collect();
+    assert_eq!(
+        policy_calls.len(),
+        3,
+        "one policy application per NIC (2 nics + 1 on the second VM): {calls:?}"
+    );
+    // Records are "policy:<network_id>:<version>:<json>"; the version is
+    // the field between the network id and the known json suffix.
+    let suffix = format!(":{policy}");
+    let versions: std::collections::HashSet<&str> = policy_calls
+        .iter()
+        .map(|c| {
+            let net_start = "policy:".len();
+            let net_end = net_start + c[net_start..].find(':').expect("network delimiter") + 1;
+            &c[net_end..c.len() - suffix.len()]
+        })
+        .collect();
+    assert_eq!(
+        versions.len(),
+        1,
+        "the same snapshot must always yield the same content-derived version: {calls:?}"
+    );
+    assert!(
+        versions.iter().all(|v| v.starts_with("attach-")),
+        "versions must carry the attach- prefix: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_vm_without_policy_snapshot_skips_policy_application() {
+    // The safety half of #355: no snapshot (or a SEMANTICALLY empty one —
+    // blank string, whitespace, or an empty JSON array) → NO policy
+    // call. nwd's engine engages default-deny even for an empty
+    // ruleset; applying one to a rule-less network would cut its guests
+    // off entirely (including DHCP). Rule-less networks keep the
+    // bare-table behavior.
+    let h = harness(None);
+
+    for (vm_id, snapshot) in [
+        ("vm-nopolicy", None),
+        ("vm-emptylist", Some("[]")),
+        ("vm-blank", Some("")),
+        ("vm-whitespace", Some("   ")),
+    ] {
+        let mut def = definition(vm_id, 1, 1);
+        def.networks[0].firewall_policy_json = snapshot.map(str::to_string);
+        let result = h
+            .runtime
+            .execute(entry(
+                OperationKind::CreateVm,
+                vm_id,
+                &format!("op-create-{vm_id}"),
+                envelope(MutationCommand::CreateVm { definition: def }),
+            ))
+            .await;
+        assert!(result.is_ok(), "create must succeed: {result:?}");
+    }
+
+    let calls = h.controller.calls.lock().expect("calls lock").clone();
+    assert!(
+        !calls.iter().any(|c| c.starts_with("policy:")),
+        "no policy application without a non-empty snapshot: {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("ensure:net-0"))
+            .count(),
+        4,
+        "topology is still ensured for every VM: {calls:?}"
+    );
 }
 
 #[tokio::test]
@@ -665,6 +830,7 @@ async fn update_attach_detach_are_unsupported() {
                     network_ref: "net-x".to_string(),
                     mac_address: None,
                     addressing: None,
+                    firewall_policy_json: None,
                 },
             },
         ),

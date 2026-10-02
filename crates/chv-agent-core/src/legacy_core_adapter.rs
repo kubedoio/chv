@@ -244,6 +244,12 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
                     network_ref: nic.network_id,
                     mac_address: Some(nic.mac_address),
                     addressing,
+                    // Normalize a blank snapshot to None, matching the
+                    // serde TryFrom path — the durable definition never
+                    // carries Some("") sentinels. (Empty ARRAYS ride
+                    // through; the executor's emptiness gate is the
+                    // safety net for those.)
+                    firewall_policy_json: nic.firewall_policy_json.filter(|p| !p.trim().is_empty()),
                 }
             })
             .collect(),
@@ -463,6 +469,7 @@ mod tests {
             tap_name: "tap-leftover".into(),
             cidr: String::new(),
             gateway: String::new(),
+            firewall_policy_json: None,
         });
         assert!(adapt_legacy_vm_mutation(
             &create_meta,
@@ -481,6 +488,8 @@ mod tests {
         // The BFF's build_agent_vm_spec always emits disk sizes, control-plane
         // NIC addressing, and merged hypervisor overrides; all of it is
         // modeled in VmDefinition now and must translate losslessly.
+        // (#355: the network's firewall policy snapshot rides the same
+        // path — verify it below.)
         let mut create_meta = meta();
         create_meta.desired_state_version = "1".into();
         let mut spec = minimal_spec();
@@ -497,6 +506,9 @@ mod tests {
             tap_name: String::new(),
             cidr: "10.200.0.0/24".into(),
             gateway: "10.200.0.1".into(),
+            firewall_policy_json: Some(
+                r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#.into(),
+            ),
         });
         spec.cloud_init_userdata = Some("#cloud-config".into());
         spec.hypervisor_overrides = Some(chv_common::hypervisor::HypervisorOverrides {
@@ -533,6 +545,11 @@ mod tests {
         assert_eq!(addressing.ip_address, "10.200.0.47");
         assert_eq!(addressing.cidr, "10.200.0.0/24");
         assert_eq!(addressing.gateway, "10.200.0.1");
+        assert_eq!(
+            definition.networks[0].firewall_policy_json.as_deref(),
+            Some(r#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#),
+            "the firewall policy snapshot must reach the Core definition (#355)"
+        );
         assert_eq!(
             definition.cloud_init_userdata.as_deref(),
             Some("#cloud-config")
@@ -722,6 +739,7 @@ mod tests {
             tap_name: String::new(),
             cidr: String::new(),
             gateway: String::new(),
+            firewall_policy_json: None,
         });
         let intent = adapt_legacy_vm_mutation(
             &meta(),
