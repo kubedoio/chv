@@ -33,3 +33,11 @@ ca_cert_path = "/etc/chv/certs/ca.crt"
 
 # JWT secret — MUST match controlplane.toml jwt_secret for console access
 jwt_secret = "<same-as-controlplane>"
+
+# Stord path confinement preserved across supervisor respawns (#376).
+# Empty/omitted = the respawned daemon runs allow-all (historical
+# behavior); deployments relying on stord's path_allowlist mirror it
+# here so a respawned stord keeps the operator's posture. Must cover
+# the volume locator dir (storage_base_dir and the dirs the agent
+# passes as volume locators) and any image/seed dirs.
+stord_path_allowlist = ["/var/lib/chv/storage", "/var/lib/chv/agent"]
