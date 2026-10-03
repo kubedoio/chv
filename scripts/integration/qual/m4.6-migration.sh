@@ -810,6 +810,25 @@ expect_stord_startup_failure "N1b receiver fields with enabled=false" \
     "${N1B_DIR}/receiver-disabled.toml" "${N1B_DIR}/receiver-disabled.log" \
     "migration.enabled = false"
 
+# assert_contains_any DESC HAYSTACK NEEDLE [NEEDLE...] — passes if any needle
+# is present, reporting the one that matched. For server-side mTLS
+# rejections the TLS 1.3 alert races the client's in-flight request, so the
+# surfaced error is one of several transport-level forms (run 2:
+# Cancelled/"operation was canceled"; run 3: Unknown/"transport error").
+assert_contains_any() {
+    local desc="$1" haystack="$2"
+    shift 2
+    local needle
+    for needle in "$@"; do
+        if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+            qual_pass "${desc} (matched: '${needle}')"
+            return 0
+        fi
+    done
+    qual_error "${desc} (none of '$*' present — got: ${haystack:0:200})"
+    return 1
+}
+
 # ===========================================================================
 # Legs N2/N3/N4/N7 — wrong-identity SOURCES: each starts (the material is
 # structurally valid), triggers a migration at the LIVE DST, and must fail
@@ -824,12 +843,15 @@ expect_stord_startup_failure "N1b receiver fields with enabled=false" \
 #     detail (unknown issuer vs name mismatch) is NOT surfaced (finding).
 #   - server-side rejection (DST rejects SRC's client identity: N4 rogue
 #     CA, N7 expired leaf): in TLS 1.3 the SRC's handshake completes before
-#     DST processes its cert flight, so the alert lands mid-RPC and the
-#     task error is "operation was canceled" — opaque to the operator
-#     (finding), while the DST logs nothing at all.
+#     DST processes its cert flight, so the alert races the client's
+#     in-flight request and the surfaced task error is an OPAQUE
+#     transport-level form — observed both as Cancelled/"operation was
+#     canceled" and as Unknown/"transport error" (finding), while the DST
+#     logs nothing at all. Asserted as a disjunction of the observed forms.
 # ===========================================================================
 run_negative_src() {
-    local name="$1" ca="$2" cert="$3" key="$4" dest="$5" needle="$6" log_needle="${7:-}"
+    local name="$1" ca="$2" cert="$3" key="$4" dest="$5" log_needle="$6"
+    shift 6
     local dir sock log pid vol handle mid err bytes
     dir="${M46_DIR}/${name}"
     mkdir -p "$dir"
@@ -848,7 +870,7 @@ run_negative_src() {
         phase_is "$sock" "$mid" "FAILED" \
         || qual_error "N-${name}: task never failed"
     err="$(migration_field "$sock" "$mid" errorMessage)"
-    assert_contains "N-${name}: error is the deterministic mTLS failure text" "$err" "$needle"
+    assert_contains_any "N-${name}: error is a transport-level mTLS failure" "$err" "$@"
     if [ -n "$log_needle" ]; then
         assert_file_contains "N-${name}: SRC log shows the leg's distinguishing input" \
             "$log" "$log_needle"
@@ -877,26 +899,25 @@ qual_info "--- Leg N2: SRC trusts an unrelated CA → destination certificate ca
 # failure is attributable to the trust anchor alone.
 run_negative_src n2 "${CERTS_DIR}/ca2.crt" \
     "${CERTS_DIR}/src-client.crt" "${CERTS_DIR}/src-client.key" \
-    "localhost" "failed to connect to peer with mTLS: transport error"
+    "localhost" "" "failed to connect to peer with mTLS: transport error"
 
 # --- Leg N3: wrong server name ----------------------------------------------
 qual_info "--- Leg N3: dest_server_name does not match the destination certificate SAN"
 run_negative_src n3 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/src-client.crt" "${CERTS_DIR}/src-client.key" \
-    "wrong.example" "failed to connect to peer with mTLS: transport error" \
-    "wrong.example"
+    "wrong.example" "wrong.example" "failed to connect to peer with mTLS: transport error"
 
 # --- Leg N4: wrong destination identity (from the receiver side) ------------
 qual_info "--- Leg N4: SRC presents a client identity from the unrelated CA → DST rejects the handshake"
 run_negative_src n4 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/rogue-client.crt" "${CERTS_DIR}/rogue-client.key" \
-    "localhost" "operation was canceled"
+    "localhost" "" "operation was canceled" "transport error" "failed to connect to peer with mTLS"
 
 # --- Leg N7: expired client certificate --------------------------------------
 qual_info "--- Leg N7: SRC's client leaf is expired → handshake-time rejection"
 run_negative_src n7 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/expired-client.crt" "${CERTS_DIR}/expired-client.key" \
-    "localhost" "operation was canceled"
+    "localhost" "" "operation was canceled" "transport error" "failed to connect to peer with mTLS"
 
 # ===========================================================================
 # Leg N5 — mismatched keypairs: STARTUP errors (both halves)
