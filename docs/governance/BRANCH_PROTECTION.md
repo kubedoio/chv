@@ -2,13 +2,15 @@
 
 This document describes the required GitHub repository settings for the CHV project. These settings **cannot be expressed as files in the repository**; they must be configured via the GitHub UI, the `gh` CLI, or the rulesets API.
 
-> **Status (2026-09-30, prompt 03 workstream E):** the `protect-main` **ruleset**
-> (id 17358522) exists and matches the specification below, including all eight
-> required status checks. **Enforcement is staged, not active**: the ruleset
-> includes `required_signatures`, and recent `main` history mixes signed and
-> unsigned commits — enabling enforcement before commit signing is universal
-> for all committers would block legitimate PRs. Once signing is set up, run
-> `./scripts/github-setup/apply-branch-protection.sh --enforce`.
+> **Status (2026-10-03): `protect-main` enforcement is ACTIVE.** The ruleset
+> (id 17358522) matches the specification below, including all eight required
+> status checks, and is enforced on the default branch. The signing
+> prerequisite recorded on 2026-09-30 (mixed signed/unsigned history) was
+> resolved: the 2026-10-03 activation verified the last 10 `main` commits all
+> `verified=true` (`reason=valid`), a direct-push smoke test was declined by
+> the ruleset, and `verify-settings.sh` reports `protect-main enforcement is
+> active` with 0 errors / 0 warnings. Activation procedure and evidence:
+> [main-protection.md §5/§7](../evidence/production-readiness/v0.3.0-rc1/03-security-reproducibility-governance/main-protection.md).
 
 ---
 
@@ -64,7 +66,7 @@ Run the helper scripts (requires `gh` CLI and repo admin access):
 # Update the protect-main ruleset definition (keeps current enforcement state)
 ./scripts/github-setup/apply-branch-protection.sh
 
-# Activate enforcement (gated on commit-signing readiness — see the status note above)
+# Activate enforcement (was gated on commit-signing readiness — active since 2026-10-03, see the status note above)
 ./scripts/github-setup/apply-branch-protection.sh --enforce
 
 # Print the live ruleset without changing anything

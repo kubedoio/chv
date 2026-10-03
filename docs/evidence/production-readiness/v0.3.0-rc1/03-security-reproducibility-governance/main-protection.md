@@ -76,6 +76,7 @@ review.
   claim: `main` is not yet protected against force-push/deletion/review
   bypass. The activation procedure is one command
   (`apply-branch-protection.sh --enforce`) once commit signing is universal.
+  *(Superseded 2026-10-03 — enforcement is now active; see §7.)*
 
 ## 5. Activation runbook (once signing is set up)
 
@@ -94,3 +95,35 @@ Until enforcement is active, `main` relies on maintainer discipline only —
 the same state the repository has had since the ruleset was created. The gap
 is recorded here and in `BRANCH_PROTECTION.md`'s status note; it closes with
 the runbook above.
+
+*(Closed 2026-10-03 — see §7.)*
+
+## 7. Activation record (2026-10-03)
+
+Executed after the prompt-04 campaign completed (main `1fbb2b04`), per the
+maintainer's go-ahead, following the §5 runbook:
+
+1. **Signing prerequisite** — `GET /repos/kubedoio/chv/commits?per_page=10`:
+   all ten commits `verified=true`, `reason=valid`. The 2026-09-30 blocker
+   (mixed signed/unsigned history) no longer applied: the prompt-03/04 merge
+   queue (squash merges via the GitHub API) is GitHub-signed throughout.
+2. **Activation** — `./scripts/github-setup/apply-branch-protection.sh
+   --enforce` (its built-in unsigned-commit check passed): the API response
+   shows `"enforcement":"active"` for ruleset `protect-main` (id 17358522,
+   `updated_at` 2026-10-03T09:28:04Z), with all rules intact — deletion,
+   non-fast-forward, required signatures, PR review (code-owner + 1 approval,
+   stale-review dismissal, review-thread resolution, extra approval for
+   unattributed changes), and the eight required status checks
+   (`Rust checks`, `UI checks`, `E2E tests`, `cargo audit`, `cargo deny
+   (advisories/bans/licenses/sources)`).
+3. **Verification** — `./scripts/github-setup/verify-settings.sh`: `protect-main
+   enforcement is active`, all rules `[OK]`, summary **0 errors / 0
+   warnings**.
+4. **Negative smoke test** — an empty direct push to `main` was **declined by
+   the repository rules** (`push declined due to repository rule violations`),
+   proving enforcement bites; the probe branch was cleaned up.
+
+Post-activation consequence (intended): PRs to `main` now require code-owner
+review plus one approval — an author can no longer merge their own PR — and
+all eight checks must pass. This recording PR is the first to be subject to
+that rule.
