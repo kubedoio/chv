@@ -70,12 +70,6 @@ Provide local operator-safe inspection and limited recovery workflows for the CH
 - `chvctl migrate status <migration_id>` — Check migration status
 - `chvctl migrate cancel <migration_id>` — Cancel a migration
 
-### Upgrades
-- `chvctl upgrade start <node_id> --version <ver>` — Start rolling upgrade
-- `chvctl upgrade status <node_id>` — Check upgrade status
-- `chvctl upgrade list` — List active/past upgrades
-- `chvctl upgrade rollback <node_id>` — Rollback a failed upgrade
-
 ### Health
 - `chvctl health cluster` — Cluster health summary (deep health check)
 
@@ -95,4 +89,4 @@ Provide local operator-safe inspection and limited recovery workflows for the CH
 - mutations must surface confirmation, policy check result, and operation ID
 - failures must map to stable error codes
 - `resize` and `delete` operations enforce quota checks and ownership validation
-- `drain` and `upgrade` operations require `Operator` or `Admin` role
+- `drain` operations require `Operator` or `Admin` role

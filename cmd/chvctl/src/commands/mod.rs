@@ -7,7 +7,6 @@ pub mod network;
 pub mod node;
 pub mod storage;
 pub mod task;
-pub mod upgrade;
 pub mod user;
 pub mod vm;
 pub mod volume;

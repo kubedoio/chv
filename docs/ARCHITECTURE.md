@@ -175,8 +175,9 @@ ADR-007 defines the policy: bundle-tested node releases by default, selective co
 ### Upgrade orchestration
 
 > **Qualification status:** The surfaces below are code-supported but
-> unqualified. No qualified path exercises them. Issue #427 tracks the
-> missing end-to-end upgrade flow.
+> unqualified. No qualified path exercises them. No automated end-to-end
+> upgrade flow exists (the dead `chvctl upgrade` surface was removed via
+> issue #427).
 
 The former control-plane upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgrader`) was deleted as dead code in PR #213. No automated agent binary-swap path survives. ADR-007 defines bundle policy; it does not describe a swap mechanism. The surviving surfaces are:
 
@@ -188,7 +189,7 @@ The former control-plane upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgra
 
 The boot gate is operator-opt-in via `CHV_COMPAT_MATRIX_PATH`. Once opted in, it fails closed: a boot-time inventory query failure refuses startup instead of bypassing the gate. The BFF wires `drain` and `enter_maintenance` node actions to the handlers above (`crates/chv-controlplane-service/src/bff_mutations.rs`).
 
-The `chvctl upgrade` subcommands still exist, but the BFF serves no `/v1/upgrades` routes. Those subcommands target endpoints that do not exist.
+The `chvctl upgrade` subcommands were removed (issue #427). They targeted `/v1/upgrades` BFF routes that were never registered — the routes' backing control-plane upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgrader`) was deleted as dead code in PR #213, so the subcommands could only fail at runtime with a 404. No automated upgrade surface exists; node upgrades are a manual procedure.
 
 See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
 
