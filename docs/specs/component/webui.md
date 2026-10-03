@@ -2,7 +2,7 @@
 
 ## Scope
 
-The SvelteKit frontend (`/ui`) that runs in the browser and communicates with the CHV control plane exclusively via the WebUI BFF HTTP API.
+The SvelteKit frontend (`/ui`) that runs in the browser and communicates with the CHV control plane exclusively via the WebUI backend-for-frontend (BFF) HTTP API.
 
 ## Responsibilities
 

@@ -32,7 +32,7 @@
 - routed/NAT/public exposure flows are managed through `chv-nwd` functions
 
 ## Service model
-- one `chv-nwd` per host in MVP-1
+- one `chv-nwd` per node in MVP-1
 - upgrade mode: drain and replace
 
 ## Recovery model

@@ -8,7 +8,7 @@ Provide browser-safe, session-aware, view-model-oriented APIs for the WebUI.
 ## Rules
 - browser never calls internal node services directly
 - browser never calls Cloud Hypervisor
-- BFF can aggregate control-plane data into UI-optimized responses
+- the backend-for-frontend (BFF) can aggregate control-plane data into UI-optimized responses
 - mutations map to task-creating backend operations
 
 ## Endpoint groups

@@ -6,8 +6,8 @@
 
 1. Overview
 2. Datacenters / Clusters
-3. Nodes
-4. Virtual Machines
+3. Nodes (shown as "Hosts" in the UI — see below)
+4. Virtual Machines (shown as "Instances" in the UI — see below)
 5. Volumes
 6. Networks
 7. Images / Templates
@@ -15,6 +15,12 @@
 9. Events / Alerts
 10. Maintenance / Upgrades
 11. Settings / Access
+
+## UI label mapping
+
+The UI deliberately uses different labels from docs and API routes. The nav shows
+"Hosts" for nodes and "Instances" for VMs (ADR-006-WebUI). Route paths keep
+`/nodes` and `/vms`.
 
 ## Overview page
 Shows:
