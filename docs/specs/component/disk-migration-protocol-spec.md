@@ -194,7 +194,7 @@ message BlockChunk {
   - every `RoundComplete` is answered with an `Ack` (the round acknowledgment, doubling as the window flush)
   - `FinalSync` and `FinalizeComplete` flush any chunks not yet acknowledged
 - If no Ack arrives within **30 s**, the sender fails with `deadline_exceeded` and the task ends Failed — it does not pause and retry (`crates/chv-stord-core/src/migration/flow_control.rs`, `migration/sender.rs`)
-- The `Backpressure` message exists in the proto and the sender applies a throttle sleep if it receives one (`handle_inbound_message`, `crates/chv-stord-core/src/migration/sender.rs`), but the receiver never sends it in the current implementation — it is a defensive wire surface, not an active mechanism
+- The `Backpressure` message exists in the proto and the sender honors one if it arrives — `handle_inbound_message` records the factor (`crates/chv-stord-core/src/migration/sender.rs`) and the `bulk_copy` / `dirty_sync_rounds` send loops apply the throttle sleep — but the receiver never sends it in the current implementation — it is a defensive wire surface, not an active mechanism
 
 ## Integrity
 
@@ -281,7 +281,7 @@ enum AckStatus {
 }
 
 message Backpressure {
-  float slow_down_factor = 1;
+  float slow_down_factor = 1;  // 0.5 = halve send rate
 }
 
 message RoundStart {
@@ -305,7 +305,7 @@ message FinalizeComplete {
   // Versioned, self-describing full-volume digest the receiver must
   // re-compute over the destination before reporting verified=true:
   // "sha256:" (7 ASCII bytes) followed by 32 raw digest bytes. Receivers
-  // fail closed on unrecognized formats.
+  // fail closed on unrecognized formats. (Previously optional/unused.)
   bytes volume_checksum = 3;
 }
 
@@ -363,7 +363,7 @@ Fail-closed gating rules (issues #390, #395):
 
 - `enabled = false` with **any** client identity field set → startup error
 - `enabled = false` with **any** receiver field set → startup error (an operator who believes migration is off must not get an inbound TCP listener)
-- `enabled = true` with any *individual* client or receiver field missing → startup error (both halves are all-or-nothing)
+- `enabled = true` with any *individual* client field missing → startup error (the client half is all-or-nothing). The receiver half is all-or-nothing *when any receiver field is set*; `enabled = true` with **no** receiver fields is a legitimate source-only stord (no listener, logged at startup)
 - Receiver files unreadable, keypair mismatch, empty/invalid CA bundle, or an unparseable `listen_addr` → startup error
 
 Stord additionally enforces `migration_dest_allowlist` (top-level stord key,
