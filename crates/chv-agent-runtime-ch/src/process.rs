@@ -335,6 +335,52 @@ fn pid_is_cloud_hypervisor(
     true
 }
 
+/// Whether `/proc/<pid>/task/*/comm` still shows cloud-hypervisor's
+/// serial-manager thread (`serial-manager`). A live Socket-transport VMM
+/// always runs one — cloud-hypervisor spawns it with the VM and it never
+/// exits while the VMM lives — so on a PROVEN-live VMM its absence is the
+/// issue-#409 wedge signature: the thread dies silently when the
+/// agent-side serial connection is reset with unread data in flight (an
+/// agent SIGKILL during the guest's boot window), leaving the serial
+/// listener bound but never accepted again while every guest UART write
+/// fails EPIPE — the guest keeps "Running" in `vm.info` with a dead
+/// console and a half-booted kernel.
+///
+/// - `Some(true)`: a thread named `serial-manager` was seen.
+/// - `Some(false)`: the task list was read and every thread's `comm` was
+///   read, with no such thread — a provable absence.
+/// - `None`: absence could NOT be proven (unreadable `/proc` — e.g.
+///   hidepid or a restricted container — or a task list that vanished
+///   mid-scan). Callers must treat this as "act on nothing": a false
+///   "dead" verdict would reboot a healthy VM, so only a provable
+///   absence may trigger remediation.
+fn vmm_serial_manager_thread_alive(pid: u32) -> Option<bool> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    let mut scanned_any = false;
+    for entry in tasks.flatten() {
+        match std::fs::read_to_string(entry.path().join("comm")) {
+            Ok(comm) => {
+                scanned_any = true;
+                if comm.trim() == "serial-manager" {
+                    return Some(true);
+                }
+            }
+            // The thread exited between the readdir and the read; its
+            // surviving siblings still classify the process.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    if scanned_any {
+        Some(false)
+    } else {
+        // An empty task list means the process died between the caller's
+        // liveness proof and this scan (or a zombie): absence of a
+        // serial-manager thread proves nothing about a live VMM.
+        None
+    }
+}
+
 /// Outcome of a `/proc` scan for a live VMM owning an api socket.
 enum UntrackedVmmScan {
     /// The scan completed: no live VMM owns the socket.
@@ -451,6 +497,18 @@ pub struct ProcessCloudHypervisorAdapter {
     /// are never removed — dropping a key while an operation still holds
     /// its mutex would let a fresh key bypass that holder's serialization.
     lifecycle_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Remediation budget for the issue-#409 serial heal (see
+    /// `heal_dead_serial_manager`): vm_id → pid of the adopted VMM whose
+    /// provably-dead serial-manager thread a `start_vm` call already
+    /// rebooted away. Bounds the remedy to ONE guest reboot per VMM
+    /// generation per agent process: if the reboot fails to revive the
+    /// console path (or the thread-name detection ever goes stale against
+    /// a future cloud-hypervisor), the reconciler's repeated `start_vm`
+    /// calls must not turn that into a reboot storm. Entries are never
+    /// removed (the same discipline as `lifecycle_locks`); a re-spawned
+    /// or re-adopted VM runs under a different pid and is budgeted
+    /// afresh.
+    serial_heal_reboots: std::sync::Mutex<HashMap<String, u32>>,
     /// One-way latch set by [`Self::drain_and_close_consoles`] during
     /// graceful agent shutdown. Console healing (the broadcaster's
     /// reconnect loop and `respawn_broadcaster_if_dead`) consults it and
@@ -729,6 +787,7 @@ impl ProcessCloudHypervisorAdapter {
             chv_binary: chv_binary.into(),
             vms: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
+            serial_heal_reboots: std::sync::Mutex::new(HashMap::new()),
             console_draining: Arc::new(AtomicBool::new(false)),
             vms_root: std::sync::RwLock::new(None),
             boot_watchdog: std::sync::RwLock::new(None),
@@ -2674,6 +2733,200 @@ impl ProcessCloudHypervisorAdapter {
         }
         Ok(())
     }
+
+    /// Lock-free core of [`Self::reboot_vm`]: the caller must already
+    /// hold the per-VM lifecycle lock. `start_vm`'s #409 serial heal
+    /// calls this directly — it holds the same (non-reentrant) mutex and
+    /// must not deadlock against itself.
+    async fn reboot_vm_locked(
+        &self,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = self.get_vm_socket(vm_id).await?;
+
+        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
+
+        // Snapshot the pre-reboot console connection BEFORE the API call.
+        // cloud-hypervisor v43's vm.reboot tears the VM down and re-creates
+        // it, re-binding the serial listener at the same path — but the OLD
+        // accepted connection is orphaned without EOF: the serial manager's
+        // accept path hands its descriptor to epoll via `into_raw_fd()` and
+        // never closes it, so the broadcaster parked on it would never wake.
+        // The forced EOF must land on exactly this connection — the one
+        // that predates the reboot — not on whatever a concurrent heal may
+        // have swapped into the map meanwhile, so a dup is taken up front:
+        // it pins the open file description, making the raw fd impossible
+        // to recycle under us. Socket transport only (the pty transport
+        // has no socket to shut down; its reboot behavior is a recorded
+        // follow-up).
+        let pre_reboot_console: Option<OwnedFd> = {
+            let vms = self.vms.read().await;
+            match vms.get(vm_id) {
+                Some(proc) if matches!(proc.serial_transport, SerialTransport::Socket(_)) => {
+                    Self::dup_cloexec(&proc.console_io).ok()
+                }
+                _ => None,
+            }
+        };
+
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
+        if status == 0 {
+            warn!(
+                vm_id = %vm_id,
+                "unparseable response from vm.reboot; serial connection not rotated"
+            );
+            return Ok(());
+        }
+        if status != 200 && status != 204 {
+            warn!(status = status, "unexpected status from vm.reboot");
+            return Ok(());
+        }
+        // A successful vm.reboot starts a NEW boot in the same VMM: bump
+        // the entry's boot watermark to the console capture's current
+        // size so the boot watchdog scopes its banner/marker evidence to
+        // the new boot — the pre-reboot boot's marker must not satisfy
+        // the new boot's completion check (the capture keeps appending
+        // across a reboot; only a fresh kernel banner after this offset
+        // counts).
+        {
+            let vms = self.vms.read().await;
+            if let Some(proc) = vms.get(vm_id) {
+                if let Some(vm_dir) = proc.api_socket.parent() {
+                    let watermark = std::fs::metadata(vm_console_log(vm_dir))
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    proc.boot_watermark.store(watermark, Ordering::SeqCst);
+                }
+            }
+        }
+        // A successful vm.reboot re-bound the listener; rotate the pinned
+        // connection. shutdown(2) acts on the open file description, so it
+        // wakes every blocked reader on it (the broadcaster's dup
+        // included): the broadcaster observes EOF and its self-heal
+        // reconnects to the re-bound listener, swapping the stored
+        // endpoint and streaming the new boot. Queued bytes are NOT
+        // discarded by SHUT_RD (reads still drain them, then EOF), and
+        // the subsequent close of the rotated descriptors is clean even
+        // with data queued — SHUT_RD neutralizes the reset-on-close
+        // heuristic. It does make the peer's writes fail EPIPE while the
+        // connection is nominally open, which is exactly why SHUT_RD is
+        // used ONLY here, on a connection whose VMM peer is already torn
+        // down by the reboot — never on a live connection (see
+        // `abandon_serial_connection`). Best-effort: a failure means the
+        // connection was already gone, which the broadcaster's own EOF
+        // handling covers.
+        if let Some(fd) = pre_reboot_console {
+            if let Err(e) =
+                nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Read)
+            {
+                warn!(
+                    vm_id = %vm_id,
+                    error = %e,
+                    "serial read-side shutdown after vm.reboot failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue-#409 self-heal, driven from `start_vm`'s idempotent
+    /// already-running path: an ADOPTED VM (a live VMM this agent
+    /// re-attached to after a restart) whose cloud-hypervisor
+    /// serial-manager thread is PROVABLY gone has a console path no
+    /// agent-side fd work can revive — the serial listener stays bound
+    /// but is never accepted again, and the guest's UART writes fail
+    /// EPIPE (with the THRE interrupt suppressed, a booting guest wedges
+    /// half-up while `vm.info` keeps reporting Running). The only
+    /// remediation is VMM-level: `vm.reboot` tears the VM down and
+    /// re-creates it with a fresh serial manager, re-binding the
+    /// listener; the rotation in `reboot_vm_locked` then forces the
+    /// parked broadcaster onto the new connection.
+    ///
+    /// Safety gates — every one must hold before a reboot is issued:
+    /// - `Adopted` entry only: a tracked (`Owned`) VM's console path has
+    ///   been this agent's own since spawn and cannot be wedged by the
+    ///   adoption race this heals;
+    /// - Socket transport only (the Pty transport has no serial-manager
+    ///   thread at all);
+    /// - the serial-manager thread's absence is PROVEN (`Some(false)`):
+    ///   an unreadable `/proc` (`None`) or a live thread is a no-op, so
+    ///   adopting a VM with a live console stays a pure no-op;
+    /// - at most ONE remediation reboot per VMM generation per agent
+    ///   process (`serial_heal_reboots`), bounding a stale-detection
+    ///   false positive to a single guest restart.
+    ///
+    /// A failed remediation is logged, never fatal: the VM is running
+    /// and `start_vm`'s contract ("make the VM running") is already
+    /// satisfied — failing the op's RED metrics over a console heal
+    /// would misreport a healthy lifecycle result.
+    async fn heal_dead_serial_manager(&self, vm_id: &str, operation_id: Option<&str>) {
+        let pid = {
+            let vms = self.vms.read().await;
+            let Some(proc) = vms.get(vm_id) else {
+                return;
+            };
+            match (&proc.child, &proc.serial_transport) {
+                (VmmChild::Adopted(pid), SerialTransport::Socket(_)) => *pid,
+                _ => return,
+            }
+        };
+        if *self
+            .serial_heal_reboots
+            .lock()
+            .expect("serial heal lock poisoned")
+            .get(vm_id)
+            .unwrap_or(&0)
+            == pid
+        {
+            return;
+        }
+        match vmm_serial_manager_thread_alive(pid) {
+            Some(true) => {}
+            None => {
+                warn!(
+                    vm_id = %vm_id,
+                    pid = pid,
+                    "cannot prove whether the adopted vm's serial-manager thread is alive; leaving the console path untouched"
+                );
+            }
+            Some(false) => {
+                warn!(
+                    vm_id = %vm_id,
+                    pid = pid,
+                    op = operation_id.unwrap_or("-"),
+                    "adopted vm's serial-manager thread is gone (dead console path, issue #409); rebooting the vm to restore console capture"
+                );
+                match self.reboot_vm_locked(vm_id, operation_id).await {
+                    Ok(()) => {
+                        // Mark only after the reboot was issued: a
+                        // transport-level failure leaves the budget
+                        // unspent so the next start_vm can retry (a
+                        // failed request is harmless — no guest restart
+                        // happened), while a completed one stops the
+                        // reconciler from ever repeating it for this
+                        // VMM generation.
+                        self.serial_heal_reboots
+                            .lock()
+                            .expect("serial heal lock poisoned")
+                            .insert(vm_id.to_string(), pid);
+                        info!(
+                            vm_id = %vm_id,
+                            pid = pid,
+                            "serial-heal reboot issued for the adopted vm; console capture should resume on the new boot"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            vm_id = %vm_id,
+                            error = %e,
+                            "serial-heal reboot failed; the vm keeps running with console capture down (retried on the next start_vm)"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// What `start_vm` should do for a VM whose `vm.info` reported `state`.
@@ -3216,6 +3469,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         match action {
             StartVmAction::AlreadyRunning => {
+                // Issue-#409 self-heal, adopted VMs only: the reconciler
+                // (and any operator re-drive) lands here shortly after
+                // an agent restart re-adopted a live VMM, making this
+                // the first reconciliation point that can detect — and
+                // reboot away — a serial-manager thread that died when
+                // the previous agent process was SIGKILLed mid-boot.
+                // Every healthy VM takes the no-op path (see
+                // `heal_dead_serial_manager`'s gates); a deliberately
+                // `Paused` VM is never touched.
+                if state == "Running" {
+                    self.heal_dead_serial_manager(vm_id, operation_id).await;
+                }
                 info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
                 // Idempotent success: VM is already in the desired state.
                 // The guard's succeeded flag must be set on every Ok return
@@ -3605,91 +3870,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Serialize with the other lifecycle ops for this VM (see
         // `lifecycle_locks`).
         let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
-        let api_socket = self.get_vm_socket(vm_id).await?;
-
-        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
-
-        // Snapshot the pre-reboot console connection BEFORE the API call.
-        // cloud-hypervisor v43's vm.reboot tears the VM down and re-creates
-        // it, re-binding the serial listener at the same path — but the OLD
-        // accepted connection is orphaned without EOF: the serial manager's
-        // accept path hands its descriptor to epoll via `into_raw_fd()` and
-        // never closes it, so the broadcaster parked on it would never wake.
-        // The forced EOF must land on exactly this connection — the one
-        // that predates the reboot — not on whatever a concurrent heal may
-        // have swapped into the map meanwhile, so a dup is taken up front:
-        // it pins the open file description, making the raw fd impossible
-        // to recycle under us. Socket transport only (the pty transport
-        // has no socket to shut down; its reboot behavior is a recorded
-        // follow-up).
-        let pre_reboot_console: Option<OwnedFd> = {
-            let vms = self.vms.read().await;
-            match vms.get(vm_id) {
-                Some(proc) if matches!(proc.serial_transport, SerialTransport::Socket(_)) => {
-                    Self::dup_cloexec(&proc.console_io).ok()
-                }
-                _ => None,
-            }
-        };
-
-        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
-        if status == 0 {
-            warn!(
-                vm_id = %vm_id,
-                "unparseable response from vm.reboot; serial connection not rotated"
-            );
-            return Ok(());
-        }
-        if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vm.reboot");
-            return Ok(());
-        }
-        // A successful vm.reboot starts a NEW boot in the same VMM: bump
-        // the entry's boot watermark to the console capture's current
-        // size so the boot watchdog scopes its banner/marker evidence to
-        // the new boot — the pre-reboot boot's marker must not satisfy
-        // the new boot's completion check (the capture keeps appending
-        // across a reboot; only a fresh kernel banner after this offset
-        // counts).
-        {
-            let vms = self.vms.read().await;
-            if let Some(proc) = vms.get(vm_id) {
-                if let Some(vm_dir) = proc.api_socket.parent() {
-                    let watermark = std::fs::metadata(vm_console_log(vm_dir))
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    proc.boot_watermark.store(watermark, Ordering::SeqCst);
-                }
-            }
-        }
-        // A successful vm.reboot re-bound the listener; rotate the pinned
-        // connection. shutdown(2) acts on the open file description, so it
-        // wakes every blocked reader on it (the broadcaster's dup
-        // included): the broadcaster observes EOF and its self-heal
-        // reconnects to the re-bound listener, swapping the stored
-        // endpoint and streaming the new boot. Queued bytes are NOT
-        // discarded by SHUT_RD (reads still drain them, then EOF), and
-        // the subsequent close of the rotated descriptors is clean even
-        // with data queued — SHUT_RD neutralizes the reset-on-close
-        // heuristic. It does make the peer's writes fail EPIPE while the
-        // connection is nominally open, which is exactly why SHUT_RD is
-        // used ONLY here, on a connection whose VMM peer is already torn
-        // down by the reboot — never on a live connection (see
-        // `abandon_serial_connection`). Best-effort: a failure means the
-        // connection was already gone, which the broadcaster's own EOF
-        // handling covers.
-        if let Some(fd) = pre_reboot_console {
-            if let Err(e) =
-                nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Read)
-            {
-                warn!(
-                    vm_id = %vm_id,
-                    error = %e,
-                    "serial read-side shutdown after vm.reboot failed"
-                );
-            }
-        }
-        Ok(())
+        self.reboot_vm_locked(vm_id, operation_id).await
     }
 
     async fn resize_vm(
@@ -5872,6 +6053,332 @@ mod tests {
         assert_eq!(got, b"post-reboot".to_vec());
     }
 
+    /// `vmm_serial_manager_thread_alive` discriminates by thread `comm`:
+    /// provable absence (`Some(false)`), a live thread (`Some(true)`),
+    /// and an unscannable pid (`None` — never a false "dead" verdict,
+    /// which would reboot a healthy VM).
+    #[test]
+    fn serial_manager_thread_liveness_follows_thread_comm() {
+        let own_pid = std::process::id();
+        // No thread of this test process is named "serial-manager" (only
+        // this test spawns one, further down): absence is provable.
+        assert_eq!(
+            super::vmm_serial_manager_thread_alive(own_pid),
+            Some(false),
+            "a live process without a serial-manager thread must classify as provably absent"
+        );
+        // A dead pid cannot be scanned: absence is unprovable, never
+        // false — the fail-safe that keeps the heal off unreadable
+        // /proc mounts.
+        assert_eq!(
+            super::vmm_serial_manager_thread_alive(4_000_000),
+            None,
+            "an unscannable pid must never classify as provably absent"
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("serial-manager".to_string())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+            .unwrap();
+        // The thread's task entry (with its comm) is published by
+        // clone(), but poll so the test stays robust.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if super::vmm_serial_manager_thread_alive(own_pid) == Some(true) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "spawned serial-manager thread must become visible in /proc"
+            );
+        }
+
+        // Once the thread exits, its task entry disappears and the
+        // verdict returns to provable absence — a revived-or-recreated
+        // manager is distinguishable from a dead one.
+        stop.store(true, Ordering::SeqCst);
+        thread.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if super::vmm_serial_manager_thread_alive(own_pid) == Some(false) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "exited serial-manager thread must disappear from /proc"
+            );
+        }
+    }
+
+    /// Issue #409, the fix's remediation path: an adopted, Running,
+    /// Socket-transport VM whose VMM provably has no serial-manager
+    /// thread gets exactly ONE remediation reboot out of start_vm's
+    /// idempotent already-running path — the broadcaster, parked on the
+    /// wedged (connected-but-never-accepted) connection, is rotated onto
+    /// the re-bound listener and console capture resumes on the new
+    /// boot — and a second start_vm does not reboot again.
+    #[tokio::test]
+    async fn start_vm_heals_adopted_vm_with_dead_serial_manager() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-heal");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+        let api_sock_path = vm_dir.join("vm.sock");
+
+        // The stand-in VMM: a live process with the api-socket argv (so
+        // the Adopted entry's identity checks hold) and NO
+        // serial-manager thread — the provable absence that is the wedge
+        // signature.
+        let bin = write_vmm_standin_binary(dir.path());
+        let standin = StandinVmm(spawn_vmm_standin(&bin, &api_sock_path));
+        wait_for_standin_argv(standin.pid());
+        assert_eq!(
+            super::vmm_serial_manager_thread_alive(standin.pid()),
+            Some(false),
+            "test precondition: the stand-in must provably lack a serial-manager thread"
+        );
+
+        // The wedged console connection: connected from the agent side
+        // (adoption's reconnect succeeds into the kernel's accept
+        // backlog) but never accepted — the peer stays open and silent,
+        // so the broadcaster parked on it never sees a byte.
+        let (wedge_peer, wedge_agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let wedge_console_io: OwnedFd = wedge_agent_end.into();
+        let wedge_fd = wedge_console_io.as_raw_fd();
+
+        // The re-bound listener vm.reboot "leaves behind": the
+        // broadcaster's self-heal must connect here and stream the new
+        // boot's output.
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let rebind_server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("rebind accept");
+            conn.write_all(b"second-boot").expect("write second boot");
+            // Hold the connection open while the test asserts.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        });
+
+        // Fake cloud-hypervisor API: vm.info → Running, vm.reboot → 204.
+        // Three requests are expected (vm.info, vm.reboot, vm.info) and
+        // one slot of slack: a spurious second reboot would be recorded
+        // and fail the count assertions below.
+        let api = MockChApiHandle::spawn(&api_sock_path, 4);
+        api.set_vm_info_state("Running");
+
+        // Prior capture history: the heal's watermark bump must scope
+        // the new boot past the frozen bytes.
+        std::fs::write(vm_console_log(&vm_dir), "frozen console\n").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(bin.clone());
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(true));
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-heal".to_string(),
+                VmProcess {
+                    api_socket: api_sock_path.clone(),
+                    child: VmmChild::Adopted(standin.pid()),
+                    console_io: wedge_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // The broadcaster is alive and parked on the wedged connection —
+        // the exact production state after the agent restart.
+        let broadcaster_fd = ProcessCloudHypervisorAdapter::dup_cloexec(
+            &adapter.vms.read().await.get("vm-heal").unwrap().console_io,
+        )
+        .unwrap();
+        ProcessCloudHypervisorAdapter::spawn_pty_broadcaster(
+            adapter.vms.clone(),
+            "vm-heal".to_string(),
+            broadcaster_fd,
+            SerialTransport::Socket(sock_path.clone()),
+            pty_tx.clone(),
+            pty_scrollback.clone(),
+            broadcaster_alive.clone(),
+            adapter.console_draining.clone(),
+        );
+        let mut rx = pty_tx.subscribe();
+
+        // start_vm stays idempotent-successful AND heals on the way
+        // through: the op must not turn into an error over a console
+        // remediation.
+        adapter.start_vm("vm-heal", None).await.unwrap();
+
+        // The remediation reboot rotated the broadcaster onto the
+        // re-bound listener: the new boot's output flows again.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("second-boot probe must arrive through the healed console")
+            .expect("channel must be live");
+        assert_eq!(got, b"second-boot".to_vec());
+        {
+            let map = adapter.vms.read().await;
+            let proc = map.get("vm-heal").unwrap();
+            assert_ne!(
+                proc.console_io.as_raw_fd(),
+                wedge_fd,
+                "the wedged connection must be swapped for the healed one"
+            );
+            assert_eq!(
+                proc.boot_watermark.load(Ordering::SeqCst),
+                "frozen console\n".len() as u64,
+                "the heal's reboot must scope the new boot past the frozen capture"
+            );
+        }
+        assert_eq!(api.reboot_requests(), 1, "exactly one remediation reboot");
+
+        // A second start_vm (the reconciler's next pass) stays a no-op:
+        // the one-reboot-per-VMM-generation budget is spent.
+        adapter.start_vm("vm-heal", None).await.unwrap();
+        assert_eq!(
+            api.reboot_requests(),
+            1,
+            "the serial heal must not reboot the same VMM generation twice"
+        );
+        assert_eq!(api.vm_info_requests(), 2);
+
+        rebind_server.join().expect("rebind server thread");
+        drop(wedge_peer);
+    }
+
+    /// The heal's safety gates: an adopted VM WITH a live serial-manager
+    /// thread, and a tracked (Owned) VM, are never rebooted by start_vm —
+    /// adopting a VM with a live console stays a pure no-op, and the
+    /// tracked console path is untouched by the heal.
+    #[tokio::test]
+    async fn start_vm_leaves_vms_with_live_serial_manager_alone() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_live_dir = dir.path().join("vm-live-thread");
+        let vm_owned_dir = dir.path().join("vm-owned");
+        std::fs::create_dir_all(&vm_live_dir).unwrap();
+        std::fs::create_dir_all(&vm_owned_dir).unwrap();
+        let api_sock_path = vm_live_dir.join("vm.sock");
+
+        let bin = write_vmm_standin_binary(dir.path());
+
+        // The adopted stand-in renames its main thread to
+        // "serial-manager" — the /proc signature of a VMM whose console
+        // path is alive.
+        let live_standin = StandinVmm(spawn_vmm_standin_script(
+            &bin,
+            &api_sock_path,
+            "echo serial-manager > /proc/self/comm; while true; do sleep 30; done",
+        ));
+        wait_for_standin_argv(live_standin.pid());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if super::vmm_serial_manager_thread_alive(live_standin.pid()) == Some(true) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stand-in must publish its serial-manager comm"
+            );
+        }
+
+        // One shared fake API: both VMs report Running; any vm.reboot
+        // would be recorded and fail the assertions below.
+        let api = MockChApiHandle::spawn(&api_sock_path, 4);
+        api.set_vm_info_state("Running");
+
+        let adapter = ProcessCloudHypervisorAdapter::new(bin.clone());
+        let (live_peer, live_agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (owned_peer, owned_agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let live_fd = live_agent_end.as_raw_fd();
+        let owned_fd = owned_agent_end.as_raw_fd();
+        let (live_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let (owned_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let owned_child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-live-thread".to_string(),
+                VmProcess {
+                    api_socket: api_sock_path.clone(),
+                    child: VmmChild::Adopted(live_standin.pid()),
+                    console_io: OwnedFd::from(live_agent_end),
+                    serial_transport: SerialTransport::Socket(vm_live_dir.join("serial.sock")),
+                    pty_tx: live_tx,
+                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    broadcaster_alive: Arc::new(AtomicBool::new(true)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+            map.insert(
+                "vm-owned".to_string(),
+                VmProcess {
+                    api_socket: api_sock_path.clone(),
+                    child: VmmChild::Owned(owned_child),
+                    console_io: OwnedFd::from(owned_agent_end),
+                    serial_transport: SerialTransport::Socket(vm_owned_dir.join("serial.sock")),
+                    pty_tx: owned_tx,
+                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    broadcaster_alive: Arc::new(AtomicBool::new(true)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // Both start_vm calls succeed idempotently...
+        adapter.start_vm("vm-live-thread", None).await.unwrap();
+        adapter.start_vm("vm-owned", None).await.unwrap();
+
+        // ...and neither VM was rebooted: a live console path (adopted)
+        // and a tracked VM (Owned) are both outside the heal's gates.
+        assert_eq!(
+            api.reboot_requests(),
+            0,
+            "no vm.reboot may be issued for a VM with a live serial manager or a tracked VM"
+        );
+        assert_eq!(api.vm_info_requests(), 2);
+        assert!(
+            adapter.serial_heal_reboots.lock().unwrap().is_empty(),
+            "no serial-heal budget may be spent"
+        );
+        {
+            let map = adapter.vms.read().await;
+            assert_eq!(
+                map.get("vm-live-thread").unwrap().console_io.as_raw_fd(),
+                live_fd,
+                "the adopted VM's live console endpoint must be untouched"
+            );
+            assert_eq!(
+                map.get("vm-owned").unwrap().console_io.as_raw_fd(),
+                owned_fd,
+                "the tracked VM's console endpoint must be untouched"
+            );
+        }
+
+        teardown_watchdog_vm(&adapter, "vm-owned").await;
+        drop(live_peer);
+        drop(owned_peer);
+    }
+
     /// Between `spawn()` returning and the child's `execve` completing there
     /// is a small window in which `/proc/<pid>/cmdline` still reads empty;
     /// tests that assert on process identity wait for it to be observable.
@@ -6224,12 +6731,25 @@ mod tests {
         bin: &std::path::Path,
         api_socket: &std::path::Path,
     ) -> std::process::Child {
+        spawn_vmm_standin_script(bin, api_socket, "sleep 300")
+    }
+
+    /// Generalized stand-in spawner: runs `script` under the stand-in
+    /// binary with the `--api-socket` argv appended (visible in `/proc`
+    /// for identity checks). The #409 heal tests use it to run a
+    /// stand-in whose main-thread `comm` reads "serial-manager" — the
+    /// `/proc` signature of a VMM with a live serial-manager thread.
+    fn spawn_vmm_standin_script(
+        bin: &std::path::Path,
+        api_socket: &std::path::Path,
+        script: &str,
+    ) -> std::process::Child {
         use std::os::unix::process::CommandExt as _;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match std::process::Command::new(bin)
                 .arg("-c")
-                .arg("sleep 300")
+                .arg(script)
                 .arg("--api-socket")
                 .arg(api_socket)
                 .process_group(0)
