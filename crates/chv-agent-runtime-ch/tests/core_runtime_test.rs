@@ -15,7 +15,9 @@ use cellhv_core_types::{
 };
 use chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime;
 use chv_agent_runtime_ch::mock::{MockCloudHypervisorAdapter, MockHostResourceController};
-use chv_hypervisor_api::resources::{vm_api_socket, vm_config_file, vm_pid_file};
+use chv_hypervisor_api::resources::{
+    vm_api_socket, vm_config_file, vm_pid_file, ObservedAttachmentSource, ObservedVmAttachments,
+};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -663,6 +665,345 @@ async fn create_then_restart_delete_without_state() {
         !log.iter()
             .any(|c| c.starts_with("detach:") || c.starts_with("close:")),
         "no handle drain expected without in-memory state: {log:?}"
+    );
+}
+
+/// A controllable [`ObservedAttachmentSource`] for the fallback-drain
+/// tests: returns a preset answer and counts how often it was consulted.
+struct TestAttachmentSource {
+    attachments: ObservedVmAttachments,
+    queries: std::sync::Mutex<Vec<String>>,
+}
+
+impl TestAttachmentSource {
+    fn new(attachments: ObservedVmAttachments) -> Arc<Self> {
+        Arc::new(Self {
+            attachments,
+            queries: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn queried(&self, vm_id: &str) -> usize {
+        self.queries
+            .lock()
+            .expect("queries lock")
+            .iter()
+            .filter(|vm| vm == &vm_id)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl ObservedAttachmentSource for TestAttachmentSource {
+    async fn observed_attachments(&self, vm_id: &str) -> ObservedVmAttachments {
+        self.queries
+            .lock()
+            .expect("queries lock")
+            .push(vm_id.to_string());
+        self.attachments.clone()
+    }
+}
+
+/// #405: a delete with NO in-memory runtime record (the VM was created
+/// before an agent restart) but cache-observed attachments must still
+/// drain stord detach/close and nwd detach from the durable
+/// observed-attachment source — this is the live M4.7 run-1 leak (host
+/// taps `tap-c4f4aed3`/`tap-027c51ae` survived two HTTP-200 deletes).
+#[tokio::test]
+async fn delete_after_restart_drains_from_observed_attachments() {
+    let h = harness(None);
+    let vm_id = "vm-r";
+    let create = MutationCommand::CreateVm {
+        definition: definition(vm_id, 1, 1),
+    };
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create",
+            envelope(create),
+        ))
+        .await
+        .expect("create succeeds");
+
+    // The post-restart world: a FRESH runtime (empty in-memory map; same
+    // adapter + controller — the daemons/CH are still up) wired with the
+    // durable observed-attachment source, carrying what the NodeCache
+    // projection would have recorded for the pre-restart create: volume
+    // ids (a handle only where one was durably recorded) and nic ids.
+    let source = TestAttachmentSource::new(ObservedVmAttachments {
+        volumes: vec![
+            ("vol-0".to_string(), None),
+            ("vol-1".to_string(), Some("handle-vol-1".to_string())),
+        ],
+        nics: vec![format!("{vm_id}-net-0")],
+    });
+    let restarted = Arc::new(
+        CloudHypervisorCoreRuntime::new(
+            h.adapter.clone(),
+            h.controller.clone(),
+            h.runtime_dir.clone(),
+        )
+        .with_observed_attachments(source),
+    );
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = restarted
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del",
+            envelope(delete),
+        ))
+        .await;
+    assert!(
+        result.is_ok(),
+        "delete after restart must succeed: {result:?}"
+    );
+    assert!(
+        !h.adapter.vms.lock().expect("vms lock").contains_key(vm_id),
+        "adapter must no longer contain the VM"
+    );
+    // The fallback drained: every observed volume detached, the
+    // handle-bearing one closed, the handle-less one NOT closed (stord
+    // keys sessions by handle — a close without one is impossible), and
+    // every observed nic detached (the tap removal).
+    let log = calls(&h.controller);
+    assert!(
+        is_subsequence(
+            &log,
+            &[
+                "detach:vol-0",
+                "detach:vol-1",
+                "close:vol-1",
+                "detach_nic:vm-r-net-0",
+            ]
+        ),
+        "fallback drain must detach volumes, close the handle-bearing one, and detach nics: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c == "close:vol-0"),
+        "a volume without a durably recorded handle must not be closed: {log:?}"
+    );
+    // No last-detach network teardown on the fallback path (residue until
+    // network delete / node reprovision, as before the fallback existed).
+    assert!(
+        !log.iter().any(|c| c.starts_with("net_teardown:")),
+        "the fallback must not tear network topology down: {log:?}"
+    );
+}
+
+/// The tracked (in-memory-record-present) delete path is unchanged by the
+/// fallback: the observed-attachment source is never consulted, and the
+/// drain comes from the in-memory record exactly as before.
+#[tokio::test]
+async fn tracked_delete_never_consults_the_fallback_source() {
+    // Wire the source into the runtime BEFORE the create, so the delete
+    // runs on a runtime whose in-memory map DOES hold the VM's record —
+    // a source that would return WRONG attachments if consulted.
+    let source = TestAttachmentSource::new(ObservedVmAttachments {
+        volumes: vec![("vol-bogus".to_string(), Some("handle-bogus".to_string()))],
+        nics: vec!["vm-tracked-net-bogus".to_string()],
+    });
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().join("runtime");
+    let adapter = Arc::new(MockCloudHypervisorAdapter::default());
+    let controller = Arc::new(MockHostResourceController::new());
+    let runtime = Arc::new(
+        CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir)
+            .with_observed_attachments(source.clone()),
+    );
+
+    let vm_id = "vm-tracked";
+    let create = MutationCommand::CreateVm {
+        definition: definition(vm_id, 2, 1),
+    };
+    runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create",
+            envelope(create),
+        ))
+        .await
+        .expect("create succeeds");
+    assert_eq!(runtime.debug_side_effects_len(), 1);
+
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del",
+            envelope(delete),
+        ))
+        .await;
+    assert!(result.is_ok(), "tracked delete must succeed: {result:?}");
+    assert_eq!(
+        source.queried(vm_id),
+        0,
+        "the fallback source must not be consulted for a tracked delete"
+    );
+    assert!(
+        !adapter.vms.lock().expect("vms lock").contains_key(vm_id),
+        "adapter must no longer contain the VM"
+    );
+    // The in-memory record drove the drain (reverse-order detach+close of
+    // BOTH volumes — a handle-less fallback drain would have closed
+    // neither).
+    let log = calls(&controller);
+    assert!(
+        is_subsequence(
+            &log,
+            &[
+                "detach:vol-1",
+                "close:vol-1",
+                "detach:vol-0",
+                "close:vol-0",
+                "detach_nic:vm-tracked-net-0",
+            ]
+        ),
+        "tracked drain ordering must be unchanged: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c.contains("bogus")),
+        "no fallback attachment may leak into a tracked drain: {log:?}"
+    );
+    assert_eq!(
+        runtime.debug_side_effects_len(),
+        0,
+        "successful tracked delete must remove the entry"
+    );
+}
+
+/// The fallback drain is fail-open exactly like the tracked drain: a
+/// failing cleanup step (detach, close, or detach_nic) logs and continues,
+/// and the delete still succeeds — a missing tap or an unknown volume must
+/// never fail an already-deleted VM's op.
+#[tokio::test]
+async fn fallback_drain_cleanup_failures_do_not_fail_the_delete() {
+    for fail_step in ["detach:1", "close:1", "detach_nic:1"] {
+        // The fail knob arms a cleanup step (detach/close/detach_nic) that
+        // a SUCCESSFUL create never calls, so one shared controller can
+        // serve both the pre-restart create and the post-restart delete.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = dir.path().join("runtime");
+        let adapter = Arc::new(MockCloudHypervisorAdapter::default());
+        let controller = Arc::new(MockHostResourceController::new_with_fail(fail_step));
+        let vm_id = "vm-fail";
+        CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir.clone())
+            .execute(entry(
+                OperationKind::CreateVm,
+                vm_id,
+                "op-create",
+                envelope(MutationCommand::CreateVm {
+                    definition: definition(vm_id, 1, 1),
+                }),
+            ))
+            .await
+            .expect("create succeeds");
+
+        let source = TestAttachmentSource::new(ObservedVmAttachments {
+            volumes: vec![("vol-0".to_string(), Some("handle-vol-0".to_string()))],
+            nics: vec!["vm-fail-net-0".to_string()],
+        });
+        let restarted = Arc::new(
+            CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir)
+                .with_observed_attachments(source),
+        );
+        let delete = MutationCommand::DeleteVm {
+            vm_id: VmId::new(vm_id).expect("vm id"),
+        };
+        let result = restarted
+            .execute(entry(
+                OperationKind::DeleteVm,
+                vm_id,
+                "op-del-fallback-fail",
+                envelope(delete),
+            ))
+            .await;
+        assert!(
+            result.is_ok(),
+            "a failing fallback cleanup step ({fail_step}) must not fail the delete: {result:?}"
+        );
+        // The drain continued past the injected failure: the OTHER cleanup
+        // steps still ran (each case fails exactly one step).
+        let log = calls(&controller);
+        if fail_step != "detach:1" {
+            assert!(
+                log.iter().any(|c| c == "detach:vol-0"),
+                "the volume detach must still run ({fail_step}): {log:?}"
+            );
+        }
+        if fail_step != "close:1" {
+            assert!(
+                log.iter().any(|c| c == "close:vol-0"),
+                "the volume close must still run ({fail_step}): {log:?}"
+            );
+        }
+        if fail_step != "detach_nic:1" {
+            assert!(
+                log.iter().any(|c| c == "detach_nic:vm-fail-net-0"),
+                "the nic detach must still run ({fail_step}): {log:?}"
+            );
+        }
+    }
+}
+
+/// The fail-open default: with NO observed-attachment source wired (the
+/// pre-#405 composition, and today's core-native mode), a post-restart
+/// delete still succeeds and drains nothing — pinned by
+/// `create_then_restart_delete_without_state` above; this test pins the
+/// same for the empty-source case (a cache that observed nothing).
+#[tokio::test]
+async fn delete_after_restart_with_empty_observed_attachments_drains_nothing() {
+    let h = harness(None);
+    let vm_id = "vm-empty";
+    let create = MutationCommand::CreateVm {
+        definition: definition(vm_id, 1, 1),
+    };
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create",
+            envelope(create),
+        ))
+        .await
+        .expect("create succeeds");
+
+    let source = TestAttachmentSource::new(ObservedVmAttachments::default());
+    let restarted = Arc::new(
+        CloudHypervisorCoreRuntime::new(
+            h.adapter.clone(),
+            h.controller.clone(),
+            h.runtime_dir.clone(),
+        )
+        .with_observed_attachments(source),
+    );
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = restarted
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del",
+            envelope(delete),
+        ))
+        .await;
+    assert!(
+        result.is_ok(),
+        "delete with an empty observed source must succeed: {result:?}"
+    );
+    let log = calls(&h.controller);
+    assert!(
+        !log.iter()
+            .any(|c| c.starts_with("detach:") || c.starts_with("close:")),
+        "nothing to drain when the source observed nothing: {log:?}"
     );
 }
 

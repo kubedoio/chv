@@ -36,7 +36,7 @@ pub use health::{check_host_resources, HealthAggregator, ResourcePressure};
 pub use inventory::InventoryReporter;
 pub use metrics_server::{metrics_router, MetricsState};
 pub use reconcile::Reconciler;
-pub use resources::AgentResourceController;
+pub use resources::{AgentResourceController, NodeCacheAttachmentSource};
 pub use spec::{DiskSpec, NicSpec, VmSpec};
 pub use state_machine::{NodeState, StateMachine};
 pub use supervisor::DaemonSupervisor;
