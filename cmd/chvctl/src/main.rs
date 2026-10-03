@@ -6,7 +6,7 @@ mod config;
 mod output;
 
 use commands::{
-    auth, backup, health, image, migrate, network, node, storage, task, upgrade, user, vm, volume,
+    auth, backup, health, image, migrate, network, node, storage, task, user, vm, volume,
 };
 use output::OutputFormat;
 
@@ -87,11 +87,6 @@ enum Commands {
         #[command(subcommand)]
         command: migrate::MigrateCommands,
     },
-    /// Manage node upgrades
-    Upgrade {
-        #[command(subcommand)]
-        command: upgrade::UpgradeCommands,
-    },
     /// Health checks
     Health {
         #[command(subcommand)]
@@ -128,7 +123,6 @@ async fn main() {
         Commands::User { command } => user::execute(&client, command, &cli.output).await,
         Commands::Storage { command } => storage::execute(&client, command, &cli.output).await,
         Commands::Migrate { command } => migrate::execute(&client, command, &cli.output).await,
-        Commands::Upgrade { command } => upgrade::execute(&client, command, &cli.output).await,
         Commands::Health { command } => health::execute(&client, command, &cli.output).await,
         Commands::Version => {
             println!(

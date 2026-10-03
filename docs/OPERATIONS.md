@@ -142,7 +142,6 @@ journalctl -u chv-nwd -f
 | `chvctl backup` | `list`, `run` | Backup jobs (`show`, `create`, `restore` planned) |
 | `chvctl user` | `list`, `create`, `delete` | User management (admin) |
 | `chvctl migrate` | `start`, `status`, `cancel` | Live migration control |
-| `chvctl upgrade` | `start`, `status`, `list`, `rollback` | Rolling upgrades |
 | `chvctl health` | `cluster` | Cluster health summary |
 | `chvctl version` | — | Show version and build info |
 
@@ -160,9 +159,6 @@ chvctl node drain <NODE_ID>
 
 # Check cluster health
 chvctl health cluster
-
-# Start a rolling upgrade
-chvctl upgrade start <NODE_ID> --version <version>
 
 # Resize a VM
 chvctl vm resize <VM_ID> --cpu 4 --memory-mb 8192
@@ -326,25 +322,9 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 
 ### Upgrade Failures
 
-When an upgrade fails, the `UpgradeOrchestrator` records the failure state with a reason.
+The automated upgrade orchestrator was removed in PR #213, and the `chvctl upgrade` subcommands were removed in #427 — they targeted `/v1/upgrades` BFF routes that were never registered. There is no automated upgrade surface to troubleshoot; upgrades are performed manually (see "Upgrade Procedure (Manual)" below). If a manual binary swap leaves a node drained, force it back to a healthy state:
 
-| Symptom | Diagnostic | Resolution |
-|---------|-----------|------------|
-| State shows `Failed` | `chvctl upgrade status <NODE_ID>` | Check reason field; fix the issue and retry or rollback |
-| Pre-check rejected | Check logs: `journalctl -u chv-controlplane \| grep "pre-check"` | Fix the blocking condition (incompatible version, active migrations, unhealthy node) |
-| Health check timeout | Node didn't reach `TenantReady` within 120s | Check agent logs: `journalctl -u chv-agent -n 100`; verify binary was installed correctly |
-| Drain timeout | VMs didn't evacuate within 300s | Check migration status; ensure target nodes have capacity |
-| Rollback triggered | Automatic on health-check failure | Verify node is back to previous version: `chv-agent --version` |
-
-**Recovery steps:**
 ```bash
-# Check upgrade state
-chvctl upgrade status <NODE_ID>
-
-# Manual rollback if automated rollback failed
-chvctl upgrade rollback <NODE_ID>
-
-# Force node back to healthy state
 curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
   -d '{"node_id": "<NODE_ID>", "action": "exit_maintenance"}'
 ```
@@ -505,43 +485,12 @@ watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_node_vm_count'
 
 ### Rolling Upgrade
 
-> **Qualification status:** The rolling-upgrade machinery is code-supported
-> but unqualified; no multi-host evidence exists.
-
-**Via CLI:**
-```bash
-# Start upgrade on a specific node
-chvctl upgrade start <NODE_ID> --version <version>
-
-# Check upgrade status
-chvctl upgrade status <NODE_ID>
-
-# List all upgrades
-chvctl upgrade list
-
-# Rollback if upgrade failed
-chvctl upgrade rollback <NODE_ID>
-```
-
-**Via API:**
-```bash
-# Initiate upgrade
-curl -X POST http://127.0.0.1:8080/v1/upgrades \
-  -H "Content-Type: application/json" \
-  -d '{"node_id": "<NODE_ID>", "version": "<version>"}'
-
-# Check status
-curl http://127.0.0.1:8080/v1/upgrades/<NODE_ID>
-```
-
-**Upgrade flow (automated per node):**
-1. Pre-checks: version compatibility, disk space, no active migrations, node health
-2. Drain node (evacuate VMs)
-3. Record upgrade intent in `node_desired_state`
-4. Agent performs binary swap + systemd restart
-5. Control plane polls for health (up to 120s timeout)
-6. If healthy → un-drain and proceed to next node
-7. If unhealthy → automatic rollback to previous version
+> **Status:** No automated rolling-upgrade surface exists. The control-plane
+> upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgrader`) was deleted as
+> dead code in PR #213, and the `chvctl upgrade` subcommands — which targeted
+> `/v1/upgrades` BFF routes that were never registered — were removed in #427.
+> Use the manual procedure below ("Upgrade Procedure (Manual)") together with
+> `chvctl node drain` to upgrade nodes one at a time.
 
 ### Compatibility Matrix
 
