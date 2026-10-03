@@ -61,7 +61,7 @@ Nightly packages are built automatically from every merge to `main`.
 - **Quality:** Automated tests pass, but the code may contain regressions, breaking changes, or incomplete features.
 - **Artifacts:** `.deb`, `.rpm`, checksums.
 - **Support:** No support guarantee. File issues against the specific commit if you find bugs.
-- **Upgrade path:** Debian: can upgrade to RC or stable (`~` sorts before the release, so nightly → RC → stable is a forward upgrade). RPM: nightlies carry a `^` post-release suffix and sort **above** the same-base stable — moving from an RPM nightly to that stable release is a **downgrade** (`dnf downgrade` or `dnf install --oldpackage`).
+- **Upgrade path:** Nightly and RC versions carry a `~` pre-release suffix on both `.deb` and `.rpm` (the CI derives one version string and stamps it on both formats). `~` sorts before the stable release in Debian and RPM ordering alike, so nightly → RC → stable is a forward upgrade on both formats.
 
 ### Version format
 
@@ -107,21 +107,24 @@ Every pull request to `main` triggers a package build. The packages are uploaded
 
 ## Version precedence
 
-Package managers order versions differently by format:
+Package managers order versions from oldest to newest — the same order on both formats as shipped (the CI stamps the Debian-derived `~` string on the `.rpm` too):
 
 ```text
-Debian (apt):  nightly < RC < stable        (~ sorts before the release)
-RPM (dnf/yum): stable < nightly (same base) (^ is the post-release operator)
+nightly < RC < stable
 ```
 
 Examples:
-- Debian: `<version>~nightly.20260510.g0872c4a7` < `<version>~rc.1` < `<version>`
-- RPM: `<version>-0.1.rc1` < `<version>` < `<version>^nightly.20260510.g0872c4a7`
+- `<version>~nightly.20260510.g0872c4a7` < `<version>~rc.1` < `<version>` (both formats, as shipped)
 
-On Debian, nightly → RC → stable is always a forward upgrade. On RPM, an
-RPM nightly sorts above the same-base stable release: moving to that
-stable release is a downgrade. Use `dnf downgrade` (or
-`dnf install --oldpackage`) for that step.
+`~` is the pre-release operator in both Debian and RPM version comparison,
+so upgrading from nightly → RC → stable is always a forward upgrade.
+
+One caveat: `scripts/version.sh` has a per-format RPM path that emits a `^`
+(post-release) suffix — `^nightly` would sort **above** the same-base
+stable in RPM. No workflow uses that path today. If the pipeline ever
+adopts per-format version strings, RPM nightly ordering flips to
+above-stable (tracked issue; see
+[versioning policy](../release/versioning-policy.md) §3.1).
 
 ## Switching channels
 
