@@ -196,9 +196,10 @@ pub trait HypervisorAdapter: Send + Sync + 'static {
 }
 
 pub use resources::AlwaysInUse;
+pub use resources::NoObservedAttachments;
 pub use resources::{
     ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir, HostResourceController,
-    NetworkUsageLookup, DEFAULT_NIC_CIDR,
+    NetworkUsageLookup, ObservedAttachmentSource, ObservedVmAttachments, DEFAULT_NIC_CIDR,
 };
 // Relocated to chv-common (#356 N5) so nwd's derived-names teardown fallback
 // shares the definition; re-exported here so existing imports keep working.

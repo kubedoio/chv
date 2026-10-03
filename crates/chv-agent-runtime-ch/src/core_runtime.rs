@@ -22,11 +22,17 @@
 //! attempts the drain best-effort, EVEN when the hypervisor delete itself
 //! failed, so a failed delete cannot strand open stord/nwd handles; the tracked
 //! entry is preserved for a later retry when the delete did not succeed. The
-//! map is in-memory only: a daemon restart loses it, and a delete then logs a
-//! "no durable handle persistence" residual and still returns Ok (the delete
-//! already succeeded; a leaking handle is a logged residual, not an
-//! infinite-retry failure). M2.2a deliberately adds no durable handle
-//! persistence; that is a documented crash residual.
+//! map is in-memory only: a daemon restart loses it. When that happens, the
+//! delete falls back to draining from a DURABLE observed-attachment source
+//! ([`ObservedAttachmentSource`], #405 — production: the NodeCache
+//! compatibility projection, whose VM axis the startup rebuild re-seeds from
+//! the Core store before the executor starts), so a VM created before a
+//! restart still gets its host taps detached and its stord volumes
+//! detached/closed. When even that source has nothing (no cache record), the
+//! delete logs the "no durable handle persistence" residual and still returns
+//! Ok (the delete already succeeded; a leaking handle is a logged residual,
+//! not an infinite-retry failure). M2.2a deliberately adds no durable handle
+//! persistence; the fallback narrows that debt to the cache-empty case.
 
 use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig, VmNicConfig};
 use cellhv_core_executor::{CoreVmRuntime, RuntimeFailure};
@@ -35,7 +41,8 @@ use cellhv_core_types::{OperationKind, StorageAttachmentRef};
 use chv_errors::ChvError;
 use chv_hypervisor_api::resources::{
     ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_config_file, vm_pid_file, vm_runtime_dir,
-    HostResourceController, NetworkUsageLookup, DEFAULT_NIC_CIDR,
+    HostResourceController, NetworkUsageLookup, NoObservedAttachments, ObservedAttachmentSource,
+    DEFAULT_NIC_CIDR,
 };
 use chv_hypervisor_api::{bridge_name_for_network, AlwaysInUse};
 use std::collections::HashMap;
@@ -142,6 +149,12 @@ pub struct CloudHypervisorCoreRuntime {
     network_usage: Arc<dyn NetworkUsageLookup>,
     /// Per-VM in-memory handle map (see module docs for lifetime).
     side_effects: Mutex<HashMap<String, VmSideEffects>>,
+    /// Durable observed-attachment fallback for the delete drain (#405):
+    /// consulted ONLY when the in-memory map has no entry for the VM (any
+    /// VM created before an agent restart). Defaults to
+    /// [`NoObservedAttachments`] (fail-open: the logged crash residual)
+    /// until [`Self::with_observed_attachments`] wires a real source.
+    observed_attachments: Arc<dyn ObservedAttachmentSource>,
 }
 
 impl CloudHypervisorCoreRuntime {
@@ -156,6 +169,7 @@ impl CloudHypervisorCoreRuntime {
             runtime_dir,
             network_usage: Arc::new(AlwaysInUse),
             side_effects: Mutex::new(HashMap::new()),
+            observed_attachments: Arc::new(NoObservedAttachments),
         }
     }
 
@@ -165,6 +179,15 @@ impl CloudHypervisorCoreRuntime {
     /// delete / node reprovision instead.
     pub fn with_network_usage(mut self, lookup: Arc<dyn NetworkUsageLookup>) -> Self {
         self.network_usage = lookup;
+        self
+    }
+
+    /// Wire the durable observed-attachment source for the delete-time
+    /// side-effect fallback drain (#405). Without this, a delete that finds
+    /// no in-memory record (any VM created before an agent restart) drains
+    /// nothing and logs the M2.2a crash residual (fail-open default).
+    pub fn with_observed_attachments(mut self, source: Arc<dyn ObservedAttachmentSource>) -> Self {
+        self.observed_attachments = source;
         self
     }
 
@@ -542,6 +565,11 @@ impl CloudHypervisorCoreRuntime {
     /// preserved so a later retry can finish the drain; when false (delete
     /// succeeded) the entry is removed. Every cleanup step is best-effort and
     /// logs-and-continues; no drain failure ever escalates the delete outcome.
+    ///
+    /// When there is no tracked entry (a VM created before an agent restart),
+    /// the drain falls back to the durable observed-attachment source (#405,
+    /// see the `None` arm below) before giving up with the logged crash
+    /// residual.
     async fn drain_side_effects(&self, vm_id: &str, op_id: &str, keep_entry: bool) {
         let effects = match self.side_effects.lock() {
             Ok(mut map) => {
@@ -563,14 +591,78 @@ impl CloudHypervisorCoreRuntime {
             }
         };
         let Some(effects) = effects else {
-            // Documented crash residual: after a daemon restart the in-memory
-            // handle map is gone and stord/nwd handles may leak (M2.2a adds no
-            // durable handle persistence).
-            warn!(
+            // #405 fallback: after a daemon restart the in-memory handle
+            // map is gone, but the delete's side effects (host taps,
+            // stord sessions) are still live on the node. Drain them from
+            // the DURABLE observed-attachment source (production: the
+            // NodeCache projection, re-seeded from the Core store at
+            // startup) — mirroring the CH adapter's own `delete_untracked_vm`
+            // precedent for the no-entry delete case. This fallback runs
+            // on BOTH delete outcomes (the caller already decided
+            // `keep_entry`); there is no entry to keep, and every step is
+            // the same best-effort log-and-continue as the tracked drain,
+            // so a missing tap (nwd detach is Ok on "cannot find device")
+            // or an unknown volume cannot fail the delete.
+            let observed = self.observed_attachments.observed_attachments(vm_id).await;
+            if observed.is_empty() {
+                // Documented crash residual: neither the in-memory map nor
+                // the durable observed state knows this VM's handles, so
+                // stord/nwd handles may leak (M2.2a adds no durable handle
+                // persistence; the fallback above narrows but does not
+                // eliminate that debt).
+                warn!(
+                    vm_id,
+                    operation_id = op_id,
+                    "no in-memory side-effect state available for delete; leaking stord/nwd handles is a documented crash residual (no durable handle persistence in M2.2a)"
+                );
+                return;
+            }
+            info!(
                 vm_id,
                 operation_id = op_id,
-                "no in-memory side-effect state available for delete; leaking stord/nwd handles is a documented crash residual (no durable handle persistence in M2.2a)"
+                volumes = observed.volumes.len(),
+                nics = observed.nics.len(),
+                "no in-memory side-effect state for delete; draining stord/nwd handles from durable observed attachments (post-restart fallback)"
             );
+            for (volume_id, handle) in &observed.volumes {
+                if let Err(e) = self
+                    .resources
+                    .detach_volume_from_vm(volume_id, vm_id, false, Some(op_id))
+                    .await
+                {
+                    warn!(vm_id, volume_id, error = %e, "delete cleanup: detach_volume failed, continuing");
+                }
+                // A handle the source did not durably record cannot be
+                // closed (stord keys sessions by handle): the detach above
+                // still releases the VM-scoped attachment, and the open
+                // session remains the documented M2.2a handle-persistence
+                // residual.
+                if let Some(handle) = handle {
+                    if let Err(e) = self
+                        .resources
+                        .close_volume(volume_id, handle, Some(op_id))
+                        .await
+                    {
+                        warn!(vm_id, volume_id, error = %e, "delete cleanup: close_volume failed, continuing");
+                    }
+                }
+            }
+            for nic_id in &observed.nics {
+                if let Err(e) = self
+                    .resources
+                    .detach_vm_nic(nic_id, vm_id, "", Some(op_id))
+                    .await
+                {
+                    warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
+                }
+            }
+            // Deliberately NO last-detach network teardown on the fallback
+            // path: the tracked path's teardown input (`effects.networks`)
+            // comes from the in-memory record, and promoting network
+            // teardown onto the restart path is a separate decision with
+            // its own authority guards (#356 N5). Host topology residue
+            // from a post-restart delete is cleaned by network delete /
+            // node reprovision, exactly as before this fallback existed.
             return;
         };
         for (volume_id, handle, attached) in effects.volumes.iter().rev() {

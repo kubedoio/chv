@@ -13,6 +13,7 @@ pub mod maintenance;
 pub mod metrics;
 pub mod networks;
 pub mod nodes;
+pub mod operations;
 pub mod overview;
 pub mod quotas;
 pub mod settings;

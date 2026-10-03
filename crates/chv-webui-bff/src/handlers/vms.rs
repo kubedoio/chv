@@ -838,6 +838,34 @@ pub async fn delete_vm(
 
     require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
 
+    // #406: idempotent retry. The M2.5 authority-side retention keeps
+    // the VM rows after a delete, so a retried delete of the same VM
+    // re-enters this handler with the same `delete-vm-<vm_id>` key.
+    // Check for a recorded operation BEFORE any mutation: a hit replays
+    // the original outcome (200 Accepted with the recorded task_id)
+    // without re-running the nic-row removal or bumping the generation.
+    // The BEGIN IMMEDIATE tx serializes this check-then-insert pair
+    // against concurrent deletes of the same VM.
+    let idempotency_key = format!("delete-vm-{}", vm_id);
+    if let Some(recorded) =
+        crate::handlers::operations::find_recorded_operation(&mut tx, &idempotency_key).await?
+    {
+        tracing::info!(
+            %vm_id,
+            operation_id = %recorded.operation_id,
+            status = %recorded.status,
+            "delete_vm: idempotent retry of a recorded delete; replaying original outcome"
+        );
+        return Ok(Json(json!({
+            "accepted": true,
+            "task_id": recorded.operation_id,
+            "vm_id": vm_id,
+            "recorded_status": recorded.status,
+            "summary": format!("Deleting VM '{}'", vm_id),
+            "next_refresh_path": format!("/api/v1/tasks/{}", recorded.operation_id),
+        })));
+    }
+
     // Remove the VM's NIC desired-state rows (#356): nothing else ever
     // deletes them (the vms/vm_desired_state rows persist as tombstones
     // of the desired-state lifecycle), and lingering rows permanently
@@ -874,8 +902,7 @@ pub async fn delete_vm(
             .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
     let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
-    let idempotency_key = format!("delete-vm-{}", vm_id);
-    sqlx::query(
+    let insert_operation = sqlx::query(
         r#"
         INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
         VALUES (?, ?, 'vm', ?, 'DeleteVm', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -887,8 +914,18 @@ pub async fn delete_vm(
     .bind(&requested_by)
     .bind(new_generation)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+    .await;
+    if let Err(e) = insert_operation {
+        // #406: an idempotency-key collision here must never surface as
+        // an opaque 500 — fail closed with a 409 naming the condition
+        // (and the tx rolls back, so the delete is not re-executed).
+        return Err(crate::handlers::operations::map_operation_insert_error(
+            &mut tx,
+            &idempotency_key,
+            e,
+        )
+        .await);
+    }
 
     tx.commit()
         .await
@@ -957,7 +994,12 @@ pub async fn resize_vm(
 
     let requested_by = claims.sub.clone();
     let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
-    let idempotency_key = format!("resize-vm-{}", vm_id);
+    // #406 review round: the key is args-hashed (`resize-vm-<vm_id>-<cpu>-<mem>`)
+    // so the two realistic intents are both correct — a same-args retry replays
+    // the recorded outcome (idempotent), while a genuinely different resize is
+    // a fresh operation (never silently swallowed by a per-VM key). The values
+    // are validated above, before this derivation.
+    let idempotency_key = format!("resize-vm-{}-{}-{}", vm_id, cpu_count, memory_bytes);
 
     // BEGIN IMMEDIATE: serialize concurrent writers to avoid quota TOCTOU on resize,
     // and the SELECT for delta math runs inside the tx so the values can't change
@@ -969,6 +1011,31 @@ pub async fn resize_vm(
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
+
+    // #406: idempotent retry — same mechanic as delete_vm. The key is
+    // args-hashed (see above), so only a same-args retry re-derives it;
+    // replay the recorded outcome instead of colliding on the UNIQUE
+    // insert, and never re-run the quota delta math or the desired-state
+    // UPDATE. Checked after the ownership gate so a non-owner probing a
+    // recorded VM still gets 403/404.
+    if let Some(recorded) =
+        crate::handlers::operations::find_recorded_operation(&mut tx, &idempotency_key).await?
+    {
+        tracing::info!(
+            %vm_id,
+            operation_id = %recorded.operation_id,
+            status = %recorded.status,
+            "resize_vm: idempotent retry of a recorded resize; replaying original outcome"
+        );
+        return Ok(Json(json!({
+            "accepted": true,
+            "task_id": recorded.operation_id,
+            "vm_id": vm_id,
+            "recorded_status": recorded.status,
+            "summary": format!("Resizing VM '{}' to {} vCPU, {} bytes memory", vm_id, cpu_count, memory_bytes),
+            "next_refresh_path": format!("/api/v1/tasks/{}", recorded.operation_id),
+        })));
+    }
 
     // Fetch current resource usage for delta-based quota check (inside the tx so
     // the values are stable across the quota check and the UPDATE below).
@@ -1016,7 +1083,7 @@ pub async fn resize_vm(
             .await
             .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
-    sqlx::query(
+    let insert_operation = sqlx::query(
         r#"
         INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
         VALUES (?, ?, 'vm', ?, 'ResizeVm', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -1028,8 +1095,18 @@ pub async fn resize_vm(
     .bind(&requested_by)
     .bind(new_generation)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+    .await;
+    if let Err(e) = insert_operation {
+        // #406: an idempotency-key collision here must never surface as
+        // an opaque 500 — fail closed with a 409 naming the condition
+        // (and the tx rolls back, so the resize is not re-executed).
+        return Err(crate::handlers::operations::map_operation_insert_error(
+            &mut tx,
+            &idempotency_key,
+            e,
+        )
+        .await);
+    }
 
     tx.commit()
         .await

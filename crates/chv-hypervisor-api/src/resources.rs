@@ -329,6 +329,66 @@ impl NetworkUsageLookup for AlwaysInUse {
     }
 }
 
+/// Observed volume + NIC attachments for one VM, as a durable authority
+/// recorded them — the delete-time fallback drain input (#405).
+///
+/// Produced by an [`ObservedAttachmentSource`] when the runtime's
+/// in-memory side-effect map has no entry for the VM (any VM created
+/// before an agent restart — the map dies with the process).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservedVmAttachments {
+    /// `(volume_id, attachment_handle)` pairs, in the source's record
+    /// order. The handle is `Some` only when the source durably recorded
+    /// the stord attachment handle; a `None` handle still allows the
+    /// detach (stord keys a VM attachment by volume + vm, not by handle)
+    /// but not the session close.
+    pub volumes: Vec<(String, Option<String>)>,
+    /// `nic_id`s, in attach order.
+    pub nics: Vec<String>,
+}
+
+impl ObservedVmAttachments {
+    /// True when the source observed nothing to drain for the VM.
+    pub fn is_empty(&self) -> bool {
+        self.volumes.is_empty() && self.nics.is_empty()
+    }
+}
+
+/// Durable answer to "which volume and NIC attachments did this node
+/// observe for `vm_id`?" — the delete-time side-effect fallback drain's
+/// input (#405).
+///
+/// The answer MUST come from a source that survives daemon restarts
+/// (production: the NodeCache compatibility projection, whose VM axis the
+/// startup rebuild re-seeds from the Core store before the executor
+/// starts). In-memory runtime state is exactly what it replaces: after a
+/// restart that map is empty, which is the leak being fixed.
+///
+/// The source is READ-ONLY from the drain's perspective: it must not
+/// remove or mutate the observed state (the delete's own projection owns
+/// that), so a FAILED delete can retry the fallback drain idempotently.
+///
+/// Implementations fail OPEN with empty attachments when the underlying
+/// state cannot be read: an absent answer only leaves the pre-existing
+/// logged residual (no drain), never a wrong drain.
+#[async_trait]
+pub trait ObservedAttachmentSource: Send + Sync + 'static {
+    async fn observed_attachments(&self, vm_id: &str) -> ObservedVmAttachments;
+}
+
+/// Fail-open [`ObservedAttachmentSource`]: no attachments are ever
+/// observed, so the delete-time fallback drain degrades to the logged
+/// M2.2a crash residual. The runtime's default before
+/// `with_observed_attachments` wires a real source.
+pub struct NoObservedAttachments;
+
+#[async_trait]
+impl ObservedAttachmentSource for NoObservedAttachments {
+    async fn observed_attachments(&self, _vm_id: &str) -> ObservedVmAttachments {
+        ObservedVmAttachments::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
