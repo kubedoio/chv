@@ -1,5 +1,10 @@
 # CHV Design System
 
+> **Deprecated:** This document is superseded by the root
+> [`DESIGN.md`](../DESIGN.md) and is kept for history only. Do not use it
+> for new work; the root `DESIGN.md` is the single source of truth for
+> design tokens.
+
 A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) platform.
 
 ## Design Principles

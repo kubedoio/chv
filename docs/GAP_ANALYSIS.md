@@ -19,16 +19,16 @@
 
 **Previously reported gaps that are now resolved:**
 - Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
-- VM resize is wired end-to-end (BFF → desired state → agent reconcile → Cloud Hypervisor).
-- Network mutations (`start`/`stop`/`restart`) are wired through BFF → control plane → agent → nwd.
+- VM resize is wired end-to-end (backend-for-frontend (BFF) → desired state → agent reconcile → Cloud Hypervisor (the VMM)).
+- Network mutations (`start`/`stop`/`restart`) are wired through BFF → control plane → agent → `chv-nwd`.
 - svelte-check reports **0 errors and 0 warnings**.
 - Playwright E2E tests run in CI (`.github/workflows/ci.yml` `e2e` job).
 - Toast component uses design-system CSS variables (no hardcoded hex).
-- TopologyCanvas, SidebarNav, and settings/users page are all under 300 lines after refactor.
+- TopologyCanvas and settings/users page are under 300 lines after refactor; `SidebarNav.svelte` has since regressed above 300 (see §3.1 re-check).
 - There are **zero** `unimplemented!()` stubs in production Rust code.
 - **`awaiting-operator-input` task state** implemented in `OperationStatus`, UI task list, and migration reaper exclusion.
-- **Disk migration dirty sync + final flush** implemented end-to-end: stord `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs, `MigrationTaskTable` with VM-pause coordination, agent progress polling and reporting to control plane.
-- **chv-stord security hardening** implemented: dedicated `chv-stord` service account, path/device allowlists, capability dropping in systemd, socket `chown` to `chv-stord` group.
+- **Disk migration dirty sync + final flush** implemented end-to-end: `chv-stord` `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs, `MigrationTaskTable` with VM-pause coordination, agent progress polling and reporting to control plane.
+- **chv-stord security hardening** implemented: dedicated `chv-stord` service account, path/device allowlists, capability dropping in systemd, socket `chown` to the `chv-stord` group.
 - **Multi-node WebSocket routing** implemented: nginx `map`-based dynamic upstream by `node_id`, BFF proxied-mode URL generation, documented in `DEPLOYMENT.md`.
 
 ---
@@ -47,13 +47,13 @@
 
 ### 1.1 Disk Migration Dirty Sync and Final Flush — ✅ RESOLVED 2026-06-02
 - **Spec:** ADR-012, `chv-stord-spec.md`, live-migration-spec.md
-- **Resolution:** Implemented end-to-end with stord `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs, `MigrationTaskTable` with VM-pause coordination via `tokio::sync::watch`, agent progress polling every 5s, and control-plane progress reporting via `PendingControlPlaneMessage` queue.
+- **Resolution:** Implemented end-to-end with `chv-stord` `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs. `MigrationTaskTable` coordinates VM pauses via `tokio::sync::watch`. The agent polls progress every 5s. It reports progress to the control plane via the `PendingControlPlaneMessage` queue.
 - **Evidence:** `proto/node/chv-stord-api.proto`, `crates/chv-stord-core/src/migration/task.rs`, `crates/chv-stord-core/src/handlers.rs:844-1067`, `crates/chv-agent-core/src/migration.rs:229-410`, `crates/chv-agent-core/src/daemon_clients.rs:422-520`
 - **Priority:** P1
 
 ### 1.2 Backup Jobs: Execution Engine Complete — Restore/DR Runbooks Pending
 - **Spec:** ARCHITECTURE.md, PHASED_IMPLEMENTATION_PLAN.md Phase 3
-- **Status:** Core execution engine resolved (2026-06-03). Backup shipper trait (Null, NFS, S3 with streaming upload) wired into `BackupWorker`. VM-level snapshots are staged, shipped to remote destinations, and DB records are updated with checksum, size, remote path, and storage backend. `retention_days` enforcement works alongside `retention_count` pruning, with correct remote artifact deletion using `job.destination` (original URL) to build the shipper and `job.target_path` (shipped key/path) for deletion. S3 credentials are configurable per-schedule. 9 unit tests cover shipper implementations.
+- **Status:** Core execution engine resolved (2026-06-03). Backup shipper trait (Null, NFS, S3 with streaming upload) wired into `BackupWorker`. VM-level snapshots are staged and shipped to remote destinations. DB records gain checksum, size, remote path, and storage backend. `retention_days` enforcement works alongside `retention_count` pruning. Remote artifact deletion uses `job.destination` (original URL) to build the shipper and `job.target_path` (shipped key/path) for the delete. S3 credentials are configurable per-schedule. 9 unit tests cover shipper implementations.
 
   **Post-implementation review fixes (2026-06-03):**
   - Race condition in scheduled job creation eliminated via optimistic locking (`try_claim_schedule_run`)
@@ -61,13 +61,13 @@
   - S3 credentials encrypted at rest with AES-256-GCM (`CredentialEncryption`), key from `CHV_ENCRYPTION_KEY` or `CHV_JWT_SECRET`
   - BFF duplicate JSON keys removed; destination tracking preserved across job creation and re-run paths
 
-  Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes). Restore execution/validation remains a future feature (no restore worker yet), but DR runbooks are now documented covering all current manual and automated restore paths.
+  Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes). Restore execution/validation remains a future feature (no restore worker yet). DR runbooks now document all current manual and automated restore paths.
 - **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`, `crates/chv-controlplane-store/src/credential_crypto.rs`, `cmd/chv-controlplane/migrations/0043_backup_destination_and_credentials.sql`
 - **Priority:** P2
 
 ### 1.3 iSCSI and Ceph RBD Storage Backend Adapters — ✅ RESOLVED 2026-06-03
 - **Spec:** ADR-004, `chv-stord-spec.md`
-- **Resolution:** Both backends implement the full `StorageBackend` trait (open, close, attach, detach, health, resize, snapshot, clone, dirty tracking, read/write block, migration). They are selectable at runtime in `cmd/chv-stord/src/main.rs` via `backend_type = "iscsi"` or `backend_type = "ceph"` with corresponding config sections. Config parsing (`chv-config`) supports `StordIscsiConfig` and `StordCephConfig`. The generic `StorageServer<B>` and `StorageMigrationServiceImpl<B>` work with `Box<dyn StorageBackend>` via the blanket impl. All backends compile, pass clippy, and have unit tests.
+- **Resolution:** Both backends implement the full `StorageBackend` trait (open, close, attach, detach, health, resize, snapshot/clone preparation, restore/delete snapshot, device policy, read/write block, volume size, dirty tracking). They are selectable at runtime in `cmd/chv-stord/src/main.rs` via `backend_type = "iscsi"` or `backend_type = "ceph"` with corresponding config sections. Config parsing (`chv-config`) supports `StordIscsiConfig` and `StordCephConfig`. The generic `StorageServer<B>` and `StorageMigrationServiceImpl<B>` work with `Box<dyn StorageBackend>` via the blanket impl. All backends compile, pass clippy, and have unit tests.
 - **Evidence:** `crates/chv-stord-backends/src/iscsi.rs`, `crates/chv-stord-backends/src/ceph.rs`, `cmd/chv-stord/src/main.rs:43-77`, `crates/chv-config/src/lib.rs:237-242`
 - **Priority:** P2
 
@@ -77,7 +77,7 @@
 
 ### 2.1 chv-stord-spec Security Requirements — ✅ RESOLVED 2026-06-02
 - **Spec:** `chv-stord-spec.md` (dedicated service account, restricted socket permissions, explicit device/path allowlists, capability drop)
-- **Resolution:** Dedicated `chv-stord` system user/group created in `install.sh` and `postinstall.sh`. `path_allowlist` and `device_allowlist` enforced in `StorageServiceImpl::open_volume`. Systemd service updated with `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE`, `RestrictAddressFamilies=AF_UNIX`, `RestrictSUIDSGID=true`, and socket `chown` to `chv-stord` group.
+- **Resolution:** Dedicated `chv-stord` system user/group created in `install.sh` and `postinstall.sh`. `path_allowlist` and `device_allowlist` enforced in `StorageServiceImpl::open_volume`. Systemd service updated with `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE`, `RestrictAddressFamilies=AF_UNIX`, `RestrictSUIDSGID=true`, and socket `chown` to the `chv-stord` group.
 - **Evidence:** `scripts/install.sh:203-235`, `packaging/scripts/postinstall.sh:15-40`, `docs/examples/systemd/chv-stord.service`, `crates/chv-stord-core/src/handlers.rs:108-213`
 - **Priority:** P1
 
@@ -88,8 +88,9 @@
 ### 3.1 Components Over 300 Lines — ✅ RESOLVED 2026-06-04
 - **Spec:** CLAUDE.md / CONTRIBUTING.md: "Keep Svelte components under ~300 lines"
 - **Gap:** Previously `CreateVMModal.svelte` (~580 lines) and `DataTable.svelte` exceeded the threshold.
-- **Resolution:** `CreateVMModal.svelte` is now 283 lines. `DataTable.svelte` has been fully decomposed into `ResourceTable.svelte` (198 lines), `InventoryTable.svelte` (72 lines), and `UserTable.svelte` (125 lines). The monolithic `DataTable.svelte` no longer exists. Table logic utilities live in `table.svelte.ts` (451 lines of non-component logic).
-- **Evidence:** `wc -l ui/src/lib/components/vms/CreateVMModal.svelte` = 283; no file named `DataTable.svelte` exists in `ui/src/`
+- **Resolution:** `CreateVMModal.svelte` is now 283 lines. `DataTable.svelte` is fully decomposed into `ResourceTable.svelte` (198 lines), `InventoryTable.svelte` (72 lines), and `UserTable.svelte` (125 lines). The monolithic `DataTable.svelte` no longer exists. Table logic utilities live in `table.svelte.ts` (451 lines of non-component logic).
+- **Re-check 2026-10-03:** `CreateVMModal.svelte` is 288 lines and `settings/users/+page.svelte` is 253 lines. `SidebarNav.svelte` has regressed to 346 lines and exceeds the threshold again. PR #213 later deleted `ResourceTable.svelte` as dead code; `table.svelte.ts` is now 12 lines.
+- **Evidence:** `wc -l ui/src/lib/components/vms/CreateVMModal.svelte` = 288; no file named `DataTable.svelte` exists in `ui/src/`
 - **Priority:** P2
 
 ### 3.2 InventoryListPage Uses `any` Types — ✅ RESOLVED 2026-06-03
@@ -116,7 +117,7 @@
 
 ### 4.2 Docker Compose Incomplete for Production Use — ✅ RESOLVED 2026-06-03
 - **Spec:** DEPLOYMENT.md, CONTRIBUTING.md (Docker optional)
-- **Resolution:** Added `docker-compose.prod.yml` with production-oriented configuration: health checks for all services, `read_only: true` root filesystems with `tmpfs` overlays, dedicated service users (`chv`, `chv-stord`), KVM device passthrough for `chv-agent`, host networking for `chv-nwd`, proper volume sharing between services via named Docker volumes, and nginx reverse proxy with WebSocket upgrade support. `Dockerfile` updated with runtime dependencies, service user creation, and additional exposed ports.
+- **Resolution:** Added `docker-compose.prod.yml` with production-oriented configuration. It provides health checks for all services and `read_only: true` root filesystems with `tmpfs` overlays. It adds dedicated service users (`chv`, `chv-stord`), KVM device passthrough for `chv-agent`, and host networking for `chv-nwd`. Services share volumes via named Docker volumes. An nginx reverse proxy handles WebSocket upgrades. `Dockerfile` updated with runtime dependencies, service user creation, and additional exposed ports.
 - **Evidence:** `docker-compose.prod.yml`, `Dockerfile`
 - **Priority:** P2
 
