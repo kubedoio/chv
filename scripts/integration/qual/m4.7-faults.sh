@@ -1318,22 +1318,28 @@ qual_chvctl vm start "$F2_VM" >/dev/null 2>&1 \
 # Deterministic mid-boot kill window (the run-2/#409 lesson): the CP op
 # reaching Succeeded is submit-level (#368), so killing on it lands at a
 # variable offset from the actual boot — run 1 hit post-boot (trivial
-# pass), run 2 hit mid-firmware (the wedge). The firmware's first
-# console lines are the earliest observable proof the payload push has
-# begun booting; killing the agent the moment they appear lands INSIDE
-# the firmware boot window every run — the exact #409 exposure, with
-# the #410 heal expected to recover it on the re-driven start.
+# pass), run 2 hit mid-firmware (the wedge), run 3 post-boot again. The
+# #409 wedge further requires the kernel to RST the serial socket, which
+# only happens when the agent dies with UNREAD console data in flight —
+# the firmware's early trickle (~500 bytes) makes that a sub-second
+# lottery (run 4 hit the window cleanly without wedging). The kernel
+# banner is followed by seconds of sustained heavy serial spew, so
+# killing the moment it appears guarantees traffic in flight: the RST
+# condition, and with it the exact #409 exposure, every run. The #410
+# heal is then expected to recover the wedged VM on the re-driven start
+# (a fresh full boot — kernel banner + logind — after the budgeted
+# reboot); a clean continuation also passes (the RST did not land), and
+# the console artifact (boot count) records which happened.
 F2_BOOT_WINDOW=missed
-F2_BOOT_DEADLINE=$((SECONDS + 30))
+F2_BOOT_DEADLINE=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$F2_BOOT_DEADLINE" ]; do
-    if console_has "$F2_VM" "Booting with PVH"; then F2_BOOT_WINDOW=hit; break; fi
-    [ "$(count_boots "$F2_VM")" -ge 1 ] && { F2_BOOT_WINDOW=hit; break; }
+    if console_has "$F2_VM" "Linux version"; then F2_BOOT_WINDOW=hit; break; fi
     sleep 0.05
 done
 if [ "$F2_BOOT_WINDOW" = "hit" ]; then
-    qual_pass "F2: firmware boot in progress (console output started) — killing the agent inside the boot window (#409 exposure)"
+    qual_pass "F2: kernel spew under way (banner printed, serial traffic in flight) — killing the agent inside the boot window (#409 exposure)"
 else
-    qual_warn "F2: boot window not observed within 30s (console: $(wc -c < "$(vm_console_log "$F2_VM")" 2>/dev/null || echo 0) bytes) — killing the agent anyway; recovery assertions unchanged"
+    qual_warn "F2: boot window not observed within 60s (console: $(wc -c < "$(vm_console_log "$F2_VM")" 2>/dev/null || echo 0) bytes) — killing the agent anyway; recovery assertions unchanged"
 fi
 kill -9 "$AGENT_PID" 2>/dev/null || true
 wait_gone "$AGENT_PID" \
