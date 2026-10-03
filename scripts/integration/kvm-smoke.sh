@@ -15,7 +15,12 @@
 #   --chv-version VER  Pin cloud-hypervisor version (default: v43.0)
 #
 # Environment:
-#   CHV_CLOUD_HYPERVISOR_VERSION   Override pinned CH version
+#   CHV_CLOUD_HYPERVISOR_VERSION   Override pinned CH version. When set (or
+#                                  when --chv-version is passed), the
+#                                  requested version is staged in a private
+#                                  temp dir and used via the generated agent
+#                                  config — /usr/bin/cloud-hypervisor is
+#                                  never modified (#458).
 #   CHV_TEST_TIMEOUT               Seconds to wait for services (default: 30)
 #
 # Safety:
@@ -36,6 +41,17 @@ PACKAGE_DIR=""
 BINARY_DIR=""
 SKIP_CLEANUP=false
 CHV_PINNED_VERSION="${CHV_CLOUD_HYPERVISOR_VERSION:-v43.0}"
+# True when a version was explicitly requested (env var or --chv-version):
+# explicit overrides must never install to or overwrite the system
+# /usr/bin/cloud-hypervisor pin (#458).
+CHV_VERSION_EXPLICIT=false
+if [[ -n "${CHV_CLOUD_HYPERVISOR_VERSION:-}" ]]; then
+    CHV_VERSION_EXPLICIT=true
+fi
+# cloud-hypervisor the generated agent config points at. Stays at the
+# system path unless an explicit override stages an isolated copy.
+CHV_BIN_PATH="/usr/bin/cloud-hypervisor"
+CHV_STAGING_DIR=""
 TEST_TIMEOUT="${CHV_TEST_TIMEOUT:-30}"
 
 # Temp resources — all prefixed with TEST_DIR
@@ -81,6 +97,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --chv-version)
             CHV_PINNED_VERSION="$2"
+            CHV_VERSION_EXPLICIT=true
             shift 2
             ;;
         -h|--help)
@@ -154,6 +171,14 @@ cleanup() {
         rm -rf "$TEST_DIR"
     fi
 
+    # Remove the version-override staging dir (explicit --chv-version /
+    # CHV_CLOUD_HYPERVISOR_VERSION runs). The system
+    # /usr/bin/cloud-hypervisor pin is never written by this script when an
+    # explicit override is requested (#458).
+    if [[ -n "$CHV_STAGING_DIR" && -d "$CHV_STAGING_DIR" ]]; then
+        rm -rf "$CHV_STAGING_DIR"
+    fi
+
     info "Cleanup complete"
 }
 
@@ -213,22 +238,8 @@ check_kvm() {
 # ---------------------------------------------------------------------------
 # 3. Verify / install cloud-hypervisor
 # ---------------------------------------------------------------------------
-check_cloud_hypervisor() {
-    info "=========================================="
-    info "cloud-hypervisor Check"
-    info "=========================================="
-
-    local chv_bin="/usr/bin/cloud-hypervisor"
-
-    if [[ -x "$chv_bin" ]]; then
-        local version
-        version="$($chv_bin --version 2>&1 | head -1)"
-        info "Found: $version"
-        pass "cloud-hypervisor is installed"
-        return 0
-    fi
-
-    info "cloud-hypervisor not found at $chv_bin — downloading ${CHV_PINNED_VERSION}..."
+download_cloud_hypervisor() {
+    local dest="$1"
 
     local arch
     arch="$(uname -m)"
@@ -244,10 +255,65 @@ check_cloud_hypervisor() {
     local url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_PINNED_VERSION}/${asset}"
     info "Downloading from: $url"
 
-    curl -fsSL -o "$chv_bin" "$url" || die "Failed to download cloud-hypervisor"
-    chmod +x "$chv_bin"
+    curl -fsSL -o "$dest" "$url" || die "Failed to download cloud-hypervisor"
+    chmod +x "$dest"
+}
 
+check_cloud_hypervisor() {
+    info "=========================================="
+    info "cloud-hypervisor Check"
+    info "=========================================="
+
+    local chv_bin="/usr/bin/cloud-hypervisor"
     local version
+
+    if [[ "$CHV_VERSION_EXPLICIT" == true ]]; then
+        # Explicit override (CHV_CLOUD_HYPERVISOR_VERSION / --chv-version):
+        # honor it unconditionally, but never write to the system path —
+        # self-hosted runners keep a qualified pin at
+        # /usr/bin/cloud-hypervisor that an override must not clobber
+        # (#458). Stage the requested version in a private temp dir and
+        # point the generated agent config (chv_binary_path) at it.
+        if [[ -x "$chv_bin" ]]; then
+            version="$($chv_bin --version 2>&1 | head -1)"
+            case "$version" in
+                *"${CHV_PINNED_VERSION}"*)
+                    info "System cloud-hypervisor matches requested ${CHV_PINNED_VERSION} — using it"
+                    pass "cloud-hypervisor ${CHV_PINNED_VERSION} (system)"
+                    return 0
+                    ;;
+                *)
+                    info "System cloud-hypervisor is '${version}' but ${CHV_PINNED_VERSION} requested"
+                    info "Staging an isolated copy — the system binary is left untouched"
+                    ;;
+            esac
+        fi
+
+        CHV_STAGING_DIR="$(mktemp -d /tmp/${TEST_NAME}-chvbin-XXXXXX)"
+        CHV_BIN_PATH="${CHV_STAGING_DIR}/cloud-hypervisor"
+        info "cloud-hypervisor not staged yet — downloading ${CHV_PINNED_VERSION} to ${CHV_BIN_PATH}..."
+        download_cloud_hypervisor "$CHV_BIN_PATH"
+        version="$("${CHV_BIN_PATH}" --version 2>&1 | head -1)"
+        case "$version" in
+            *"${CHV_PINNED_VERSION}"*) ;;
+            *) die "Downloaded cloud-hypervisor is '${version}', expected ${CHV_PINNED_VERSION}" ;;
+        esac
+        info "Using staged binary: ${CHV_BIN_PATH} (${version})"
+        pass "cloud-hypervisor ${CHV_PINNED_VERSION} staged at ${CHV_BIN_PATH} (system pin untouched)"
+        return 0
+    fi
+
+    # Default (no explicit override): trust an existing system binary —
+    # self-hosted runners install a qualified pin there.
+    if [[ -x "$chv_bin" ]]; then
+        version="$($chv_bin --version 2>&1 | head -1)"
+        info "Found: $version"
+        pass "cloud-hypervisor is installed"
+        return 0
+    fi
+
+    info "cloud-hypervisor not found at $chv_bin — downloading ${CHV_PINNED_VERSION}..."
+    download_cloud_hypervisor "$chv_bin"
     version="$($chv_bin --version 2>&1 | head -1)"
     info "Installed: $version"
     pass "cloud-hypervisor downloaded and installed"
@@ -485,10 +551,17 @@ log_level = "info"
 # Match the shipped configs (#326): core-managed is the qualified production
 # composition; every packaged/deployed surface sets it explicitly.
 authority_mode = "core-managed"
+# Core-authority paths must live in the throwaway test tree — the packaged
+# defaults (/var/lib/chv/agent, /run/chv/core) belong to the 'chv' user and
+# fail the owner-owned startup validation when this root-run test uses
+# them. Same shape as qual/deploy.sh's generated agent.toml (#458).
+core_api_socket_path = "${agent_dir}/core.sock"
+core_store_path = "${agent_dir}/core.db"
+core_archive_path = "${agent_dir}/node-cache-v1.archive"
 control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "${stord_dir}/api.sock"
 nwd_socket = "${nwd_dir}/api.sock"
-chv_binary_path = "/usr/bin/cloud-hypervisor"
+chv_binary_path = "${CHV_BIN_PATH}"
 stord_binary_path = "${BINARY_DIR}/chv-stord"
 nwd_binary_path = "${BINARY_DIR}/chv-nwd"
 cache_path = "${agent_dir}/agent-cache.json"
@@ -515,6 +588,13 @@ socket_path = "${nwd_dir}/api.sock"
 runtime_dir = "${nwd_dir}"
 log_level = "info"
 EOF
+
+    # Agent runtime dir MUST be 0700 for the Core-authority startup
+    # validation (cellhv-core-startup::validate_paths). mkdir under the
+    # default umask gives 0755, which the fail-closed validation rejects —
+    # same contract as qual/deploy.sh and install.sh (#458, regression
+    # from the #334 core-managed flip).
+    chmod 0700 "${agent_dir}"
 
     pass "Dev environment generated in $TEST_DIR"
 }
