@@ -23,14 +23,17 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 | [ADR-015](../specs/adr/015-layered-ecosystem-compatibility.md) | Evidence-Driven Ecosystem Integration Strategy | **Proposed** | Time-boxes OpenStack discovery and leaves libvirt versus native adapter choices provisional. Defers CloudStack and OpenNebula until the Core authority and first OpenStack path are stable. |
 | [ADR-016](../specs/adr/016-evolve-chv-agent-into-cellhv-core.md) | Evolve `chv-agent` into CellHV Core | **Accepted** | The existing `chv-agent` evolves in place into the standalone Core runtime. No parallel `cellhvd`, state store, operation engine, or VM authority is introduced. |
 | [ADR-017](../specs/adr/017-core-compatibility-invariants.md) | Core Compatibility Invariants | **Accepted** | Locks native Core authority, Cloud Hypervisor as the Core 1.0 VMM, truthful VMM identity, independent compatibility axes, and evidence-backed support claims. Other VMMs are outside the active programme. |
-| [ADR-021](../specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md) | Stretched-L2 Fabric (VXLAN Head-End Replication over WireGuard) | **Accepted** | Tenant networks behave as one literal L2 segment (shared VLAN) across all hypervisors: ARP/DHCP/BUM traverse via VXLAN head-end replication to enrolled peers, with kernel MAC learning; inter-site transport is an encrypted WireGuard mesh (`wg-chv` in a `chv-fabric` netns, per-host keys provisioned at enrollment). Partially supersedes ADR-013's `nolearning`/no-BUM and encryption-non-goal decisions; keeps ADR-013's eBPF policy role and proto surface. |
+| [ADR-018](../specs/adr/018-libvirt-delegation-over-core-api.md) | Optional Libvirt Delegation Over the CellHV Core API | **Proposed** | If productised, libvirt compatibility is an optional adapter outside `chv-agent` Core that uses only the versioned public Core API. `chv-agent` remains the sole lifecycle and Cloud Hypervisor process authority. |
+| [ADR-019](../specs/adr/019-stable-core-host-identity-and-nodecache-authority.md) | Stable Core Host Identity and NodeCache Authority Modes | **Proposed** | A Core host keeps one opaque `HostId` resolved with strict precedence (existing Core DB, importable NodeCache, configured seed, generated UUID) and never replaced afterward. NodeCache authority modes freeze the VM-authoritative projection in Core mode. |
+| [ADR-020](../specs/adr/020-per-vm-systemd-supervision-and-exclusivity.md) | Per-VM Systemd Supervision and Exclusivity | **Proposed** | Proposes per-VM systemd units as a supervision and exclusivity boundary for Cloud Hypervisor processes. Systemd supervises processes only; `chv-agent` retains all VM lifecycle authority. |
+| [ADR-021](../specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md) | Stretched-L2 Fabric (VXLAN Head-End Replication over WireGuard) | **Accepted** | Tenant networks behave as one literal L2 segment (shared VLAN) across all nodes: ARP/DHCP/BUM traverse via VXLAN head-end replication to enrolled peers, with kernel MAC learning; inter-site transport is an encrypted WireGuard mesh (`wg-chv` in a `chv-fabric` netns, per-host keys provisioned at enrollment). Partially supersedes ADR-013's `nolearning`/no-BUM and encryption-non-goal decisions; keeps ADR-013's eBPF policy role and proto surface. |
 
 ## Web UI ADRs
 
 | ADR | Title | Status | Summary |
 |-----|-------|--------|---------|
 | [ADR-001-WebUI](../specs/adr/001-webui-product-principles.md) | WebUI Product Principles | **Accepted** | 7 principles: cluster-first nav, tasks as first-class, legible state, no browser-to-node coupling, progressive depth, predictable mutation UX, private-cloud-first usability. |
-| [ADR-002-WebUI](../specs/adr/002-webui-architecture-boundary.md) | WebUI Architecture Boundary | **Accepted** | Browser talks only to control-plane BFF. Direct access to agent, stord, nwd, or CHV APIs is forbidden. |
+| [ADR-002-WebUI](../specs/adr/002-webui-architecture-boundary.md) | WebUI Architecture Boundary | **Accepted** | Browser talks only to the control-plane backend-for-frontend (BFF). Direct access to `chv-agent`, `chv-stord`, `chv-nwd`, or Cloud Hypervisor APIs is forbidden. |
 | [ADR-003-WebUI](../specs/adr/003-webui-navigation-model.md) | WebUI Navigation Model | **Superseded by ADR-006-WebUI** | Primary navigation hierarchy and detail-page tab structure. |
 | [ADR-004-WebUI](../specs/adr/004-webui-task-and-state-model.md) | WebUI Task and State Model | **Accepted** | Tasks and state are first-class UI objects. Every mutation creates a task. Defines task states and resource health states. |
 | [ADR-005-WebUI](../specs/adr/005-webui-design-system-direction.md) | WebUI Design System Direction | **Accepted** | Modern but restrained, enterprise-serious, light-mode first, high information density, border-first surfaces, strong typography. Avoids copying Proxmox/Xen Orchestra visually. |
@@ -73,7 +76,7 @@ Cross-references to a non-backend ADR must include the suffix.
 
 When making a significant architectural decision:
 
-1. Write a new ADR following the template in [`documentation-and-adrs`](../.agents/skills/documentation-and-adrs/SKILL.md)
+1. Write a new ADR following the documentation guidance in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#documentation)
 2. Store it in `docs/specs/adr/` with sequential numbering
 3. Update this index
 4. If the decision changes an existing ADR, mark the old one as `Superseded by ADR-XXX`
