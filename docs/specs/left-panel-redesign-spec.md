@@ -1,11 +1,13 @@
 # Left Panel Redesign Specification
 
+> **Status (2026-10-03):** implemented and shipped, with drift. The WebUI left panel follows this specification's naming, routes, and instance action model. Two items drifted from the text below. First, the nav tree shows only instances under each host; the host-scoped Networks/Storage/Images links in section 1 did not ship in the left panel. Host-scoped filtered views exist elsewhere via `?node_id={id}` links. Second, the platform is now named CHV; this document predates that naming and retains the historical labels only in the old-label renaming tables below. Verified against `main` at `1fbb2b04` (`ui/src/lib/components/shell/NavInfrastructureTree.svelte`, `ui/src/lib/components/shell/NavGlobalLinks.svelte`, `ui/src/lib/shell/instance-actions.ts`).
+
 ## 1. Information Architecture
 
 ### Final Left Panel Hierarchy
 
 ```
-CellHV
+CHV
 Control Plane
 
 [ Search resources... ]
@@ -210,7 +212,7 @@ Host-scoped Networks/Storage/Images navigate to the global page with a host filt
 9. Power Off has a warning confirmation.
 10. No operational action silently succeeds without API integration.
 11. Tests exist for state-aware actions and destructive confirmations.
-12. UI remains visually consistent with current CellHV design.
+12. UI remains visually consistent with current CHV design.
 13. No fake production values introduced.
 14. Code is clean, typed, and componentized.
 15. Result is suitable for a serious infrastructure control plane.

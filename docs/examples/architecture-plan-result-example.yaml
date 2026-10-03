@@ -36,7 +36,7 @@ changes:
 
 warnings:
   - severity: warning
-    code: STATIC_IP_NEAR_DHCP_RANGE
-    message: Static IP 10.120.0.21 is outside DHCP range but in the same subnet. Confirm IP management policy.
+    code: STATIC_IP_IN_DHCP_RANGE
+    message: Static IP 10.120.0.21 falls inside the DHCP range of its network. Confirm IP management policy.
     resource_ref: instances/app-01
     blocking: false
