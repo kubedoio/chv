@@ -777,7 +777,17 @@ impl Reconciler {
                     let fw_op_id = format!("{}-firewall", op_id);
                     match serde_json::to_vec(rules) {
                         Ok(policy_json) => {
-                            if let Err(e) = nwd
+                            // #360: only dispatch a SEMANTICALLY non-empty
+                            // ruleset — nwd's engine engages default-deny even
+                            // for an empty ruleset, which would cut a rule-less
+                            // network's guests off entirely (including DHCP).
+                            // Same predicate the core-managed path (orchestrator
+                            // spec assembly) uses.
+                            if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(
+                                &policy_json,
+                            )) {
+                                warn!(network_id = %net_id, "skipping empty firewall ruleset: applying it would engage default-deny with zero allows");
+                            } else if let Err(e) = nwd
                                 .set_firewall_policy(net_id, "v1", policy_json, Some(&fw_op_id))
                                 .await
                             {
@@ -2673,7 +2683,24 @@ mod tests {
         }
     }
 
-    struct MockNwdOk;
+    /// One dispatched `set_firewall_policy` RPC: `(network_id, policy_json)`.
+    type FirewallCall = (String, Vec<u8>);
+
+    /// What the mock nwd actually saw: one `FirewallCall` entry per
+    /// `set_firewall_policy` RPC, plus every network whose topology was
+    /// ensured. The ensure log lets firewall-skip tests prove the reconcile
+    /// loop reached (and passed) the topology step, so an empty
+    /// `firewall_calls` can never pass vacuously.
+    #[derive(Clone, Default)]
+    struct NwdCallLog {
+        ensured_networks: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        firewall_calls: std::sync::Arc<std::sync::Mutex<Vec<FirewallCall>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockNwdOk {
+        calls: NwdCallLog,
+    }
     #[tonic::async_trait]
     impl NetworkService for MockNwdOk {
         async fn list_namespace_state(
@@ -2689,7 +2716,13 @@ mod tests {
             &self,
             req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            nwd_operation_id(req.into_inner().meta)?;
+            let inner = req.into_inner();
+            nwd_operation_id(inner.meta.clone())?;
+            self.calls
+                .ensured_networks
+                .lock()
+                .unwrap()
+                .push(inner.topology.map(|t| t.network_id).unwrap_or_default());
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -2756,8 +2789,16 @@ mod tests {
         }
         async fn set_firewall_policy(
             &self,
-            _req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
+            req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            let inner = req.into_inner();
+            nwd_operation_id(inner.meta.clone())?;
+            let policy_json = inner.policy.map(|p| p.policy_json).unwrap_or_default();
+            self.calls
+                .firewall_calls
+                .lock()
+                .unwrap()
+                .push((inner.network_id, policy_json));
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -2924,13 +2965,17 @@ mod tests {
         }
     }
 
-    async fn start_mock_nwd(socket: &std::path::Path) {
+    async fn start_mock_nwd(socket: &std::path::Path) -> NwdCallLog {
+        let calls = NwdCallLog::default();
         let uds = tokio::net::UnixListener::bind(socket).unwrap();
+        let mock = MockNwdOk {
+            calls: calls.clone(),
+        };
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(
                     chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
-                        MockNwdOk,
+                        mock,
                     ),
                 )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -2939,10 +2984,11 @@ mod tests {
         });
         for _ in 0..10 {
             if NwdClient::connect(socket).await.is_ok() {
-                return;
+                return calls;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        calls
     }
 
     #[tokio::test]
@@ -2971,6 +3017,112 @@ mod tests {
         let config = vms.get("vm-1").unwrap();
         assert_eq!(config.cpus, 1);
         assert_eq!(config.memory_bytes, 1024);
+    }
+
+    fn network_fragment_cache(firewall_rules: &str) -> NodeCache {
+        use crate::cache::DesiredStateFragment;
+        NodeCache {
+            node_state: "TenantReady".to_string(),
+            network_fragments: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "net-1".to_string(),
+                    DesiredStateFragment {
+                        id: "net-1".to_string(),
+                        kind: "network".to_string(),
+                        generation: "1".to_string(),
+                        spec_json: format!(
+                            r#"{{"cidr":"10.0.0.0/24","firewall_rules":{firewall_rules}}}"#
+                        )
+                        .into_bytes(),
+                        policy_json: vec![],
+                        updated_at: "2024-01-01T00:00:00Z".to_string(),
+                        updated_by: "cp".to_string(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_networks_does_not_dispatch_empty_firewall_ruleset() {
+        // #360 pin: a semantically empty firewall_rules in a network
+        // fragment must NOT reach nwd's set_firewall_policy — nwd's engine
+        // engages default-deny even for an empty ruleset, which would cut
+        // the network's guests off entirely (including DHCP). The topology
+        // ensure is asserted alongside so the skip can never pass vacuously
+        // (e.g. because the loop exited before reaching nwd).
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        let calls = start_mock_nwd(&nwd_socket).await;
+
+        let mut rec = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(network_fragment_cache("[]"))),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.reconcile_networks().await.unwrap();
+
+        // The loop reached nwd and ensured net-1's topology...
+        assert_eq!(calls.ensured_networks.lock().unwrap().as_slice(), ["net-1"]);
+        // ...but no firewall policy was dispatched for it.
+        assert!(
+            calls.firewall_calls.lock().unwrap().is_empty(),
+            "an empty ruleset must never be dispatched to nwd's set_firewall_policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_networks_still_dispatches_non_empty_firewall_ruleset() {
+        // The #360 guard must not over-fire: a real ruleset keeps flowing to
+        // nwd byte-identically (same network, same serialized policy).
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        let calls = start_mock_nwd(&nwd_socket).await;
+
+        let rules = r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#;
+        let mut rec = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(network_fragment_cache(rules))),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.reconcile_networks().await.unwrap();
+
+        assert_eq!(calls.ensured_networks.lock().unwrap().as_slice(), ["net-1"]);
+        let firewall_calls = calls.firewall_calls.lock().unwrap();
+        assert_eq!(
+            firewall_calls.len(),
+            1,
+            "a non-empty ruleset must still be dispatched exactly once"
+        );
+        assert_eq!(firewall_calls[0].0, "net-1");
+        assert_eq!(
+            firewall_calls[0].1,
+            serde_json::to_vec(&serde_json::json!([{
+                "direction": "ingress",
+                "action": "accept",
+                "protocol": "icmp"
+            }]))
+            .unwrap()
+        );
     }
 
     #[tokio::test]

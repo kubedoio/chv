@@ -553,7 +553,14 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             if let Some(rules) = spec.get("firewall_rules") {
                 let fw_op_id = format!("{}-firewall", meta.operation_id);
                 let policy_json = serde_json::to_vec(rules).unwrap_or_default();
-                if let Err(e) = nwd
+                // #360: only dispatch a SEMANTICALLY non-empty ruleset —
+                // nwd's engine engages default-deny even for an empty
+                // ruleset, which would cut a rule-less network's guests
+                // off entirely (including DHCP). Same predicate the
+                // core-managed path (orchestrator spec assembly) uses.
+                if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(&policy_json)) {
+                    warn!(network_id = %inner.network_id, "skipping empty firewall ruleset: applying it would engage default-deny with zero allows");
+                } else if let Err(e) = nwd
                     .set_firewall_policy(&inner.network_id, "v1", policy_json, Some(&fw_op_id))
                     .await
                 {
@@ -3792,6 +3799,306 @@ mod tests {
         )
         .await;
         assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
+    }
+
+    /// One dispatched `set_firewall_policy` RPC: `(network_id, policy_json)`.
+    type FirewallCall = (String, Vec<u8>);
+
+    /// Records what the legacy network-apply path actually dispatched to
+    /// nwd: every ensured topology plus every `set_firewall_policy` RPC.
+    /// The ensure log lets firewall-skip tests prove the request reached
+    /// nwd and passed the topology step, so an empty `firewall_calls` can
+    /// never pass vacuously.
+    #[derive(Clone, Default)]
+    struct NetworkPolicyTracker {
+        ensured_networks: Arc<std::sync::Mutex<Vec<String>>>,
+        firewall_calls: Arc<std::sync::Mutex<Vec<FirewallCall>>>,
+    }
+
+    struct MockNetworkPolicyNwd {
+        tracker: NetworkPolicyTracker,
+    }
+
+    #[tonic::async_trait]
+    impl chv_nwd_api::chv_nwd_api::network_service_server::NetworkService for MockNetworkPolicyNwd {
+        async fn list_namespace_state(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ListNamespaceStateRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse { items: vec![] },
+            ))
+        }
+
+        async fn ensure_network_topology(
+            &self,
+            req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            let inner = req.into_inner();
+            self.tracker
+                .ensured_networks
+                .lock()
+                .unwrap()
+                .push(inner.topology.map(|t| t.network_id).unwrap_or_default());
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn delete_network_topology(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::DeleteNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_network_health(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::NetworkHealthRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::NetworkHealthResponse>, Status> {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::NetworkHealthResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    network_id: "".to_string(),
+                    health_status: "healthy".to_string(),
+                    last_error: "".to_string(),
+                },
+            ))
+        }
+
+        async fn attach_vm_nic(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::AttachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::AttachVmNicResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn detach_vm_nic(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn set_firewall_policy(
+            &self,
+            req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            let inner = req.into_inner();
+            let policy_json = inner.policy.map(|p| p.policy_json).unwrap_or_default();
+            self.tracker
+                .firewall_calls
+                .lock()
+                .unwrap()
+                .push((inner.network_id, policy_json));
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn set_nat_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SetNatPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dhcp_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDhcpScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dns_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDnsScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn expose_service(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ExposeServiceRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn withdraw_service_exposure(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_overlay(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_security_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_rate_limit(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::RateLimitPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_fabric_identity(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetFabricIdentityRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::FabricIdentityResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+    }
+
+    /// Drives `apply_network_desired_state` (the legacy-mode RPC; it fails
+    /// closed in core-managed mode) against a recording mock nwd and returns
+    /// what was dispatched, keyed by the spec's `firewall_rules` JSON.
+    async fn apply_network_with_rules(firewall_rules: &str) -> (NetworkPolicyTracker, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let nwd_socket = dir.path().join("nwd.sock");
+        let tracker = NetworkPolicyTracker::default();
+
+        {
+            let tracker = tracker.clone();
+            let uds = tokio::net::UnixListener::bind(&nwd_socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            MockNetworkPolicyNwd { tracker },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        // No startup race: the Unix listener is bound (listen() done)
+        // before the server task is spawned, so connect() succeeds via
+        // the kernel backlog even before the task accepts.
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            std::path::PathBuf::from("/run/chv/stord/api.sock"),
+            nwd_socket,
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let req = proto::ApplyNetworkDesiredStateRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            network_id: "net-1".to_string(),
+            fragment: Some(proto::DesiredStateFragment {
+                id: "net-1".to_string(),
+                kind: "network".to_string(),
+                generation: "1".to_string(),
+                spec_json: format!(r#"{{"cidr":"10.0.0.0/24","firewall_rules":{firewall_rules}}}"#)
+                    .into_bytes(),
+                policy_json: vec![],
+                updated_at: "".to_string(),
+                updated_by: "".to_string(),
+            }),
+        };
+        let resp = proto::reconcile_service_server::ReconcileService::apply_network_desired_state(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        (tracker, resp.is_ok())
+    }
+
+    #[tokio::test]
+    async fn apply_network_desired_state_does_not_dispatch_empty_firewall_ruleset() {
+        // #360 pin: a semantically empty firewall_rules in the legacy
+        // apply_network_desired_state path must NOT reach nwd's
+        // set_firewall_policy — nwd's engine engages default-deny even for
+        // an empty ruleset, which would cut the network's guests off
+        // entirely (including DHCP). The topology ensure is asserted
+        // alongside so the skip can never pass vacuously (e.g. because the
+        // RPC aborted before reaching nwd).
+        let (tracker, acked) = apply_network_with_rules("[]").await;
+        assert!(acked);
+        // The RPC reached nwd and ensured net-1's topology...
+        assert_eq!(
+            tracker.ensured_networks.lock().unwrap().as_slice(),
+            ["net-1"]
+        );
+        // ...but no firewall policy was dispatched for it.
+        assert!(
+            tracker.firewall_calls.lock().unwrap().is_empty(),
+            "an empty ruleset must never be dispatched to nwd's set_firewall_policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_network_desired_state_still_dispatches_non_empty_firewall_ruleset() {
+        // The #360 guard must not over-fire: a real ruleset keeps flowing
+        // to nwd byte-identically (same network, same serialized policy).
+        let rules = r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#;
+        let (tracker, acked) = apply_network_with_rules(rules).await;
+        assert!(acked);
+        assert_eq!(
+            tracker.ensured_networks.lock().unwrap().as_slice(),
+            ["net-1"]
+        );
+        let firewall_calls = tracker.firewall_calls.lock().unwrap();
+        assert_eq!(
+            firewall_calls.len(),
+            1,
+            "a non-empty ruleset must still be dispatched exactly once"
+        );
+        assert_eq!(firewall_calls[0].0, "net-1");
+        assert_eq!(
+            firewall_calls[0].1,
+            serde_json::to_vec(&serde_json::json!([{
+                "direction": "ingress",
+                "action": "accept",
+                "protocol": "icmp"
+            }]))
+            .unwrap()
+        );
     }
 
     #[tokio::test]
