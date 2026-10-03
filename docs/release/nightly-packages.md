@@ -1,6 +1,6 @@
 # Nightly Packages
 
-This document describes the CHV nightly package builds, how to install them, and what to expect.
+This document describes the CHV nightly package builds, how to install them, and what to expect. For the full channel comparison, see [CHV Release Channels](../install/channels.md).
 
 ## What is a nightly build?
 
@@ -13,8 +13,8 @@ Nightly packages let you test the latest features, verify bug fixes, and validat
 Nightly versions include the date and git short SHA:
 
 ```text
-0.1.0~nightly.20260510.g0872c4a7   (Debian)
-0.1.0^nightly.20260510.g0872c4a7   (RPM)
+<version>~nightly.20260510.g0872c4a7   (Debian)
+<version>^nightly.20260510.g0872c4a7   (RPM)
 ```
 
 This guarantees that each nightly build is uniquely identifiable and traceable to a specific commit.
@@ -24,8 +24,8 @@ This guarantees that each nightly build is uniquely identifiable and traceable t
 | Aspect | Expectation |
 |--------|-------------|
 | **Stability** | Unstable. Nightly builds may contain unfinished features, regressions, or breaking changes. |
-| **Data safety** | Do not use nightly packages in production. Use them only on disposable test hosts or VMs. |
-| **Upgrade path** | Nightly packages can be upgraded to newer nightly packages or to stable releases. |
+| **Data safety** | Do not use nightly packages in production. Use them only on disposable test nodes or VMs. |
+| **Upgrade path** | Newer nightlies and later stable releases are upgrades. On RPM, the same-base stable release sorts below a nightly; see [From nightly to stable](#from-nightly-to-stable). |
 | **Support** | Community / best-effort. File issues against the specific commit if you find bugs. |
 | **Retention** | GitHub nightly release assets are retained indefinitely but may be replaced. Package repository retention depends on storage policy. |
 
@@ -39,7 +39,7 @@ Until the package repository is fully configured, nightly packages are attached 
 
 ```bash
 # Download the latest .deb files from the Nightly release page
-curl -sL "https://github.com/kubedoio/chv/releases/download/nightly/chv-controlplane_0.1.0~nightly.$(date +%Y%m%d).g$(curl -s https://api.github.com/repos/kubedoio/chv/releases/tags/nightly | jq -r '.target_commitish' | head -c7)_amd64.deb" -o chv-controlplane.deb
+curl -sL "https://github.com/kubedoio/chv/releases/download/nightly/chv-controlplane_<version>~nightly.$(date +%Y%m%d).g$(curl -s https://api.github.com/repos/kubedoio/chv/releases/tags/nightly | jq -r '.target_commitish' | head -c7)_amd64.deb" -o chv-controlplane.deb
 
 # Or download manually from the browser, then install:
 sudo dpkg -i chv-controlplane_*.deb chv-node_*.deb chvctl_*.deb
@@ -104,18 +104,18 @@ sudo dnf install chv-controlplane chv-node chvctl
 
 ### From an older nightly
 
-Nightly packages use the same package name as stable releases, so your package manager will treat newer nightlies as upgrades:
+Nightly packages use the same package name as stable releases, so your package manager treats newer nightlies as upgrades:
 
 ```bash
 # Debian/Ubuntu
-sudo dpkg -i chv-controlplane_0.1.0~nightly.NEW_amd64.deb
+sudo dpkg -i chv-controlplane_<version>~nightly.NEW_amd64.deb
 sudo apt-get install -f
 
 # Or via apt once the repo is configured
 sudo apt upgrade
 
 # RHEL/CentOS/Fedora
-sudo rpm -U chv-controlplane-0.1.0^nightly.NEW-1.x86_64.rpm
+sudo rpm -U chv-controlplane-<version>^nightly.NEW-1.x86_64.rpm
 
 # Or via dnf once the repo is configured
 sudo dnf upgrade
@@ -123,22 +123,26 @@ sudo dnf upgrade
 
 ### From nightly to stable
 
-Stable releases have a higher version precedence than nightly builds in both Debian and RPM version ordering:
+Version precedence between nightly and stable differs by format:
 
 | Comparison | Result |
 |------------|--------|
-| `0.1.0` vs `0.1.0~nightly.20260510.g0872c4a7` | `0.1.0` is newer (Debian) |
-| `0.1.0` vs `0.1.0^nightly.20260510.g0872c4a7` | `0.1.0` is newer (RPM) |
+| `<version>` vs `<version>~nightly.20260510.g0872c4a7` | `<version>` is newer (Debian) |
+| `<version>` vs `<version>^nightly.20260510.g0872c4a7` | The nightly is newer (RPM) |
 
-This means you can install a stable release over a nightly and the package manager will correctly treat it as an upgrade.
+On Debian, `~` sorts below the stable release. Installing a stable release over a nightly is a normal upgrade:
 
 ```bash
 # Debian/Ubuntu — stable .deb files
-sudo dpkg -i chv-controlplane_0.1.0_amd64.deb chv-node_0.1.0_amd64.deb chvctl_0.1.0_amd64.deb
+sudo dpkg -i chv-controlplane_<version>_amd64.deb chv-node_<version>_amd64.deb chvctl_<version>_amd64.deb
 sudo apt-get install -f
+```
 
+On RPM, `^` marks a post-release snapshot and sorts above the stable release with the same base version. Installing the same-base stable over an RPM nightly is a downgrade. Use `rpm -U --oldpackage` or `dnf downgrade` for that. Upgrading to the next stable version is a normal upgrade:
+
+```bash
 # RHEL/CentOS/Fedora — stable .rpm files
-sudo rpm -U chv-controlplane-0.1.0-1.x86_64.rpm chv-node-0.1.0-1.x86_64.rpm chvctl-0.1.0-1.x86_64.rpm
+sudo rpm -U chv-controlplane-<version>-1.x86_64.rpm chv-node-<version>-1.x86_64.rpm chvctl-<version>-1.x86_64.rpm
 ```
 
 ## Removing nightly packages

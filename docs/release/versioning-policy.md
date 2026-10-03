@@ -14,7 +14,7 @@ CHV uses **Semantic Versioning 2.0.0** (SemVer) with the format:
 MAJOR.MINOR.PATCH
 ```
 
-Example: `0.1.0`
+Example: `1.2.3`
 
 In addition to stable releases, CHV publishes builds through **release channels** (`stable`, `rc`, `nightly`, `pr`). Channel information is embedded in package versions and CLI build metadata but does not alter the core SemVer identity of a release.
 
@@ -38,34 +38,35 @@ All other version references are derived from it:
 
 | Channel | Purpose | Example Version String |
 |---------|---------|------------------------|
-| `stable` | Production-ready releases | `0.1.0` |
-| `rc` | Release candidates for soak-testing | `0.1.0~rc.1` (Debian), `0.1.0-0.1.rc1` (RPM) |
-| `nightly` | Automated builds from `main` | `0.1.0~nightly.20260510.gabc123` (Debian), `0.1.0^20260510.gabc123` (RPM) |
-| `pr` | Builds from pull requests | `0.1.0~pr42.20260510.gabc123` (Debian), `0.1.0^20260510.pr42.gabc123` (RPM) |
+| `stable` | Production-ready releases | `<version>` |
+| `rc` | Release candidates for soak-testing | `<version>~rc.1` (Debian), `<version>-0.1.rc1` (RPM) |
+| `nightly` | Automated builds from `main` | `<version>~nightly.<date>.g<sha>` (Debian), `<version>^nightly.<date>.g<sha>` (RPM) |
+| `pr` | Builds from pull requests | `<version>~pr<N>.<date>.g<sha>` (Debian), `<version>^pr<N>.<date>.g<sha>` (RPM) |
 
 ### 3.1 Package Version Mapping
 
-The following table shows how a single SemVer maps to Debian and RPM internal formatting per channel.
+The following table shows how `scripts/version.sh` maps a single SemVer to Debian and RPM version strings per channel.
 
-| Channel | SemVer | Debian Version | RPM Version | RPM Release |
-|---------|--------|----------------|-------------|-------------|
-| `stable` | `0.1.0` | `0.1.0` | `0.1.0` | `1` |
-| `rc` | `0.1.0` | `0.1.0~rc.1` | `0.1.0` | `0.1.rc1` |
-| `nightly` | `0.1.0` | `0.1.0~nightly.20260510.gabc123` | `0.1.0` | `^20260510.gabc123` |
-| `pr` | `0.1.0` | `0.1.0~pr42.20260510.gabc123` | `0.1.0` | `^20260510.pr42.gabc123` |
+| Channel | SemVer | Debian Version | RPM Version |
+|---------|--------|----------------|-------------|
+| `stable` | `X.Y.Z` | `<version>` | `<version>` |
+| `rc` | `X.Y.Z` | `<version>~rc.1` | `<version>-0.1.rc1` |
+| `nightly` | `X.Y.Z` | `<version>~nightly.<date>.g<sha>` | `<version>^nightly.<date>.g<sha>` |
+| `pr` | `X.Y.Z` | `<version>~pr<N>.<date>.g<sha>` | `<version>^pr<N>.<date>.g<sha>` |
 
 > **Notes**
 > - Debian uses `~` to ensure prereleases sort **before** the stable release in `dpkg --compare-versions`.
-> - RPM uses the `Release` field to carry channel metadata while keeping the `Version` field clean.
+> - RPM carries RC in the release segment: `<version>-0.1.rc1` sorts before the stable `<version>-1`.
+> - RPM uses `^` for nightly and PR builds. In RPM version comparison, `^` marks a post-release snapshot and sorts **after** the stable release with the same base version.
 
 ### 3.2 Git Tags
 
 | Channel | Tag Format | Example |
 |---------|-----------|---------|
-| `stable` | `v<VERSION>` | `v0.1.0` |
-| `rc` | `v<VERSION>-rc.N` | `v0.1.0-rc.1` |
-| `nightly` | `nightly-YYYYMMDD` or untagged | `nightly-20260510` |
-| `pr` | No tag (workflow dispatch only) | — |
+| `stable` | `v<VERSION>` | `v<version>` |
+| `rc` | `v<VERSION>-rc.N` | `v<version>-rc.1` |
+| `nightly` | Rolling `nightly` tag, overwritten on every build | `nightly` |
+| `pr` | No tag; packages are uploaded as workflow artifacts | — |
 
 ---
 
@@ -76,7 +77,7 @@ The following table shows how a single SemVer maps to Debian and RPM internal fo
 | Component | When to Bump | Examples |
 |-----------|-------------|----------|
 | **MAJOR** | Incompatible API or database schema changes | Dropping a gRPC method, removing a DB column, changing protobuf wire format |
-| **MINOR** | New features, backward-compatible | Adding a BFF endpoint, new VM hypervisor flag, new UI page |
+| **MINOR** | New features, backward-compatible | Adding a backend-for-frontend (BFF) endpoint, a new Cloud Hypervisor (the VMM) VM flag, a new UI page |
 | **PATCH** | Bug fixes, backward-compatible | Fixing a race condition, correcting a SQL query, UI layout fix |
 
 ### 4.2 Pre-1.0 Exception

@@ -2,7 +2,7 @@
 
 **Purpose:** This is the single source of truth for the CHV release engineering pipeline. If you are an LLM agent working on releases, packaging, CI/CD, or versioning, **read this file first** before exploring the repository.
 
-**Last updated:** 2026-09-30  
+**Last updated:** 2026-10-03  
 **Version:** 0.1.2  
 
 ---
@@ -30,7 +30,7 @@
 
 | What | File | Format |
 |------|------|--------|
-| Semantic version | `VERSION` | Plain text, e.g. `0.1.0` |
+| Semantic version | `VERSION` | Plain text, e.g. `X.Y.Z` |
 | Per-crate version | `cmd/*/Cargo.toml` | Must match `VERSION` |
 | Rust toolchain | `rust-toolchain.toml` | Exact channel pin, e.g. `1.98.1` |
 | Changelog | `CHANGELOG.md` | Keep a Changelog format |
@@ -77,9 +77,9 @@
 
 ### Version Derivation
 ```
-VERSION ──▶ scripts/version.sh ──▶ deb: 0.1.0~rc.1
-                              ──▶ rpm: 0.1.0-0.1.rc1
-                              ──▶ nightly: 0.1.0~nightly.20260511.gabc1234
+VERSION ──▶ scripts/version.sh ──▶ deb: <version>~rc.1
+                              ──▶ rpm: <version>-0.1.rc1
+                              ──▶ nightly: <version>~nightly.<date>.g<sha>
 ```
 - Called by: `scripts/build-packages.sh`, CI workflows, Makefile
 - Environment override: `CHV_PKG_PRERELEASE` (set by CI for RC builds)
@@ -91,22 +91,22 @@ Makefile:build-release ──▶ cargo build --workspace --release
                         ──▶ tar -czf dist/chv-VERSION-linux-amd64.tar.gz
 ```
 - Version metadata injected via `cmd/*/build.rs` (CHV_VERSION, CHV_GIT_SHA, CHV_BUILD_DATE, CHV_RELEASE_CHANNEL)
-- Binaries respond to `--version` with: `chvctl 0.1.0 (commit abc1234, build 2026-05-11, channel stable)`
+- Binaries respond to `--version` with: `chvctl <version> (commit <sha>, build <date>, channel stable)`
 
 ### Package Generation
 ```
 scripts/build-packages.sh ──▶ nfpm package -f config.yaml -p deb/rpm
    │
-   ├── packaging/nfpm/chv-controlplane.yaml  → chv-controlplane_0.1.0_amd64.deb
-   ├── packaging/nfpm/chv-node.yaml          → chv-node_0.1.0_amd64.deb
-   └── packaging/nfpm/chvctl.yaml            → chvctl_0.1.0_amd64.deb
+   ├── packaging/nfpm/chv-controlplane.yaml  → chv-controlplane_<version>_amd64.deb
+   ├── packaging/nfpm/chv-node.yaml          → chv-node_<version>_amd64.deb
+   └── packaging/nfpm/chvctl.yaml            → chvctl_<version>_amd64.deb
    └── packaging/scripts/postinstall.sh      → runs on package install
    └── packaging/scripts/preremove.sh        → runs before package removal
    └── packaging/scripts/postremove.sh       → runs after package removal
 ```
 - **Tool:** nFPM v2.41.1 (pinned in CI)
 - **Formats:** `.deb` (Debian/Ubuntu) and `.rpm` (RHEL/Rocky/Alma/Fedora)
-- **Package `chv-node` depends on `chv-controlplane`**
+- **Package `chv-node` depends on `chv-controlplane`** (plus `wireguard-tools`: hard dependency in `.deb`, `recommends` in `.rpm`)
 - Config files marked `config|noreplace` (survive upgrades)
 - Services installed but NOT auto-started
 
@@ -125,7 +125,7 @@ scripts/package/lifecycle-rpm.sh → same for RPM
 | Workflow | Trigger | What it does | Runner |
 |----------|---------|--------------|--------|
 | `ci.yml` | push/PR to `main` | fmt, clippy, test, version check | `ubuntu-latest` |
-| `package-pr.yml` | PR to `main` | build, package, smoke deb/rpm | `ubuntu-22.04` (glibc 2.35 pin — oldest smoke target is debian:12/glibc 2.36) |
+| `package-pr.yml` | PR to `main`, push to other branches | build, package, smoke deb/rpm | `ubuntu-22.04` (glibc 2.35 pin — oldest smoke target is debian:12/glibc 2.36) |
 | `package-nightly.yml` | push to `main`, dispatch | build, package, smoke, lifecycle, publish pre-release | `ubuntu-22.04` (build job; same glibc pin) |
 | `release.yml` | tag `v*`, dispatch | full pipeline + SBOM + signing + GitHub Release | build job `ubuntu-22.04` (glibc pin); package/release jobs `ubuntu-latest` (binaries only run in containers) |
 | `integration-kvm.yml` | dispatch, PR label, push `main` | host diagnostics, KVM tests, package install | self-hosted `chv-kvm` |
@@ -198,33 +198,34 @@ make sign-checksums
 ### Version Management
 
 ```bash
-# Bump VERSION file and all Cargo.toml files
-./scripts/bump-version.sh 0.1.1
+# Bump VERSION and all derived version references
+# (Cargo.toml files, ui/package.json, sidebar label, README, install script)
+make bump-version BUMP_TYPE=patch   # or: minor / major
 
 # Derive package versions
-./scripts/version.sh --deb        # 0.1.0
-./scripts/version.sh --rpm        # 0.1.0
-./scripts/version.sh --deb rc 1   # 0.1.0~rc.1
-./scripts/version.sh --rpm rc 1   # 0.1.0-0.1.rc1
-./scripts/version.sh --deb nightly
-./scripts/version.sh --rpm nightly
+./scripts/version.sh --deb        # <version>
+./scripts/version.sh --rpm        # <version>
+./scripts/version.sh --deb rc 1   # <version>~rc.1
+./scripts/version.sh --rpm rc 1   # <version>-0.1.rc1
+./scripts/version.sh --deb nightly   # <version>~nightly.<date>.g<sha>
+./scripts/version.sh --rpm nightly   # <version>^nightly.<date>.g<sha>
 ```
 
 ### Release a New Version
 
 ```bash
 # 1. Bump version
-./scripts/bump-version.sh 0.1.1
+make bump-version BUMP_TYPE=patch   # or: minor / major
 
 # 2. Update CHANGELOG.md
 # 3. Commit and push
 # 4. Tag (triggers release.yml)
-git tag v0.1.1
-git push origin v0.1.1
+git tag v<version>
+git push origin v<version>
 
 # For RC:
-git tag v0.1.1-rc.1
-git push origin v0.1.1-rc.1
+git tag v<version>-rc.1
+git push origin v<version>-rc.1
 ```
 
 ---
@@ -257,7 +258,7 @@ git push origin v0.1.1-rc.1
 | Release workflow fails at "Create GitHub Release" | Missing `contents: write` permission | Check workflow `permissions` block |
 | Signing step shows "SIGNING NOT CONFIGURED" | Secrets not set | Add `CHV_RELEASE_GPG_KEY` or `CHV_RELEASE_COSIGN_KEY` to repo secrets |
 | `local: can only be used in a function` | Bash `local` outside function | Fix: remove `local` keyword from top-level code |
-| RPM version contains `^` character | Invalid RPM version separator | Use `~` instead (valid in both RPM and Debian) |
+| Nightly RPM sorts newer than the stable release | `^` in an RPM version marks a post-release snapshot and sorts above the base version | Expected behavior. Upgrade to the next stable version, or force the same-base stable with `rpm -U --oldpackage` |
 
 ---
 
@@ -268,7 +269,7 @@ git push origin v0.1.1-rc.1
 - "Run smoke tests" → run `make package-smoke-deb` and `make package-smoke-rpm` (requires Docker)
 - "Cut a release" → bump VERSION, update CHANGELOG, commit, tag `vX.Y.Z`, push tag
 - "Fix the install script" → edit `scripts/install.sh` (not the hosting scripts unless explicitly asked)
-- "Update version everywhere" → run `./scripts/bump-version.sh NEW_VERSION`
+- "Update version everywhere" → run `make bump-version BUMP_TYPE=<major|minor|patch>`
 - "Review release workflow" → read `.github/workflows/release.yml` and `docs/release/PIPELINE.md`
 - "Sign artifacts" → check if `CHV_RELEASE_GPG_KEY` or `CHV_RELEASE_COSIGN_KEY` secrets exist; if not, explain graceful degradation
 

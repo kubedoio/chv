@@ -4,7 +4,7 @@ This document describes the commands available for building, testing, linting, a
 
 ## Prerequisites
 
-- Rust toolchain (stable)
+- Rust toolchain (pinned by `rust-toolchain.toml`; rustup resolves it automatically)
 - Node.js 20 + npm (for UI build)
 - `nfpm` (for packaging)
 - `envsubst` from gettext (for packaging)
@@ -180,13 +180,13 @@ Generates apt and yum repository metadata from built packages and optionally upl
 Usage:
 ```bash
 # Dry-run (default when no secrets configured)
-./scripts/publish/publish-repo.sh --packages dist/packages --channel nightly --version 0.1.0~nightly.20260510.g0872c4a7 --dry-run
+./scripts/publish/publish-repo.sh --packages dist/packages --channel nightly --version "$(./scripts/version.sh --deb nightly)" --dry-run
 
 # With S3 credentials in environment
 export CHV_REPO_S3_BUCKET=my-bucket
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-./scripts/publish/publish-repo.sh --packages dist/packages --channel nightly --version 0.1.0~nightly.20260510.g0872c4a7
+./scripts/publish/publish-repo.sh --packages dist/packages --channel nightly --version "$(./scripts/version.sh --deb nightly)"
 
 # or via Makefile
 make publish-repo-dry-run
@@ -202,8 +202,8 @@ Usage:
 ./scripts/release/extract-changelog.sh $(cat VERSION)
 
 # Extract section for a specific version
-./scripts/release/extract-changelog.sh 0.1.0
-./scripts/release/extract-changelog.sh 0.1.0-rc.1
+./scripts/release/extract-changelog.sh <version>
+./scripts/release/extract-changelog.sh <version>-rc.1
 
 # or via Makefile
 make changelog
@@ -266,7 +266,7 @@ Test steps:
 5. Binary version checks
 6. Systemd unit validation
 7. Generate temporary dev TLS certs and configs
-8. Start controlplane, stord, nwd, agent
+8. Start `chv-controlplane`, `chv-stord`, `chv-nwd`, `chv-agent`
 9. Verify processes stay alive and ports respond
 10. Collect logs
 11. Cleanup (unless `--skip-cleanup`)
@@ -297,7 +297,7 @@ make integration-kvm-packages # test with existing packages
 
 ### `make build`
 ```
-   Compiling chv-common v0.1.0
+   Compiling chv-common v<version>
    ...
     Finished `dev` profile [unoptimized + debuginfo] target(s) in Xs
 ```
@@ -319,7 +319,7 @@ test result: ok. X passed; 0 failed; 0 ignored
 ```
 ===============================================
 CHV Local Release Check
-Version: 0.1.0
+Version: <version>
 ===============================================
 [1/5] Checking formatting...
   OK
@@ -330,7 +330,7 @@ Version: 0.1.0
 [4/5] Building release binaries...
   OK
 [5/5] Checking CLI version output...
-  Output: chvctl 0.1.0 (commit ..., build ..., channel ...)
+  Output: chvctl <version> (commit ..., build ..., channel ...)
   OK
 ===============================================
 All checks passed!
