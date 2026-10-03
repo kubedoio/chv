@@ -422,13 +422,16 @@ found it.
 - Multi-host anything is unprovable (declaration §5); capability is capped at
   KVM-VERIFIED.
 
-**Open disclosed issues (worst-first, from m4.9 §3):**
+**Open disclosed issues (worst-first; anchored in m4.9 §3, with later
+disclosures added here):**
 
 - **Pinned-VMM CVE exposure (v43.0)** — the qualified pin is in the
   affected range of two upstream High-severity advisories:
   **CVE-2026-27211** / GHSA-jmr4-g2hv-mjj6 (host-file exfiltration via
   QCOW backing-file abuse on raw-image-backed virtio-block disks;
-  affected v34.0–v50.0, fixed v50.1/v51.0, published 2026-02-20) and
+  affected v34.0–v50.0, fixed v50.1/v51.0, published 2026-02-20; the
+  High label is the upstream advisory's own — NVD scores it
+  **Critical**, CVSS 10.0) and
   **CVE-2026-45782** / GHSA-f47p-p25q-83rh (use-after-free in
   virtio-block async I/O, a guest-triggerable VMM memory-corruption /
   guest-to-host escape primitive; affected v21.0–v51.1, fixed
