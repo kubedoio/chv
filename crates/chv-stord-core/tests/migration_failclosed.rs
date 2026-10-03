@@ -231,14 +231,16 @@ async fn assert_stream_terminates_without_messages(inbound: &mut Streaming<Migra
                 "no further protocol message may follow the fail-closed rejection, got: {msg:?}"
             );
         }
-        Ok(Ok(None)) => {} // clean end of stream
+        Ok(Ok(None)) => {} // clean end of stream — what the served receiver does (see below)
         Ok(Err(status)) => {
-            // The receiver terminated the exchange with an error status
-            // (e.g. data_loss on the CRC path) — the fail-closed outcome.
-            eprintln!(
-                "DIAG terminal status: code={:?} message={}",
+            // Not expected against the production service — the handler only
+            // logs a receiver error (service.rs stream_blocks) and the stream
+            // ends cleanly — but if a transport status ever DOES surface, it
+            // must not be a success: nothing may launder the exchange into ok.
+            assert_ne!(
                 status.code(),
-                status.message()
+                tonic::Code::Ok,
+                "terminal transport status must not be Ok after the rejection"
             );
         }
         Err(_) => panic!("stream must terminate after the rejection, it hung instead"),
