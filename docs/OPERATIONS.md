@@ -117,7 +117,7 @@ journalctl -u chv-nwd -f
 
 ## CLI Reference (`chvctl`)
 
-`chvctl` is the operator CLI for the CHV platform. It communicates with the BFF HTTP API.
+`chvctl` is the operator CLI for the CHV platform. It communicates with the backend-for-frontend (BFF) HTTP API.
 
 ### Global Flags
 
@@ -162,7 +162,7 @@ chvctl node drain <NODE_ID>
 chvctl health cluster
 
 # Start a rolling upgrade
-chvctl upgrade start <NODE_ID> --version 0.5.0
+chvctl upgrade start <NODE_ID> --version <version>
 
 # Resize a VM
 chvctl vm resize <VM_ID> --cpu 4 --memory-mb 8192
@@ -250,7 +250,12 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 
 ## Scaling: Multi-Node
 
-### Add a Hypervisor-Only Host
+> **Qualification status:** Multi-node operation is unqualified. The enrollment
+> protocol is code-supported, but control-plane dispatch resolves a local
+> Unix-socket path and cannot drive a remote node. The qualified topology is
+> single-host.
+
+### Add a hypervisor-only node
 
 1. **On the control plane host**, create a bootstrap token:
    ```bash
@@ -259,7 +264,7 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
    # Insert into DB (one-time use)
    ```
 
-2. **On the new hypervisor host**, install binaries and Cloud Hypervisor:
+2. **On the new hypervisor node**, install binaries and Cloud Hypervisor (the VMM):
    ```bash
    sudo apt install -y qemu-kvm bridge-utils iproute2 iptables
    # Copy chv-agent, chv-stord, chv-nwd from the control plane host
@@ -314,7 +319,7 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 ### chv-stord or chv-nwd Keep Restarting
 | Check | Command |
 |-------|---------|
-| Binary permissions | `ls -la /usr/local/bin/chv-stord /usr/local/bin/chv-nwd` |
+| Binary permissions | `ls -l $(command -v chv-stord chv-nwd)` |
 | Socket directory | `ls -la /run/chv/stord /run/chv/nwd` |
 | Config syntax | `cat /etc/chv/stord.toml` / `cat /etc/chv/nwd.toml` |
 | Daemon logs | `journalctl -u chv-stord -f` / `journalctl -u chv-nwd -f` |
@@ -457,6 +462,9 @@ was observed and how it was verified — it is recorded in the journal.
 
 Draining a node evacuates all VMs via live migration before allowing maintenance.
 
+> **Qualification status:** The drain machinery is code-supported but
+> unqualified; no multi-host evidence exists.
+
 **Via CLI:**
 ```bash
 chvctl node drain <NODE_ID>
@@ -497,10 +505,13 @@ watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_node_vm_count'
 
 ### Rolling Upgrade
 
+> **Qualification status:** The rolling-upgrade machinery is code-supported
+> but unqualified; no multi-host evidence exists.
+
 **Via CLI:**
 ```bash
 # Start upgrade on a specific node
-chvctl upgrade start <NODE_ID> --version 0.5.0
+chvctl upgrade start <NODE_ID> --version <version>
 
 # Check upgrade status
 chvctl upgrade status <NODE_ID>
@@ -517,7 +528,7 @@ chvctl upgrade rollback <NODE_ID>
 # Initiate upgrade
 curl -X POST http://127.0.0.1:8080/v1/upgrades \
   -H "Content-Type: application/json" \
-  -d '{"node_id": "<NODE_ID>", "version": "0.5.0"}'
+  -d '{"node_id": "<NODE_ID>", "version": "<version>"}'
 
 # Check status
 curl http://127.0.0.1:8080/v1/upgrades/<NODE_ID>
@@ -571,6 +582,10 @@ The control plane validates the matrix at upgrade time. If the target version fa
 
 ## Multi-Node Operations
 
+> **Qualification status:** The procedures in this section are
+> code-supported but unqualified. The qualified topology is single-host,
+> capped at KVM-VERIFIED.
+
 ### Migration Monitoring
 
 Key Prometheus metrics to watch during live migration:
@@ -608,6 +623,10 @@ watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_migration'
 ```
 
 ### VXLAN Overlay Troubleshooting
+
+> **Status:** The VXLAN/WireGuard fabric fails closed in the qualified
+> configuration. The qualified network topology is a single-host local
+> bridge with taps.
 
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|

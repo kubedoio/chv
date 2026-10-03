@@ -1,6 +1,6 @@
 # CHV
 
-> Cloud Hypervisor control plane for lightweight virtualization and infrastructure evaluation.
+> Control plane for Cloud Hypervisor (the VMM) — lightweight virtualization and infrastructure evaluation.
 
 CHV is an open-source control plane and evaluation platform around **Cloud Hypervisor**. It is designed for teams exploring lightweight virtualization, KVM-based workloads, and infrastructure patterns beyond traditional hypervisor stacks.
 
@@ -55,7 +55,7 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
                               │ mTLS gRPC
 ┌─────────────────────────────▼───────────────────────────────┐
 │                      chv-agent                                │
-│           (VM lifecycle · CHV runtime · Serial console)     │
+│  (VM lifecycle · Cloud Hypervisor runtime · Serial console) │
 ├─────────────────────────────┬───────────────────────────────┤
 │         chv-stord           │           chv-nwd             │
 │   (Volumes · Pools · Images)│  (Networks · Firewall · NAT)  │
@@ -72,7 +72,7 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
 ```
 .
 ├── cmd/                    # Rust binaries
-│   ├── chv-agent/          # Node agent (VM lifecycle, CHV runtime, serial console)
+│   ├── chv-agent/          # Node agent (VM lifecycle, Cloud Hypervisor runtime, serial console)
 │   ├── chv-controlplane/   # Control plane (orchestration, node mgmt, enrollment, BFF)
 │   ├── chv-nwd/            # Network daemon (bridge, netns, nftables, DHCP, DNS)
 │   └── chv-stord/          # Storage daemon (volumes, pools, images, snapshots)
@@ -119,7 +119,7 @@ CHV is distributed as `.deb` and `.rpm` packages. Choose the guide for your dist
 Quick install (Debian/Ubuntu):
 
 ```bash
-VERSION="0.2.0"
+VERSION="<version>"
 BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
@@ -182,15 +182,22 @@ cargo build --workspace
 |----------|---------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System architecture, data flow, and boundaries |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | Deploy CHV on a combined control-plane + hypervisor host |
-| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (0.2.013) |
+| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (ADR-001–ADR-021) |
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
 | [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
+| [`docs/OBSERVABILITY.md`](./docs/OBSERVABILITY.md) | Observability contract: metrics, SLIs/SLOs, logs, and alerts |
+| [`docs/PACKAGING.md`](./docs/PACKAGING.md) | Package layout for `chvctl`, `chv-controlplane`, and `chv-node` |
+| [`docs/runbooks/`](./docs/runbooks) | Disaster-recovery and restore runbooks |
+| [`docs/GAP_ANALYSIS.md`](./docs/GAP_ANALYSIS.md) | Specification-versus-implementation gap analysis |
 | [`docs/install/`](./docs/install) | Installation guides (Debian, RHEL, channels, uninstall) |
 | [`docs/release/`](./docs/release) | Release process, versioning, and artifact verification |
+| [`docs/governance/`](./docs/governance) | Repository governance: branch protection and hardening records |
 | [`DESIGN.md`](./DESIGN.md) | Design system (typography, color, spacing, dark mode) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development workflow, code style, and PR process |
+| [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |
+| [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) | Community code of conduct |
 | [`AGENTS.md`](./AGENTS.md) | Agent orientation and build rules (canonical for coding agents) |
 
 ## CI / CD

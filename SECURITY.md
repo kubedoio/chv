@@ -27,7 +27,7 @@ Open a private advisory via the repository's **Security → Advisories → Repor
 
 **What to include in a report:**
 
-- A clear description of the issue and the affected component (e.g., `chv-controlplane`, `chv-agent`, `chv-stord`, `chv-nwd`, BFF, UI)
+- A clear description of the issue and the affected component (e.g., `chv-controlplane`, `chv-agent`, `chv-stord`, `chv-nwd`, the backend-for-frontend (BFF), UI)
 - The CHV version (`chvctl version` output is ideal) and deployment shape (single-node dev install, multi-node, distro)
 - Steps to reproduce, including any minimal proof-of-concept
 - Impact assessment from your perspective (what can an attacker do?)
@@ -63,7 +63,7 @@ If a fix is non-trivial and the maintainers and reporter agree, the disclosure w
 Vulnerabilities in any of the following components, as built from this repository:
 
 - **`chv-controlplane`** — orchestration, control-plane HTTP/gRPC, BFF, enrollment
-- **`chv-agent`** — node agent, VM lifecycle, Cloud Hypervisor runtime
+- **`chv-agent`** — node agent, VM lifecycle, Cloud Hypervisor (the VMM) runtime
 - **`chv-stord`** — storage daemon (volumes, pools, images, snapshots)
 - **`chv-nwd`** — network daemon (bridges, netns, nftables, DHCP, DNS)
 - **`chv-webui-bff`** — Web UI backend-for-frontend

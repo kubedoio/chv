@@ -1,6 +1,6 @@
 # CHV Deployment Guide — All-in-One Host
 
-This guide explains how to deploy CHV on a single Linux host that acts as both the **control plane** (orchestration, API, Web UI) and the **hypervisor** (VM runtime via Cloud Hypervisor).
+This guide deploys CHV on a single Linux host. The host runs the **control plane** (orchestration, API, Web UI) and Cloud Hypervisor (the VMM) as the VM runtime.
 
 > **Version:** 0.2.0  
 > **Target:** Ubuntu 22.04/24.04 LTS or equivalent Linux with KVM support  
@@ -30,7 +30,7 @@ curl -sfL https://get.cellhv.com/ | sh -
 Or install a specific version:
 
 ```bash
-curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.2.0 sh -
+curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=<version> sh -
 ```
 
 **Network defaults** (override with environment variables):
@@ -97,12 +97,12 @@ in the install output. You will be required to change it on first login.
 
 | Path | Purpose |
 |------|---------|
-| `/usr/local/bin/chv-*` | CHV binaries |
+| `/usr/bin/chv-*` | CHV binaries |
 | `/usr/bin/cloud-hypervisor` | Cloud Hypervisor VMM |
 | `/etc/chv/controlplane.toml` | Control plane config |
 | `/etc/chv/agent.toml` | Agent config |
 | `/etc/chv/stord.toml` | Storage daemon config |
-| `/etc/chv/nwd.toml` | Network daemon config (bridge, CIDR, upstream iface) |
+| `/etc/chv/nwd.toml` | Network daemon config (socket, runtime dir; bridges are API-created `br-<net_id>`) |
 | `/etc/chv/certs/` | TLS CA and certificates |
 | `/var/lib/chv/controlplane.db` | SQLite database |
 | `/var/lib/chv/cache/` | Agent durable cache |
@@ -183,7 +183,7 @@ Or manually:
 
 ```bash
 ./scripts/build-release.sh
-sudo INSTALL_CHV_TARBALL_PATH=dist/chv-0.2.0-linux-amd64.tar.gz ./scripts/install.sh
+sudo INSTALL_CHV_TARBALL_PATH=dist/chv-<version>-linux-amd64.tar.gz ./scripts/install.sh
 ```
 
 ---
@@ -197,6 +197,10 @@ If you prefer to deploy manually or need to customize every step, follow the det
 #### Hardware
 - x86_64 server with **hardware virtualization** (VT-x / AMD-V)
 - Minimum 4 cores, 8 GB RAM, 50 GB disk
+
+> These minimums are an unevidenced documentation guideline, not a
+> qualification-backed envelope. The qualified deployment host was 16 vCPU
+> with 31 GiB RAM; no scale claims are derivable from it.
 
 #### Software
 ```bash
@@ -336,7 +340,7 @@ ca_key_path = "/etc/chv/certs/ca.key"
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "/var/lib/chv/agent"
 log_level = "info"
-control_plane_addr = "http://127.0.0.1:8443"
+control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
@@ -469,11 +473,16 @@ sudo systemctl enable --now chv-agent
 
 ## Multi-Node WebSocket Console Routing
 
+> **Deployment status:** Multi-node operation is code-supported but unqualified.
+> Control-plane dispatch resolves a local Unix-socket path, so
+> control-plane-driven operations cannot reach a remote node. The qualified
+> topology is single-host.
+
 When CHV runs on multiple hypervisor nodes, VM serial consoles must be routed to the correct node.  There are two deployment modes.
 
 ### Direct Mode
 
-Each node has its `agent_ws_address` column set in the `nodes` table (e.g. `192.168.1.10:8444`).  The BFF returns a full `ws://` or `wss://` URL and the browser connects directly to the node agent.  This is the simplest setup, but it requires the browser to reach every node on the network.
+Each node has its `agent_ws_address` column set in the `nodes` table (e.g. `192.168.1.10:8444`).  The backend-for-frontend (BFF) returns a full `ws://` or `wss://` URL and the browser connects directly to the node agent.  This is the simplest setup, but it requires the browser to reach every node on the network.
 
 ```bash
 # Set a node's WebSocket address (stop the control plane first — manual
@@ -596,7 +605,7 @@ sudo journalctl -u chv-nwd -f
 
 ### `chv-stord` or `chv-nwd` Keep Restarting
 - Check daemon logs for missing binary paths or permission errors
-- Verify `/usr/local/bin/chv-stord` and `/usr/local/bin/chv-nwd` are executable
+- Verify the `chv-stord` and `chv-nwd` binaries are executable (`/usr/bin` for package installs, `/usr/local/bin` for the manual procedure)
 
 ### Database Issues
 The database is SQLite at `/var/lib/chv/controlplane.db`. It is created automatically by `chv-controlplane` on first start via sqlx migrations.
@@ -649,7 +658,7 @@ location /v1/ {
 
 ## Next Steps
 
-- **Multi-node expansion:** Deploy additional hypervisor-only hosts with `chv-agent` pointing to the control plane's reachable IP.
+- **Multi-node expansion (code-supported, unqualified):** The enrollment protocol is code-supported, but control-plane dispatch resolves a local Unix-socket path and cannot reach remote nodes. The qualified topology is single-host.
 - **External storage:** Configure `chv-stord` backends for shared storage.
 - **Networking:** Define tenant bridges and network segments via the Web UI or API.
 - **TLS hardening:** Replace the self-signed CA with your organization's PKI.

@@ -14,7 +14,7 @@ what to alert on, and how to investigate incidents.
 | `chv-agent` | `/metrics` | configurable via `metrics_bind` in agent config |
 | `chv-stord` | `/metrics` | configurable via `metrics_bind` in stord config |
 | `chv-nwd` | `/metrics` | configurable via `metrics_bind` in nwd config |
-| `chv-webui-bff` | served on same port as the BFF (default `127.0.0.1:8443`) | via `/metrics` route |
+| `chv-webui-bff` | served on same port as the backend-for-frontend (BFF; default `127.0.0.1:8443`) | via `/metrics` route |
 
 > The `metrics_bind` configuration keys default to `None` (disabled). Enable with
 > e.g. `metrics_bind = "0.0.0.0:9090"` in the relevant config file. The control-plane
@@ -30,8 +30,8 @@ as a PromQL expression that can be evaluated continuously.
 ### SLI-1: VM start latency (p99)
 
 **Definition:** 99th percentile of the time from `create_vm` invocation on the Cloud Hypervisor
-adapter to the operation returning `Ok`. This covers the path from the agent accepting a start
-command to the CH API completing.
+(the VMM) adapter to the operation returning `Ok`. This covers the path from the agent accepting a start
+command to the Cloud Hypervisor API completing.
 
 ```promql
 histogram_quantile(0.99,
@@ -238,17 +238,17 @@ journalctl -u chv-controlplane -o json | jq 'select(.fields.correlation_id == "x
 
 | Alert | Severity | Runbook |
 |---|---|---|
-| `VmStartLatencyHighP99` | warning | [docs/runbooks/vm-start-slow.md](runbooks/vm-start-slow.md) (TBD) |
-| `VmOpFailureRateHigh` | warning | [docs/runbooks/vm-op-failures.md](runbooks/vm-op-failures.md) (TBD) |
-| `ControlPlaneGrpcErrorRateHigh` | warning | [docs/runbooks/control-plane-op-failures.md](runbooks/control-plane-dr.md) |
+| `VmStartLatencyHighP99` | warning | `vm-start-slow.md` (runbook pending) |
+| `VmOpFailureRateHigh` | warning | `vm-op-failures.md` (runbook pending) |
+| `ControlPlaneGrpcErrorRateHigh` | warning | [docs/runbooks/control-plane-dr.md](runbooks/control-plane-dr.md) |
 | `ControlPlaneOpQueueGrowing` | warning | [docs/runbooks/control-plane-dr.md](runbooks/control-plane-dr.md) |
 | `ControlPlaneConvergenceSlow` | warning | [docs/runbooks/control-plane-dr.md](runbooks/control-plane-dr.md) |
 | `ControlPlaneDriftPersistent` | critical | [docs/runbooks/control-plane-dr.md](runbooks/control-plane-dr.md) |
 | `MigrationFailureRateHigh` | warning | [docs/runbooks/vm-snapshot-restore.md](runbooks/vm-snapshot-restore.md) |
-| `BffApiErrorRate` | warning | [docs/runbooks/bff-errors.md](runbooks/bff-errors.md) (TBD) |
+| `BffApiErrorRate` | warning | `bff-errors.md` (runbook pending) |
 | `NodeDown` | critical | [docs/runbooks/full-site-recovery.md](runbooks/full-site-recovery.md) |
 
-TBD runbooks should be filed as follow-up issues before the first production deployment.
+Pending runbooks should be filed as follow-up issues before the first production deployment.
 
 ---
 
