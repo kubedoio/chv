@@ -56,7 +56,7 @@ CHV_UI_DIR="/opt/chv/ui"
 CHV_MIGRATIONS_DIR="/usr/local/share/chv/migrations"
 CHV_DB_PATH="${CHV_DATA_DIR}/controlplane.db"
 
-GITHUB_REPO="${GITHUB_REPO:-cellhv/chv}"
+GITHUB_REPO="${GITHUB_REPO:-kubedoio/chv}"
 
 # Populated later
 EXTRACT_DIR=""
