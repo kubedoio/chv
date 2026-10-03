@@ -4,7 +4,7 @@ This document describes the high-level architecture of CHV, the boundaries betwe
 
 ## System Overview
 
-CHV is a Linux-first, cloud-image-first virtualization platform. It targets sovereign private cloud and edge environments where operators need full control over the hypervisor stack without the operational complexity of OpenStack or the licensing cost of VMware vSphere.
+CHV is a Linux-first, cloud-image-first virtualization platform. It targets sovereign private cloud and edge environments. Operators get full control over the hypervisor stack without the operational complexity of OpenStack or the licensing cost of VMware vSphere. VMs run on Cloud Hypervisor (the VMM); the binary is `cloud-hypervisor`.
 
 The system is built around four binaries:
 
@@ -26,8 +26,8 @@ See ADR-002: [Control Plane to Node Boundary](./specs/adr/002-control-plane-boun
 ### Agent ↔ Hypervisor Trait Boundary (`chv-hypervisor-api`)
 
 - `chv-agent-core` is **fully decoupled** from Cloud Hypervisor and depends strictly on the `HypervisorAdapter` trait in `chv-hypervisor-api`.
-- Low-level VMM interaction (process supervision, REST API over Unix domain socket, PTY master allocation) is isolated in `chv-agent-runtime-ch`.
-- Alternative VMM backends (such as `o3k` or OpenStack Nova drivers) implement `chv_hypervisor_api::HypervisorAdapter` and `cellhv_core_executor::CoreVmRuntime` without modifying `chv-agent-core` or `cellhv-core-*`.
+- Low-level VMM interaction (process supervision, REST API over Unix socket, PTY master allocation) is isolated in `chv-agent-runtime-ch`.
+- Alternative VMM backends (such as O3K or OpenStack Nova drivers) implement `chv_hypervisor_api::HypervisorAdapter` and `cellhv_core_executor::CoreVmRuntime`. Neither `chv-agent-core` nor `cellhv-core-*` needs modification.
 
 ### Agent ↔ Storage / Network
 
@@ -38,7 +38,7 @@ See ADR-001: [Node Runtime Split](./specs/adr/001-node-runtime-split.md)
 
 ### Web UI ↔ Backend
 
-- The browser talks **only** to the control-plane BFF HTTP service (`chv-webui-bff`).
+- The browser talks **only** to the control-plane backend-for-frontend (BFF) HTTP service (`chv-webui-bff`).
 - Direct browser access to `chv-agent`, `chv-stord`, `chv-nwd`, or Cloud Hypervisor APIs is forbidden.
 
 See ADR-002-WebUI: [WebUI Architecture Boundary](./specs/adr/002-webui-architecture-boundary.md)
@@ -71,7 +71,7 @@ Observed state streamed back ──► SQLite ──► Web UI polling
 ### Serial Console
 
 ```
-Browser ──► WebSocket /ws/vms/{id} ──► BFF ──► gRPC ──► chv-agent ──► PTY ──► CHV API
+Browser ──► WebSocket /ws/vms/{id} ──► BFF ──► gRPC ──► chv-agent ──► PTY ──► Cloud Hypervisor API
 ```
 
 Console access is gated by short-lived JWT tokens with one-time-use replay prevention.
@@ -90,13 +90,16 @@ Only `TenantReady` nodes receive new VMs. Nodes may also enter `Degraded`, `Drai
 
 When a node enters `Draining` (via `chvctl node drain` or the BFF API):
 
+> **Qualification status:** The drain flow is code-supported but unqualified.
+> No qualified path exercises node-drain evacuation.
+
 1. Scheduling is paused on the node (no new VMs placed).
 2. The agent reconcile loop detects `Draining` state and iterates running VMs.
-3. For each VM, a migration request is issued to the control plane (tracked in `drain_requested_vms` to avoid duplicates).
+3. The agent issues a migration request to the control plane for each VM. It tracks requests in `drain_requested_vms` to avoid duplicates.
 4. When `vm_count` reaches 0 (all VMs evacuated or stopped), the node transitions to `Maintenance`.
 5. After maintenance, an operator marks the node `TenantReady` to resume scheduling.
 
-Implementation: `ReconcileEngine` in `crates/chv-agent-core/src/reconcile.rs` handles the `NodeState::Draining` arm.
+Implementation: `Reconciler` in `crates/chv-agent-core/src/reconcile.rs` handles the `NodeState::Draining` arm.
 
 In core-managed (single-authority) mode the drain flow is deliberately
 different: the reconcile loop is observe-only, issues **no** migration
@@ -134,10 +137,10 @@ Storage migration between nodes is secured with mandatory mTLS:
 - **mTLS enforcement**: `MigrationSender` rejects plaintext connections. If `tls_config` is not provided, `start_migration()` returns `FAILED_PRECONDITION`. There is no fallback to `http://`.
 - **Certificate validation**: The sender presents the node certificate issued by the CP CA and validates the destination's certificate against the same CA.
 - **Backpressure**: The receiver can send `Backpressure` messages with a `slow_down_factor`. The sender inserts throttle sleeps proportional to this factor between chunk sends.
-- **Flow control**: A sliding send window (default 16 in-flight chunks) prevents memory exhaustion on either side.
+- **Flow control**: A sliding send window (default 128 unacknowledged chunks) prevents memory exhaustion on either side.
 - **MigrationReaper**: A background task (`crates/chv-controlplane-service/src/migration_reaper.rs`) scans every 60s for migrations stuck beyond 2 hours and force-transitions them to `Failed`.
 
-Current status: migration orchestration is partial. Control-plane phases, mTLS, flow control, backpressure, rollback paths, and stale-operation reaping exist, but dirty sync rounds, stord-to-control-plane convergence reporting, and paused final dirty flush remain incomplete.
+Current status: quiescent-volume (single-writer) disk migration is qualified. M4.6 exercised it between two `chv-stord` instances over mTLS on a single host ([evidence](./evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.6-migration.md)). Concurrent-write migration remains unproven (issue #394). The control-plane-orchestrated `migrate_vm` path is outside the qualified surface.
 
 Implementation: `crates/chv-stord-core/src/migration/sender.rs`
 
@@ -159,7 +162,7 @@ During control-plane outages, nodes preserve runtime state and allow limited loc
 
 ### Partition Reconnect Flush
 
-When an agent detects that it has reconnected to the control plane after a partition (state transitions from `Disconnected` to `Connected`), it flushes all pending messages queued during the outage. The flush is ordered and atomic per-message: if a dispatch fails, remaining messages stay queued for the next attempt.
+When an agent detects that it has reconnected to the control plane after a partition (state transitions from `Disconnected` to `Connected`), it flushes all pending messages queued during the outage. The flush is ordered and atomic per message. A failed dispatch leaves the remaining messages queued for the next attempt.
 
 Implementation: `ControlPlaneClient::flush_pending_messages()` in `crates/chv-agent-core/src/control_plane.rs`. Pending messages are stored in `NodeCache::pending_control_plane_messages`.
 
@@ -167,36 +170,25 @@ See ADR-006: [Partition and Autonomy Policy](./specs/adr/006-partition-policy.md
 
 ## Upgrade and Rollback
 
-The default upgrade path is a bundle-tested node release. One-step rollback to the previous tested bundle is supported. The system tracks versions for:
+ADR-007 defines the policy: bundle-tested node releases by default, selective component upgrades only inside a compatibility matrix, and one-step rollback to the previous tested bundle. The ADR scopes the matrix over the control plane, the node daemons, Cloud Hypervisor, and host helper tools. The implemented gate checks `chv-agent`, `chv-stord`, and `chv-nwd` versions from `node_inventory`.
 
-- Control plane
-- `chv-agent`, `chv-stord`, `chv-nwd`
-- Cloud Hypervisor
-- Host helper tools
+### Upgrade orchestration
 
-### Upgrade Orchestration Flow
+> **Qualification status:** The surfaces below are code-supported but
+> unqualified. No qualified path exercises them. Issue #427 tracks the
+> missing end-to-end upgrade flow.
 
-Rolling upgrades are driven by `UpgradeOrchestrator` (trait-based, strategy pattern):
+The former control-plane upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgrader`) was deleted as dead code in PR #213. No automated agent binary-swap path survives. ADR-007 defines bundle policy; it does not describe a swap mechanism. The surviving surfaces are:
 
-```
-UpgradeOrchestrator
-    │ plan(target_version, strategy, nodes)
-    ▼
-For each node (rolling, one-at-a-time):
-    1. Run pre-checks (VersionCompatible, DiskSpace, NoActiveMigrations, HealthCheck)
-    2. Drain node (pause scheduling, wait for VMs to evacuate)
-    3. Write upgrade intent to node_desired_state (Maintenance + target_version)
-    4. Agent observes desired state → performs binary swap + systemd restart
-    5. Poll node_observed_state for TenantReady (health check)
-    6. If health check fails → rollback_node (restore previous binary)
-    7. Un-drain node (resume scheduling)
-```
+| Surface | Behavior | Code |
+|---------|----------|------|
+| Compatibility-matrix boot gate | Refuses control-plane startup when enrolled node versions violate the matrix | `cmd/chv-controlplane/src/bootstrap.rs` |
+| `DrainNode` handler | Pauses scheduling on a node and starts evacuation | `crates/chv-agent-core/src/agent_server.rs` |
+| `EnterMaintenance` handler | Moves a drained node into `Maintenance` | `crates/chv-agent-core/src/agent_server.rs` |
 
-The concrete implementation is `SystemdNodeUpgrader` (`crates/chv-controlplane-service/src/systemd_upgrader.rs`), which interacts with the SQLite state store and the node gRPC client pool.
+The boot gate is operator-opt-in via `CHV_COMPAT_MATRIX_PATH`. Once opted in, it fails closed: a boot-time inventory query failure refuses startup instead of bypassing the gate. The BFF wires `drain` and `enter_maintenance` node actions to the handlers above (`crates/chv-controlplane-service/src/bff_mutations.rs`).
 
-### Compatibility Matrix Boot Gate
-
-Before any upgrade proceeds, the `CompatibilityMatrix` (`crates/chv-controlplane-service/src/compat.rs`) validates that the target version falls within the allowed range for each component. Incompatible versions are rejected before draining begins. The matrix is loaded from `/etc/chv/compat-matrix.toml`.
+The `chvctl upgrade` subcommands still exist, but the BFF serves no `/v1/upgrades` routes. Those subcommands target endpoints that do not exist.
 
 See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
 
@@ -210,7 +202,7 @@ The `with_circuit_breaker()` helper wraps any async operation and automatically 
 
 ### Deep Health Checks
 
-The `/health/deep` endpoint (`GET /health/deep`) reports component-level health:
+The `GET /health/deep` endpoint reports component-level health:
 
 - **database**: SQLite connectivity with latency measurement
 - **agent_socket_dir**: Agent runtime directory exists and is readable
@@ -221,7 +213,8 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 ## Current Implementation Phase
 
 **Phase:** Early-to-MVP transitioning to stability  
-**Gap Analysis:** [`../PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md)
+**Roadmap:** [`../PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md)  
+**Gap analysis:** [`./GAP_ANALYSIS.md`](./GAP_ANALYSIS.md)
 
 ### What Works
 
@@ -232,15 +225,15 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 - Operation journal with idempotency
 - Prometheus metrics endpoint
 - Web UI dashboard, VM list/detail, events, images, networks, storage pools
-- Serial console backend (WebSocket → PTY → CHV)
+- Serial console backend (WebSocket → PTY → Cloud Hypervisor)
 - Hypervisor settings DB + BFF (orchestrator merge partially wired)
 - Basic CI (GitHub Actions)
-- Rolling upgrade orchestration with `SystemdNodeUpgrader` and compatibility matrix
-- Storage migration with mTLS enforcement, backpressure, and flow control; dirty sync rounds and paused final dirty flush remain incomplete
+- Compatibility-matrix boot gate and drain/maintenance handlers (code-supported, unqualified)
+- Storage migration with mTLS enforcement, backpressure, and flow control; quiescent-volume (single-writer) migration is qualified (M4.6), concurrent-write migration remains unproven (#394)
 - Circuit breaker on node communication
 - Deep health checks (database, agent socket, agent connectivity)
 - Migration reaper (auto-fails stuck migrations after 2h)
-- Drain evacuation (automatic VM migration on node drain)
+- Drain evacuation on node drain (code-supported, unqualified; agent-driven in legacy mode, control-plane-driven in core-managed mode)
 - Partition reconnect flush (pending messages delivered on reconnect)
 - eBPF policy scope defined for policy/rate limiting; kernel VXLAN remains the overlay datapath
 - FDB cleanup on VM detach
@@ -251,10 +244,9 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 | Area | Gap | Priority |
 |------|-----|----------|
 | Backend | Backup/DR execution engine, off-host shipping, restore validation, and runbook automation incomplete | P2 |
-| Backend | Disk migration dirty sync rounds, convergence reporting, and paused final dirty flush incomplete | P1 |
+| Backend | Concurrent-write disk migration unproven (issue #394); control-plane-orchestrated migration path unqualified | P1 |
 | Backend | iSCSI and Ceph RBD storage backend adapters planned, not production-complete | P2 |
-| UI | Some components still exceed 300 lines (`vms/[id]/+page.svelte`, `CreateVMModal.svelte`) | P2 |
-| UI | `InventoryListPage` uses `any[]` types, defeating table type-safety | P2 |
+| UI | Some components still exceed 300 lines (`vms/[id]/+page.svelte` at 325, `SidebarNav.svelte` at 346) | P2 |
 
 ## Technology Choices
 

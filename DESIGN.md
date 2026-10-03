@@ -2,9 +2,9 @@
 
 ## Product Context
 
-**What this is:** A Linux-first, cloud-image-first virtualization platform for sovereign private cloud and edge cloud environments. CHV provides API-driven VM lifecycle management built on Cloud Hypervisor.
+**What this is:** A Linux-first, cloud-image-first virtualization platform for sovereign private cloud and edge cloud environments. CHV provides API-driven VM lifecycle management built on Cloud Hypervisor (the VMM).
 
-**Who it's for:** DevOps engineers, SREs, infrastructure teams, and platform engineers who need on-premise or edge virtualization that feels like a modern cloud provider.
+**Who it's for:** DevOps engineers, SREs, infrastructure teams, and platform engineers. They need on-premise or edge virtualization that feels like a modern cloud provider.
 
 **Space/industry:** Infrastructure/Virtualization — competing with VMware vSphere, Proxmox VE, OpenStack.
 
@@ -16,7 +16,7 @@
 
 **Direction:** Warm Earthy Enterprise Console
 
-A refined, warm-toned interface that signals "production-ready infrastructure" without the cold sterility of legacy enterprise tools. The palette draws from natural, earthy tones — warm browns, ambers, and cream — giving the console a distinctive character while remaining entirely functional.
+A refined, warm-toned interface that signals "production-ready infrastructure" without the cold sterility of legacy enterprise tools. The palette draws from natural, earthy tones — warm browns, ambers, and cream. It gives the console a distinctive character while remaining entirely functional.
 
 **Decoration level:** Minimal
 
@@ -38,7 +38,7 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 
 **Code/Terminal:** IBM Plex Mono — terminal output, logs
 
-**Loading:** Google Fonts CDN (`IBM+Plex+Sans` and `IBM+Plex+Mono`)
+**Loading:** Local font install or OS-native fallback — no external CDN (see `ui/src/app.css`)
 
 **Scale:**
 | Token | Size | Pixels | Usage |
@@ -58,6 +58,13 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 ## Color
 
 **Approach:** Semantic and restrained — color carries meaning, not decoration. The palette is warm and earthy rather than the conventional cool blue/gray enterprise palette.
+
+> **Accuracy note:** The token tables below reflect the CSS as of the
+> 2026-04-19 alignment. The `ui/src/app.css` "Rust Carbon Cockpit" refactor
+> (2026-04-22) changed values afterwards. The light neutral scale, the light
+> shell tokens, and the radius scale no longer match `ui/src/app.css`, and
+> some tokens below (motion, console, light status badges) are not defined
+> there. Treat `ui/src/app.css` as the source of truth for values.
 
 ### Primary
 
@@ -123,7 +130,7 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 
 ### Dark Mode
 
-Dark mode is implemented via `[data-theme="dark"]` CSS override. Strategy: invert the neutral scale, warm up accent colors by ~10% luminance, reduce semantic color saturation by ~15% to avoid eye strain on dark backgrounds.
+Dark mode is implemented via `[data-theme="dark"]` CSS override. Strategy: invert the neutral scale, warm up accent colors by ~10% luminance, and reduce semantic color saturation by ~15%. This avoids eye strain on dark backgrounds.
 
 | Token | Light | Dark | Notes |
 |-------|-------|------|-------|
@@ -427,8 +434,6 @@ Toast notifications use the design system's semantic colors, not hardcoded value
 - Auto-dismiss: 5s for success/info, manual dismiss for error/warning
 - Animation: slide in from right, `--duration-normal` (250ms), `--ease-out`
 
-**Note:** The current `Toast.svelte` uses hardcoded colors (#54B435, #E60000, #0066CC) that do not match the design system. These should be migrated to the CSS variables above.
-
 ---
 
 ## RBAC UI States
@@ -524,17 +529,6 @@ Components that shipped after the original design system was written. Document t
 
 ---
 
-## Preview
-
-See `docs/design-preview.html` for a live HTML preview of this design system applied to CHV's VM management interface.
-
-To view:
-```bash
-open docs/design-preview.html
-```
-
----
-
 ## Decisions Log
 
 | Date | Decision | Rationale |
@@ -554,6 +548,7 @@ open docs/design-preview.html
 | 2026-04-20 | Toast notification spec updated | Migrate from hardcoded colors to design system semantic variables |
 | 2026-04-20 | RBAC UI state patterns documented | Three-role system (viewer/operator/admin) needs clear UI guidelines |
 | 2026-04-20 | Sprint 8-10 component patterns documented | Snapshots, firewall, storage, users, API tokens, cloud-init |
+| 2026-10-03 | Accuracy pass: preview section removed, Toast note corrected, token-drift note added | `docs/design-preview.html` no longer exists; `Toast.svelte` uses semantic variables; `ui/src/app.css` changed after the 2026-04-19 alignment |
 
 ---
 
