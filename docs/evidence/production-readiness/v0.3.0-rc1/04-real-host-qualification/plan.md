@@ -376,4 +376,31 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   corrected on main by #398, and the sibling `disk-migration-protocol-spec.md`
   by #403 (both docs-only, post-run) — the specs now record quiescent-volume
   migration as the claimed mode, matching the #394 boundary above.
-- M4.7–M4.9: not started.
+- **M4.7 — COMPLETE** (final green run 5: 226 pass / 0 errors / 5 warn,
+  rc=0, candidate `5870a4a5`; log `/tmp/opencode/m4.7-run5.log`):
+  `m4.7-faults.sh` (preamble + legs F1–F7 + final sweep) kills each
+  service *inside an operation's execution window* — CP mid-CreateVm dispatch,
+  agent mid-StartVm CH-spawn, stord mid boot-volume provision (the only
+  operator-reachable volume path on a core-managed node; standalone
+  attach/detach fails closed there — disclosed deviation), nwd mid
+  tap-provision, source stord mid-BULK_COPY (extends M4.6 N9 to the source
+  side), CP mid-BULK_COPY (the direct stord↔stord path must survive it) —
+  plus the idempotent-cleanup leg (re-delete, double-stop,
+  delete-vs-in-flight-create). Every leg asserts the forbidden outcomes
+  (duplicate VM processes, double-spawned daemons, lost/duplicated state,
+  orphaned disks/taps) with converges-OR-fails-cleanly disjunctions (#368
+  terminally-failed-but-clean is a PASS with disclosure); shared checkers
+  written once (CH-process counts, tap counts, row↔backing bijection,
+  both-journals-terminal, one-CreateVm-row-per-VM). Evidence:
+  `m4.7-faults.md` (status COMPLETE). **Three product findings filed and
+  fixed from the run series — #405 (delete-after-restart tap/session leak;
+  fixed #407), #406 (retried-delete 500; fixed #408), #409 (agent death
+  with serial traffic in flight wedges the VM half-booted while everything
+  reports Running; fixed #410 — live-validated via the wedge-then-heal
+  console artifact in run 5, after the F2 trigger was tightened twice to
+  target the serial-RST condition deterministically: submit-level op
+  success → firmware output → kernel-spew)**. #368 boundary disclosed
+  (F3/F4), not gated. Not claimed: CP-orchestrated
+  migration, host reboot, multi-node, M2.5 delete retention (warned, not
+  gated).
+- M4.8–M4.9: not started.
