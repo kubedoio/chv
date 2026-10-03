@@ -48,7 +48,10 @@ the namespace, with the staged candidate CHV binaries (`af2dfdcd`, 0.2.0,
 build 2026-10-03). A **v43.0 control run** (system pin, no namespace) used the
 same command.
 
-Result on both: **FAILED — 1 error, 6 warnings**, identical byte-for-byte.
+Result on both: **FAILED — 1 error, 6 warnings**. The failure reproduces
+identically — the result line and the full 6-warn/1-error signature are
+byte-for-byte identical between the two logs; the logs differ only in the
+random `TEST_DIR` names, PIDs, timestamps, and the version banner.
 Failing assertion: `chv-agent is not running`; agent log:
 `Error: UnsafePath("…/agent must be an owner-owned 0700 or 0750 directory")`.
 Everything else passed (KVM present, binary/version checks ×5, dev-environment
