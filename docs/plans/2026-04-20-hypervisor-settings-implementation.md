@@ -222,7 +222,7 @@ let mut vm_config_json = serde_json::json!({
 });
 ```
 
-**CHV v43.0 field mapping** (from `docs/superpowers/specs/2026-04-20-hypervisor-settings-design.md`):
+**CHV v51.1 field mapping** (from `docs/superpowers/specs/2026-04-20-hypervisor-settings-design.md`):
 
 | Setting | CHV REST Key | Notes |
 |---------|-------------|-------|
