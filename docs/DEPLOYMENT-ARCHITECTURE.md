@@ -1,0 +1,515 @@
+# CHV Deployment Architecture — Single Source of Truth
+
+> **Status (2026-10-03, branch `docs/deployment-architecture`, base `1fbb2b04`):**
+> this document is the authoritative reference for **what deploys, how the
+> components connect, and which use cases are supported at which confidence
+> tier**. It does not replace the operator how-to ([DEPLOYMENT.md](DEPLOYMENT.md)),
+> the package contract ([release/package-contract.md](release/package-contract.md)),
+> release engineering ([release/PIPELINE.md](release/PIPELINE.md)), or day-2
+> operations ([OPERATIONS.md](OPERATIONS.md)); those documents link here for
+> architecture and capability tier, and keep their own roles.
+> Capability claims in this document are capped at **KVM-VERIFIED (single
+> host)** per the frozen release declaration
+> ([evidence/production-readiness/v0.3.0-rc1/00-execution-declaration.md](evidence/production-readiness/v0.3.0-rc1/00-execution-declaration.md)
+> §5). MULTI-HOST-VERIFIED and FIELD-QUALIFIED are **unprovable** on the
+> qualification infrastructure and are reported as unproven, never claimed.
+> Two campaign prompts are pending and will extend this document without
+> restructuring it: Prompt 05 (release-candidate notes wording) and
+> Prompt 06 (reference deployment / field qualification). Where their results
+> are expected, this document says **pending** and does not pre-claim.
+
+---
+
+## 1. Purpose and scope
+
+### 1.1 What this document owns
+
+| Question | Owner |
+|---|---|
+| What are the deployable components and their responsibilities? | This document (§2) |
+| Which interfaces, ports, and sockets exist, and which may be exposed? | This document (§3) |
+| How is a deployment provisioned (identity, keys, secrets)? | This document (§4) |
+| Which deployment topologies and use cases are supported, and at what tier? | This document (§5–§7) |
+| What are the upgrade and lifecycle paths? | This document (§6) |
+| Which design decisions remain open? | This document (§8) |
+| What is explicitly not supported? | This document (§9–§10) |
+| Which document owns which kind of truth? | This document (§11) |
+
+### 1.2 Capability tier vocabulary
+
+Every capability claim in this document carries one of these labels. The
+labels map to the campaign vocabulary in
+[prompts/production-readiness/README.md](prompts/production-readiness/README.md)
+(CODED / CI-VERIFIED / KVM-VERIFIED / MULTI-HOST-VERIFIED / FIELD-QUALIFIED /
+RELEASED), narrowed to what is provable today.
+
+| Label | Meaning | Typical evidence |
+|---|---|---|
+| **[QUALIFIED — KVM-VERIFIED]** | Behavior proven on the real KVM host, in-stack, with forbidden-outcome assertions. Single host only. | Prompt-04 milestone evidence: [m4.1](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.1-harness.md)–[m4.9](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.9-status.md) |
+| **[CI-VERIFIED]** | Repository CI proves the contract at non-privileged tiers (package build, smoke, and lifecycle tests). | [release/PIPELINE.md](release/PIPELINE.md); `scripts/package/` tests in `release.yml` / `package-nightly.yml` |
+| **[CODE-SUPPORTED, UNQUALIFIED]** | Code exists and is wired, but no qualified path exercises it. | Code references in this document |
+| **[DESIGN-ONLY]** | An accepted ADR defines the design; the capability is not qualified (and may not be implemented end-to-end). | [specs/adr/](specs/adr/) |
+| **[UNSUPPORTED/ABSENT]** | No support. Stated as an explicit non-claim. | Declaration §3/§6; this document |
+
+**Cap:** the qualification infrastructure is a single shared host (16 vCPU /
+31 GiB, nested KVM). Per declaration §5, no capability may be labeled above
+KVM-VERIFIED, and multi-host behavior is reported as unproven.
+
+### 1.3 Terminology
+
+- **CHV** names the platform only. The VMM is **Cloud Hypervisor** (binary
+  `cloud-hypervisor`), never "CHV" or "CH".
+- **node** is the managed host in prose. The UI label **"Hosts"** and the
+  Designer YAML key **`servers`** are synonyms for node; the mapping is noted
+  here once and not repeated.
+- **VM** is used in prose. The UI label **"Instances"** is a synonym.
+- Daemon names are always fully qualified: `chv-controlplane`, `chv-agent`
+  (alias, used once here: **chv-agent (CellHV Core)**, because it hosts the
+  CellHV Core lifecycle authority), `chv-stord`, `chv-nwd`, `chvctl`.
+- **control plane** is the noun; **control-plane** is the adjective.
+- Inter-process local endpoints are **Unix sockets**.
+- **O3K** names the sibling Kubedo edge-fabric project whose provider code
+  CHV consumes for the fabric design.
+- The web API layer behind nginx is the **backend-for-frontend (BFF)**. The
+  BFF is embedded in `chv-controlplane`; there is no separate BFF binary.
+- Versions are written as `<version>` except where this document states a
+  pinned fact (for example the qualified Cloud Hypervisor pin in §7).
+
+## 2. Component inventory
+
+### 2.1 CHV daemons and tools
+
+| Component | Role | Key details | Tier of the role statement |
+|---|---|---|---|
+| `chv-controlplane` | Single control-plane daemon | Orchestrator (desired-state operations), node enrollment, CA issuer, SQLite persistence. Embeds the backend-for-frontend (BFF) on its HTTP listener. gRPC on `127.0.0.1:8443` (mTLS), HTTP/BFF on `127.0.0.1:8080`. | [QUALIFIED — KVM-VERIFIED] ([m4.1](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.1-harness.md), [m4.3](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.3-lifecycle.md)) |
+| `chv-agent` | Node lifecycle agent | VM lifecycle; spawns, supervises, and adopts `cloud-hypervisor`; serial-console WebSocket on `127.0.0.1:8444`; metrics on `127.0.0.1:9901` (qualification config uses `127.0.0.1:9100`). Hosts the CellHV Core single-writer lifecycle authority (`authority_mode = "core-managed"` is the qualified default). Fallback-supervises `chv-stord` and `chv-nwd` when their units are absent. | [QUALIFIED — KVM-VERIFIED] (as above) |
+| `chv-stord` | Storage daemon | Volumes, pools, images, snapshots. Backends: local file and LVM (qualified, §7); Ceph RBD and iSCSI are coded but unqualified. Opt-in mTLS migration TCP listener, disabled by default. | Storage paths: [QUALIFIED — KVM-VERIFIED] within profiles ([m4.5](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.5-storage.md)); Ceph/iSCSI: [CODE-SUPPORTED, UNQUALIFIED] |
+| `chv-nwd` | Network daemon | Bridges, taps, per-network namespaces, nftables policy, dnsmasq DHCP/DNS. Stretched-L2 VXLAN + WireGuard fabric via `fabric-linux` v0.1.5 (`Cargo.toml` pin) — disabled and fails closed in the qualification configuration. | Local-bridge topology + host-safety gate: [QUALIFIED — KVM-VERIFIED] ([m4.4](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.4-network.md)); fabric: [DESIGN-ONLY] ([ADR-021](specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md)) |
+| `chvctl` | CLI client | Talks to the BFF on `:8080`. Packaged standalone; not part of `chv-node`. | [QUALIFIED — KVM-VERIFIED] as the campaign's driver surface (all prompt-04 scenarios drive chvctl/BFF/API) |
+
+### 2.2 Web UI and edge
+
+| Component | Role | Key details | Tier |
+|---|---|---|---|
+| SvelteKit UI statics | Browser application | Built to static files. `scripts/install.sh` serves them from `/opt/chv/ui` through **nginx** on `:80` — the only component that listens on a non-loopback address. The `.deb`/`.rpm` ships the same tree at `/usr/share/chv/ui` but installs **no web server** (see §5 UC-3 and decision D3). | UI serving via install.sh: [QUALIFIED — KVM-VERIFIED] at the contract level ([m4.2 install-sh leg](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.2-clean-install.md)). UI behavior end-to-end: see §9 (#355). |
+| nginx | Edge reverse proxy | Terminates HTTP `:80`; proxies `/api/` and `/v1/` to the BFF `:8080`; proxies `/ws/vms/{node_id}/…` to the agent console `:8444`. Installed and configured by `scripts/install.sh`, not by the packages. | [QUALIFIED — KVM-VERIFIED] at the contract level (as above) |
+
+### 2.3 External dependencies
+
+| Dependency | Version fact | Notes |
+|---|---|---|
+| Cloud Hypervisor | Qualified pin **v43.0.0** (declaration §3; `scripts/integration/kvm-smoke.sh` default `v43.0`) | `scripts/install.sh` downloads **v51.1** (`scripts/install.sh:346`) — a conflict with the qualified pin; see decision D6. |
+| rust-hypervisor-firmware | 0.5.0 (qualification firmware; `scripts/install.sh:373` URL) | `download_firmware` is commented out in the install flow (`scripts/install.sh:1535`); `copy_firmware` only copies a pre-placed local `/root/CLOUDHV.fd`. |
+| fabric-linux | v0.1.5 (`Cargo.toml` git tag pin) | Consumed by `chv-nwd` for the (design-only) fabric. |
+| Host OS | Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` | Qualified on Ubuntu noble amd64; `.rpm` built but untested in prompt-04 (declaration §3, m4.2). |
+
+### 2.4 Package set (nfpm; `.deb` and `.rpm`)
+
+Source of truth for contents: the nfpm configurations
+([`../packaging/nfpm/chv-controlplane.yaml`](../packaging/nfpm/chv-controlplane.yaml),
+[`../packaging/nfpm/chv-node.yaml`](../packaging/nfpm/chv-node.yaml),
+[`../packaging/nfpm/chvctl.yaml`](../packaging/nfpm/chvctl.yaml)). Where
+[release/package-contract.md](release/package-contract.md) disagrees with the
+nfpm configurations, the nfpm configurations win; one such contradiction is
+recorded below.
+
+| Package | Contents | Dependencies | Notes |
+|---|---|---|---|
+| `chv-controlplane` | Binary; UI tree at `/usr/share/chv/ui`; migrations; `chv-controlplane.service`; `/etc/chv/controlplane.toml` (`config\|noreplace`) | `libssl3` (deb) / `openssl-libs` (rpm) | — |
+| `chv-node` | `chv-agent`, `chv-stord`, `chv-nwd` binaries; 3 units; tmpfiles.d entry; 4 configs (`agent.toml`, `stord.toml`, `nwd.toml`, plus the reference-only `chv.yaml`) | **hard-depends on `chv-controlplane`**; deb additionally hard-depends `wireguard-tools` (rpm: `recommends`) | The hard dependency installs a control plane on every node host — flagged as decision D2. `chvctl` is **not** included (nfpm is truth; `package-contract.md` states both "pulled in by `chv-node`" and "not included" — a self-contradiction resolved in favor of nfpm). |
+| `chvctl` | Binary only | `libssl3` / `openssl-libs` | Install separately on any management machine. |
+
+Packaged systemd units ([`../packaging/systemd/`](../packaging/systemd/)):
+
+| Unit | Key facts |
+|---|---|
+| `chv-controlplane.service` | `User=chv`; loads `-/etc/chv/encryption.env` via `EnvironmentFile`; `ProtectSystem=strict`. |
+| `chv-agent.service` | `User=chv`; `After=`/`Wants=` the other three units; `SupplementaryGroups=kvm`; `TimeoutStopSec=75` so SIGTERM drain (60 s budget) always completes before SIGKILL. |
+| `chv-stord.service` | `User=chv` by design (socket is 0600 with `chv-agent` as sole client; `cloud-hypervisor` spawned as `chv` must read/write volume files). Storage dirs `chv:chv-stord 0770`; the `chv-stord` group is the documented future isolation seam. |
+| `chv-nwd.service` | `User=chv`; `AmbientCapabilities`/`CapabilityBoundingSet` = `CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN`; `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` as the compensating control. The `CAP_SYS_ADMIN` grant (needed for `ip netns add`) is a documented, deliberately accepted tradeoff — see the unit file and issue #328. |
+
+Package scripts ([`../packaging/scripts/`](../packaging/scripts/)):
+
+| Script | Behavior |
+|---|---|
+| `postinstall.sh` | Mints `/etc/chv/encryption.env` once from `/dev/urandom` (never regenerated — regeneration would make existing encrypted credentials unrecoverable). Creates `chv` and `chv-stord` users and group memberships (`chv`→`kvm`, `chv-stord`→`disk`, `chv-stord`→`chv`). Creates state dirs; storage dirs `chv:chv-stord 0770`. Explicitly does **not** create bridges, pools, VMs, or firewall rules. Reloads systemd; does **not** enable or start services. |
+| `preremove.sh` | Stops the four services on remove/purge; skips stopping on upgrade. |
+| `postremove.sh` | Preserves `/var/lib/chv`, `/etc/chv`, `/var/log/chv`. Destructive cleanup requires explicit operator action. |
+
+## 3. Interface and port contract
+
+This table is the contract. "Loopback" means the endpoint binds `127.0.0.1`
+and must not be exposed. Changes to this table are architecture changes and
+require review against the declaration.
+
+### 3.1 TCP listeners
+
+| Listener | Bind (qualified config) | Protocol | Consumers | Exposure rule | Tier |
+|---|---|---|---|---|---|
+| Control-plane gRPC | `127.0.0.1:8443` | gRPC, mTLS (server cert + client CA; agents present CA-signed certs) | `chv-agent` (enrollment, reports), loopback tooling | Do not expose. | [QUALIFIED — KVM-VERIFIED] ([m4.1](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.1-harness.md)) |
+| Control-plane HTTP / BFF | `127.0.0.1:8080` | HTTP (BFF `/v1/…`, admin `/api/v1/…`, health) | nginx, `chvctl` | Do not expose directly; nginx is the edge. | [QUALIFIED — KVM-VERIFIED] |
+| Agent serial console | `127.0.0.1:8444` | WebSocket (`/vms/{vm_id}/console?token=…`) | nginx (`/ws/vms/…` proxy) | **Must not be exposed.** Default from `chv-config` (`crates/chv-config/src/lib.rs:597`). | [QUALIFIED — KVM-VERIFIED] |
+| Agent metrics | `127.0.0.1:9901` (packaged default; qualification used `127.0.0.1:9100`) | HTTP `/metrics` | Prometheus-style scrapers | Loopback in the qualified config. | [QUALIFIED — KVM-VERIFIED] |
+| nginx edge | `:80` (all interfaces) | HTTP; UI statics; proxies `/api/`, `/v1/` → `:8080`, `/ws/vms/{node_id}/…` → `:8444` | Browsers | The only externally listening component. TLS at the edge is a recommendation, not a default — see decision D7. | [QUALIFIED — KVM-VERIFIED] at the contract level |
+| stord migration receiver | disabled by default; example `127.0.0.1:50052` | gRPC, mTLS, mandatory client certs; no plaintext mode | peer `chv-stord` | Opt-in only. With any receiver field set while `enabled = false`, the daemon refuses to start (fail-closed). | [QUALIFIED — KVM-VERIFIED] between two stord instances on one host ([m4.6](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.6-migration.md)) |
+| Fabric WireGuard | `65001/udp` (default; configurable) | WireGuard underlay mesh | peer `chv-nwd` | [DESIGN-ONLY] — [ADR-021](specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md); fails closed today. |
+| Fabric VXLAN | `4789/udp` | kernel VXLAN overlay | peer `chv-nwd` | [DESIGN-ONLY] — ADR-021. |
+
+### 3.2 Unix sockets
+
+| Socket | Owner | Clients | Notes | Tier |
+|---|---|---|---|---|
+| `/run/chv/agent/api.sock` | `chv-agent` | `chv-controlplane` (dispatch) | Legacy gRPC API surface; the agent sets the socket mode after bind. | [QUALIFIED — KVM-VERIFIED] |
+| `/run/chv/core/core-v1.sock` | `chv-agent` (CellHV Core) | Core clients | Directory `0700`. Native Core API. | [QUALIFIED — KVM-VERIFIED] |
+| `/run/chv/stord/api.sock` | `chv-stord` | `chv-agent` | Mode 0600; sole client is `chv-agent`. | [QUALIFIED — KVM-VERIFIED] |
+| `/run/chv/nwd/api.sock` | `chv-nwd` | `chv-agent` | Mode 0600; sole client is `chv-agent`. | [QUALIFIED — KVM-VERIFIED] |
+
+### 3.3 The control-plane → agent dispatch constraint (decisive)
+
+`chv-controlplane` reaches agents by resolving the configured
+`agent_socket_pattern` to a **filesystem path** and connecting over a **Unix
+socket**:
+
+- `resolve_agent_socket` returns a `PathBuf`
+  (`crates/chv-controlplane-service/src/migration.rs:1539-1550`); node ids are
+  validated as single safe path components.
+- The orchestrator dispatches through the node client pool with that path
+  (`crates/chv-controlplane-service/src/orchestrator.rs:461-464`), and the
+  client connects with `UnixStream::connect`
+  (`crates/chv-controlplane-service/src/node_client.rs:189`).
+- The agent serves gRPC from a `UnixListener`
+  (`crates/chv-agent-core/src/agent_server.rs:138`). **The agent has no TCP
+  gRPC listener.** Its only TCP listeners are the console (`:8444`) and
+  metrics (`:9901`) bindings.
+
+Consequence: **a control plane cannot reach an agent on another host as
+coded.** This is the decisive multi-host constraint; see UC-6 and decision D1.
+
+### 3.4 Certificate and identity model
+
+| Item | Value | Evidence |
+|---|---|---|
+| CA | `/etc/chv/certs/ca.crt` + `ca.key`, held by the control plane | `docs/examples/controlplane.toml` `[tls]`; [m4.1](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.1-harness.md) |
+| Node certificates | Issued by the control plane at enrollment; subject `CN = <node_id>`; serial recorded in the nodes table | `crates/chv-controlplane-service/src/enrollment.rs`; `peer_identity.rs` |
+| Enrollment client cert | Pre-placed by the operator/installer at `/run/chv/agent/agent.crt` (+ key); used only for the EnrollNode handshake | `scripts/install.sh:1241`; m4.1 harness invariants |
+| Steady-state agent TLS | `/run/chv/agent/agent.crt`, `agent.key` (control-plane-issued material replaces the enrollment cert) | `docs/examples/agent.toml` |
+| Bootstrap token | One-time; minted/rotated over loopback `/internal/bootstrap-token` | `scripts/install.sh:1178`; m4.1 asserts single consumption |
+| Peer identity enforcement | stord↔stord migration peers authenticate by certificate identity; negative cases fail closed with zero bytes leaving the source | [m4.6](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.6-migration.md) |
+
+## 4. Security-provisioning model
+
+Two install paths provision differently. Both end in the same qualified
+runtime posture.
+
+| Path | Provisioning | Result |
+|---|---|---|
+| `scripts/install.sh` (all-in-one) | Generates CA + server/client certs, writes configs, mints the encryption key and bootstrap token, seeds the admin user (forced password change), base image, default network, and `dev-vm-1` (skippable with `INSTALL_CHV_NO_SEED=1`), installs and starts nginx + the four units. Root-only (`scripts/install.sh:162`). | Working single-host deployment. [QUALIFIED — KVM-VERIFIED] topology; the install path itself carries the m4.2 install-sh contract leg (clean container, ~30 assertions + 7 host-side checks, errors=0 warnings=0). |
+| Packages on a clean host | Layout only. The control plane **fails closed** at startup without operator provisioning: CA + server/client certs, a real `jwt_secret`, and admin seeding (typed error, restart loop, no insecure fallback). | [QUALIFIED — KVM-VERIFIED] as the fail-closed boundary ([m4.2](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.2-clean-install.md) §3). |
+
+Additional provisioning facts:
+
+- `CHV_ALLOW_INSECURE` is refused by production binaries; the qualification
+  harness asserts its absence (m4.1).
+- The credential-encryption key (`CHV_ENCRYPTION_KEY`) is minted once by
+  postinstall and never regenerated. The fallback that couples it to
+  `CHV_JWT_SECRET` is open issue **#336**.
+- Authority mode: every shipped configuration surface selects
+  `authority_mode = "core-managed"` (single durable CellHV Core authority).
+  The reference-only `packaging/config/chv.yaml` still shows
+  `authority_mode: legacy` (line 59) — a disclosed contradiction with the
+  shipped `.toml` configs; see §10.
+- The optional legacy `chvbr0` host bridge/NAT bootstrap is opt-out
+  (`INSTALL_CHV_NO_BRIDGE=1`). Qualified networks are created via the API and
+  managed by `chv-nwd` as `br-<net_id>`; the pre-created `chvbr0` is a dev
+  convenience.
+- `--wipe` tears down the deployment **but preserves persistent agent
+  authority state by design** (`scripts/install.sh:1380-1422`).
+
+## 5. Deployment topologies and use cases
+
+Each use case states: status tier, what it includes, what it excludes, and
+evidence. Pending Prompt-05/Prompt-06 results slot into this section.
+
+### UC-1 — Single-host reference deployment via `scripts/install.sh`
+
+**Status: [QUALIFIED — KVM-VERIFIED] (topology); install-path contract
+evidenced at container tier.**
+
+| Aspect | Statement |
+|---|---|
+| Topology | One host runs `chv-controlplane`, `chv-agent`, `chv-stord`, `chv-nwd`, nginx. All internal listeners loopback; nginx is the edge. |
+| Includes | Everything in §2; core-managed authority; enrollment with real mTLS; seeded admin (forced password change), base image, default network, `dev-vm-1`. |
+| Excludes | Multi-host anything (UC-6), fabric (UC-7), backup/restore as DR (declaration §3), HA (UC-9). |
+| Evidence | Declaration §3/§5; prompt-04 milestones ran this topology on the qualification host (m4.3–m4.8). The install.sh path itself has permanent coverage via `scripts/integration/qual/install-sh-leg.sh` (m4.2 §"New harness leg"): clean container, all four units active, contract assertions — with `NO_SEED`/`NO_BRIDGE` set, so it proves the packaging/systemd contract, not VM end-to-end behavior. |
+| Disclosed conflicts | (a) `GITHUB_REPO` defaults to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — see [install/channels.md](install/channels.md). (b) install.sh downloads Cloud Hypervisor **v51.1** (`scripts/install.sh:346`), conflicting with the qualified pin **v43.0.0** — decision D6. (c) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. |
+
+### UC-2 — Package-based clean-host install
+
+**Status: [QUALIFIED — KVM-VERIFIED] (packages provide layout; control plane
+fails closed until operator provisioning).**
+
+| Aspect | Statement |
+|---|---|
+| Includes | The `.deb`/`.rpm` static contract (users, groups, modes, units, conffiles, migrations, tmpfiles), boot behavior with packaged configs, and a real-host package smoke against `/dev/kvm`. |
+| Excludes | A working deployment from packages alone. The operator must provision CA + certs, a real `jwt_secret`, and admin seeding (documented in [PACKAGING.md](PACKAGING.md) and m4.2 §3). |
+| Evidence | [m4.2](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.2-clean-install.md) Legs A/B/C + fix rounds; residue after removal is exactly the deb contract (conffiles, users, data dirs). |
+| Notes | Ubuntu noble amd64 qualified; `.rpm` built but untested in prompt-04. No apt/dnf repository yet; no package signing yet (verify checksums out-of-band) — [PACKAGING.md](PACKAGING.md) "Known Gaps". |
+
+### UC-3 — Headless / package-only deployment
+
+**Status: [CODE-SUPPORTED, UNQUALIFIED]. Partially defined.**
+
+The packages install all daemons and `chvctl`, but no web server. The UI tree
+ships at `/usr/share/chv/ui` unserved. A headless operator can drive the
+platform with `chvctl` against the BFF, but nothing provisions or documents
+that path end-to-end. How (or whether) to serve the UI from packages is
+decision **D3**.
+
+### UC-4 — Development install
+
+**Status: [CODE-SUPPORTED, UNQUALIFIED] (development surface).**
+
+`make dev-install` → `scripts/dev-install.sh` → builds a release tarball and
+runs `scripts/install.sh` with `INSTALL_CHV_TARBALL_PATH` pointing at the
+local tarball (skipping the GitHub download). Dev defaults (bridge iface,
+name, CIDR) and seeds are documented in the script header. Used for
+development; not a qualified deployment path.
+
+### UC-5 — Qualification harness topology
+
+**Status: [QUALIFIED — KVM-VERIFIED] (this is the topology that produced the
+evidence).**
+
+`scripts/integration/qual/deploy.sh` deploys the candidate as plain processes
+into throwaway directories with real mTLS, core-managed authority, and
+teardown that asserts forbidden residue (no `cloud-hypervisor` processes, no
+new links, no new nft tables). Every prompt-04 milestone cites these scripts
+at the exact SHA. Treat this as the reproducibility reference for any future
+re-qualification; it is not an operator install path.
+
+### UC-6 — Multi-host (control plane + remote nodes)
+
+**Status: [UNSUPPORTED/ABSENT] as a qualified capability — and
+architecturally blocked as coded.**
+
+| Aspect | Statement |
+|---|---|
+| The blocker | The CP→agent dispatch resolves to a Unix-socket filesystem path (§3.3). The agent has no TCP gRPC listener. A remote node cannot be reached, by construction. |
+| The packaging blocker | `chv-node` hard-depends on `chv-controlplane`, so a "node-only" host installs a control plane it does not need (decision D2). |
+| What IS code-supported | The enrollment protocol (cert issue, `CN = <node_id>`, bootstrap token, node rows) works over the mTLS gRPC surface; nothing in the protocol is single-host-specific. |
+| What IS documented | Multi-node serial-console routing via nginx (`agent_ws_address` direct mode, or the proxied `/ws/vms/{node_id}` map) — [DEPLOYMENT.md](DEPLOYMENT.md) "Multi-Node WebSocket Console Routing". |
+| Declaration | MULTI-HOST-VERIFIED is **unprovable** on this infrastructure (declaration §5); multi-host migration and multi-node network semantics are not claimed. |
+| Options | Decision **D1** (and D2). This document does not pick a winner. |
+
+### UC-7 — Multi-host stretched-L2 fabric (VXLAN over WireGuard)
+
+**Status: [DESIGN-ONLY] ([ADR-021](specs/adr/021-stretched-l2-vxlan-her-wireguard-fabric.md),
+accepted; not qualified).**
+
+The fabric (kernel VXLAN head-end replication over a WireGuard mesh, ports
+65001/udp and 4789/udp, `fabric-linux` v0.1.5 provider) fails closed in the
+qualification configuration. The agent logs a benign, non-fatal
+fabric-identity warning at enrollment when the nwd fabric provider is
+disabled (`failed to fetch fabric identity from nwd; reporting empty fabric
+identity`, m4.1 §6). No multi-host fabric behavior is claimed.
+
+### UC-8 — Air-gapped / offline install
+
+**Status: [UNSUPPORTED/ABSENT].**
+
+Escape hatches exist in `scripts/install.sh` — `INSTALL_CHV_TARBALL_PATH`
+(local tarball), `INSTALL_CHV_SKIP_DEPS=1`, `INSTALL_CHV_SKIP_CLOUD_HV=1`,
+and pre-staged base-image paths (`scripts/install.sh:404-428`) — but no
+documented offline recipe exists, and the installer's default flow downloads
+the tarball, Cloud Hypervisor, and the base image from the network. Whether
+to define and document an air-gap profile is decision **D4**.
+
+### UC-9 — High availability and disaster recovery
+
+**Status: [UNSUPPORTED/ABSENT] for HA — explicitly rejected by design.**
+
+- [ADR-011](specs/adr/011-single-node-controlplane.md): one control-plane
+  process per cluster; SQLite single-writer; **no leader election, no
+  replication, no multi-instance deployment**. "Speculative control-plane HA"
+  is declaration §6 non-scope.
+- DR posture: periodic SQLite backup plus runbooks
+  ([runbooks/control-plane-dr.md](runbooks/control-plane-dr.md),
+  [runbooks/full-site-recovery.md](runbooks/full-site-recovery.md)). The
+  control plane keeps pre-migration DB backups under
+  `/var/lib/chv/backups/` (last 10).
+- **Backup/restore is excluded from the RC supported matrix** (declaration
+  §3: "a backup without restore validation is not DR"). The BFF backup
+  manager is a broken no-op; snapshot/restore via the CHV API at the agent
+  layer is a separate, existing surface, not a DR claim.
+
+### UC-10 — Edge / resource-constrained profiles
+
+**Status: [UNSUPPORTED/ABSENT].**
+
+ADR-011 positions CHV for "sovereign edge environments with small cluster
+sizes of approximately 20 nodes" — that is a management-plane **design
+target**, not a qualified scale claim (see §7). No resource profiles (small
+footprints, tuned limits, constrained-kernel variants) exist. Whether to
+define them is decision **D5**.
+
+## 6. Upgrade and lifecycle paths
+
+| Path | Status | Statement |
+|---|---|---|
+| Package upgrade (deb/rpm) | **[CI-VERIFIED]** | Conffiles are `config\|noreplace`; services are not auto-restarted on upgrade (`preremove` skips stop on upgrade); SQLite migrations are forward-only; **downgrade is unsupported**; manual rollback procedure is documented in [release/package-contract.md](release/package-contract.md) ("Manual rollback procedure"). Evidence: `scripts/package/lifecycle-{deb,rpm}.sh` (fresh install, upgrade, remove, reinstall, persistent-data safety) run in `release.yml` and `package-nightly.yml`; `scripts/package/smoke-{deb,rpm}.sh` (install/remove/reinstall) in PR/nightly CI. |
+| Agent drain on stop | **[QUALIFIED — KVM-VERIFIED]** | SIGTERM drains in-flight journal operations for up to 60 s; the unit's `TimeoutStopSec=75` protects the budget (unit file; m4.7 F1→F2 ordering). |
+| Node-upgrade orchestration | **[CODE-SUPPORTED, UNQUALIFIED]** — partial, and narrower than documented | What exists: the compatibility-matrix boot gate (`crates/chv-controlplane-service/src/compat.rs`, wired at startup via `cmd/chv-controlplane/src/bootstrap.rs`, opt-in through `CHV_COMPAT_MATRIX_PATH`, fail-closed) and the `DrainNode` / `EnterMaintenance` / resume-scheduling gRPC handlers. What does **not** exist: the `SystemdNodeUpgrader` rolling-upgrade stack was **deleted as dead code** (PR #213, commit `26209555`); [ARCHITECTURE.md](ARCHITECTURE.md) still references it (stale — see §9). ADR-007's bundle-upgrade/one-step-rollback model is not implemented by the package lifecycle; how to present that gap is decision **D8**. |
+| `chvctl upgrade` subcommands | **Dead surface** | `chvctl upgrade start/status/rollback/list` POST to BFF `/v1/upgrades` routes, which are **not registered** in the BFF router (`crates/chv-webui-bff/src/router.rs`). The commands cannot succeed. Recorded here as a finding; same class as the fixed #320. |
+| Live network-policy update | **Half-open** | Policy enforcement end-to-end is qualified (attach-time materialization, m4.4), but the UI firewall editor writes a dead-end store (**#355**, open) and legacy `set_firewall_policy` call sites can apply empty rulesets (**#360**, open). |
+| Storage migration during upgrade | Boundary | Quiescent-source migration only (**#394**): concurrent-write migration silently loses data and is not claimed. Migration task state is in-memory; no cross-restart resume. |
+
+## 7. Supported envelope
+
+Only declaration-backed statements appear here. Anything not in this section
+is not supported.
+
+| Dimension | Supported statement | Source |
+|---|---|---|
+| Host count | **Single host.** All qualification evidence is single-host (nested KVM on a 16 vCPU / 31 GiB shared host). | Declaration §5; m4.9 §3 |
+| VMM | Cloud Hypervisor only, pinned **v43.0.0**. The CH v43 serial-console upstream defect is the recorded gate above KVM-VERIFIED; re-verify at any Cloud Hypervisor upgrade. | Declaration §3; m4.9 §3 |
+| Architecture / OS | Linux x86_64; `.deb` + `.rpm`. Qualified on Ubuntu noble amd64; `.rpm` untested in prompt-04. | Declaration §3; m4.2 |
+| Network profile | Single-host CHV-owned bridge overlay (local bridge + taps) with the nwd host-safety gate. Multi-host VXLAN fabric unproven. | Declaration §3 with the m4.9 §4.5 precision record |
+| Storage profiles | Local file (VM-integrated) + LVM (stord layer only; not reachable from the VM lifecycle, #379). Ceph RBD / iSCSI not claimed. | Declaration §3; m4.5 |
+| Migration | Quiescent-volume (single-writer) disk migration over mTLS between two stord instances, single host. Multi-host migration unproven. | Declaration §3; m4.6; m4.9 §4.1 |
+| Lifecycle authority | Exactly one durable CellHV Core authority per node; legacy/control-plane paths are compatibility adapters only. | Declaration §3; prompt-02 |
+| Backup/restore | **Excluded from the RC supported matrix.** | Declaration §3 |
+| Scale | **No concurrency, density, throughput, or requests-per-second claim.** M4.8 numbers are baselines on the qualification host only. | m4.8; m4.9 §3 |
+| Hardware minimums | **No qualified minimum.** [DEPLOYMENT.md](DEPLOYMENT.md) states "Minimum 4 cores, 8 GB RAM, 50 GB disk" — an unevidenced documentation claim, pending Prompt-05/06 wording. ADR-011's "approximately 20 nodes" is a design target, not a qualified scale claim. | This document; ADR-011 |
+
+**Pending:** Prompt 05 (release-candidate notes) will fix the public wording
+of the supported matrix; Prompt 06 (reference deployment) will add the first
+field-evidence tier. Neither is pre-claimed here.
+
+## 8. Open design decisions
+
+None of these is decided by this document. Each row names the decision, the
+options, the trade-offs, and what would unblock it.
+
+| # | Decision | Options | Trade-offs | What unblocks it |
+|---|---|---|---|---|
+| D1 | Multi-host dispatch: how can a control plane reach remote agents? | (a) Add an opt-in TCP gRPC listener to `chv-agent` (mTLS, node-cert identity). (b) Declare single-host-only and document it. (c) Stage both: document single-host now, land the listener behind a feature flag later. | (a) Unblocks real multi-host but adds an exposed listener, new attack surface, and requires MULTI-HOST-VERIFIED evidence that the current infrastructure cannot produce (declaration §5). (b) Honest and cheap, but strands the code-supported enrollment protocol and the documented console routing. (c) Avoids over-claiming while keeping the path open, at the cost of carrying undecided surface area. | Maintainer choice plus a qualification topology with a second host (or an explicit re-scoping of the claim). |
+| D2 | `chv-node` package dependency: keep or relax the hard dependency on `chv-controlplane`? | (a) Keep. (b) Drop to `recommends`/`suggests`. (c) Split a `chv-node-common` and make the CP dependency explicit only in a meta-package. | (a) Simple, matches the qualified single-host topology; installs a useless control plane on every future node host. (b) Correct shape for node-only hosts, but changes tested install semantics and can produce half-provisioned hosts (CP fails closed anyway). (c) Cleanest dependency graph, most packaging work. | D1: node-only hosts only matter if multi-host dispatch exists. |
+| D3 | Serving the UI from packages | (a) Headless-only posture: document `chvctl` as the package-mode interface; UI requires install.sh. (b) Document an operator-provided reverse proxy against `/usr/share/chv/ui` + the BFF/console proxies. (c) The deb configures nginx itself (or ships a snippet). | (a) Cheapest, narrows the product. (b) Flexible, pushes TLS/edge concerns to the operator with no contract. (c) Best out-of-box parity with install.sh, but adds a web-server dependency and edge ownership to the packages. | Prompt-06 reference-deployment profile choice; UC-3 demand. |
+| D4 | Air-gapped support | (a) Not supported; state it. (b) Document an offline recipe from the existing escape hatches (`INSTALL_CHV_TARBALL_PATH`, `INSTALL_CHV_SKIP_DEPS`, `INSTALL_CHV_SKIP_CLOUD_HV`, pre-staged images). (c) Add a first-class offline mode to the installer. | (a) Free, loses sovereign/edge adopters the positioning targets. (b) Cheap documentation work; the hatches exist but are untested as a recipe. (c) Real installer work plus a qualification leg. | Maintainer priority; a qualification leg if (b) or (c). |
+| D5 | Edge / resource profiles | (a) None; the current units and defaults are the only profile. (b) Document one "small" profile (documented unit overrides). (c) Ship alternate unit/config variants in the packages. | (a) Honest, no false edge signal. (b) Documentation-only, unqualified. (c) Real surface area, needs evidence on constrained hardware. | Field evidence from Prompt-06; ADR-011 positioning vs. actual demand. |
+| D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | Prompt-05 release-notes wording forces the choice: the published installer and the qualified pin cannot silently disagree. |
+| D7 | TLS termination at the edge | (a) Keep `:80` plaintext as the documented default; recommend TLS in nginx. (b) Make the installer configure TLS by default (self-signed or operator cert). | (a) Matches all qualified evidence; ships plaintext by default in a product positioned for sovereign environments. (b) Stronger default posture; no qualified evidence for the TLS-edge shape, cert-management burden lands on install.sh. | Prompt-06 deployment profile; security review appetite. |
+| D8 | Presenting ADR-007 (upgrade/rollback policy) against reality | (a) Mark ADR-007 as aspirational relative to the shipped lifecycle and point here. (b) Update ADR-007 to the qualified package-upgrade model. (c) Re-implement the rolling-upgrade stack (deleted in #213) and qualify it. | (a) Cheap, leaves a stale-looking ADR. (b) Honest and small, narrows the design promise. (c) Largest effort, restores the designed capability, needs qualification evidence that does not exist. | Maintainer decision on whether node rolling upgrade is roadmap or non-goal; note `chvctl upgrade` is dead either way (§6). |
+
+## 9. Known boundaries and residual risk
+
+Consolidated from [m4.9 §3](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.9-status.md).
+Nothing here is a surprise; each item is disclosed in the milestone that
+found it.
+
+**Infrastructure-provability boundaries:**
+
+- Host reboot is not provable on the qualification topology; the
+  four-daemon cold restart + cold reconcile leg is the labeled subset.
+- Lifecycle evidence is single-VM, single-node, serial. Concurrency evidence
+  is limited to the bounded M4.8 read/write workload.
+- Nested virtualization only; bare-metal KVM behavior is not separately
+  evidenced.
+- All M4.8 numbers are baselines on this host; no scale claims derivable.
+- Multi-host anything is unprovable (declaration §5); capability is capped at
+  KVM-VERIFIED.
+
+**Open disclosed issues (worst-first, from m4.9 §3):**
+
+- **#394** — concurrent-write migration silently loses data; quiescent-source
+  migration is the claimed mode.
+- **#368** — a transient effector failure terminally fails a journaled VM
+  create; nothing re-drives it. Disclosed, not gated.
+- **#345 (Cloud Hypervisor side)** — the v43 control-loop hang after guest
+  poweroff is contained, not cured; the CH v43 serial-console upstream defect
+  gates above KVM-VERIFIED and requires re-verification at any Cloud
+  Hypervisor upgrade.
+- **#355 / #360** — UI firewall editor writes a dead-end store; legacy call
+  sites can apply empty rulesets. Pre-fix stored data caveats apply
+  (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
+- **#378 / #379** — snapshot/clone accepted then fails closed on
+  core-managed nodes; LVM unreachable from the VM lifecycle.
+- **#384 / #385 / #386** — last-writer-wins physical upserts + clone TOCTOU;
+  respawned stord drops operator config beyond the allowlist; ownerless
+  imported/template volumes.
+- **#401 / #402** — destination-only stord not expressible; mTLS rejection
+  observability.
+- **#351 / #336 / #372** — delete-path kill-refusal tolerance;
+  JWT-secret/encryption-key coupling; remaining chvctl↔BFF contract drift.
+
+**Inherited / design non-claims:**
+
+- The UI itself was not re-qualified in prompt-04; all scenario evidence is
+  chvctl/BFF/API-driven. The declaration's "UI/BFF/CLI: supported for the
+  reference deployment" should be scoped to the exercised surfaces when
+  Prompt 05 words the release notes (m4.9 §4.6).
+- M2.5 delete retention: `vm delete` removes authority-side state but the
+  BFF list row, CP row, VM dir, volume row, and backing file persist.
+- CP-orchestrated migration (`agent migrate_vm`) fails closed in
+  core-managed mode by design (single-writer enforcement).
+- Migration-path edges: FinalizeAck wait has no timeout; migration task
+  state is in-memory (no cross-restart resume).
+- The dnsmasq runtime path is hardcoded to `/run/chv/nwd`
+  (`crates/chv-nwd-core/src/dns.rs`) — a single-host assumption.
+- Cross-restart snapshot-lifecycle edge (stord restart does not rehydrate
+  handles taken before the restart).
+
+**Documentation drift found while writing this document (not fixed here —
+this branch changes only this file):**
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) still describes `SystemdNodeUpgrader`
+  at `crates/chv-controlplane-service/src/systemd_upgrader.rs`; that file was
+  deleted in PR #213. The ADR-007 presentation gap is decision D8.
+- [release/package-contract.md](release/package-contract.md) contradicts
+  itself on whether `chv-node` includes `chvctl` (nfpm is truth: it does
+  not).
+- `packaging/config/chv.yaml` ships `authority_mode: legacy` while every
+  shipped `.toml` config selects core-managed (§10).
+- `scripts/install.sh` defaults to the `cellhv/chv` repository and Cloud
+  Hypervisor v51.1 (§5 UC-1, decisions D6; also `get.cellhv.com` hosting in
+  [DEPLOYMENT.md](DEPLOYMENT.md)).
+
+## 10. Legacy and unsupported surfaces
+
+The following surfaces are **not part of any supported topology**. Do not
+deploy them; do not file evidence against them.
+
+| Surface | Status | Why fenced |
+|---|---|---|
+| `docker-compose.prod.yml` | Legacy / unmaintained (explicit in-repo banner) | Predates the #323 ownership model and the prompt-02 authority cutover; its ownership layout differs deliberately. The banner directs users to the packages or `scripts/install.sh`. |
+| `docker-compose.yml`, `Dockerfile`, `deploy/entrypoint.sh` | Legacy (no in-repo banner; dated pre-#323) | Same era and same ownership-model mismatch; no in-file marker exists — this row is the fence. Cleanup is a docs/packaging decision outside this document's scope. |
+| Legacy `chvbr0` host bridge/NAT bootstrap | Opt-out dev convenience (`INSTALL_CHV_NO_BRIDGE=1`) | Qualified networks are API-created and `chv-nwd`-managed (`br-<net_id>`). |
+| `authority_mode = "legacy"` | Compatibility adapter only | Explicit opt-in; the agent logs a warning. Qualified posture is core-managed everywhere. |
+| `packaging/config/chv.yaml` (`/etc/chv/chv.yaml` in `chv-node`) | Reference-only | Still shows `authority_mode: legacy` (line 59), contradicting the shipped `.toml` configs. Disclosed; no daemon consumes it for authority selection. |
+| `docs/examples/bootstrap.sh` | Manual helper | Points operators to `scripts/install.sh`; not a supported install path. |
+| BFF backup manager | Broken no-op | Excluded from the RC matrix (declaration §3); "backup is not DR". |
+| `chvctl upgrade` subcommands | Dead | Target unimplemented BFF routes (§6). |
+
+## 11. Source-of-truth map
+
+| Document | Owns | Relationship to this document |
+|---|---|---|
+| **This document** (`docs/DEPLOYMENT-ARCHITECTURE.md`) | Deployment architecture: components, interface/port contract, provisioning model, topology + use-case tiers, upgrade paths, supported envelope, open design decisions | Authoritative for the above; all other docs link here for architecture and tier claims. |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Single-host operator how-to (quick start, manual steps, multi-node console routing, installer hosting) | How-to only; its hardware-minimums claim is flagged in §7 pending Prompt-05/06. |
+| [release/PIPELINE.md](release/PIPELINE.md) | Release engineering: versioning, CI/CD, artifact pipeline | Links here for what the artifacts deploy. |
+| [release/package-contract.md](release/package-contract.md) | The package contract: contents, ownership, upgrade/rollback procedures | nfpm configurations remain the mechanical truth for contents (§2.4). |
+| [PACKAGING.md](PACKAGING.md) | Packaging overview and operator package steps | Links here for topology and tiers. |
+| [OPERATIONS.md](OPERATIONS.md) | Day-2 operations: monitoring, CLI reference, live-database access, multi-node operations | Day-2 only. |
+| [install/](install/) (channels, debian-ubuntu, rhel-rocky-alma, from-github-release, uninstall) | Per-distro install instructions | Use the canonical repository URLs; the installer default repository conflict is disclosed in §5 UC-1. |
+| [runbooks/](runbooks/) | Incident procedures (control-plane DR, full-site recovery, snapshot restores) | DR procedures; the DR *claim* boundary is §5 UC-9. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design and data flow | Carries stale upgrade-stack references (§9); this document supersedes on deployment matters. |
+| [specs/adr/](specs/adr/) | Design authority | ADRs are decisions; this document records their qualification tier (for example ADR-021 is DESIGN-ONLY). |
+| [evidence/](evidence/) (frozen prompt-04 milestones) | Proof | Every [QUALIFIED — KVM-VERIFIED] label here cites a milestone doc. |
+| [prompts/production-readiness/](prompts/production-readiness/) | Campaign definitions | Prompt 05 and Prompt 06 are pending; their results extend §5 and §7. |
+
+---
+
+*Terminology in this document follows the controlled technical English
+standard: CHV names the platform; the VMM is Cloud Hypervisor; node (UI
+"Hosts", Designer `servers`) and VM (UI "Instances") are the prose terms;
+daemons are named in full; local endpoints are Unix sockets.*
