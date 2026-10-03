@@ -7,6 +7,16 @@ Install path: `/usr/local/bin/ch-remote`
 
 The command syntax below matches the qualified v43.0 `ch-remote`.
 
+**Upstream gap (disclosed, deliberate):** upstream Cloud Hypervisor stable at
+time of writing (2026-10-03) is **v53.0** (released 2026-07-12); the gap from
+the qualified v43.0 pin is a deliberate decision
+(DEPLOYMENT-ARCHITECTURE.md §8, decision D6, option (a)), and closing it via
+re-qualification is tracked as issue #448. The v43.0 → v53.0 `ch-remote`
+command surface is **additions-only** (`resize-disk`, added with the
+`/vm.resize-disk` endpoint in v50.0, and `add-generic-vhost-user`); no command
+was removed or renamed, so the table below — which documents the pinned v43.0
+surface — needs no changes for the gap.
+
 ## Usage
 
 ```
