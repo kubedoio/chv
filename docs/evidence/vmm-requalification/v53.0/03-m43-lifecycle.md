@@ -68,6 +68,13 @@ System pin `/usr/bin/cloud-hypervisor`, expected sha256
 | Host, after the v43 control run (22:05:15) | `a250a934…` | v43.0.0 |
 | Host, final sweep (22:05:49) | `a250a934…` | v43.0.0 |
 
+Checkpoint provenance: four of the five are preserved records in the
+campaign workdir (baseline, before/after staging, post-control, final
+sweep); the 21:56:52 post-namespace checkpoint is entailed by the
+bracketing preserved checkpoints (21:49 and 22:05:15, both `a250a934…`)
+plus the mount-namespace zero-write proof below, rather than by its own
+preserved log line.
+
 Isolation model (campaign-standard, per the [campaign index](README.md)): the
 v53 arm executed inside `unshare --mount` with the candidate bind-mounted
 over `/usr/bin/cloud-hypervisor` namespace-locally (the qual harness hardcodes
@@ -103,7 +110,7 @@ not-provable on this topology, as in the frozen campaign.
 
 | Leg (frozen definition) | Key assertions | v53.0 result | v43.0 control | Verdict |
 |---|---|---|---|---|
-| **A — full lifecycle** | create-and-boot; kernel banner + logind evidence ×3 boots; reboot = guest-level, **same CH process**; graceful stop → CH exits; second start re-spawns fresh CH; spec honored; exactly one CH process at every point | all PASS (console: boot1 71,687 B, boot2 166,498 B cumulative, boot3 90,691 B incl. `ubuntu login:` prompt) | all PASS | **PASS both**; v53 stop path clean |
+| **A — full lifecycle** | create-and-boot; kernel banner + logind evidence ×3 boots; reboot = guest-level, **same CH process**; graceful stop → CH exits; second start re-spawns fresh CH; spec honored; exactly one CH process at every point | all PASS (console: boot1 71,687 B, boot2 166,498 B cumulative, boot3 90,691 B incl. the getty login prompt — `b2719c75 login:`, the guest hostname being the VM id) | all PASS | **PASS both**; v53 stop path clean |
 | **B — S1 agent SIGKILL while Running** | CH survives crash; restarted agent re-adopts same pid; exactly one CH; identity constant; ops history unchanged | all PASS (re-adopted; ops=5 events=15) | all PASS (ops=5 events=15) | **PASS both** |
 | **C — control-plane restart while Running** | CH unaffected, same pid across restart; agent reconnect; identity; ops unchanged | all PASS | all PASS | **PASS both** |
 | **D — 60 s management-plane outage** | API refuses for full window; guest keeps executing; same CH pid; ops unchanged; outage-heal drain gate | all PASS except cputime warn (idle guest — `qual_warn`, not a gate); drain gate passed 0→0 | same shape: cputime warn | **PASS both**; cputime warn is version-independent (both arms) — an idle guest, not a regression |
@@ -172,10 +179,10 @@ of any kind was needed.
 | Component | Frozen era (run 6, candidate `baa20c0e`) | This leg | Assessment |
 |---|---|---|---|
 | `m4.3-lifecycle.sh` | as of #350 | **unchanged** (last commit touching it: #350) | zero scenario drift |
-| `deploy.sh` | as of #350 | +`CHV_QUAL_LOG_LEVEL` (#367), +stord `path_allowlist` propagation (#377) | robustness only; default log level `info` = evidence shape |
+| `deploy.sh` | as of #357 (post-#350 robustness era) | +`CHV_QUAL_LOG_LEVEL` (#367), +stord `path_allowlist` propagation (#377) | robustness only; default log level `info` = evidence shape |
 | `env-preflight.sh` | as of #357 | unchanged for qual (#459 touched kvm-smoke only); the version-gate reinstall hazard remains as disclosed — handled by the namespace model, verified in §2 | as designed |
 | CHV stack | `baa20c0e` (rc1 boundary) | `b6d6ad50` — carries the post-rc1 fixes the frozen run recorded as findings: #342 (zombie reap), #344 (cache import), #346/#348 (stop-wedge containment), #334 (core-managed authority) | **intended drift**: this leg re-qualifies the *current* stack against v53.0, not the frozen candidate. This is why the frozen run's product findings (#339/#341/#343/#345) do not recur in either arm |
-| Guest image / firmware | `noble-qual-patched.img` (`37f7c340…`), rust-hypervisor-fw 0.5.0 (`4a0a1e97…`) | same artifacts, same digests, read-only (stord seeds volumes by `fs::copy`; the shared image is never written) | identical |
+| Guest image / firmware | `noble-qual-patched.img` (`37f7c340…`, digest carried from leg 02's fresh measurement; this leg verified the seed image hash in-log), rust-hypervisor-fw 0.5.0 (`4a0a1e97…`) | same artifacts, same digests, read-only (stord seeds volumes by `fs::copy`; the shared image is never written) | identical |
 
 ## 7. Host-cleanliness proof and repo isolation
 
