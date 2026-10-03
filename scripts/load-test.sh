@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Configuration
-BFF_URL="${BFF_URL:-http://localhost:8444}"
+BFF_URL="${BFF_URL:-http://localhost:8080}"
 USERNAME="${CHV_USER:-admin}"
 # If CHV_PASS is not set, try to read the bootstrap password from the local install.
 if [ -n "${CHV_PASS:-}" ]; then
