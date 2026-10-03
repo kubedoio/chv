@@ -51,7 +51,9 @@ verify_install_state() {
     # D3 interim: example reverse-proxy config for the packaged UI tree
     # (documentation only; nothing serves the tree). See
     # docs/DEPLOYMENT.md "Serving the Web UI in package mode".
-    local example_conf="/usr/share/doc/chv-controlplane/examples/chv-example.conf"
+    # Under /usr/share/chv, not /usr/share/doc: ubuntu's dpkg
+    # path-exclude=/usr/share/doc/* would drop the file at install time.
+    local example_conf="/usr/share/chv/examples/chv-example.conf"
     if [[ -f "$example_conf" ]]; then
         info "  Found: ${example_conf}"
     else

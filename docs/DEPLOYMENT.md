@@ -549,7 +549,7 @@ The static `map` approach is production-standard for small-to-medium clusters (t
 The `chv-controlplane` package ships the Web UI static tree at
 `/usr/share/chv/ui`. The package also ships an example nginx
 configuration at
-`/usr/share/doc/chv-controlplane/examples/chv-example.conf`.
+`/usr/share/chv/examples/chv-example.conf`.
 
 ### Prerequisites
 
@@ -566,7 +566,7 @@ configuration at
 1. Install nginx.
 2. Install the example configuration:
    ```bash
-   sudo cp /usr/share/doc/chv-controlplane/examples/chv-example.conf \
+   sudo cp /usr/share/chv/examples/chv-example.conf \
         /etc/nginx/sites-available/chv
    sudo ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
    sudo rm -f /etc/nginx/sites-enabled/default

@@ -32,7 +32,7 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 /usr/bin/chv-controlplane
 /usr/share/chv/ui/           # Web UI static assets
 /usr/share/chv/migrations/   # Database migrations
-/usr/share/doc/chv-controlplane/examples/chv-example.conf   # Example reverse-proxy config
+/usr/share/chv/examples/chv-example.conf   # Example reverse-proxy config
 /etc/chv/controlplane.toml   # Default config (noreplace)
 /lib/systemd/system/chv-controlplane.service
 ```
@@ -42,7 +42,7 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 > `chv-controlplane`'s HTTP listener (loopback `:8080`) exposes the BFF API
 > only — there is no static file server in the binary, and the packages
 > install no web server. The package ships an example nginx configuration
-> at `/usr/share/doc/chv-controlplane/examples/chv-example.conf`, and
+> at `/usr/share/chv/examples/chv-example.conf`, and
 > [DEPLOYMENT.md](DEPLOYMENT.md) ("Serving the Web UI in package mode")
 > documents how to use it; that serving path is
 > [CODE-SUPPORTED, UNQUALIFIED]. The qualified UI path is still

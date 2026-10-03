@@ -65,7 +65,7 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 /usr/bin/chv-controlplane
 /usr/share/chv/ui/                  # built Svelte SPA assets (type: tree)
 /usr/share/chv/migrations/          # SQLite schema migrations (type: tree)
-/usr/share/doc/chv-controlplane/examples/chv-example.conf   # example reverse-proxy config (D3 interim)
+/usr/share/chv/examples/chv-example.conf   # example reverse-proxy config (D3 interim)
 /lib/systemd/system/chv-controlplane.service
 /etc/chv/controlplane.toml          # type: config|noreplace
 ```
@@ -155,7 +155,7 @@ Web UI in package mode".
 | `/usr/bin/chv-stord` | `root:root` | install | `chv-node` | Executable |
 | `/usr/bin/chv-nwd` | `root:root` | install | `chv-node` | Executable |
 | `/usr/share/chv/ui/*` | `root:root` | install | `chv-controlplane` | Static SPA files |
-| `/usr/share/doc/chv-controlplane/examples/chv-example.conf` | `root:root` | install | `chv-controlplane` | Example reverse-proxy config for the packaged UI tree; not enabled ([CODE-SUPPORTED, UNQUALIFIED]) |
+| `/usr/share/chv/examples/chv-example.conf` | `root:root` | install | `chv-controlplane` | Example reverse-proxy config for the packaged UI tree; not enabled ([CODE-SUPPORTED, UNQUALIFIED]) |
 | `/usr/share/chv/migrations/*` | `root:root` | install | `chv-controlplane` | SQL migrations |
 | `/lib/systemd/system/chv-*.service` | `root:root` | install | respective package | Systemd units |
 | `/etc/chv/controlplane.toml` | `root:root` | install | `chv-controlplane` | Config file; `config|noreplace` |
