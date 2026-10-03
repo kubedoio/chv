@@ -6,7 +6,7 @@
 **Prerequisites:**
 - Volume exists and is registered in CHV
 - At least one snapshot exists for the volume
-- For Ceph: `rbd` CLI available on the stord host
+- For Ceph: `rbd` CLI available on the node running `chv-stord`
 - For LVM/iSCSI: manual disk replacement procedure (see below)
 
 ---
@@ -52,7 +52,7 @@ curl -s "https://controlplane.example.com/v1/operations?resource_id=<VOLUME_ID>"
   -H "Authorization: Bearer $TOKEN" | jq '.operations[] | select(.operation_type == "RestoreVolume")'
 ```
 
-Check stord logs:
+Check `chv-stord` logs:
 
 ```bash
 sudo journalctl -u chv-stord -f | grep -i "restore\|snapshot"
@@ -71,7 +71,7 @@ ls -la /var/lib/chv/stord/volumes/<VOLUME_ID>/
 **Ceph backend:**
 
 ```bash
-# On the stord host
+# On the node running chv-stord
 rbd snap ls <pool>/<image>
 # The target snapshot should show as the active state after rollback
 ```
@@ -80,7 +80,7 @@ rbd snap ls <pool>/<image>
 
 ## 3. Path B: Manual Restore (lvm / iscsi)
 
-> **Warning:** LVM and iSCSI snapshot restore are **not implemented** in CHV stord. You must perform manual disk replacement. This procedure requires downtime for any VM attached to the volume.
+> **Warning:** LVM and iSCSI snapshot restore are **not implemented** in `chv-stord`. You must perform manual disk replacement. This procedure requires downtime for any VM attached to the volume.
 
 ### 3a. Identify Affected VMs
 
@@ -178,7 +178,7 @@ chvctl vm start <VM_ID_1>
 
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|
-| `RestoreVolume operation failed` (local/ceph) | Check stord logs | `journalctl -u chv-stord -n 500` |
+| `RestoreVolume operation failed` (local/ceph) | Check `chv-stord` logs | `journalctl -u chv-stord -n 500` |
 | Ceph rollback hangs | Check `rbd status` for watchers | Ensure no VM has the RBD image open |
 | LVM `lvchange` fails with "open" error | `lsof /dev/<VG>/<LV>` | Stop all VMs using the volume first |
 | iSCSI re-login fails | `iscsiadm -m session` | Verify target is up; check network/firewall |
@@ -187,15 +187,15 @@ chvctl vm start <VM_ID_1>
 ## What Happens Under the Hood (local/ceph)
 
 ### Local Backend
-1. BFF validates request
+1. The backend-for-frontend (BFF) validates the request
 2. `LifecycleService` creates `RestoreVolume` operation
-3. `Orchestrator` dispatches to stord on the target node
-4. Stord performs atomic rename: snapshot → active image using a `.restore-tmp` staging file
+3. `Orchestrator` dispatches to `chv-stord` on the target node
+4. `chv-stord` performs an atomic rename: snapshot → active image using a `.restore-tmp` staging file
 5. Operation completes
 
 ### Ceph Backend
 1. Same dispatch path through orchestrator
-2. Stord calls `rbd snap rollback <pool>/<image>@<snapshot_id>`
+2. `chv-stord` calls `rbd snap rollback <pool>/<image>@<snapshot_id>`
 3. RBD reverts the image to the snapshot state
 4. Operation completes
 

@@ -5,7 +5,7 @@
 **Estimated Time:** 15–30 minutes  
 **Prerequisites:**
 - Access to backup artifacts: SQLite DB backups, certificate backups, and VM backup artifacts
-- A fresh or spare host meeting CHV control plane requirements
+- A fresh or spare host meeting CHV control-plane requirements
 - Same CHV version (or newer) installed on the replacement host
 - DNS or load balancer updated to point to the replacement host
 
@@ -13,7 +13,7 @@
 
 ## 1. Assess the Scope of Failure
 
-### Scenario A: Control Plane Host Failed (VMs still running on hypervisors)
+### Scenario A: Control-Plane Host Failed (VMs still running on hypervisor nodes)
 - VMs continue running but cannot be managed
 - No API, no UI, no scheduling
 - **Recovery target:** Rebuild control plane, re-enroll agents
@@ -23,25 +23,25 @@
 - SQLite corruption or disk full
 - **Recovery target:** Restore DB from latest backup
 
-### Scenario C: Certificate Authority Compromised or Lost
+### Scenario C: Certificate Authority (CA) Compromised or Lost
 - mTLS between control plane and agents breaks
 - Agents cannot reconnect
 - **Recovery target:** Rotate certificates, re-enroll agents
 
 ---
 
-## 2. Scenario A: Rebuild Control Plane Host
+## 2. Scenario A: Rebuild the Control-Plane Host
 
 ### 2a. Prepare the Replacement Host
 
-Install CHV control plane on the new host:
+Install the CHV control plane on the new host:
 
 ```bash
 # Install from package (Debian/Ubuntu)
-dpkg -i chv-controlplane_0.1.0_amd64.deb
+dpkg -i chv-controlplane_<version>_amd64.deb
 
 # Or from release tarball
-tar xzf chv-0.1.0-linux-amd64.tar.gz
+tar xzf chv-<version>-linux-amd64.tar.gz
 sudo ./install.sh --component controlplane
 ```
 
@@ -82,7 +82,7 @@ sudo chmod 600 /etc/chv/certs/*.key
 ### 2d. Verify Configuration
 
 ```bash
-# Check the control plane config
+# Check the control-plane config
 cat /etc/chv/controlplane.toml
 
 # Ensure listen addresses match the new host's IPs
@@ -105,7 +105,7 @@ curl -s http://localhost:8080/health | jq
 Agents will attempt to reconnect but may fail if the control plane's gRPC listener address changed.
 
 ```bash
-# On each hypervisor host:
+# On each hypervisor node:
 sudo systemctl restart chv-agent
 
 # Check agent logs for connection success
@@ -120,7 +120,7 @@ TOKEN=$(openssl rand -hex 32)
 echo "$TOKEN" | sudo tee /etc/chv/bootstrap.token.new
 sudo chmod 600 /etc/chv/bootstrap.token.new
 
-# On agent host, re-enroll
+# On the agent node, re-enroll
 sudo chvctl agent enroll --token "$TOKEN" --server https://new-cp.example.com:443
 ```
 
@@ -130,7 +130,7 @@ sudo chvctl agent enroll --token "$TOKEN" --server https://new-cp.example.com:44
 # List all VMs — they should show their last known state
 chvctl vm list
 
-# VMs that were Running should still be running on their hypervisors
+# VMs that were Running should still be running on their nodes
 # The control plane will reconcile state on next agent heartbeat
 ```
 
@@ -185,14 +185,14 @@ sudo openssl x509 -req -in /etc/chv/certs/controlplane.csr \
   -CA /etc/chv/certs/ca.crt -CAkey /etc/chv/certs/ca.key \
   -CAcreateserial -out /etc/chv/certs/controlplane.crt -days 365
 
-# Generate new agent cert (per agent host)
+# Generate new agent cert (per agent node)
 # Agents will re-generate their own certs on re-enrollment
 ```
 
 ### 4b. Distribute New CA
 
 ```bash
-# Copy new CA to all agent hosts
+# Copy the new CA to all agent nodes
 for host in agent-1 agent-2 agent-3; do
   scp /etc/chv/certs/ca.crt "$host:/tmp/chv-ca.crt"
   ssh "$host" "sudo cp /tmp/chv-ca.crt /etc/chv/certs/ca.crt && sudo systemctl restart chv-agent"

@@ -87,7 +87,7 @@ cp /mnt/backups/<JOB_ID>.backup /tmp/<JOB_ID>.backup
 
 ### 2c. Null Destination (dev/test)
 
-The artifact was never copied off-host. Check the local staging directory:
+The artifact was never copied off the control plane. Check the local staging directory:
 
 ```bash
 ls -la /run/chv/controlplane/backups/<JOB_ID>.backup
@@ -132,13 +132,13 @@ file /tmp/<JOB_ID>.backup
 # If it's a qcow2 image
 qemu-img info /tmp/<JOB_ID>.backup
 
-# If it's a directory (older CH versions or certain configurations)
+# If it's a directory (older Cloud Hypervisor versions or certain configurations)
 ls -la /tmp/<JOB_ID>.backup/
 ```
 
 The artifact may be:
 - A single `qcow2` disk image
-- A CH snapshot directory with `memory` and disk state
+- A Cloud Hypervisor snapshot directory with `memory` and disk state
 
 ---
 
@@ -208,11 +208,11 @@ curl -X POST https://controlplane.example.com/v1/vms/snapshots/restore \
   }'
 ```
 
-> **Note:** The BFF snapshot restore endpoint only accepts `vm_id` and `snapshot_id`, not a raw filesystem path. If you need to restore from a manual path, use the Cloud Hypervisor API directly via the agent socket (see section 6c) or copy the snapshot files to the expected snapshot directory and use the standard snapshot restore API.
+> **Note:** The backend-for-frontend (BFF) snapshot restore endpoint only accepts `vm_id` and `snapshot_id`, not a raw filesystem path. To restore from a manual path, use the Cloud Hypervisor API directly via the agent socket (see section 6c). Alternatively, copy the snapshot files into the expected snapshot directory and use the standard restore API.
 
 ### 6c. Direct Cloud Hypervisor API (last resort)
 
-If CHV APIs are unavailable, use the CH API socket directly:
+If CHV APIs are unavailable, use the Cloud Hypervisor API socket directly:
 
 ```bash
 # Find the VM's API socket
@@ -237,11 +237,11 @@ chvctl vm start <VM_ID>
 Monitor boot:
 
 ```bash
-# Agent logs
+# chv-agent logs
 sudo journalctl -u chv-agent -f | grep <VM_ID>
 ```
 
-> **Note:** There is no `chvctl vm console` command. To access the serial console, use the Web UI (Inventory → VM → Console tab), which retrieves a console URL from `GET /v1/vms/{vm_id}/console`.
+> **Note:** There is no `chvctl vm console` command. To access the serial console, use the Web UI (Default Cloud → Hosts → Instances → `<VM_NAME>` → Console tab), which retrieves a console URL from `GET /v1/vms/{vm_id}/console`.
 
 Verify guest integrity:
 
@@ -266,7 +266,7 @@ curl -X POST https://controlplane.example.com/v1/backups/restores \
 
 # Then mark it as succeeded (since the API stub doesn't execute).
 # Live-database write: stop the control plane first and restart it after
-# (see docs/OPERATIONS.md, "Live Database Access"):
+# (see docs/OPERATIONS.md, section "Live Database Access"):
 sudo systemctl stop chv-controlplane
 sudo sqlite3 /var/lib/chv/controlplane.db \
   "UPDATE backup_restores SET status = 'Succeeded', completed_at = datetime('now') 
@@ -281,9 +281,9 @@ sudo systemctl start chv-controlplane
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|
 | `CHECKSUM MISMATCH` after download | Network corruption or wrong artifact | Re-download; verify bucket/path |
-| `qemu-img info` shows corruption | Incomplete download or CH version mismatch | Re-download; check artifact size matches `size_bytes` in DB |
+| `qemu-img info` shows corruption | Incomplete download or Cloud Hypervisor version mismatch | Re-download; check artifact size matches `size_bytes` in DB |
 | VM fails to start after restore | Disk format mismatch | Convert with `qemu-img convert -O qcow2` |
-| CH API returns `BadRequest` on restore | Snapshot format incompatible with CH version | Check CH version at backup time vs now; may need intermediate conversion |
+| Cloud Hypervisor API returns `BadRequest` on restore | Snapshot format incompatible with the Cloud Hypervisor version | Check the Cloud Hypervisor version at backup time vs now; may need intermediate conversion |
 | Permission denied on disk | Wrong ownership | `sudo chown -R chv:chv /var/lib/chv/agent/vms/<VM_ID>/` |
 | Guest filesystem errors | Disk image from running VM | Always stop VM before creating snapshots; `fsck` the restored disk |
 

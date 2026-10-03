@@ -52,7 +52,7 @@ Note the `snapshot_id` you want to restore.
 
 ### Via Web UI
 
-1. Navigate to **Inventory → VMs → `<VM_NAME>`**
+1. Navigate to **Default Cloud → Hosts → Instances → `<VM_NAME>`**
 2. Click the **Snapshots** tab
 3. Find the target snapshot and click **Restore**
 4. Confirm the warning: the current VM state will be replaced
@@ -110,7 +110,7 @@ chvctl vm start <VM_ID>
 
 ### Verify guest health
 
-Connect to the VM via SSH or the configured console access method and verify data integrity (e.g., check filesystems, running services, and application state).
+Connect to the VM via SSH or the configured console. Verify data integrity: filesystems, running services, and application state.
 
 ---
 
@@ -134,17 +134,17 @@ curl -X POST https://controlplane.example.com/v1/vms/snapshots \
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|
 | `VM must be stopped before restore` | VM is running | Stop the VM first (`chvctl vm stop`) |
-| `RestoreSnapshot operation failed` | Check agent logs | `journalctl -u chv-agent -n 200` — look for CH API errors |
+| `RestoreSnapshot operation failed` | Check agent logs | `journalctl -u chv-agent -n 200` — look for Cloud Hypervisor API errors |
 | `Snapshot not found` | Snapshot was deleted by retention | Check `backup_jobs` table for shipped artifact; follow [Backup Artifact Restore](backup-artifact-restore.md) |
-| VM won't start after restore | CH restore may have left partial state | Stop VM, delete `disk.qcow2`, restore from backup artifact manually |
+| VM won't start after restore | Cloud Hypervisor restore may have left partial state | Stop VM, delete `disk.qcow2`, restore from backup artifact manually |
 
 ## What Happens Under the Hood
 
-1. BFF validates VM is stopped
-2. BFF dispatches `RestoreSnapshot` to the node agent hosting the VM
-3. Agent calls Cloud Hypervisor: `PUT /api/v1/vm.restore` with `source_url=file:///var/lib/chv/agent/vms/{vm_id}/snapshots/{snapshot_id}`
-4. CH loads the snapshot state and disk image
-5. BFF marks operation `Succeeded` or `Failed`
+1. The backend-for-frontend (BFF) validates that the VM is stopped
+2. The BFF dispatches `RestoreSnapshot` to the `chv-agent` on the node hosting the VM
+3. `chv-agent` calls the Cloud Hypervisor API: `PUT /api/v1/vm.restore` with `source_url=file:///var/lib/chv/agent/vms/{vm_id}/snapshots/{snapshot_id}`
+4. Cloud Hypervisor loads the snapshot state and disk image
+5. The BFF marks the operation `Succeeded` or `Failed`
 
 ## Related Runbooks
 

@@ -5,7 +5,7 @@
 **Estimated Time:** 1–4 hours (depending on VM count and backup destination)  
 **Prerequisites:**
 - Access to off-site backup artifacts (S3 or NFS)
-- Replacement hardware or cloud instances for all CHV roles (control plane + hypervisors)
+- Replacement hardware, or VMs in an external cloud provider, for all CHV roles (control plane and hypervisor nodes)
 - CHV installation media/packages
 - Network configuration (IPs, DNS, VLANs) documented or recoverable
 - Database backup from the control plane
@@ -19,23 +19,23 @@ CHV recovery follows a strict startup order. Do not skip steps.
 
 | Order | Component | Why It Must Come First |
 |-------|-----------|------------------------|
-| 1 | Control plane host | Source of truth for all metadata |
-| 2 | Network/storage infrastructure | Hypervisors need connectivity to CP and storage |
-| 3 | Hypervisor hosts (agents) | Host the VMs |
-| 4 | Storage nodes (stord) | Volume backends |
+| 1 | Control-plane host | Source of truth for all metadata |
+| 2 | Network/storage infrastructure | Hypervisor nodes need connectivity to the control plane and storage |
+| 3 | Hypervisor nodes (`chv-agent`) | Host the VMs |
+| 4 | Storage nodes (`chv-stord`) | Volume backends |
 | 5 | VMs (from backup artifacts) | Final workload restoration |
 
 ---
 
 ## 2. Rebuild the Control Plane
 
-Follow [Control Plane DR](control-plane-dr.md) — Scenario A (host rebuild) in full.
+Follow [Control Plane DR](control-plane-dr.md) — Scenario A (control-plane host rebuild) in full.
 
 Key additional steps for a full site recovery:
 
 ### 2a. Verify Backup Artifacts Are Accessible
 
-Before rebuilding hypervisors, confirm you can reach the backup destination:
+Before rebuilding the hypervisor nodes, confirm you can reach the backup destination:
 
 ```bash
 # S3
@@ -47,7 +47,7 @@ showmount -e backup-nfs.example.com
 
 ### 2b. Document the Original Topology
 
-If the old control plane is completely destroyed and you don't have the DB backup, you must reconstruct the topology from memory or external documentation. Minimum required:
+If the old control plane and the DB backup are both lost, reconstruct the topology from memory or external documentation. Minimum required:
 
 - List of all VM IDs and their hypervisor assignments
 - Volume IDs and storage backend configuration
@@ -63,16 +63,16 @@ If the old control plane is completely destroyed and you don't have the DB backu
 
 ---
 
-## 3. Rebuild Hypervisor Hosts
+## 3. Rebuild Hypervisor Nodes
 
 ### 3a. Install CHV Agent
 
 ```bash
-# On each hypervisor host
-dpkg -i chv-agent_0.1.0_amd64.deb
+# On each hypervisor node
+dpkg -i chv-agent_<version>_amd64.deb
 
 # Or from tarball
-tar xzf chv-0.1.0-linux-amd64.tar.gz
+tar xzf chv-<version>-linux-amd64.tar.gz
 sudo ./install.sh --component agent
 ```
 
@@ -95,7 +95,7 @@ EOF
 ### 3c. Enroll with Control Plane
 
 ```bash
-# Generate bootstrap token on control plane
+# Generate a bootstrap token on the control plane
 TOKEN=$(openssl rand -hex 32)
 echo "$TOKEN" | sudo tee /etc/chv/bootstrap.token.new
 
@@ -109,18 +109,18 @@ sudo systemctl enable --now chv-agent
 ### 3d. Verify Agent Registration
 
 ```bash
-# On control plane
+# On the control plane
 chvctl node list | jq '.nodes[] | {node_id, status}'
 ```
 
 ---
 
-## 4. Rebuild Storage Nodes (stord)
+## 4. Rebuild Storage Nodes (`chv-stord`)
 
-### 4a. Install stord
+### 4a. Install `chv-stord`
 
 ```bash
-dpkg -i chv-stord_0.1.0_amd64.deb
+dpkg -i chv-stord_<version>_amd64.deb
 ```
 
 ### 4b. Configure Storage Backend
@@ -146,7 +146,7 @@ ceph_user = "chv"
 EOF
 ```
 
-### 4c. Start stord
+### 4c. Start `chv-stord`
 
 ```bash
 sudo systemctl enable --now chv-stord
@@ -194,7 +194,7 @@ Bulk restore script (if many VMs):
 
 ```bash
 #!/bin/bash
-# restore-all-vms.sh — run on control plane
+# restore-all-vms.sh — run on the control plane
 
 API_TOKEN="$TOKEN"
 BACKEND="s3"
@@ -245,13 +245,13 @@ done <<< "$jobs"
 
 ### 6a. Local Volumes
 
-Local volumes were stored on stord hosts. If the stord host was lost, the volumes are lost unless backed up externally.
+Local volumes were stored on `chv-stord` nodes. If the storage node was lost, the volumes are lost unless backed up externally.
 
 ### 6b. Ceph Volumes
 
-Ceph volumes survive stord host loss (data is in the Ceph cluster). Simply:
+Ceph volumes survive the loss of a `chv-stord` node (data is in the Ceph cluster). Simply:
 
-1. Reinstall stord
+1. Reinstall `chv-stord`
 2. Connect to the same Ceph pool
 3. Volumes are automatically available
 
@@ -272,7 +272,7 @@ curl -X POST http://localhost:8080/v1/volumes \
   }' | jq '.volume_id'
 ```
 
-If you have a volume backup artifact, restore it manually to the stord data directory.
+If you have a volume backup artifact, restore it manually to the `chv-stord` data directory.
 
 ---
 
@@ -362,7 +362,7 @@ aws s3 ls s3://my-backup-bucket/chv/ --recursive | grep $(date +%Y%m%d)
 
 1. **Document the root cause** in your incident tracker
 2. **Update network diagrams** if they changed during rebuild
-3. **Verify off-site backups are still running** — the DR event may have disrupted schedules
+3. **Verify off-site backups are still running** — the incident may have disrupted schedules
 4. **Run a backup restore drill** within 48 hours to ensure the recovered system can actually restore
 5. **Update this runbook** if any steps didn't work as expected
 6. **Consider implementing automated restore** — the manual steps in this runbook are a significant operational risk
@@ -374,7 +374,7 @@ aws s3 ls s3://my-backup-bucket/chv/ --recursive | grep $(date +%Y%m%d)
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|
 | Agent enrollment fails with `invalid token` | Token expired or wrong CA | Generate fresh token; verify CA cert matches |
-| VMs won't start after restore | Disk images incompatible with new CH version | Convert with `qemu-img convert`; check CH release notes |
+| VMs won't start after restore | Disk images incompatible with the new Cloud Hypervisor version | Convert with `qemu-img convert`; check the Cloud Hypervisor release notes |
 | Ceph volumes not visible | Wrong pool or user | Verify `stord.toml` matches old configuration |
 | Backup worker not creating jobs | Schedules not enabled | `sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" "SELECT schedule_id, enabled FROM backup_schedules;"` |
 | S3 upload fails after recovery | Credentials rotated or bucket policy changed | Update schedule with new S3 credentials |
