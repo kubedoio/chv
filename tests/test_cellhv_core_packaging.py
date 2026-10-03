@@ -31,9 +31,23 @@ class CellHvCorePackagingTests(unittest.TestCase):
         self.assertNotRegex(unit, r"rm\s+-f\s+/run/chv/core/core-v1\.sock")
 
     def test_standalone_and_packaged_agent_units_have_security_parity(self):
+        # PR #334 ("install.sh ships canonical units") removed the embedded
+        # unit heredoc this test originally parsed. install.sh now installs
+        # the canonical unit files verbatim: from the release tarball's
+        # systemd/ (populated from docs/examples/systemd/ by
+        # scripts/build-release.sh) or, from a repository checkout,
+        # packaging/systemd/ itself. Standalone-vs-packaged parity is
+        # therefore between the .deb unit (packaging/systemd/) and the
+        # standalone-install unit source (docs/examples/systemd/).
         packaged = (ROOT / "packaging/systemd/chv-agent.service").read_text()
+        standalone = (ROOT / "docs/examples/systemd/chv-agent.service").read_text()
         installer = (ROOT / "scripts/install.sh").read_text()
-        generated = installer.split("cat > /etc/systemd/system/chv-agent.service <<'EOF'", 1)[1].split("\nEOF", 1)[0]
+        # Parity is structural: install.sh must keep installing the
+        # canonical units instead of embedding its own copy — the embedded
+        # pre-#334 unit shadowed the packaged units in /etc/systemd/system
+        # and drifted away from their hardening.
+        self.assertNotIn("cat > /etc/systemd/system/chv-agent.service", installer)
+        self.assertIn("packaging/systemd/chv-agent.service", installer)
         for directive in (
             "User=chv",
             "Group=chv",
@@ -44,9 +58,9 @@ class CellHvCorePackagingTests(unittest.TestCase):
             "StateDirectoryMode=0700",
         ):
             self.assertIn(directive, packaged)
-            self.assertIn(directive, generated)
-        self.assertIn("ExecStartPre=+/usr/bin/install -d -m 0700", generated)
-        self.assertNotIn("ExecStartPost=", generated)
+            self.assertIn(directive, standalone)
+        self.assertIn("ExecStartPre=+/usr/bin/install -d -m 0700", standalone)
+        self.assertNotIn("ExecStartPost=", standalone)
 
     def test_install_surfaces_provision_exact_private_parents(self):
         postinstall = (ROOT / "packaging/scripts/postinstall.sh").read_text()

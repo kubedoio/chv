@@ -61,6 +61,13 @@ jobs:
           python3 -B scripts/check-cellhv-core-architecture.py
           python3 -B -m unittest tests/test_cellhv_core_architecture.py
 
+      - name: CellHV Core packaging security-parity guards
+        # Standalone-install vs .deb unit hardening parity and destructive
+        # Core-path guards. Not gated before #439: the module predated PR
+        # #334 but was never added to this job, so the #334 heredoc removal
+        # broke it silently on main.
+        run: python3 -B -m unittest tests/test_cellhv_core_packaging.py
+
       - name: CellHV OpenStack discovery evidence guards
         run: |
           python3 -B scripts/check-cellhv-openstack-discovery.py
