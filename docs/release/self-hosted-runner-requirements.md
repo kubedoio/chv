@@ -93,7 +93,7 @@ chmod +x /usr/bin/cloud-hypervisor
 cloud-hypervisor --version
 ```
 
-> **Pin the version** in your runner image to avoid test flakiness from upstream releases. The test script pins `v43.0` by default; override it with `--chv-version VER` or the `CHV_CLOUD_HYPERVISOR_VERSION` environment variable.
+> **Pin the version** in your runner image to avoid test flakiness from upstream releases. The test script pins `v43.0` by default; override it with `--chv-version VER` or the `CHV_CLOUD_HYPERVISOR_VERSION` environment variable. Upstream stable is currently **v53.0** (2026-07-12); the test pin deliberately stays at the qualified v43.0 until the #448 re-qualification moves the qualified pin — do not bump a runner past the qualified version.
 
 ## Required Privileges
 

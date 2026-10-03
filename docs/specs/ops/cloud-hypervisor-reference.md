@@ -10,8 +10,23 @@ item (see the M2.5 KVM qualification evidence under
 `docs/evidence/production-readiness/v0.3.0-rc1/02-single-authority-cutover/`)
 was resolved by pinning the installer to the qualified version.
 
-Source of truth: [Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md)
-OpenAPI spec: https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/master/vmm/src/api/openapi/cloud-hypervisor.yaml
+**Upstream gap (disclosed, deliberate):** upstream Cloud Hypervisor stable at
+time of writing (2026-10-03) is **v53.0** (released 2026-07-12). The 10-release
+gap between the pin and upstream stable is a deliberate decision
+(DEPLOYMENT-ARCHITECTURE.md §8, decision D6, option (a)); closing it via
+re-qualification is tracked as issue #448. The pinned v43.0 is in the affected
+range of two upstream High-severity advisories — CVE-2026-27211
+(GHSA-jmr4-g2hv-mjj6, host-file exfiltration via QCOW backing-file abuse) and
+CVE-2026-45782 (GHSA-f47p-p25q-83rh, use-after-free in virtio-block async I/O)
+— disclosed with exposure characterization in DEPLOYMENT-ARCHITECTURE.md §9.
+"Upstream-only" annotations in this document refer to features present in
+upstream releases **at or above the listed version** and absent from the
+pinned v43.0; nothing here is a claim that CHV exercises them.
+
+Source of truth (pinned to the v43.0 tag so it does not silently track main):
+[Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v43.0/docs/api.md)
+OpenAPI spec (same v43.0 pin):
+https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/v43.0/vmm/src/api/openapi/cloud-hypervisor.yaml
 
 ## Binaries
 
@@ -104,11 +119,11 @@ Available as soon as cloud-hypervisor starts, on the Unix socket from `--api-soc
 | Coredump VM | `/vm.coredump` | `VmCoredumpData` | N/A | **VM paused** (x86_64 + guest_debug only) |
 | Restore VM | `/vm.restore` | `RestoreConfig` | N/A | Created but not booted |
 | Resize VM | `/vm.resize` | `VmResize` | N/A | VM booted |
-| Resize disk (upstream-only; not available in the pinned v43.0) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
+| Resize disk (upstream-only; not available in the pinned v43.0 — added upstream v50.0, #7476) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
 | Resize memory zone | `/vm.resize-zone` | `VmResizeZone` | N/A | VM booted |
 | VM info | `/vm.info` | N/A | `VmInfo` | VM created |
 | VM counters | `/vm.counters` | N/A | `VmCounters` | VM booted |
-| Inject NMI | `/vmm.nmi` | N/A | N/A | VM booted |
+| Inject NMI | `/vm.nmi` (the v43.0 OpenAPI file carried a typo listing `/vmm.nmi`, corrected upstream v53.0; the real endpoint was always `/vm.nmi` — `ch-remote` v43.0 already issued the correct path) | N/A | N/A | VM booted |
 | Add VFIO device | `/vm.add-device` | `VmAddDevice` | `PciDeviceInfo` | VM booted |
 | Add disk | `/vm.add-disk` | `DiskConfig` | `PciDeviceInfo` | VM booted |
 | Add fs | `/vm.add-fs` | `FsConfig` | `PciDeviceInfo` | VM booted |
@@ -148,19 +163,35 @@ curl --unix-socket /tmp/ch.sock -i -X PUT 'http://localhost/api/v1/vm.shutdown'
 
 ## How CHV launches Cloud Hypervisor
 
-CHV spawns cloud-hypervisor with these standard flags:
+CHV does not configure the VM on the cloud-hypervisor command line. The agent
+spawns the VMM with a single flag — the API socket — with stdout discarded and
+stderr appended to `cloud-hypervisor.stderr.log` in the VM runtime directory
+(`crates/chv-agent-runtime-ch/src/process.rs`):
 
 ```bash
-cloud-hypervisor \
-  --api-socket /var/lib/chv/agent/vms/{vm_id}/vm.sock \
-  --cpus boot={cpus} \
-  --memory size={memory_bytes} \
-  --firmware /var/lib/chv/hypervisor-fw \
-  --disk path={disk_path} \
-  --net mac={mac},tap={tap_name} \
-  --console off \
-  --serial tty={pty_slave_path}
+cloud-hypervisor --api-socket /var/lib/chv/agent/vms/{vm_id}/vm.sock
 ```
+
+The VM itself is then created over the **REST API**: the agent builds the full
+`VmConfig` JSON (cpus, memory, payload — firmware or kernel —, disks including
+the cloud-init seed ISO, net `tap`/`mac` pairs, serial, and console) and PUTs
+it to `/api/v1/vm.create` on that socket via its HTTP client
+(`ch_api_request_with_body` → `PUT /api/v1/vm.create`,
+`crates/chv-agent-runtime-ch/src/process.rs`; any non-200/204 response kills
+the child — a half-created VM is never left running). Before the create call
+the agent waits up to 10 s for the API socket to appear and persists the VMM
+pid plus the exact `vm.create` payload, so adoption and respawn can recover a
+VM whose agent died between spawn and create.
+
+**Serial console:** the shipped default serial mode is **Socket**, not tty —
+the `vm.create` payload carries
+`{"mode": "Socket", "socket": "/var/lib/chv/agent/vms/{vm_id}/serial.sock"}`,
+and cloud-hypervisor binds that listener during `vm.create` while the agent
+connects to it as a client right after (`DEFAULT_SERIAL_MODE`, `crates/chv-common/src/hypervisor.rs`;
+seeded Pty defaults were flipped to Socket by control-plane migration
+`cmd/chv-controlplane/migrations/0055_serial_socket_default.sql`). Pty remains
+available as an explicit global/per-VM tuning (`hv.serial_mode`) for
+interactive kernel debugging. Console mode defaults to `Off`.
 
 After spawning, the VM is controlled entirely via the HTTP API on the Unix socket.
 The CHV agent uses direct HTTP requests; operators can use `ch-remote` for manual interaction.
