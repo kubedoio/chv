@@ -168,28 +168,14 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Assemble release tarball
-        run: |
-          RELEASE_NAME="chv-${PKG_VERSION}-linux-amd64"
-          RELEASE_DIR="dist/${RELEASE_NAME}"
-
-          mkdir -p "${RELEASE_DIR}/bin"
-          mkdir -p "${RELEASE_DIR}/ui"
-          mkdir -p "${RELEASE_DIR}/migrations"
-          mkdir -p "${RELEASE_DIR}/systemd"
-          mkdir -p "${RELEASE_DIR}/nginx"
-
-          cp target/release/chv-controlplane target/release/chv-agent \
-             target/release/chv-stord target/release/chv-nwd target/release/chvctl \
-             "${RELEASE_DIR}/bin/"
-
-          cp -r ui/build/* "${RELEASE_DIR}/ui/"
-          cp -r cmd/chv-controlplane/migrations/* "${RELEASE_DIR}/migrations/" 2>/dev/null || true
-          cp docs/examples/systemd/*.service "${RELEASE_DIR}/systemd/" 2>/dev/null || true
-          cp docs/examples/nginx/chv-ui.conf "${RELEASE_DIR}/nginx/" 2>/dev/null || true
-          cp docs/examples/*.toml "${RELEASE_DIR}/" 2>/dev/null || true
-          cp scripts/install.sh "${RELEASE_DIR}/" 2>/dev/null || true
-
-          tar -czf "dist/${TARBALL_NAME}" -C dist "${RELEASE_NAME}"
+        # Shared assembler (scripts/release/assemble-tarball.sh) — the same
+        # single source of truth scripts/build-release.sh uses. This workflow
+        # previously inlined its own assembly, which drifted from
+        # build-release.sh (missing tmpfiles/chv-node.conf, which install.sh
+        # requires, and no checksum). Passing the tag-derived PKG_VERSION
+        # publishes the asset exactly where install.sh looks:
+        #   releases/download/v<version>/chv-<version>-linux-amd64.tar.gz
+        run: ./scripts/release/assemble-tarball.sh "${PKG_VERSION}"
 
       - name: Upload release binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
@@ -212,7 +198,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
         with:
           name: release-tarball
-          path: dist/${{ env.TARBALL_NAME }}
+          path: |
+            dist/${{ env.TARBALL_NAME }}
+            dist/${{ env.TARBALL_NAME }}.sha256
 
   # ---------------------------------------------------------------------------
   # Build packages and run smoke tests
@@ -486,6 +474,7 @@ jobs:
           prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
           files: |
             dist/${{ needs.build.outputs.tarball_name }}
+            dist/${{ needs.build.outputs.tarball_name }}.sha256
             dist/packages/*.deb
             dist/packages/*.rpm
             dist/packages/SHA256SUMS*

@@ -88,8 +88,14 @@ VERSION ──▶ scripts/version.sh ──▶ deb: <version>~rc.1
 ```
 Makefile:build-release ──▶ cargo build --workspace --release
                         ──▶ cd ui && npm ci && npm run build
-                        ──▶ tar -czf dist/chv-VERSION-linux-amd64.tar.gz
+scripts/build-release.sh ──▶ (builds the above, then)
+                            scripts/release/assemble-tarball.sh <version>
+                            ──▶ dist/chv-<version>-linux-amd64.tar.gz (+ .sha256)
 ```
+- `scripts/release/assemble-tarball.sh` is the single source of truth for the
+  tarball layout/naming; `release.yml` calls it with the tag-derived version
+  so the published asset lands exactly where `scripts/install.sh` looks:
+  `releases/download/v<version>/chv-<version>-linux-amd64.tar.gz` (#440)
 - Version metadata injected via `cmd/*/build.rs` (CHV_VERSION, CHV_GIT_SHA, CHV_BUILD_DATE, CHV_RELEASE_CHANNEL)
 - Binaries respond to `--version` with: `chvctl <version> (commit <sha>, build <date>, channel stable)`
 

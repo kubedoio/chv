@@ -50,6 +50,14 @@ curl -sfL https://get.cellhv.com/ | \
   sh -
 ```
 
+> **Prerequisite — first stable release:** the one-liner resolves the latest
+> **stable** GitHub release and downloads its tarball. No stable release has
+> been published yet (the only existing release is the rolling `nightly`
+> pre-release, which carries `.deb`/`.rpm` packages but no release tarball),
+> so this path activates with the first stable release — until then the
+> installer exits early with that explanation. Use the nightly packages or
+> [build and install from a local tarball](#build--package-a-release) today.
+
 The installer will:
 
 1. Install system dependencies (`nginx`, `qemu-kvm`, `bridge-utils`, `iptables`, etc.)
