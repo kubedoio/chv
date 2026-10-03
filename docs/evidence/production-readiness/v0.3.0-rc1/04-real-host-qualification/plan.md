@@ -25,7 +25,7 @@ MULTI-HOST-VERIFIED and above remain unprovable on this infrastructure
 
 | Item | Value |
 |---|---|
-| Host | **4 vCPU, 7.8 GiB RAM**, 333 GiB free disk, `/dev/kvm`, Ubuntu kernel `6.8.0-139-generic`, x86_64, root |
+| Host | **4 vCPU, 7.8 GiB RAM**, 333 GiB free disk, `/dev/kvm`, Ubuntu kernel `6.8.0-139-generic`, x86_64, root (m4.1-harness.md records 330 GiB at its own same-day snapshot — free-space drift, not a discrepancy) |
 | vs. M2.5 host | **Different, smaller box** (M2.5 ran on 16 vCPU / 31 GiB). All prompt-04 evidence is generated fresh on this host; M2.5 evidence is not reused as this prompt's proof |
 | LVM | `lvm`/`vgcreate`/`losetup` present — LVM storage profile testable via loopback PV |
 | Container runtime | none installed; `apt` works (used in prompt 03) — `systemd-nspawn`/`debootstrap` installable for clean-install isolation |
@@ -209,7 +209,6 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   errors=0 warnings=3) plus the `kvm-smoke.sh --packages` host leg
   (PASSED, real /dev/kvm). Static packaging contract holds; control plane
   fails CLOSED on a bare install (packages↔install.sh boundary); agent
-  unit holds the /run Core contract. Four findings filed: #323 (stord
   unit holds the /run Core contract. Four findings filed: #323 (stord
   unit user vs storage ownership), #324 (nwd unit /run/netns), #325
   (postinst group-membership grep bug), #326 (packaged legacy authority
