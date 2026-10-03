@@ -1,6 +1,6 @@
 # CellHV Core Native Unix HTTP Listener
 
-Status: Production wiring (core-native authority mode startup in `chv-agent`; also exercised by the core-managed composition tests).
+Status: Production wiring (the listener is composed in both core-managed and core-native authority modes in `chv-agent`; the legacy authority mode does not start it).
 
 `cellhv_core_api::CoreApiListener` is the sole owner of one native HTTP Unix
 socket and its accept task. It serves the existing `router(AuthorityHandle)`;

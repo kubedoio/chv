@@ -6,7 +6,7 @@ configurations select `core-managed`).
 
 ## Boundary
 
-`cellhv-core-startup` is a library used to make the future `chv-agent` startup
+`cellhv-core-startup` is a library used to make the `chv-agent` startup
 authority choice. It creates no daemon, database format, operation engine, VM
 process, storage attachment, or network attachment. All database access passes
 through `cellhv-core-operations::OperationService`; NodeCache conversion passes
