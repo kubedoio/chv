@@ -469,6 +469,9 @@ this branch changes only this file):**
 - [ARCHITECTURE.md](ARCHITECTURE.md) still describes `SystemdNodeUpgrader`
   at `crates/chv-controlplane-service/src/systemd_upgrader.rs`; that file was
   deleted in PR #213. The ADR-007 presentation gap is decision D8.
+  *(Resolved after this document was written: PR #433 rewrote the
+  ARCHITECTURE.md upgrade section to the surviving surfaces, and the
+  `chvctl upgrade` dead surface was removed per #427.)*
 - [release/package-contract.md](release/package-contract.md) contradicts
   itself on whether `chv-node` includes `chvctl` (nfpm is truth: it does
   not).
@@ -506,7 +509,7 @@ deploy them; do not file evidence against them.
 | [OPERATIONS.md](OPERATIONS.md) | Day-2 operations: monitoring, CLI reference, live-database access, multi-node operations | Day-2 only. |
 | [install/](install/) (channels, debian-ubuntu, rhel-rocky-alma, from-github-release, uninstall) | Per-distro install instructions | Use the canonical repository URLs; the installer default repository conflict is disclosed in §5 UC-1. |
 | [runbooks/](runbooks/) | Incident procedures (control-plane DR, full-site recovery, snapshot restores) | DR procedures; the DR *claim* boundary is §5 UC-9. |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System design and data flow | Carries stale upgrade-stack references (§9); this document supersedes on deployment matters. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design and data flow | The deleted upgrade stack and the removed `chvctl upgrade` surface are recorded there in past tense; this document supersedes on deployment matters. |
 | [specs/adr/](specs/adr/) | Design authority | ADRs are decisions; this document records their qualification tier (for example ADR-021 is DESIGN-ONLY). |
 | [evidence/](evidence/) (frozen prompt-04 milestones) | Proof | Every [QUALIFIED — KVM-VERIFIED] label here cites a milestone doc. |
 | [prompts/production-readiness/](prompts/production-readiness/) | Campaign definitions | Prompt 05 and Prompt 06 are pending; their results extend §5 and §7. |
