@@ -86,14 +86,14 @@ The integration test attempts to locate `cloud-hypervisor` at `/usr/bin/cloud-hy
 ### Manual installation (recommended for faster tests)
 
 ```bash
-CH_VERSION="v43.0"
+CH_VERSION="v53.0"
 curl -sL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static" \
   -o /usr/bin/cloud-hypervisor
 chmod +x /usr/bin/cloud-hypervisor
 cloud-hypervisor --version
 ```
 
-> **Pin the version** in your runner image to avoid test flakiness from upstream releases. The test script pins `v43.0` by default; override it with `--chv-version VER` or the `CHV_CLOUD_HYPERVISOR_VERSION` environment variable. An explicit override is staged in a private temp dir and never writes to `/usr/bin/cloud-hypervisor`, so the runner's qualified pin stays untouched (#458). Upstream stable is currently **v53.0** (2026-07-12); the test pin deliberately stays at the qualified v43.0 until the #448 re-qualification moves the qualified pin — do not bump a runner past the qualified version.
+> **Pin the version** in your runner image to avoid test flakiness from upstream releases. The test script pins `v53.0` by default (the qualified pin since the #448 re-qualification campaign, 2026-10-03); override it with `--chv-version VER` or the `CHV_CLOUD_HYPERVISOR_VERSION` environment variable. An explicit override is staged in a private temp dir and never writes to `/usr/bin/cloud-hypervisor`, so the runner's qualified pin stays untouched (#458). Do not bump a runner past the qualified version.
 
 ## Required Privileges
 

@@ -102,7 +102,7 @@ KVM-VERIFIED, and multi-host behavior is reported as unproven.
 
 | Dependency | Version fact | Notes |
 |---|---|---|
-| Cloud Hypervisor | Qualified pin **v43.0** (declaration §3; `scripts/integration/kvm-smoke.sh` default `v43.0`) | `scripts/install.sh` downloads the same **v43.0** (`scripts/install.sh:346`), aligned with the qualified pin (decision D6, option (a), implemented). |
+| Cloud Hypervisor | Qualified pin **v53.0** (moved from v43.0 by the #448 re-qualification campaign — decision D6, option (b); `scripts/integration/kvm-smoke.sh` default `v53.0`) | `scripts/install.sh` downloads the same **v53.0** and verifies the qualified sha256 digests before install (campaign evidence: [v53.0 tree](evidence/vmm-requalification/v53.0/README.md)). |
 | rust-hypervisor-firmware | 0.5.0 (qualification firmware; `scripts/install.sh:373` URL) | `download_firmware` is commented out in the install flow (`scripts/install.sh:1535`); `copy_firmware` only copies a pre-placed local `/root/CLOUDHV.fd`. |
 | fabric-linux | v0.1.5 (`Cargo.toml` git tag pin) | Consumed by `chv-nwd` for the (design-only) fabric. |
 | Host OS | Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` | Qualified on Ubuntu noble amd64; `.rpm` built but untested in prompt-04 (declaration §3, m4.2). |
@@ -379,7 +379,7 @@ is not supported.
 | Dimension | Supported statement | Source |
 |---|---|---|
 | Host count | **Single host.** All qualification evidence is single-host (nested KVM on a 16 vCPU / 31 GiB shared host). | Declaration §5; m4.9 §3 |
-| VMM | Cloud Hypervisor only, pinned **v43.0**. The CH v43 serial-console upstream defect is the recorded gate above KVM-VERIFIED; re-verify at any Cloud Hypervisor upgrade. | Declaration §3; m4.9 §3 |
+| VMM | Cloud Hypervisor only, pinned **v53.0** (moved from v43.0 via the #448 campaign — [campaign evidence root](evidence/vmm-requalification/v53.0/README.md)). The CH serial-console upstream defect (silent serial-manager thread death — present at both v43.0 and v53.0, campaign leg 02) is the recorded gate above KVM-VERIFIED; re-verify at any Cloud Hypervisor upgrade. | Declaration §3; m4.9 §3; #448 leg 02 |
 | Architecture / OS | Linux x86_64; `.deb` + `.rpm`. Qualified on Ubuntu noble amd64; `.rpm` untested in prompt-04. | Declaration §3; m4.2 |
 | Network profile | Single-host CHV-owned bridge overlay (local bridge + taps) with the nwd host-safety gate. Multi-host VXLAN fabric unproven. | Declaration §3 with the m4.9 §4.5 precision record |
 | Storage profiles | Local file (VM-integrated) + LVM (stord layer only; not reachable from the VM lifecycle, #379). Ceph RBD / iSCSI not claimed. | Declaration §3; m4.5 |
@@ -405,7 +405,7 @@ options, the trade-offs, and what would unblock it.
 | D3 | Serving the UI from packages | (a) Headless-only posture: document `chvctl` as the package-mode interface; UI requires install.sh. (b) Document an operator-provided reverse proxy against `/usr/share/chv/ui` + the BFF/console proxies. (c) The deb configures nginx itself (or ships a snippet). (d) Serve the UI from `chv-controlplane` itself (tower-http `ServeDir` from disk, opt-in `[webui]` config section). | (a) Cheapest, narrows the product. (b) Flexible, pushes TLS/edge concerns to the operator with no contract. (c) Best out-of-box parity with install.sh, but adds a web-server dependency and edge ownership to the packages. (d) Out-of-box parity without an edge dependency, but adds a serving surface to the binary and needs its own qualification. | **Resolved 2026-10-03, phased: interim (b), target (d); (c) rejected.** Interim: the packages ship an example nginx conf (`/usr/share/chv/examples/chv-example.conf`) plus operator docs ([DEPLOYMENT.md](DEPLOYMENT.md) "Serving the Web UI in package mode"); serving-from-packages is [CODE-SUPPORTED, UNQUALIFIED] until a container qualification leg exists. Target: serve from the binary — tracked in #447. (c) is rejected permanently: it breaks the fail-closed "packages provide layout only" contract (§4) and forces nginx onto every host. |
 | D4 | Air-gapped support | (a) Not supported; state it. (b) Document an offline recipe from the existing escape hatches (`INSTALL_CHV_TARBALL_PATH`, `INSTALL_CHV_SKIP_DEPS`, `INSTALL_CHV_SKIP_CLOUD_HV`, pre-staged images). (c) Add a first-class offline mode to the installer. | (a) Free, loses sovereign/edge adopters the positioning targets. (b) Cheap documentation work; the hatches exist but are untested as a recipe. (c) Real installer work plus a qualification leg. | Maintainer priority; a qualification leg if (b) or (c). |
 | D5 | Edge / resource profiles | (a) None; the current units and defaults are the only profile. (b) Document one "small" profile (documented unit overrides). (c) Ship alternate unit/config variants in the packages. | (a) Honest, no false edge signal. (b) Documentation-only, unqualified. (c) Real surface area, needs evidence on constrained hardware. | Field evidence from Prompt-06; ADR-011 positioning vs. actual demand. |
-| D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | **Resolved 2026-10-03 — option (a) implemented**: the installer downloads the qualified v43.0 pin (#422); the v51.1 drift is closed. Follow-up (2026-10-03): upstream stable is now **v53.0** (released 2026-07-12); the resulting 10-release gap is deliberate — the recorded path to close it is option (b), tracked as issue **#448** (see the §9 CVE disclosure for what the gap costs). |
+| D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | **Resolved 2026-10-03 — option (a) implemented**: the installer downloads the qualified v43.0 pin (#422); the v51.1 drift is closed. Follow-up (2026-10-03): upstream stable is now **v53.0** (released 2026-07-12); the resulting 10-release gap is deliberate — the recorded path to close it is option (b), tracked as issue **#448** (see the §9 CVE disclosure for what the gap costs). **Resolved 2026-10-03 (later) — option (b) implemented**: the #448 campaign re-qualified v43.0 → v53.0 on the qualification host across six evidence legs (anchor kvm-smoke; serial-console re-check; M4.3 lifecycle — the #345 stop wedge not reproduced at v53 with a v43 control reproducing it; M4.6 migration; M4.2/M4.4/M4.5 smokes; security regression — CVE-2026-27211 closed with runtime proof, CVE-2026-45782 closed at records tier, no new advisories, no new regressions). The pin moves to **v53.0** with download digest verification; Landlock stays off (the CVE closes via the version move — `backing_files=false` + the agent's existing `image_type` pinning, leg 06 §4.2); the silent serial-manager thread death remains upstream-unfixed at v53.0 and is carried by existing containment (adaptations tracked: #284, #410). [Campaign evidence root](evidence/vmm-requalification/v53.0/README.md). |
 | D7 | TLS termination at the edge | (a) Keep `:80` plaintext as the documented default; recommend TLS in nginx. (b) Make the installer configure TLS by default (self-signed or operator cert). | (a) Matches all qualified evidence; ships plaintext by default in a product positioned for sovereign environments. (b) Stronger default posture; no qualified evidence for the TLS-edge shape, cert-management burden lands on install.sh. | Prompt-06 deployment profile; security review appetite. |
 | D8 | Presenting ADR-007 (upgrade/rollback policy) against reality | (a) Mark ADR-007 as aspirational relative to the shipped lifecycle and point here. (b) Update ADR-007 to the qualified package-upgrade model. (c) Re-implement the rolling-upgrade stack (deleted in #213) and qualify it. | (a) Cheap, leaves a stale-looking ADR. (b) Honest and small, narrows the design promise. (c) Largest effort, restores the designed capability, needs qualification evidence that does not exist. | Maintainer decision on whether node rolling upgrade is roadmap or non-goal; the dead `chvctl upgrade` surface was removed via #427, so option (c) would also require re-adding a client surface (§6). |
 
@@ -430,28 +430,14 @@ found it.
 **Open disclosed issues (worst-first; anchored in m4.9 §3, with later
 disclosures added here):**
 
-- **Pinned-VMM CVE exposure (v43.0)** — the qualified pin is in the
-  affected range of two upstream High-severity advisories:
-  **CVE-2026-27211** / GHSA-jmr4-g2hv-mjj6 (host-file exfiltration via
-  QCOW backing-file abuse on raw-image-backed virtio-block disks;
-  affected v34.0–v50.0, fixed v50.1/v51.0, published 2026-02-20; the
-  High label is the upstream advisory's own — NVD scores it
-  **Critical**, CVSS 10.0) and
-  **CVE-2026-45782** / GHSA-f47p-p25q-83rh (use-after-free in
-  virtio-block async I/O, a guest-triggerable VMM memory-corruption /
-  guest-to-host escape primitive; affected v21.0–v51.1, fixed
-  v51.2/v52.0, published 2026-05-14). Exposure: both are
-  guest-initiated — CVE-2026-27211 maps directly onto CHV's raw-disk +
-  guest-reboot profile (a guest-writable raw disk header plus a
-  guest-triggered reboot is sufficient; no management-stack
-  interaction), and CVE-2026-45782 needs only a running guest with
-  default async block I/O. The upstream advisory mitigation for
-  CVE-2026-27211 is Landlock sandboxing; CHV exposes it
-  (`hv.landlock_enable`) but it defaults off and has never been
-  qualified — it is disclosed here as an option, not enabled. The fix
-  path is the **#448** re-qualification campaign (decision D6, option
-  (b)); the pin does not move without that evidence
-  ([campaign evidence root](evidence/vmm-requalification/v53.0/README.md)).
+- **Pinned-VMM CVE exposure — CLOSED 2026-10-03 (D6 option (b) implemented).**
+  The former v43.0 pin was in the affected range of CVE-2026-27211
+  (GHSA-jmr4-g2hv-mjj6) and CVE-2026-45782 (GHSA-f47p-p25q-83rh); both
+  close at the v53.0 pin, with runtime proof for CVE-2026-27211 (the full
+  exfiltration chain reproduced at v43 under the CHV invocation shape and
+  refused fail-closed at v53 on every entry point) —
+  [campaign leg 06](evidence/vmm-requalification/v53.0/06-security-regression.md).
+  No advisory affects v53.0 as of 2026-10-03.
 - **#394** — concurrent-write migration silently loses data; quiescent-source
   migration is the claimed mode.
 - **#368** — a transient effector failure terminally fails a journaled VM

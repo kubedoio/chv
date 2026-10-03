@@ -11,7 +11,7 @@
 #
 # Legs (plan §M4.3), all against one guest (qual-vm-1, 2 vCPU / 1 GiB,
 # firmware boot, default network) driven through
-# chvctl → BFF → control-plane → agent gRPC → CellHV Core → CH v43.0:
+# chvctl → BFF → control-plane → agent gRPC → CellHV Core → CH v53.0:
 #
 #   A. create → start → guest-boot evidence (console.log kernel banner +
 #      logind) → reboot (guest-level, same CH process) → stop (graceful)

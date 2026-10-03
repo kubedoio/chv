@@ -410,19 +410,39 @@ install_cloud_hypervisor() {
         return
     fi
 
-    local chv_version="43.0"
+    local chv_version="53.0"
+    # Qualified-pin digests — D6 option (b), #448 campaign
+    # (docs/evidence/vmm-requalification/v53.0/). The download aborts on
+    # mismatch; the pin and its digests move together, always.
+    local chv_sha256="448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+    local chv_remote_sha256="13f32ba952e6791fd901f2279be2055fbacc64005f96c42a8e90d58860df84a7"
+
     info "Downloading Cloud Hypervisor v${chv_version}..."
+    local chv_tmp
+    chv_tmp="$(mktemp)"
     curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/cloud-hypervisor-static" \
-        -o /usr/local/bin/cloud-hypervisor
-    chmod +x /usr/local/bin/cloud-hypervisor
+        -o "${chv_tmp}"
+    if ! echo "${chv_sha256}  ${chv_tmp}" | sha256sum -c - >/dev/null 2>&1; then
+        rm -f "${chv_tmp}"
+        fatal "Cloud Hypervisor v${chv_version} digest mismatch (expected ${chv_sha256}); aborting install"
+    fi
+    install -m 0755 "${chv_tmp}" /usr/local/bin/cloud-hypervisor
+    rm -f "${chv_tmp}"
     ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
     info "Cloud Hypervisor installed: $(cloud-hypervisor --version)"
 
     if ! cmd_exists ch-remote; then
         info "Downloading ch-remote v${chv_version}..."
+        local chv_remote_tmp
+        chv_remote_tmp="$(mktemp)"
         curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/ch-remote-static" \
-            -o /usr/local/bin/ch-remote
-        chmod +x /usr/local/bin/ch-remote
+            -o "${chv_remote_tmp}"
+        if ! echo "${chv_remote_sha256}  ${chv_remote_tmp}" | sha256sum -c - >/dev/null 2>&1; then
+            rm -f "${chv_remote_tmp}"
+            fatal "ch-remote v${chv_version} digest mismatch (expected ${chv_remote_sha256}); aborting install"
+        fi
+        install -m 0755 "${chv_remote_tmp}" /usr/local/bin/ch-remote
+        rm -f "${chv_remote_tmp}"
         info "ch-remote installed: $(ch-remote --version 2>/dev/null || echo v${chv_version})"
     else
         info "ch-remote already installed: $(ch-remote --version 2>/dev/null || true)"
