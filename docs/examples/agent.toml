@@ -8,8 +8,8 @@ control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
-stord_binary_path = "/usr/local/bin/chv-stord"
-nwd_binary_path = "/usr/local/bin/chv-nwd"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "/var/lib/chv/cache/agent-cache.json"
 # Single durable lifecycle authority (prompt-02 cutover): core-managed runs
 # CellHV Core as the sole authority on this node — the qualified default.
