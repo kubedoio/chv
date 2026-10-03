@@ -1,4 +1,4 @@
-# CellHV OpenStack Discovery Lab
+# CHV OpenStack Discovery Lab
 
 This lab supports Phase A2 discovery only. It does not qualify or claim
 OpenStack, libvirt, network, or storage compatibility.
@@ -37,7 +37,7 @@ tag, package channel, or `latest` image is not a pin. Git inputs require a
 The proposed baseline is Ubuntu Server 24.04 on x86_64, Cloud Hypervisor
 v43.0, and the OpenStack 2025.1 stable series. These are discovery inputs, not
 a support matrix. The exact kernel, Nova, libvirt, firmware, and guest image
-builds observed in the lab must also appear in the collected gap report.
+builds observed must also appear in the collected gap report.
 
 ```bash
 set -a
@@ -91,9 +91,9 @@ cd /opt/stack/devstack
 
 Replace every `CHANGE_ME` password in the installed copy only. Never collect
 that file. The template enables Nova compute/API/scheduler/conductor,
-Placement, and minimal Neutron services; it disables Cinder initially. Its
-`connection_uri = ch:///system` is a discovery input only and does not imply
-that Nova accepts or supports the backend.
+Placement, and minimal Neutron services; it disables Cinder initially. The
+template's `connection_uri = ch:///system` is a discovery input only. It does
+not imply that Nova accepts or supports the backend.
 
 Run observe-only initial probes and preserve their exit status:
 
@@ -143,12 +143,13 @@ scripts/openstack-discovery/collect.sh \
   docs/evidence/openstack-discovery/20260721T120000Z-path-a
 ```
 
-The collector copies only allowlisted regular files, refuses symlinks and
-credential-like filenames, redacts common secret assignments and authorization
-headers, writes a source-to-output index, and generates `SHA256SUMS`. Review
-every collected file manually before publication; automated redaction is a
-backstop, not a secrecy guarantee. Never collect OpenRC files, private keys,
-cloud credential files, tokens, cookies, database dumps, or production data.
+The collector copies only allowlisted regular files and refuses symlinks and
+credential-like filenames. It redacts common secret assignments and
+authorization headers, writes a source-to-output index, and generates
+`SHA256SUMS`. Review every collected file manually before publication;
+automated redaction is a backstop, not a secrecy guarantee. Never collect
+OpenRC files, private keys, cloud credential files, tokens, cookies, database
+dumps, or production data.
 
 ## Cleanup and verification
 
@@ -182,9 +183,10 @@ discovery result, infrastructure compatibility, or qualification.
 ## Bounded Path A runner
 
 After provisioning the pinned lab, the fail-closed runner verifies the
-effective `ch:///system` configuration, source revisions, Cloud Hypervisor
-digest, package versions, and bounded command outcomes. The explicit flag
-acknowledges that the probe restarts `nova-compute`:
+effective `ch:///system` configuration, source revisions, and the Cloud
+Hypervisor digest. It also checks package versions and bounded command
+outcomes. The explicit flag acknowledges that the probe restarts
+`nova-compute`:
 
 ```bash
 scripts/openstack-discovery/run-path-a.py \
@@ -195,12 +197,13 @@ scripts/openstack-discovery/run-path-a.py \
 The private output directory contains an `execution-manifest.json` with
 ordered commands, exit statuses, timestamps, and artifact digests. Command
 output is redacted before it is written; collection redacts it again. The
-runner snapshots OpenStack resources, records the initial Nova compute service
-state, restores that state in `finally`, compares the after-run inventory, and
-runs the host cleanup verifier. Any missing restoration or cleanup result
-keeps the probe blocked. Add every file to an explicit `collect.sh` allowlist
-and inspect the redacted result before publication. A failed connection is
-valid discovery evidence and must not be patched through into a demonstration.
+runner snapshots OpenStack resources and records the initial Nova compute
+service state. It restores that state in `finally`, compares the after-run
+inventory, and runs the host cleanup verifier. Any missing restoration or
+cleanup result keeps the probe blocked. Add every file to an explicit
+`collect.sh` allowlist and inspect the redacted result before publication.
+A failed connection is valid discovery evidence and must not be patched
+through into a demonstration.
 
 Runner output is an unsigned `structural-candidate`, not T5 proof. The report
 validator deliberately makes `complete` impossible from this unsigned

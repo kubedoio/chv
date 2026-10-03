@@ -1,25 +1,27 @@
 # CHV Load Testing
 
-This document describes how to run load tests against the CHV BFF (Backend-for-Frontend) using [`oha`](https://github.com/hatoo/oha).
+This document describes how to run load tests against the CHV backend-for-frontend (BFF) using [`oha`](https://github.com/hatoo/oha).
 
 ## Prerequisites
 
 1. **CHV services are running** locally (e.g., via `docker-compose up`).
-2. The **BFF is reachable** at `http://localhost:8444` (or your custom `BFF_URL`).
-3. [`oha`](https://github.com/hatoo/oha) is installed. It is already available at `/root/.cargo/bin/oha` in this environment.
-4. (Optional) [`jq`](https://jstedo.github.io/jq/) is installed for robust JSON parsing. The script falls back to `grep` if `jq` is missing.
+2. The **BFF is reachable** at `http://localhost:8080` (or your custom `BFF_URL`). The control plane serves the BFF on `127.0.0.1:8080` by default.
+3. [`oha`](https://github.com/hatoo/oha) is installed (for example, via `cargo install oha`).
+4. (Optional) [`jq`](https://jqlang.github.io/jq/) is installed for robust JSON parsing. The script falls back to `grep` if `jq` is missing.
 
 ## Quick Start
 
+The BFF listens on port `8080`. The script's built-in `BFF_URL` default is `http://localhost:8444`, the agent serial-console port, so pass `BFF_URL` explicitly:
+
 ```bash
-./scripts/load-test.sh
+BFF_URL=http://localhost:8080 ./scripts/load-test.sh
 ```
 
 ## Environment Variables
 
 | Variable    | Default                      | Description                     |
 |-------------|------------------------------|---------------------------------|
-| `BFF_URL`   | `http://localhost:8444`      | Base URL of the CHV BFF         |
+| `BFF_URL`   | `http://localhost:8444`      | Base URL of the BFF. Set `http://localhost:8080`; the default targets the agent serial-console port |
 | `CHV_USER`  | `admin`                      | Username for JWT login          |
 | `CHV_PASS`  | *(none)*                     | Password for JWT login. On a local install, read from `/etc/chv/initial_admin_password`. |
 | `DURATION`  | `30s`                        | How long each endpoint is hit   |
@@ -70,7 +72,7 @@ On a local developer machine using the default SQLite-backed control plane:
 | `POST /v1/networks` | 5–15 ms      | 20–50 ms     | Lightweight list query               |
 | `POST /v1/overview` | 10–30 ms     | 50–100 ms    | Aggregated dashboard data            |
 
-These are **rough guidelines** on modest hardware. Your exact numbers will vary based on CPU, disk speed, and concurrent load.
+These are **rough guidelines** on modest hardware. Your exact numbers vary with CPU, disk speed, and concurrent load.
 
 ## Testing Specific Endpoints Only
 
@@ -79,7 +81,7 @@ The script runs all five endpoints in sequence. To test a single endpoint, copy 
 ```bash
 # 1. Obtain a token (same logic as the script)
 ADMIN_PASS=$(sudo cat /etc/chv/initial_admin_password 2>/dev/null || echo "YOUR_ADMIN_PASSWORD")
-TOKEN_RESPONSE=$(curl -s -X POST "http://localhost:8444/v1/auth/login" \
+TOKEN_RESPONSE=$(curl -s -X POST "http://localhost:8080/v1/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"admin\",\"password\":\"${ADMIN_PASS}\"}")
 TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.token // .access_token // empty')
@@ -89,7 +91,7 @@ oha --no-tui -z 30s -c 50 -q 100 -m POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{}" \
-  "http://localhost:8444/v1/overview"
+  "http://localhost:8080/v1/overview"
 ```
 
 ## Troubleshooting
@@ -98,5 +100,5 @@ oha --no-tui -z 30s -c 50 -q 100 -m POST \
 |--------------------------------|-----------------------------------------------------------|
 | `BFF is not reachable`         | CHV services are not running. Start `docker-compose up`.  |
 | `Failed to get token`          | Wrong credentials or BFF auth service is unhealthy.       |
-| `oha: command not found`       | `oha` is not on `PATH`. Use `/root/.cargo/bin/oha` or add `~/.cargo/bin` to `PATH`. |
+| `oha: command not found`       | `oha` is not on `PATH`. Install it with `cargo install oha`, or add Cargo's bin directory to `PATH`. |
 | Very high latencies / timeouts | SQLite contention under heavy load. Reduce `CONNECTIONS`. |

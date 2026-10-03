@@ -2,6 +2,8 @@
 
 This checklist covers repository-level protections for the CHV project. Items marked **(file)** are enforced by files in the repo. Items marked **(admin)** require a repository admin to configure in GitHub settings.
 
+> **Status (2026-10-03):** the `protect-main` ruleset is enforced on `main`. The branch-protection controls in section 1 and the CODEOWNERS review requirement (6.2) are active. See [`BRANCH_PROTECTION.md`](./BRANCH_PROTECTION.md) for the ruleset contents and activation evidence. (BRANCH_PROTECTION.md's own status note flips from "staged" to "active" when the activation-record PR merges.)
+
 ---
 
 ## 1. Access Control
@@ -9,15 +11,17 @@ This checklist covers repository-level protections for the CHV project. Items ma
 | # | Control | Status | How |
 |---|---------|--------|-----|
 | 1.1 | Default branch is `main` | ✅ | Already configured |
-| 1.2 | Direct pushes to `main` are blocked | **(admin)** | Branch protection rule or ruleset |
-| 1.3 | PR requires at least 1 approval | **(admin)** | Branch protection rule or ruleset |
-| 1.4 | CODEOWNERS review is required | **(admin)** | Enable in branch protection; see `.github/CODEOWNERS` |
-| 1.5 | Stale approvals are dismissed on new commits | **(admin)** | Branch protection rule or ruleset |
-| 1.6 | All conversations must be resolved before merge | **(admin)** | Branch protection rule or ruleset |
-| 1.7 | Signed commits are required | **(admin)** | Branch protection rule or ruleset |
-| 1.8 | Administrators are subject to the same rules | **(admin)** | "Include administrators" toggle |
-| 1.9 | Force pushes are blocked on `main` | **(admin)** | Branch protection rule or ruleset |
-| 1.10 | Branch deletion is blocked on `main` | **(admin)** | Branch protection rule or ruleset |
+| 1.2 | Direct pushes to `main` are blocked | ✅ | `protect-main` ruleset requires a pull request |
+| 1.3 | PR requires at least 1 approval | ✅ | `protect-main` ruleset (`required_approving_review_count: 1`) |
+| 1.4 | CODEOWNERS review is required | ✅ | `protect-main` ruleset requires code-owner review; see `.github/CODEOWNERS` |
+| 1.5 | Stale approvals are dismissed on new commits | ✅ | `protect-main` ruleset |
+| 1.6 | All conversations must be resolved before merge | ✅ | `protect-main` ruleset |
+| 1.7 | Signed commits are required | ✅ | `protect-main` ruleset (`required_signatures`) |
+| 1.8 | Administrators are subject to the same rules | ✅ | Rulesets apply to administrators; no bypass actors are configured |
+| 1.9 | Force pushes are blocked on `main` | ✅ | `protect-main` ruleset (`non_fast_forward`) |
+| 1.10 | Branch deletion is blocked on `main` | ✅ | `protect-main` ruleset (`deletion`) |
+
+All controls from 1.2 to 1.10 are enforced by the active `protect-main` ruleset (see [`BRANCH_PROTECTION.md`](./BRANCH_PROTECTION.md)).
 
 ---
 
@@ -49,7 +53,7 @@ This checklist covers repository-level protections for the CHV project. Items ma
 
 | # | Control | Status | How |
 |---|---------|--------|-----|
-| 3.1 | Only tags trigger releases | ✅ | `release.yml` triggers on `push: tags:` only |
+| 3.1 | Only tags trigger releases | ✅ | `release.yml` triggers on `push: tags:`; manual `workflow_dispatch` without a version builds without releasing |
 | 3.2 | Version tags (`v*`) are protected | **(admin)** | Tag protection rule or ruleset |
 | 3.3 | Release publishing requires environment approval | ✅ | `release` job uses `environment: production` or `rc`; configure required reviewers in Settings → Environments |
 | 3.4 | Package repo publishing requires separate environment | ✅ | `publish-repo` job uses `production-repo` or `rc-repo` |
@@ -102,10 +106,10 @@ repos:
 |---|---------|--------|-----|
 | 5.1 | Dependabot is enabled for Cargo, npm, and GitHub Actions | ✅ | `.github/dependabot.yml` |
 | 5.2 | Security updates are grouped separately from version updates | ✅ | `cargo-security`, `npm-security`, `actions-security` groups |
-| 5.3 | `cargo audit` runs on every PR touching Cargo files | ✅ | `.github/workflows/security.yml` |
-| 5.4 | `cargo deny` runs on every PR touching Cargo files | ✅ | `.github/workflows/security.yml` |
+| 5.3 | `cargo audit` runs on every PR | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
+| 5.4 | `cargo deny` runs on every PR | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
 | 5.5 | `cargo deny` is configured (`deny.toml`) | ✅ | At repo root |
-| 5.6 | Action versions are pinned to tags or SHAs | ✅ | All `uses:` lines use `@vN` or `@vN.M.P`; comment blocks document recommended SHA pinning |
+| 5.6 | Action versions are pinned to commit SHAs | ✅ | Third-party `uses:` lines pin immutable commit SHAs with the moving tag in a trailing comment (pin policy in `.github/dependabot.yml`) |
 
 ---
 
@@ -114,19 +118,19 @@ repos:
 | # | Control | Status | How |
 |---|---------|--------|-----|
 | 6.1 | CODEOWNERS file exists and is valid | ✅ | `.github/CODEOWNERS` |
-| 6.2 | CODEOWNERS review requirement is enabled | **(admin)** | Branch protection rule |
-| 6.3 | Teams referenced in CODEOWNERS exist and have write access | **(admin)** | Create at `https://github.com/orgs/kubedoio/teams` |
-| 6.4 | Admin-only paths (`.github/`, `SECURITY.md`) require admin team review | ✅ | `.github/CODEOWNERS` |
+| 6.2 | CODEOWNERS review requirement is enabled | ✅ | `protect-main` ruleset requires code-owner review |
+| 6.3 | CODEOWNERS owners have write access | **(admin)** | Current entries list individual users (`@zoorpha`, `@senolcolak`); the `kubedoio` teams below are the planned migration |
+| 6.4 | Admin-only paths (`.github/`, `SECURITY.md`) require review by a code owner | ✅ | `.github/CODEOWNERS` (individual owners; no team references) |
 
 ### Team inventory
 
-Create these teams in the `kubedoio` organization before enabling CODEOWNERS enforcement:
+CODEOWNERS enforcement is active with individual-user owners. Create these teams in the `kubedoio` organization when migrating from individual users:
 
 | Team | Purpose | Approximate size |
 |------|---------|-----------------|
 | `chv-admins` | Repository governance, CI, security policy | 2–3 |
 | `chv-maintainers` | Rust backend, control plane, protobuf | 3–5 |
-| `chv-frontend` | SvelteKit UI, BFF integration | 2–3 |
+| `chv-frontend` | SvelteKit UI, backend-for-frontend (BFF) integration | 2–3 |
 | `chv-ops` | Deployment, packaging, install scripts | 2–3 |
 | `chv-architecture` | ADRs, specs, design docs | 2–3 |
 
@@ -145,7 +149,7 @@ Create these teams in the `kubedoio` organization before enabling CODEOWNERS enf
 ## Quick Start for Admins
 
 1. Create the GitHub teams listed above.
-2. Apply branch protection: run `./scripts/github-setup/apply-branch-protection.sh`.
+2. Branch protection is already enforced (`protect-main`, active since 2026-10-03). Re-apply the ruleset definition with `./scripts/github-setup/apply-branch-protection.sh`.
 3. Apply tag protection: run `./scripts/github-setup/apply-tag-protection.sh`.
 4. Enable secret scanning and push protection in repository settings.
 5. Restrict default `GITHUB_TOKEN` permissions to read-only.
