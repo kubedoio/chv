@@ -11,17 +11,17 @@ This document describes how to run load tests against the CHV backend-for-fronte
 
 ## Quick Start
 
-The BFF listens on port `8080`. The script's built-in `BFF_URL` default is `http://localhost:8444`, the agent serial-console port, so pass `BFF_URL` explicitly:
+The BFF listens on port `8080`:
 
 ```bash
-BFF_URL=http://localhost:8080 ./scripts/load-test.sh
+./scripts/load-test.sh
 ```
 
 ## Environment Variables
 
 | Variable    | Default                      | Description                     |
 |-------------|------------------------------|---------------------------------|
-| `BFF_URL`   | `http://localhost:8444`      | Base URL of the BFF. Set `http://localhost:8080`; the default targets the agent serial-console port |
+| `BFF_URL`   | `http://localhost:8080`      | Base URL of the BFF              |
 | `CHV_USER`  | `admin`                      | Username for JWT login          |
 | `CHV_PASS`  | *(none)*                     | Password for JWT login. On a local install, read from `/etc/chv/initial_admin_password`. |
 | `DURATION`  | `30s`                        | How long each endpoint is hit   |

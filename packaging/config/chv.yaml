@@ -56,7 +56,7 @@ agent:
   stord_binary_path: /usr/bin/chv-stord
   nwd_binary_path: /usr/bin/chv-nwd
   cache_path: /var/lib/chv/cache/agent-cache.json
-  authority_mode: legacy
+  authority_mode: core-managed
   # Provisioned prerequisites; this does not enable Core production mode.
   core_store_path: /var/lib/chv/agent/core.db
   core_api_socket_path: /run/chv/core/core-v1.sock

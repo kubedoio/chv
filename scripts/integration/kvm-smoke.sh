@@ -232,14 +232,16 @@ check_cloud_hypervisor() {
 
     local arch
     arch="$(uname -m)"
-    local download_arch="${arch}"
+    # v43.0 asset names: "cloud-hypervisor-static" (x86_64) and
+    # "cloud-hypervisor-static-aarch64" — the x86_64 build is unsuffixed.
+    local asset
     case "$arch" in
-        x86_64) download_arch="x86_64" ;;
-        aarch64) download_arch="aarch64" ;;
+        x86_64) asset="cloud-hypervisor-static" ;;
+        aarch64) asset="cloud-hypervisor-static-aarch64" ;;
         *) die "Unsupported architecture: $arch" ;;
     esac
 
-    local url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_PINNED_VERSION}/cloud-hypervisor-static-${download_arch}"
+    local url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_PINNED_VERSION}/${asset}"
     info "Downloading from: $url"
 
     curl -fsSL -o "$chv_bin" "$url" || die "Failed to download cloud-hypervisor"

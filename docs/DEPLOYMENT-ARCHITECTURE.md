@@ -219,9 +219,8 @@ Additional provisioning facts:
   `CHV_JWT_SECRET` is open issue **#336**.
 - Authority mode: every shipped configuration surface selects
   `authority_mode = "core-managed"` (single durable CellHV Core authority).
-  The reference-only `packaging/config/chv.yaml` still shows
-  `authority_mode: legacy` (line 59) — a disclosed contradiction with the
-  shipped `.toml` configs; see §10.
+  The reference-only `packaging/config/chv.yaml` now matches (`core-managed`,
+  fixed via #424); no daemon consumes it for authority selection (§10).
 - The optional legacy `chvbr0` host bridge/NAT bootstrap is opt-out
   (`INSTALL_CHV_NO_BRIDGE=1`). Qualified networks are created via the API and
   managed by `chv-nwd` as `br-<net_id>`; the pre-created `chvbr0` is a dev
@@ -245,7 +244,7 @@ evidenced at container tier.**
 | Includes | Everything in §2; core-managed authority; enrollment with real mTLS; seeded admin (forced password change), base image, default network, `dev-vm-1`. |
 | Excludes | Multi-host anything (UC-6), fabric (UC-7), backup/restore as DR (declaration §3), HA (UC-9). |
 | Evidence | Declaration §3/§5; prompt-04 milestones ran this topology on the qualification host (m4.3–m4.8). The install.sh path itself has permanent coverage via `scripts/integration/qual/install-sh-leg.sh` (m4.2 §"New harness leg"): clean container, all four units active, contract assertions — with `NO_SEED`/`NO_BRIDGE` set, so it proves the packaging/systemd contract, not VM end-to-end behavior. |
-| Disclosed conflicts | (a) `GITHUB_REPO` defaults to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — see [install/channels.md](install/channels.md). (b) install.sh downloads Cloud Hypervisor **v51.1** (`scripts/install.sh:346`), conflicting with the qualified pin **v43.0** — decision D6. (c) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. |
+| Disclosed conflicts | (a) `GITHUB_REPO` defaulted to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — **resolved via #425**: the default is now the canonical `kubedoio/chv`; the old name survives only in the `get.cellhv.com` hosting surface (§9). (b) install.sh downloads Cloud Hypervisor **v51.1** (`scripts/install.sh:346`), conflicting with the qualified pin **v43.0** — decision D6. (c) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. |
 
 ### UC-2 — Package-based clean-host install
 
@@ -475,11 +474,13 @@ this branch changes only this file):**
 - [release/package-contract.md](release/package-contract.md) contradicts
   itself on whether `chv-node` includes `chvctl` (nfpm is truth: it does
   not).
-- `packaging/config/chv.yaml` ships `authority_mode: legacy` while every
-  shipped `.toml` config selects core-managed (§10).
-- `scripts/install.sh` defaults to the `cellhv/chv` repository and Cloud
-  Hypervisor v51.1 (§5 UC-1, decisions D6; also `get.cellhv.com` hosting in
-  [DEPLOYMENT.md](DEPLOYMENT.md)).
+- `packaging/config/chv.yaml` shipped `authority_mode: legacy` while every
+  shipped `.toml` config selected core-managed (§10) — resolved via #424.
+- `scripts/install.sh` downloads Cloud Hypervisor v51.1 (§5 UC-1, decision
+  D6; also `get.cellhv.com` hosting in
+  [DEPLOYMENT.md](DEPLOYMENT.md)). Its repository default was `cellhv/chv`
+  until #425 aligned it with the canonical `kubedoio/chv`; the
+  `get.cellhv.com` hosting surface still references the old name.
 
 ## 10. Legacy and unsupported surfaces
 
@@ -492,7 +493,7 @@ deploy them; do not file evidence against them.
 | `docker-compose.yml`, `Dockerfile`, `deploy/entrypoint.sh` | Legacy (no in-repo banner; dated pre-#323) | Same era and same ownership-model mismatch; no in-file marker exists — this row is the fence. Cleanup is a docs/packaging decision outside this document's scope. |
 | Legacy `chvbr0` host bridge/NAT bootstrap | Opt-out dev convenience (`INSTALL_CHV_NO_BRIDGE=1`) | Qualified networks are API-created and `chv-nwd`-managed (`br-<net_id>`). |
 | `authority_mode = "legacy"` | Compatibility adapter only | Explicit opt-in; the agent logs a warning. Qualified posture is core-managed everywhere. |
-| `packaging/config/chv.yaml` (`/etc/chv/chv.yaml` in `chv-node`) | Reference-only | Still shows `authority_mode: legacy` (line 59), contradicting the shipped `.toml` configs. Disclosed; no daemon consumes it for authority selection. |
+| `packaging/config/chv.yaml` (`/etc/chv/chv.yaml` in `chv-node`) | Reference-only | Ships `authority_mode: core-managed` (aligned with the shipped `.toml` configs via #424). No daemon consumes it for authority selection. |
 | `docs/examples/bootstrap.sh` | Manual helper | Points operators to `scripts/install.sh`; not a supported install path. |
 | BFF backup manager | Broken no-op | Excluded from the RC matrix (declaration §3); "backup is not DR". |
 | `chvctl upgrade` subcommands | Removed | Targeted unimplemented BFF routes (§6); removed via #427. |
