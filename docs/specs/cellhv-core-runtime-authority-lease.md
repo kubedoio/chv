@@ -5,7 +5,7 @@ Status: Production wiring (held by `CoreRuntimeOwner` for the lifetime of every 
 ## Purpose
 
 `cellhv-core-fs::RuntimeAuthorityLease` is the process-lifetime exclusion
-primitive for the future `chv-agent` Core authority. Exactly one process may
+primitive for the `chv-agent` Core authority. Exactly one process may
 hold the lease derived from a Core database path. Acquisition is exclusive and
 nonblocking: contention fails with `WouldBlock`, so startup never waits while
 two processes appear healthy.
@@ -56,8 +56,8 @@ requires a stronger privilege boundary or directory ownership model; advisory
 ## Non-Claims
 
 The library does not start an authority, open a database, bind an API, inspect
-VMs, or alter Cloud Hypervisor behavior. `cmd/chv-agent` does not use it yet.
-Production wiring must acquire it before opening the Core database and retain
-the returned value until all authority actors and API listeners have stopped.
-The tests do not claim hostile same-UID exclusion, distributed locking, or
-durability across replacement of the containing filesystem.
+VMs, or alter Cloud Hypervisor behavior. Production startup acquires it before
+opening the Core database (`cellhv-core-startup::StartupTransaction::begin`)
+and retains the returned value until all authority actors and API listeners
+have stopped. The tests do not claim hostile same-UID exclusion, distributed
+locking, or durability across replacement of the containing filesystem.

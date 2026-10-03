@@ -201,14 +201,17 @@ journal.
 
 ## 8. Explicitly pending
 
-- production native or legacy API routing and authorization;
-- durable execution-step population and production executor composition;
-- Cloud Hypervisor lifecycle calls and observed-state updates;
-- process recovery, ownership transitions, and ambiguous-side-effect policy;
-- NodeCache import and single-authority cutover;
-- storage and network provider execution;
+Wired since this slice: production native and legacy API routing, production
+executor composition, Cloud Hypervisor lifecycle calls, NodeCache import, and
+storage/network provider execution (see `cellhv-core-journal-executor.md` and
+`cellhv-core-legacy-grpc-adapter.md`). Still pending:
+
+- request authorization on the native and legacy surfaces;
+- durable execution-step population and observed-state updates;
+- process recovery, ownership transitions, and automatic ambiguous-outcome
+  retry (the operator `InspectRequired` resolution is shipped);
 - backup/restore and T2 disposable-host evidence;
 - libvirt, OpenStack, and O3K compatibility qualification.
 
-The Phase B exit gate, T2 acceptance, runtime execution, and compatibility
+The Phase B exit gate, T2 acceptance, and compatibility
 claims remain open regardless of these T1 operation tests.

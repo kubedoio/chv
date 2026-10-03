@@ -1,9 +1,10 @@
 # CellHV Core Packaging Prerequisites
 
-Status: shipped path prerequisites; production Core mode remains disabled.
+Status: shipped path prerequisites; the packaged and standalone
+configurations default to `core-managed` authority (#326).
 
-The node package publishes explicit defaults for the future in-place
-`chv-agent` Core authority:
+The node package publishes explicit defaults for the in-place `chv-agent`
+Core authority:
 
 - store: `/var/lib/chv/agent/core.db`;
 - native API socket: `/run/chv/core/core-v1.sock`;
@@ -23,5 +24,6 @@ not apply to the separately rooted native Core socket.
 
 Socket cleanup remains the listener owner's responsibility and is guarded by
 its recorded device/inode. Units and install scripts do not blindly unlink the
-native socket. These changes create no database, acquire no lease, start no
-additional service, and do not enable production Core startup.
+native socket. These changes create no database, acquire no lease, and start
+no additional service; the shipped configuration, not these prerequisites,
+selects the authority mode.

@@ -30,6 +30,7 @@ the listener task and its connection set on a best-effort asynchronous basis;
 explicit bounded `shutdown()` remains mandatory for an observed, joined
 shutdown result and for orderly authority release.
 
-Production integration remains disabled. Startup lease/identity selection must
-complete before creating this listener, and the process shutdown coordinator
-must explicitly await `shutdown()` before releasing runtime authority.
+Production integration is wired in the core-native authority mode. Startup
+lease/identity selection completes before creating this listener, and the
+process shutdown coordinator explicitly awaits `shutdown()` before releasing
+runtime authority.

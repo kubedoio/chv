@@ -11,9 +11,9 @@ run inside `chv-agent`; it is not a daemon or a second lifecycle authority.
 
 The configured endpoint is `/run/chv/core/core-v1.sock`. `chv-agent` starts the
 listener only when explicitly configured with `authority_mode = "core-native"`.
-The default remains the legacy authority mode, so an upgrade does not silently
-cut over production VM authority. Core-native mode does not compose the legacy
-Controller, VMM, or provider stack.
+The config-loader default remains `legacy` (shipped configurations select
+`core-managed`), so the native listener never starts implicitly. Core-native
+mode does not compose the legacy Controller, VMM, or provider stack.
 
 ## Contract
 

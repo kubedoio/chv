@@ -6,7 +6,8 @@
 
 ## 1. Runtime identity
 
-The existing `chv-agent` evolves into CellHV Core and remains the single runtime authority.
+The existing `chv-agent` (CellHV Core) evolves in place and remains the single
+runtime authority.
 
 - no parallel `cellhvd` service is introduced;
 - current control-plane gRPC compatibility and the native local API enter one operation engine;
@@ -169,7 +170,7 @@ Each deferred target requires its own discovery evidence, resource commitment, p
 
 A platform adapter:
 
-- remains outside `chv-agent` Core;
+- remains outside the Core;
 - uses public Core APIs;
 - maps platform idempotency and identity into Core;
 - has named maintenance ownership;

@@ -1,6 +1,8 @@
 # CellHV NodeCache Migration Contract
 
-Status: Phase B compatibility component; not wired into production startup.
+Status: Consumed by production startup through `cellhv-core-startup`
+(`StartupTransaction::activate`) in the core-managed authority mode; the
+single-authority gate below remains the production requirement.
 
 ## Boundary
 
@@ -105,8 +107,11 @@ validated where structurally applicable but do not become VM authority.
 
 ## Production Gate
 
-No production caller exists in this phase slice. Wiring requires all of the
-following in one reviewed change:
+Production startup reaches this adapter through
+`cellhv-core-startup::StartupTransaction::activate` in the core-managed
+authority mode (core-native refuses a live NodeCache before import). The
+single-authority gate still requires all of the following in one reviewed
+change:
 
 1. atomic archival and fsync of the exact source bytes;
 2. startup exclusion preventing NodeCache VM writes after cutover;

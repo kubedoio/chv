@@ -8,7 +8,8 @@
 
 This specification prevents implementation progress from being confused with runtime safety or ecosystem compatibility.
 
-`chv-agent` is the CellHV Core implementation. Tests must prove an in-place migration to local authority, not the coexistence of two runtime daemons.
+`chv-agent` (CellHV Core) is the implementation. Tests must prove an in-place
+migration to local authority, not the coexistence of two runtime daemons.
 
 Mocks and schemas can prove contracts. Only real KVM, provider, and platform tests can prove infrastructure claims.
 
