@@ -8,8 +8,8 @@ Go to the [CHV Releases](https://github.com/kubedoio/chv/releases) page and sele
 
 | Release type | Tag example | Who should use it |
 |--------------|-------------|-------------------|
-| **Stable** | `v0.1.0` | Production and evaluation |
-| **RC** | `v0.1.0-rc.1` | Pre-release validation |
+| **Stable** | `v<version>` | Production and evaluation |
+| **RC** | `v<version>-rc.1` | Pre-release validation |
 | **Nightly** | `nightly` | Latest `main` branch, development only |
 
 See [Channels](channels.md) for a detailed comparison.
@@ -20,14 +20,16 @@ Each release provides:
 - `.deb` packages (Debian, Ubuntu)
 - `.rpm` packages (RHEL, Rocky, AlmaLinux, Fedora)
 - `SHA256SUMS` — checksums for verification
-- `SHA256SUMS.sig` — GPG signature (when signing is configured)
+- `SHA256SUMS.sig` — GPG or cosign signature (when signing secrets are configured)
 - `sbom.spdx.json` — Software Bill of Materials
-- `chv-<VERSION>-linux-amd64.tar.gz` — release tarball with binaries and install script
+- `chv-<version>-linux-amd64.tar.gz` — release tarball with binaries and install script
 
 ### Quick download
 
+Set `VERSION` to the release tag, without the leading `v`:
+
 ```bash
-VERSION="0.1.0"
+VERSION="<version>"
 RELEASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 
 # Download .deb packages
@@ -76,10 +78,10 @@ Full instructions: [RHEL / Rocky / AlmaLinux](rhel-rocky-alma.md)
 
 ## Install from tarball (alternative)
 
-If your distribution does not support `.deb` or `.rpm`, use the release tarball:
+If your distribution does not support `.deb` or `.rpm`, use the release tarball. The install script targets Debian and Ubuntu systems; it installs dependencies with `apt`:
 
 ```bash
-VERSION="0.1.0"
+VERSION="<version>"
 TARBALL="chv-${VERSION}-linux-amd64.tar.gz"
 curl -sLO "https://github.com/kubedoio/chv/releases/download/v${VERSION}/${TARBALL}"
 
@@ -90,6 +92,8 @@ cd "chv-${VERSION}-linux-amd64"
 # Run the install script
 sudo ./install.sh
 ```
+
+The install script downloads Cloud Hypervisor (the VMM) when it is not already installed. Set `INSTALL_CHV_SKIP_CLOUD_HV=1` to skip that step.
 
 The tarball includes:
 - Pre-built binaries (`bin/`)
