@@ -63,7 +63,7 @@ change, and only in the smallest way that fixes the facts.
 | Reports | `docs/reports/**` |
 | Executed prompts | `docs/prompts/**` |
 | Conduct | `CODE_OF_CONDUCT.md` |
-| Early planning | the pre-0.1.0 release planning artifacts |
+| Early release planning | `docs/release/release-engineering-plan.md`, `docs/release/release-implementation-checklist.md`, `docs/release/first-release-readiness-audit.md`, `docs/release/first-release-go-no-go-checklist.md` (executed pre-0.1.0 plans, superseded by `PIPELINE.md`) |
 
 ## 2. Registers
 
@@ -184,10 +184,11 @@ The `docs/install/` and `docs/release/` clusters already use sentence case.
 Use a table when you list three or more items with parallel facts. Use prose
 for argument and context.
 
-### R11. Restrict status glyphs to checklists and status tables
+### R11. Restrict status glyphs to checklists, status tables, and example lists
 
-Use ✅, ❌, and ⚠️ only in checklists and status tables. Never use them in
-running prose or headings.
+Use ✅, ❌, and ⚠️ only in checklists, status tables, and lists of
+compliant/non-compliant examples. Never use them in running prose or
+headings.
 
 ### R12. Use concrete versions or placeholders, never stale ones
 
@@ -214,10 +215,10 @@ names, and code identifiers are exempt everywhere they appear as code.
 | `cloud-hypervisor` | — | The binary and package name. Always in code font. |
 | node | host, server (as prose nouns) | The managed host in prose, CLI, and API contexts. The UI label "Hosts" is a deliberate synonym per [ADR-006-WebUI](../specs/adr/006-webui-navigation-revised.md); document the mapping, do not change the UI. Designer YAML keeps `servers` as a contract field name. |
 | VM | instance, virtual machine (spelled out) | VM is the prose term. The UI label "Instances" is a deliberate synonym per ADR-006-WebUI. Use guest only for guest-visible behavior and guest-to-host security contexts, as in `SECURITY.md`. |
-| `chv-agent` | CellHV Core (except as noted), core-native, core-managed (for the component) | `chv-agent` is the primary name of the agent runtime. Write "(CellHV Core)" once per document as a parenthetical alias, because specs and ADRs use that name. Use core-native and core-managed for modes, not for the component. See [ADR-016](../specs/adr/016-evolve-chv-agent-into-cellhv-core.md). |
+| `chv-agent` | CellHV Core (except as noted), core-native, core-managed (for the component) | `chv-agent` is the primary name of the agent runtime. Write the alias "(CellHV Core)" once per document, as a parenthetical, because specs and ADRs use that name. The noun "CellHV Core authority" may appear where the authority (not the binary) is the subject. Use core-native and core-managed for modes, not for the component. See [ADR-016](../specs/adr/016-evolve-chv-agent-into-cellhv-core.md). |
 | `chv-controlplane` | controlplane (bare, in prose) | The control-plane daemon binary. It embeds the BFF and serves the web UI. |
-| `chv-stord` | stord (bare) | The node storage daemon. Always the full name in operator-facing text. |
-| `chv-nwd` | nwd (bare) | The node network daemon. Always the full name in operator-facing text. |
+| `chv-stord` | stord (bare) in operator-facing text | The node storage daemon. Use the full name in operator-facing text. Developer-facing documents use the full name at first mention; the bare form may follow. |
+| `chv-nwd` | nwd (bare) in operator-facing text | The node network daemon. Use the full name in operator-facing text. Developer-facing documents use the full name at first mention; the bare form may follow. |
 | `chvctl` | chv-ctl | The CLI binary. |
 | control plane | controlplane, CP (undefined) | Noun form. Use control-plane (hyphenated) as the adjective. Never write controlplane in prose; crate names are exempt. Use CP only after a first-use definition, and never in operator docs. |
 | backend-for-frontend (BFF) | BFF (undefined) | Expand on first use per document. The BFF runs inside `chv-controlplane`; there is no separate BFF binary. |
@@ -296,7 +297,7 @@ Check every box before you merge a change to a living document.
 - [ ] Prose uses node; UI labels Hosts and Instances are mapped, not changed.
 - [ ] Prose uses VM; guest appears only in guest-visible or security contexts.
 - [ ] Daemon names match the binaries in `cmd/` exactly.
-- [ ] `chv-agent` is the primary agent name; CellHV Core appears at most once, as a parenthetical.
+- [ ] `chv-agent` is the primary agent name; the alias "(CellHV Core)" appears at most once, as a parenthetical.
 - [ ] control plane (noun) and control-plane (adjective) are used correctly.
 - [ ] Every abbreviation is defined at first use in the document.
 - [ ] Sentences meet the length target for the register.
