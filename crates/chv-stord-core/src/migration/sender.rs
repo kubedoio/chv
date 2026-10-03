@@ -45,7 +45,7 @@ pub struct MigrationTlsConfig {
 /// from the local node to a remote peer's stord.
 ///
 /// Flow control: the sender maintains a sliding window of at most
-/// `send_window_size` (default 16) unacknowledged chunks. The receiver
+/// `send_window_size` (default 128, `SendWindow::new`) unacknowledged chunks. The receiver
 /// sends an `Ack` every 64 chunks while streaming and flushes the ack
 /// window at stream boundaries (`RoundComplete`, `FinalSync`, and before
 /// `FinalizeAck`), so the sender's per-phase drains complete for arbitrary
@@ -412,7 +412,7 @@ impl<B: StorageBackend> MigrationSender<B> {
     /// Perform the bulk copy phase: read all blocks and stream them to the receiver.
     ///
     /// The sender computes CRC32 for each chunk and respects the send window.
-    /// When the window is full (default 16 in-flight), the sender blocks
+    /// When the window is full (default 128 in-flight), the sender blocks
     /// until acknowledgments are received from the destination.
     ///
     /// Note: there is deliberately no drain at the end of this phase. The
