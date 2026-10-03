@@ -95,8 +95,8 @@ KVM-VERIFIED, and multi-host behavior is reported as unproven.
 
 | Component | Role | Key details | Tier |
 |---|---|---|---|
-| SvelteKit UI statics | Browser application | Built to static files. `scripts/install.sh` serves them from `/opt/chv/ui` through **nginx** on `:80` — the only component that listens on a non-loopback address. The `.deb`/`.rpm` ships the same tree at `/usr/share/chv/ui` but installs **no web server** (see §5 UC-3 and decision D3). | UI serving via install.sh: [CONTAINER-VERIFIED] — the packaging/systemd contract, proven in a clean container by the [m4.2 install-sh leg](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.2-clean-install.md). UI behavior end-to-end: see §9 (#355). |
-| nginx | Edge reverse proxy | Terminates HTTP `:80`; proxies `/api/` and `/v1/` to the BFF `:8080`; proxies `/ws/vms/{node_id}/…` to the agent console `:8444`. Installed and configured by `scripts/install.sh`, not by the packages. | [CONTAINER-VERIFIED] — the same m4.2 install-sh contract leg |
+| SvelteKit UI statics | Browser application | Built to static files. `scripts/install.sh` serves them from `/opt/chv/ui` through **nginx** on `:80` — the only component that listens on a non-loopback address. The `.deb`/`.rpm` ships the same tree at `/usr/share/chv/ui` plus a documented example reverse-proxy configuration under `/usr/share/chv/examples/` — no web server is installed or enabled (see §5 UC-3 and decision D3). | UI serving via install.sh: [CONTAINER-VERIFIED] — the packaging/systemd contract, proven in a clean container by the [m4.2 install-sh leg](evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.2-clean-install.md). UI serving from the packaged tree via the example conf: [CODE-SUPPORTED, UNQUALIFIED] (D3 interim). UI behavior end-to-end: see §9 (#355). |
+| nginx | Edge reverse proxy | Terminates HTTP `:80`; proxies `/api/` and `/v1/` to the BFF `:8080`; proxies `/ws/vms/{node_id}/…` to the agent console `:8444`. Installed and configured by `scripts/install.sh`; the packages ship an example configuration only (D3 interim). | [CONTAINER-VERIFIED] — the same m4.2 install-sh contract leg |
 
 ### 2.3 External dependencies
 
@@ -119,7 +119,7 @@ recorded below.
 
 | Package | Contents | Dependencies | Notes |
 |---|---|---|---|
-| `chv-controlplane` | Binary; UI tree at `/usr/share/chv/ui`; migrations; `chv-controlplane.service`; `/etc/chv/controlplane.toml` (`config\|noreplace`) | `libssl3` (deb) / `openssl-libs` (rpm) | — |
+| `chv-controlplane` | Binary; UI tree at `/usr/share/chv/ui`; example reverse-proxy conf at `/usr/share/chv/examples/` (D3 interim, documentation only); migrations; `chv-controlplane.service`; `/etc/chv/controlplane.toml` (`config\|noreplace`) | `libssl3` (deb) / `openssl-libs` (rpm) | — |
 | `chv-node` | `chv-agent`, `chv-stord`, `chv-nwd` binaries; 3 units; tmpfiles.d entry; 4 configs (`agent.toml`, `stord.toml`, `nwd.toml`, plus the reference-only `chv.yaml`) | **hard-depends on `chv-controlplane`**; deb additionally hard-depends `wireguard-tools` (rpm: `recommends`) | The hard dependency installs a control plane on every node host — flagged as decision D2. `chvctl` is **not** included (nfpm is truth; `package-contract.md` states both "pulled in by `chv-node`" and "not included" — a self-contradiction resolved in favor of nfpm). |
 | `chvctl` | Binary only | `libssl3` / `openssl-libs` | Install separately on any management machine. |
 
@@ -260,13 +260,18 @@ fails closed until operator provisioning).**
 
 ### UC-3 — Headless / package-only deployment
 
-**Status: [CODE-SUPPORTED, UNQUALIFIED]. Partially defined.**
+**Status: [CODE-SUPPORTED, UNQUALIFIED].**
 
-The packages install all daemons (`chvctl` is a separate package, §2.4), but no web server. The UI tree
-ships at `/usr/share/chv/ui` unserved. A headless operator can drive the
-platform with `chvctl` against the BFF, but nothing provisions or documents
-that path end-to-end. How (or whether) to serve the UI from packages is
-decision **D3**.
+The packages install all daemons (`chvctl` is a separate package, §2.4)
+but no web server. The UI tree ships at `/usr/share/chv/ui`. Under the
+D3 interim resolution, `chv-controlplane` also ships an example nginx
+configuration (`/usr/share/chv/examples/chv-example.conf`)
+and [DEPLOYMENT.md](DEPLOYMENT.md) "Serving the Web UI in package mode"
+documents how an operator serves the tree with it. The serving path
+stays [CODE-SUPPORTED, UNQUALIFIED]: no qualification leg exercises it,
+and the operator owns the edge, including TLS (decision D7). A headless
+operator can still drive the platform with `chvctl` against the BFF.
+Decision **D3** is resolved as interim (b), target (d) — see §8.
 
 ### UC-4 — Development install
 
@@ -397,7 +402,7 @@ options, the trade-offs, and what would unblock it.
 |---|---|---|---|---|
 | D1 | Multi-host dispatch: how can a control plane reach remote agents? | (a) Add an opt-in TCP gRPC listener to `chv-agent` (mTLS, node-cert identity). (b) Declare single-host-only and document it. (c) Stage both: document single-host now, land the listener behind a feature flag later. | (a) Unblocks real multi-host but adds an exposed listener, new attack surface, and requires MULTI-HOST-VERIFIED evidence that the current infrastructure cannot produce (declaration §5). (b) Honest and cheap, but strands the code-supported enrollment protocol and the documented console routing. (c) Keeps both paths open, but carries undecided surface area longer. | Maintainer choice plus a qualification topology with a second host (or an explicit re-scoping of the claim). |
 | D2 | `chv-node` package dependency: keep or relax the hard dependency on `chv-controlplane`? | (a) Keep. (b) Drop to `recommends`/`suggests`. (c) Split a `chv-node-common` and make the CP dependency explicit only in a meta-package. | (a) Simple, matches the qualified single-host topology; installs a useless control plane on every future node host. (b) Correct shape for node-only hosts, but changes tested install semantics and can produce half-provisioned hosts (CP fails closed anyway). (c) Cleanest dependency graph, most packaging work. | D1: node-only hosts only matter if multi-host dispatch exists. |
-| D3 | Serving the UI from packages | (a) Headless-only posture: document `chvctl` as the package-mode interface; UI requires install.sh. (b) Document an operator-provided reverse proxy against `/usr/share/chv/ui` + the BFF/console proxies. (c) The deb configures nginx itself (or ships a snippet). | (a) Cheapest, narrows the product. (b) Flexible, pushes TLS/edge concerns to the operator with no contract. (c) Best out-of-box parity with install.sh, but adds a web-server dependency and edge ownership to the packages. | Prompt-06 reference-deployment profile choice; UC-3 demand. |
+| D3 | Serving the UI from packages | (a) Headless-only posture: document `chvctl` as the package-mode interface; UI requires install.sh. (b) Document an operator-provided reverse proxy against `/usr/share/chv/ui` + the BFF/console proxies. (c) The deb configures nginx itself (or ships a snippet). (d) Serve the UI from `chv-controlplane` itself (tower-http `ServeDir` from disk, opt-in `[webui]` config section). | (a) Cheapest, narrows the product. (b) Flexible, pushes TLS/edge concerns to the operator with no contract. (c) Best out-of-box parity with install.sh, but adds a web-server dependency and edge ownership to the packages. (d) Out-of-box parity without an edge dependency, but adds a serving surface to the binary and needs its own qualification. | **Resolved 2026-10-03, phased: interim (b), target (d); (c) rejected.** Interim: the packages ship an example nginx conf (`/usr/share/chv/examples/chv-example.conf`) plus operator docs ([DEPLOYMENT.md](DEPLOYMENT.md) "Serving the Web UI in package mode"); serving-from-packages is [CODE-SUPPORTED, UNQUALIFIED] until a container qualification leg exists. Target: serve from the binary — tracked in #447. (c) is rejected permanently: it breaks the fail-closed "packages provide layout only" contract (§4) and forces nginx onto every host. |
 | D4 | Air-gapped support | (a) Not supported; state it. (b) Document an offline recipe from the existing escape hatches (`INSTALL_CHV_TARBALL_PATH`, `INSTALL_CHV_SKIP_DEPS`, `INSTALL_CHV_SKIP_CLOUD_HV`, pre-staged images). (c) Add a first-class offline mode to the installer. | (a) Free, loses sovereign/edge adopters the positioning targets. (b) Cheap documentation work; the hatches exist but are untested as a recipe. (c) Real installer work plus a qualification leg. | Maintainer priority; a qualification leg if (b) or (c). |
 | D5 | Edge / resource profiles | (a) None; the current units and defaults are the only profile. (b) Document one "small" profile (documented unit overrides). (c) Ship alternate unit/config variants in the packages. | (a) Honest, no false edge signal. (b) Documentation-only, unqualified. (c) Real surface area, needs evidence on constrained hardware. | Field evidence from Prompt-06; ADR-011 positioning vs. actual demand. |
 | D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | **Resolved 2026-10-03 — option (a) implemented**: the installer downloads the qualified v43.0 pin (#422); the v51.1 drift is closed. |

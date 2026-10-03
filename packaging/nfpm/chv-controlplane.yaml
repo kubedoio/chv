@@ -27,6 +27,13 @@ contents:
   - src: ui/build/
     dst: /usr/share/chv/ui
     type: tree
+  # D3 interim: example reverse-proxy config for serving the packaged
+  # UI tree. Documentation only — nothing in the package enables it.
+  # Lives under /usr/share/chv (not /usr/share/doc): ubuntu images and
+  # doc-minimized servers ship a dpkg path-exclude=/usr/share/doc/*
+  # that silently drops files from that tree at install time.
+  - src: packaging/nginx/chv-example.conf
+    dst: /usr/share/chv/examples/chv-example.conf
   - src: cmd/chv-controlplane/migrations/
     dst: /usr/share/chv/migrations
     type: tree
