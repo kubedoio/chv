@@ -182,7 +182,7 @@ cargo build --workspace
 |----------|---------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System architecture, data flow, and boundaries |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | Deploy CHV on a combined control-plane + hypervisor host |
-| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (ADR-001–ADR-021) |
+| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (ADR-001–ADR-022) |
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
 | [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
