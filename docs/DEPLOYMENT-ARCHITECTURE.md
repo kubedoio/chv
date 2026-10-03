@@ -450,7 +450,8 @@ disclosures added here):**
   (`hv.landlock_enable`) but it defaults off and has never been
   qualified — it is disclosed here as an option, not enabled. The fix
   path is the **#448** re-qualification campaign (decision D6, option
-  (b)); the pin does not move without that evidence.
+  (b)); the pin does not move without that evidence
+  ([campaign evidence root](evidence/vmm-requalification/v53.0/README.md)).
 - **#394** — concurrent-write migration silently loses data; quiescent-source
   migration is the claimed mode.
 - **#368** — a transient effector failure terminally fails a journaled VM
