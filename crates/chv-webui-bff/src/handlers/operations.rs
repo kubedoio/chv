@@ -2,13 +2,14 @@
 //! (issue #406).
 //!
 //! Several BFF handlers derive a per-resource idempotency key
-//! (`delete-vm-<vm_id>`, `resize-vm-<vm_id>`, ...) and record it as a
-//! UNIQUE row in the shared `operations` table. The authority-side
-//! retention model (M2.5) keeps the `vms`/`vm_desired_state` rows after
-//! a delete, so a retried operation on the same resource re-enters the
-//! handler and re-derives the same key. Before #406, the plain
-//! `INSERT INTO operations` collided on the UNIQUE constraint and the
-//! error surfaced as an unhandled `BffError::Internal` → HTTP 500.
+//! (`delete-vm-<vm_id>`, `resize-vm-<vm_id>-<cpu>-<mem>`, ...) and record
+//! it as a UNIQUE row in the shared `operations` table. The
+//! authority-side retention model (M2.5) keeps the `vms`/
+//! `vm_desired_state` rows after a delete, so a retried operation on the
+//! same resource re-enters the handler and re-derives the same key.
+//! Before #406, the plain `INSERT INTO operations` collided on the
+//! UNIQUE constraint and the error surfaced as an unhandled
+//! `BffError::Internal` → HTTP 500.
 //!
 //! The contract here: a key collision means the operation was already
 //! recorded by a previous (accepted) request, so the retry must REPLAY
@@ -70,6 +71,17 @@ pub async fn find_recorded_operation(
 /// 409 that names the idempotent-retry condition — the caller's
 /// transaction rolls back, so the mutation is not re-executed either
 /// way. Anything else is a genuine internal error.
+/// Classify an operation-INSERT failure for the per-resource key
+/// surfaces: if a row is now recorded under `idempotency_key`, surface a
+/// 409 naming the idempotent-retry condition; anything else is a genuine
+/// internal error (500).
+///
+/// Classification is by RE-SELECT heuristic, not by inspecting the
+/// sqlx error's constraint: a failed INSERT plus a row found under the
+/// key is treated as a collision. Under the handlers' `BEGIN IMMEDIATE`
+/// tx + in-tx pre-check this arm is unreachable defense-in-depth, so
+/// the heuristic's theoretical imprecision (a non-collision insert
+/// failure while a row happens to exist) has no reachable impact.
 pub async fn map_operation_insert_error(
     conn: &mut sqlx::SqliteConnection,
     idempotency_key: &str,

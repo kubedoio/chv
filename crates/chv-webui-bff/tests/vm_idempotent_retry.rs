@@ -419,18 +419,29 @@ async fn retried_resize_replays_recorded_outcome_not_500() {
         Some(first_task_id.as_str()),
         "retry must replay the recorded task_id"
     );
+    assert!(
+        body["recorded_status"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "the replay must disclose the recorded operation's status (review round finding): {body}"
+    );
 
-    // A second resize with DIFFERENT parameters hits the same per-VM
-    // key: it must also replay the recorded outcome and must not
-    // re-execute the mutation (the desired state keeps the first
-    // resize's values, generation stays put).
+    // A second resize with DIFFERENT parameters derives a DIFFERENT
+    // args-hashed key (review round: a per-VM key silently swallowed a
+    // genuinely different resize by replaying the first outcome): it
+    // must execute as a FRESH operation — new task id, desired state
+    // updated, generation bumped, and its own operation row.
     let (status, body) = resize_vm(&state, &token, &vm_id, 8, 4096).await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "key-colliding resize must replay 200, not 500; body: {body}"
+        "different-args resize must be a fresh accepted op, not 500; body: {body}"
     );
-    assert_eq!(body["task_id"].as_str(), Some(first_task_id.as_str()));
+    let second_task_id = body["task_id"].as_str().expect("task_id").to_string();
+    assert_ne!(
+        second_task_id, first_task_id,
+        "different-args resize must be a NEW operation, not a replay"
+    );
 
     let (cpu, mem): (i64, i64) =
         sqlx::query_as("SELECT cpu_count, memory_bytes FROM vm_desired_state WHERE vm_id = ?")
@@ -438,21 +449,36 @@ async fn retried_resize_replays_recorded_outcome_not_500() {
             .fetch_one(&state.pool)
             .await
             .expect("read vm resources");
-    assert_eq!(cpu, 4, "collision must not re-execute the resize (cpu)");
+    assert_eq!(
+        cpu, 8,
+        "the fresh resize must update the desired state (cpu)"
+    );
     assert_eq!(
         mem,
-        2048 * 1024 * 1024,
-        "collision must not re-execute the resize (memory)"
+        4096 * 1024 * 1024,
+        "the fresh resize must update the desired state (memory)"
+    );
+    assert!(
+        desired_generation(&state, &vm_id).await > gen_after_first,
+        "the fresh resize must bump desired_generation"
     );
     assert_eq!(
-        desired_generation(&state, &vm_id).await,
-        gen_after_first,
-        "collision must not bump desired_generation again"
-    );
-    assert_eq!(
-        operation_rows(&state, &format!("resize-vm-{vm_id}")).await,
+        operation_rows(
+            &state,
+            &format!("resize-vm-{vm_id}-8-{}", 4096i64 * 1024 * 1024)
+        )
+        .await,
         1,
-        "collision must not insert a second operation row"
+        "the fresh resize must record its own operation row"
+    );
+    assert_eq!(
+        operation_rows(
+            &state,
+            &format!("resize-vm-{vm_id}-4-{}", 2048i64 * 1024 * 1024)
+        )
+        .await,
+        1,
+        "the first resize's key still has exactly one row (the same-args retry did not add one)"
     );
 }
 

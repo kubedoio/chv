@@ -860,6 +860,7 @@ pub async fn delete_vm(
             "accepted": true,
             "task_id": recorded.operation_id,
             "vm_id": vm_id,
+            "recorded_status": recorded.status,
             "summary": format!("Deleting VM '{}'", vm_id),
             "next_refresh_path": format!("/api/v1/tasks/{}", recorded.operation_id),
         })));
@@ -993,7 +994,12 @@ pub async fn resize_vm(
 
     let requested_by = claims.sub.clone();
     let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
-    let idempotency_key = format!("resize-vm-{}", vm_id);
+    // #406 review round: the key is args-hashed (`resize-vm-<vm_id>-<cpu>-<mem>`)
+    // so the two realistic intents are both correct — a same-args retry replays
+    // the recorded outcome (idempotent), while a genuinely different resize is
+    // a fresh operation (never silently swallowed by a per-VM key). The values
+    // are validated above, before this derivation.
+    let idempotency_key = format!("resize-vm-{}-{}-{}", vm_id, cpu_count, memory_bytes);
 
     // BEGIN IMMEDIATE: serialize concurrent writers to avoid quota TOCTOU on resize,
     // and the SELECT for delta math runs inside the tx so the values can't change
@@ -1007,11 +1013,11 @@ pub async fn resize_vm(
     require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     // #406: idempotent retry — same mechanic as delete_vm. The key is
-    // per-VM (`resize-vm-<vm_id>`), so a retried resize of the same VM
-    // re-derives it; replay the recorded outcome instead of colliding
-    // on the UNIQUE insert, and never re-run the quota delta math or
-    // the desired-state UPDATE. Checked after the ownership gate so a
-    // non-owner probing a recorded VM still gets 403/404.
+    // args-hashed (see above), so only a same-args retry re-derives it;
+    // replay the recorded outcome instead of colliding on the UNIQUE
+    // insert, and never re-run the quota delta math or the desired-state
+    // UPDATE. Checked after the ownership gate so a non-owner probing a
+    // recorded VM still gets 403/404.
     if let Some(recorded) =
         crate::handlers::operations::find_recorded_operation(&mut tx, &idempotency_key).await?
     {
@@ -1025,6 +1031,7 @@ pub async fn resize_vm(
             "accepted": true,
             "task_id": recorded.operation_id,
             "vm_id": vm_id,
+            "recorded_status": recorded.status,
             "summary": format!("Resizing VM '{}' to {} vCPU, {} bytes memory", vm_id, cpu_count, memory_bytes),
             "next_refresh_path": format!("/api/v1/tasks/{}", recorded.operation_id),
         })));
