@@ -8,8 +8,8 @@
 
 ## 1. Purpose
 
-This specification defines the first durable authority beneath `chv-agent`,
-which is the CellHV Core runtime. It replaces neither `chv-agent` nor its Cloud
+This specification defines the first durable authority beneath the `chv-agent`
+runtime (CellHV Core). It replaces neither `chv-agent` nor its Cloud
 Hypervisor adapter. It introduces no VM lifecycle behavior.
 
 The store is the only authoritative local database for CellHV-managed VM

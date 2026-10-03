@@ -9,9 +9,12 @@
 
 ## 1. Product decision
 
-CellHV will be built around **CellHV Core**, a self-contained Linux-native compute runtime with optional ecosystem bridges.
+CellHV will be built around the **Core**, a self-contained Linux-native compute
+runtime with optional ecosystem bridges.
 
-The existing `chv-agent` evolves in place into CellHV Core. `cellhvd` is not a second daemon, binary, state store, or runtime authority. Until a separate naming ADR is accepted, the executable and systemd service remain `chv-agent`.
+The existing `chv-agent` (CellHV Core) evolves in place into the Core.
+`cellhvd` is not a second daemon, binary, state store, or runtime authority.
+The executable and systemd service remain `chv-agent`.
 
 Core MUST operate on one Linux host without Controller, libvirt, OpenStack, CloudStack, OpenNebula, O3K, Kubernetes, Designer, Web UI, or an external database.
 
@@ -58,7 +61,7 @@ A provisional item MUST NOT become a support claim without the required discover
 ## 3. Non-negotiable invariants
 
 - Core is useful and recoverable without a management plane.
-- `chv-agent` and CellHV Core are the same runtime authority.
+- `chv-agent` and the Core are the same runtime authority.
 - No parallel `cellhvd` runtime is introduced.
 - Every mutation is durably recorded before host-side effects.
 - External systems do not access the Core database, privileged helper, or VMM sockets.
@@ -85,7 +88,7 @@ A provisional item MUST NOT become a support claim without the required discover
 
 ## 5. Product position
 
-> CellHV Core is a self-contained compute runtime for modern cloud and edge workloads, built by evolving `chv-agent` into a locally authoritative, recoverable Linux service with optional ecosystem bridges.
+> The Core is a self-contained compute runtime for modern cloud and edge workloads, built by evolving `chv-agent` into a locally authoritative, recoverable Linux service with optional ecosystem bridges.
 
 CellHV does not claim:
 
@@ -137,7 +140,7 @@ flowchart TB
     ONE --> PADAPT
 
     subgraph Host[Linux compute host]
-        subgraph Agent[chv-agent evolving into CellHV Core]
+        subgraph Agent[chv-agent evolving into the Core]
             API[Native and legacy-compatible APIs]
             STATE[Durable local VM state]
             OPS[Single operation engine]

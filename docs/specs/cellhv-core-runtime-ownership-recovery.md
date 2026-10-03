@@ -129,8 +129,8 @@ production composition may call inspection until durable recovery transitions
 and their acceptance evidence are reviewed.
 
 The explicit, default-off `core-native` authority mode is now wired into
-`cmd/chv-agent`, but it composes only durable authority and the native API.
-It does not compose this ownership observer, a VM runtime, the executor, or a
+`cmd/chv-agent`. It composes the durable authority, the native API, a VM
+runtime, and the executor. It does not compose this ownership observer or a
 recovery transition.
 
 ## Machine-enforced boundary and evidence level

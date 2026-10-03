@@ -37,5 +37,6 @@ production integration must await explicit shutdown to release the lease.
 The public `OperationService` and lower-level actor/listener constructors remain
 available for existing tests and libraries. Therefore this slice is positive
 evidence for the `CoreRuntimeOwner` path only, not proof that production has no
-other construction path. It also does not compose the journal executor, Cloud
-Hypervisor runtime, ownership observation, or recovery assessment path.
+other construction path. The owner composes the journal executor and its
+`CoreVmRuntime` dependency, but not ownership observation or the recovery
+assessment path.

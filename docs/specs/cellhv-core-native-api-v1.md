@@ -9,11 +9,14 @@ single `cellhv-core-operations::AuthorityHandle`. It has no SQLite, provider,
 Cloud Hypervisor, control-plane, or cloud model dependency. It is intended to
 run inside `chv-agent`; it is not a daemon or a second lifecycle authority.
 
-The configured endpoint is `/run/chv/core/core-v1.sock`. `chv-agent` starts the
-listener only when explicitly configured with `authority_mode = "core-native"`.
-The default remains the legacy authority mode, so an upgrade does not silently
-cut over production VM authority. Core-native mode does not compose the legacy
-Controller, VMM, or provider stack.
+The configured endpoint is `/run/chv/core/core-v1.sock`. `chv-agent` composes
+the listener in both `core-managed` and `core-native` authority modes. In
+core-managed mode, `CoreRuntimeOwner::start` binds the native listener
+alongside the legacy stack. Only the `legacy` authority mode leaves the
+listener unstarted. The config-loader default is `legacy`; shipped
+configurations select `core-managed`, so the shipped agent binds the native
+listener. Core-native mode does not compose the legacy Controller, VMM, or
+provider stack.
 
 ## Contract
 
@@ -23,7 +26,7 @@ Controller, VMM, or provider stack.
 | `GET` | `/v1/host/capabilities` | Capability flags; all default to false |
 | `GET`, `POST` | `/v1/vms` | List definitions; asynchronously accept create |
 | `GET`, `PATCH`, `DELETE` | `/v1/vms/{id}` | Inspect; asynchronously accept update/delete |
-| `POST` | `/v1/vms/{id}/actions/{start,stop,reboot}` | Structured `unsupported` until an executor is wired |
+| `POST` | `/v1/vms/{id}/actions/{start,stop,reboot}` | Structured `unsupported` — power actions are deliberately not routed through the executor in v1 |
 | `GET` | `/v1/operations` | Ordered operation journal inspection; newest-first, bounded to the newest 1000 entries |
 | `GET` | `/v1/operations/{id}` | Operation journal entry inspection |
 | `GET` | `/v1/events?after=N&limit=M` | Ordered polling; limit is 1 through 1000 |
@@ -80,17 +83,20 @@ gone.
 - NodeCache cutover and legacy gRPC routing into this same operation service;
 - deterministic OpenAPI publication/client generation decision;
 - event streaming (v1 exposes deterministic polling);
-- lifecycle execution and corresponding capability enablement.
+- native-API lifecycle execution: the power endpoints remain `unsupported`
+  and the corresponding capability flags default to false.
 
 The router cannot construct an `OperationService` or actor. Async handlers send
 typed requests through the bounded shared authority queue and await typed
 replies, preserving authority ordering without blocking Tokio workers. The
 `chv-agent` composition root retains the actor owner for the whole listener
-lifetime and performs ordered shutdown in explicit core-native mode.
+lifetime and performs ordered shutdown in core-managed and core-native modes.
 
 `vm_definitions=false` currently describes executable production availability:
-the writable definition journal is not an executable VM-definition backend and
-no lifecycle executor or managed Cloud Hypervisor transport is composed. Its
-CRUD contract is implemented, tested, and reachable in explicit core-native
-mode, but this does not advertise O3K compute support and the flag must not
-become true until executable definition handling is safely wired.
+the writable definition journal is not an executable VM-definition backend.
+The `JournalExecutor` and a managed Cloud Hypervisor transport are composed in
+both core-managed and core-native modes, but the native power endpoints
+deliberately return structured `unsupported` and the capability flags default
+to false. The CRUD contract is implemented, tested, and reachable in
+core-managed and core-native modes. The flag must not become true until
+executable definition handling is safely wired.

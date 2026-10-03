@@ -1,6 +1,8 @@
 # CellHV Core Host Identity Resolution
 
-Status: Phase B library component; not wired into production startup
+Status: Wired into production startup through `cellhv-core-startup`
+(`StartupTransaction::activate` and `activate_native_only`) in the
+core-managed and core-native authority modes.
 
 ## Boundary
 
@@ -10,8 +12,10 @@ The resolver performs no filesystem access. Its optional initializer delegates
 fresh creation to the existing `cellhv-core-operations::OperationService`,
 which remains the only application-service path to the Core store.
 
-Production `cmd/chv-agent` does not call this API yet. The library therefore
-does not satisfy the Phase B startup or NodeCache authority-mode gates.
+Production `cmd/chv-agent` reaches this resolver through
+`cellhv-core-startup::StartupTransaction` in the core-managed and core-native
+authority modes. The NodeCache authority-mode gates remain unsatisfied; the
+facade they require was removed (see `cellhv-nodecache-authority-mode.md`).
 
 ## Inputs and precedence
 

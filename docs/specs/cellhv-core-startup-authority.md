@@ -1,19 +1,21 @@
 # CellHV Core Startup Authority Coordinator
 
-Status: Production wiring in the explicit, default-off `core-native` and `core-managed` authority modes (legacy NodeCache remains the default).
+Status: Production wiring in the explicit `core-native` and `core-managed`
+authority modes (the config loader defaults to `legacy`; shipped
+configurations select `core-managed`).
 
 ## Boundary
 
-`cellhv-core-startup` is a library used to make the future `chv-agent` startup
+`cellhv-core-startup` is a library used to make the `chv-agent` startup
 authority choice. It creates no daemon, database format, operation engine, VM
 process, storage attachment, or network attachment. All database access passes
 through `cellhv-core-operations::OperationService`; NodeCache conversion passes
 through `cellhv-nodecache-migration`.
 
-`cmd/chv-agent` calls this boundary only when the operator explicitly selects
-`core-native` authority mode. The default legacy launch/reconcile path remains
-unchanged, and the Core-native path does not launch, inspect, recover, or
-manage a VM process.
+`cmd/chv-agent` calls this boundary when the operator selects the
+`core-native` or `core-managed` authority mode. The default legacy
+launch/reconcile path remains unchanged, and this boundary never launches,
+inspects, recovers, or manages a VM process.
 
 `StartupTransaction::begin` is the activation boundary intended for that
 wiring. It acquires the non-blocking process-lifetime `RuntimeAuthorityLease`
@@ -27,13 +29,13 @@ guard. Once the database decision is durable, it releases the short
 without releasing the runtime lease.
 
 For agent composition, `prepare_activation` returns an opaque
-`PendingActivatedStore` that retains the short lock and exact snapshot bytes.
-`chv-agent-core::AgentCoreActivation::from_pending` verifies the checksum,
-parses those bytes, constructs the crate-private Core-mode cache facade, and
-only then calls `finish` to release the lock. With no live cache it returns no
-facade and never synthesizes a replacement JSON file. This composition is
-wired only into the explicit `core-native` authority mode. VM runtime,
-executor, and recovery composition remain unwired.
+`PendingActivatedStore` that retains the short lock and exact snapshot bytes;
+`finish` releases the lock and yields `ActivatedStore`. The former
+`chv-agent-core::AgentCoreActivation::from_pending` consumer was removed with
+the NodeCache authority facade (#213). Production core-native startup now uses
+`activate_native_only`, which refuses a live NodeCache and never synthesizes a
+replacement JSON file. Ownership observation and recovery composition remain
+outside this boundary.
 
 The direct `activate` boundary activates only the Core database. It does not
 construct or authorize `NodeCacheAuthority`, select a process-wide cache mode, wire

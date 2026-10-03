@@ -200,6 +200,9 @@ derived from Core execution** — never an independent authority.
   compatibility surface stays valid and stable across restarts (and distinct
   even for two NICs sharing a network_ref); the actual
   runtime NIC MAC is observable independently, not via this projected `VmSpec`.
-- **CoreNative not wired; legacy unchanged.** CoreNative mode has no NodeCache
-  today (documented, not wired). Legacy mode keeps the legacy reconciler and its
-  direct NodeCache mutations exactly as before.
+- **Executor-to-NodeCache projection not wired in core-native; legacy
+  unchanged.** CoreNative mode has no NodeCache today (documented, not
+  wired), so the executor projects nothing there. This is a statement about
+  the projection only — core-native mode itself is wired and composes the
+  executor. Legacy mode keeps the legacy reconciler and its direct NodeCache
+  mutations exactly as before.

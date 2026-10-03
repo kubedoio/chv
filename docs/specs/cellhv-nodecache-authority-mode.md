@@ -1,8 +1,14 @@
 # CellHV NodeCache Authority-Mode Facade
 
-Status: Phase B library slice; not wired into production.
+Status: Removed. The facade described below (`chv_agent_core::NodeCacheAuthority`
+with its `LegacyVmAuthority` / `CoreVmAuthority` / `Blocked` modes) was deleted
+as unwired dead code in #213; nothing constructs it today. The body is retained
+as the design contract for the future single-authority enforcement.
 
 ## Boundary
+
+The symbols in this section no longer exist in `chv-agent-core`. The design
+contract was:
 
 `chv_agent_core::NodeCacheAuthority` owns one `NodeCache`, one validated
 canonical persistence path, and one authority
@@ -34,12 +40,12 @@ fields. Node-state transitions are denied in Core mode because draining and
 maintenance currently trigger VM lifecycle behavior. `save` independently
 rechecks the projection so whole-cache persistence cannot conceal drift.
 
-The architecture guard rejects public facade signatures containing
+The architecture guard rejected public facade signatures containing
 `NodeCache` or `FnOnce`, preventing reintroduction of a raw clone/reference or
-caller-controlled mutation escape. It also rejects public raw-cache fields and
+caller-controlled mutation escape. It also rejected public raw-cache fields and
 aliases, custom trait signatures, associated constants/statics,
 conversion/dereference traits, serialization, and authority cloning within the
-facade source boundary.
+facade source boundary; those checks were removed with the facade.
 
 ## Production Integration
 
@@ -47,8 +53,10 @@ facade source boundary.
 `Arc<Mutex<NodeCache>>` access. Production enforcement requires construction
 of exactly one facade after startup identity/lease selection, replacement of
 every direct mutable cache reference, and static guards preventing new bypass
-paths. Until then, `nodecache_authority_facade_enforced` is true while
-`nodecache_authority_mode_enforced` remains false.
+paths. Before the #213 removal `nodecache_authority_facade_enforced` was true
+while `nodecache_authority_mode_enforced` remained false; after the removal
+both flags are false in `config/cellhv-core-identity-policy-v1.json`.
 
-This slice does not satisfy production authority acceptance, restart recovery,
-or `AGENT-CORE-004`. It changes no VM launch, stop, delete, or recovery path.
+This design does not satisfy production authority acceptance, restart
+recovery, or `AGENT-CORE-004`. It changes no VM launch, stop, delete, or
+recovery path.

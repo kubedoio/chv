@@ -11,9 +11,10 @@ accesses `cellhv-core-store`.
 
 The actor accepts an already opened and startup-validated service. It cannot
 create a database, select NodeCache versus Core authority, execute a VM action,
-contact `chv-stord` or `chv-nwd`, or open a Cloud Hypervisor API socket. Neither
-`cmd/chv-agent`, `AgentServer`, `VmRuntime`, nor the native API constructs it in
-this slice.
+contact `chv-stord` or `chv-nwd`, or open a Cloud Hypervisor API socket.
+`cmd/chv-agent` constructs it once through `CoreRuntimeOwner` in the
+core-managed and core-native authority modes; `AgentServer` and the native API
+receive clones of its handle.
 
 ## Queue Contract
 
@@ -57,17 +58,16 @@ The native router is a pure transport constructor over an injected
 start a private actor. Handler reads and mutations therefore enter the same
 bounded, queue-ordered authority surface intended for compatibility adapters.
 
-## Required Future Wiring
+## Production wiring
 
-Production construction must occur once in `chv-agent` after
+Production construction occurs once in `chv-agent` after
 `cellhv-core-startup` selects Core authority, while holding an authority lease
-for the actor lifetime. Legacy gRPC and the native local API must receive clones
-of the same handle. Direct transport construction of `OperationService` must
-then be prevented.
-
-Until that wiring exists, multiple independently constructed actors remain
-possible at the library API level. Therefore this slice is not evidence of
-process-wide exclusivity, production cutover, or `AGENT-CORE-002` completion.
+for the actor lifetime. Legacy gRPC and the native local API receive clones of
+the same handle. `OperationService` nevertheless remains publicly
+constructible for library and test surfaces, so multiple independently
+constructed actors remain possible at the library API level. Production
+composition must close that residual before claiming process-wide exclusivity
+or `AGENT-CORE-002` completion.
 The former private `cellhv-core-api::DbActor` has been retired; production
-wiring must inject a clone of the one process-wide handle and retain its
+wiring injects a clone of the one process-wide handle and retains its
 `AuthorityActorJoin` owner until ordered shutdown completes.
