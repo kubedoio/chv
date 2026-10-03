@@ -129,7 +129,7 @@ the agent runs disk pre-copy to completion, then calls send-migration
 ### Phase 5: Completed (Validation and Cleanup)
 **Actions:**
 1. CP completes the migration atomically: migration → Completed and VM placement → dest node in a single SQLite transaction (`complete_migration_atomically`, `crates/chv-controlplane-service/src/migration.rs`)
-2. Dest nwd: sends gratuitous ARP for the VM's IP/MAC (best-effort, via the dest agent — `notify_overlay_after_migration`, `overlay.rs`)
+2. Dest nwd: sends gratuitous ARP for the VM's IP/MAC (best-effort, via the dest agent — `notify_overlay_after_migration`, `crates/chv-controlplane-service/src/migration.rs`)
 3. CP best-effort disables dirty tracking on the source volumes (`disable_source_dirty_tracking`, per ADR-012)
 4. The source volume copy is NOT deleted automatically — the source volume remains on the source node after a successful migration
 
@@ -166,7 +166,7 @@ message MigrateVmRequest {
   string vm_id = 1;
   string source_node_id = 2;
   string destination_node_id = 3;
-  MigrationConfig config = 4;
+  MigrationConfig config = 6;
 }
 
 message MigrationConfig {
@@ -304,7 +304,7 @@ constants above.
 | Agent pause coordination | agent-core/migration.rs | DONE — `PausedVmGuard`: pauses VM on stord's `needs_vm_pause`, best-effort resume on every post-pause failure path |
 | Dirty block tracking trait methods | StorageBackend trait | DONE |
 | Migration port allocation | agent-core/migration.rs | DONE (TOCTOU race present) |
-| Post-migration gARP | overlay.rs + executor.rs | DONE |
+| Post-migration gARP | crates/chv-controlplane-service/src/migration.rs | DONE |
 | FDB update after migration | overlay.rs | N/A — per-VTEP FDB push retired (ADR-021): kernel MAC learning + gratuitous ARP provide correctness |
 
 ### Known constraints
