@@ -344,7 +344,8 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   Open follow-ups carried: #368, #355, #384, #385, #386, plus #378/#379
   residuals noted in the evidence doc.
 - **M4.6 — two-stord mTLS migration: COMPLETE** (scenario + evidence PR; evidence
-  [m4.6-migration.md](m4.6-migration.md)). Final run (binaries `6a1dfa06`,
+  [m4.6-migration.md](m4.6-migration.md)). Final run (run 5, on the post-review
+  artifact with the vendored grpcurl checksums asset; binaries `6a1dfa06`,
   code-identical to main `80afd8db` for crates/proto): **135 passes, 0 errors,
   0 warnings, rc=0**, teardown all-green.
   One scenario (Leg P + N1–N9 via `deploy.sh --exec`): the positive path
