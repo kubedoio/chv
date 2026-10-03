@@ -62,6 +62,13 @@
   --color-neutral-700: #393939;
   --color-neutral-800: #262626;
   --color-neutral-900: #161616;
+
+  /* Component token aliases (names consumed by components, mapped to the
+     themed tokens above; resolved per active theme) */
+  --color-ink: var(--color-neutral-900);
+  --color-muted: var(--color-neutral-500);
+  --color-line: var(--border-subtle);
+  --color-border: var(--border-subtle);
   
   /* Typography */
   /* System font stack — no external CDN required. IBM Plex fonts are used
@@ -92,14 +99,21 @@
   --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.1);
   --shadow-glow-primary: 0 0 14px rgba(143, 90, 42, 0.1);
+  --shadow-glow-success: 0 0 14px rgba(63, 107, 69, 0.1);
 
   /* Borders & Radii */
   --radius-xs: 2px;
   --radius-sm: 4px;
   --radius-md: 6px;
+  --radius-full: 9999px;
   --border-subtle: #e0ddd5;
   --border-strong: #8d8d8d;
   --dot-grid: rgba(0, 0, 0, 0.05);
+
+  /* Motion */
+  --duration-fast: 150ms;      /* Hovers, button states */
+  --duration-normal: 250ms;    /* Modal / surface transitions */
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Shell / Cockpit Layout */
   --sidebar-width: 248px;
@@ -115,6 +129,23 @@
   --shell-text-muted: var(--color-neutral-500);
   --shell-accent: var(--color-primary);
   --shell-accent-soft: var(--color-primary-light);
+
+  /* Status badges (light theme; dark overrides in [data-theme="dark"]) */
+  --status-healthy-bg: #edf4ee;
+  --status-healthy-border: rgba(63, 107, 69, 0.18);
+  --status-healthy-text: #27462d;
+  --status-warning-bg: #f8efd9;
+  --status-warning-border: rgba(154, 106, 31, 0.18);
+  --status-warning-text: #744d0f;
+  --status-degraded-bg: #edf1f6;
+  --status-degraded-border: rgba(73, 98, 125, 0.18);
+  --status-degraded-text: #304255;
+  --status-failed-bg: #faece8;
+  --status-failed-border: rgba(155, 67, 56, 0.18);
+  --status-failed-text: #6e2d25;
+  --status-unknown-bg: #e0ddd5;
+  --status-unknown-border: rgba(111, 111, 97, 0.18);
+  --status-unknown-text: #525252;
 }
 
 [data-theme="dark"] {
@@ -163,6 +194,7 @@
   --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.5);
   --shadow-glow-primary: 0 0 14px rgba(196, 133, 78, 0.15);
+  --shadow-glow-success: 0 0 14px rgba(90, 158, 98, 0.15);
 
   --border-subtle: rgba(180, 160, 130, 0.12);
   --border-strong: rgba(180, 160, 130, 0.22);
