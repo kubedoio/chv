@@ -98,9 +98,12 @@ DEPLOY_STORD_SOCK="${QUAL_TEST_DIR}/stord/api.sock"
 DEPLOY_STORD_LOG="${QUAL_LOGS_DIR}/stord.log"
 
 # Pinned grpcurl (supply-chain discipline: pinned version + checksum
-# verification against the release's checksums.txt; qual_die on mismatch).
+# verification against the release's own checksums file; qual_die on
+# mismatch). NOTE the release names the checksum asset
+# "grpcurl_<ver>_checksums.txt" (not "checksums.txt").
 GRPCURL_VERSION="1.9.3"
 GRPCURL_TARBALL="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
+GRPCURL_CHECKSUMS="grpcurl_${GRPCURL_VERSION}_checksums.txt"
 GRPCURL_BASE="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}"
 
 # Scenario ports (loopback only; asserted free before use).
@@ -187,13 +190,15 @@ provision_grpcurl() {
     curl -fsSL --retry 3 -o "${GRPCURL_DIR}/${GRPCURL_TARBALL}" \
         "${GRPCURL_BASE}/${GRPCURL_TARBALL}" \
         || qual_die "grpcurl download failed (${GRPCURL_BASE}/${GRPCURL_TARBALL})"
-    curl -fsSL --retry 3 -o "${GRPCURL_DIR}/checksums.txt" \
-        "${GRPCURL_BASE}/checksums.txt" \
-        || qual_die "grpcurl checksums.txt download failed"
-    # Isolate the expected line and verify with sha256sum -c.
-    grep -F " ${GRPCURL_TARBALL}\$" "${GRPCURL_DIR}/checksums.txt" \
+    curl -fsSL --retry 3 -o "${GRPCURL_DIR}/${GRPCURL_CHECKSUMS}" \
+        "${GRPCURL_BASE}/${GRPCURL_CHECKSUMS}" \
+        || qual_die "grpcurl checksums download failed (${GRPCURL_BASE}/${GRPCURL_CHECKSUMS})"
+    # Isolate the expected line and verify with sha256sum -c (the line is
+    # "<sha256>  <tarball>"; grep with an end anchor, NOT -F — a literal
+    # '$' would never match).
+    grep " ${GRPCURL_TARBALL}\$" "${GRPCURL_DIR}/${GRPCURL_CHECKSUMS}" \
         > "${GRPCURL_DIR}/expected.sha256" \
-        || qual_die "no checksums.txt entry for ${GRPCURL_TARBALL}"
+        || qual_die "no checksum entry for ${GRPCURL_TARBALL} in ${GRPCURL_CHECKSUMS}"
     if (cd "$GRPCURL_DIR" && sha256sum -c expected.sha256 >/dev/null 2>&1); then
         qual_pass "grpcurl v${GRPCURL_VERSION} checksum verified against the release checksums.txt"
     else
@@ -456,9 +461,15 @@ extendedKeyUsage = serverAuth
 subjectAltName = DNS:localhost, IP:127.0.0.1"
 
 # Positive-leg identities: SRC client leaf + DST server leaf (SAN covers
-# both the endpoint IP and the dest_server_name DNS name).
+# both the endpoint IP and the dest_server_name DNS name) + a DST client
+# leaf. NOTE (product truth, recorded in the evidence doc): migration
+# receivers are NOT expressible without a client identity — `enabled =
+# true` makes load_migration_tls require all four client fields, so the
+# destination must carry an (unused-by-these-legs) client identity too;
+# only the source-only direction is expressible.
 make_leaf src-client m46-src-client "${CERTS_DIR}/ca.crt" "${CERTS_DIR}/ca.key" "$CLIENT_EXT"
 make_leaf dst-server m46-dst-server "${CERTS_DIR}/ca.crt" "${CERTS_DIR}/ca.key" "$SERVER_EXT"
+make_leaf dst-client m46-dst-client "${CERTS_DIR}/ca.crt" "${CERTS_DIR}/ca.key" "$CLIENT_EXT"
 
 # N4 material: a client leaf signed by the UNRELATED CA (DST still trusts
 # the good CA as its client_ca).
@@ -508,8 +519,8 @@ if openssl x509 -in "${CERTS_DIR}/expired-client.crt" -noout -checkend 0 >/dev/n
 else
     qual_pass "N7 precondition: expired-client.crt is genuinely expired (checkend)"
 fi
-assert_file_contains "N7 precondition: expired leaf carries the clientAuth EKU" \
-    "$(openssl x509 -in "${CERTS_DIR}/expired-client.crt" -noout -text 2>/dev/null | grep -A1 'Extended Key Usage' | head -2 | tr '\n' ' ')" \
+assert_contains "N7 precondition: expired leaf carries the clientAuth EKU" \
+    "$(openssl x509 -in "${CERTS_DIR}/expired-client.crt" -noout -text 2>/dev/null)" \
     "TLS Web Client Authentication"
 if openssl verify -CAfile "${CERTS_DIR}/ca.crt" "${CERTS_DIR}/src-client.crt" >/dev/null 2>&1; then
     qual_pass "good CA chain verifies (src-client)"
@@ -562,7 +573,9 @@ EOF
 }
 
 write_dst_config() {
-    # write_dst_config PATH SOCKET RUNTIME PORT CERT KEY CA
+    # write_dst_config PATH SOCKET RUNTIME PORT CERT KEY CA — receiver
+    # fields plus the (structurally required, see the identity note above)
+    # client identity: dest_server_name points at itself, harmless.
     cat > "$1" <<EOF
 socket_path = "${2}"
 runtime_dir = "${3}"
@@ -571,6 +584,10 @@ path_allowlist = ["${3}"]
 
 [migration]
 enabled = true
+client_cert_path = "${CERTS_DIR}/dst-client.crt"
+client_key_path = "${CERTS_DIR}/dst-client.key"
+ca_cert_path = "${7}"
+dest_server_name = "localhost"
 listen_addr = "127.0.0.1:${4}"
 server_cert_path = "${5}"
 server_key_path = "${6}"
@@ -628,6 +645,10 @@ assert_process_alive "DST stord alive" "$DST_PID"
 # The mTLS wiring, asserted from the daemons' own startup evidence.
 assert_file_contains "SRC logged migration mTLS enabled (credentials validated at startup)" \
     "$SRC_LOG" "storage migration mTLS enabled"
+# The source-only shape is legitimate (enabled=true + no receiver fields):
+# SRC must NOT open an inbound listener.
+assert_file_contains "SRC is source-only (receiver listener not configured)" \
+    "$SRC_LOG" "storage migration receiver listener not configured"
 assert_file_contains "DST logged the receiver listener bound (mTLS, client auth required)" \
     "$DST_LOG" "storage migration receiver listening on 127.0.0.1:${DST_PORT} (mTLS, client auth required)"
 tcp_port_open "$DST_PORT" \
