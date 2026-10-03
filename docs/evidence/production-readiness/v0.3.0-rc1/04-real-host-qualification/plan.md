@@ -376,4 +376,23 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   corrected on main by #398, and the sibling `disk-migration-protocol-spec.md`
   by #403 (both docs-only, post-run) — the specs now record quiescent-volume
   migration as the claimed mode, matching the #394 boundary above.
-- M4.7–M4.9: not started.
+- **M4.7 — IN PROGRESS** (scenario + evidence skeleton committed; live run
+  pending): `m4.7-faults.sh` (preamble + legs F1–F7 + final sweep) kills each
+  service *inside an operation's execution window* — CP mid-CreateVm dispatch,
+  agent mid-StartVm CH-spawn, stord mid boot-volume provision (the only
+  operator-reachable volume path on a core-managed node; standalone
+  attach/detach fails closed there — disclosed deviation), nwd mid
+  tap-provision, source stord mid-BULK_COPY (extends M4.6 N9 to the source
+  side), CP mid-BULK_COPY (the direct stord↔stord path must survive it) —
+  plus the idempotent-cleanup leg (re-delete, double-stop,
+  delete-vs-in-flight-create). Every leg asserts the forbidden outcomes
+  (duplicate VM processes, double-spawned daemons, lost/duplicated state,
+  orphaned disks/taps) with converges-OR-fails-cleanly disjunctions (#368
+  terminally-failed-but-clean is a PASS with disclosure); shared checkers
+  written once (CH-process counts, tap counts, row↔backing bijection,
+  both-journals-terminal, one-CreateVm-row-per-VM). Evidence skeleton:
+  `m4.7-faults.md` (status IN PROGRESS; findings § pre-registers the
+  suspected second-delete idempotency-key 500). Not claimed: CP-orchestrated
+  migration, host reboot, multi-node, M2.5 delete retention (warned, not
+  gated).
+- M4.8–M4.9: not started.
