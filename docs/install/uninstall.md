@@ -29,6 +29,7 @@ After standard removal, the following remain on disk:
 | `/etc/chv` | Configuration files (`*.toml`, certs, bootstrap token) | ✅ Yes |
 | `/var/log/chv` | Service logs | ✅ Yes |
 | `chv` user and group | System user | ✅ Yes |
+| `chv-stord` user and group | Reserved system user | ✅ Yes |
 
 ### What is removed
 
@@ -37,6 +38,7 @@ After standard removal, the following remain on disk:
 | `/usr/bin/chv*` | Binaries | ✅ Yes |
 | `/lib/systemd/system/chv-*.service` | Systemd units | ✅ Yes |
 | `/usr/share/chv` | UI assets, migrations | ✅ Yes |
+| `/usr/lib/tmpfiles.d/chv-node.conf` | tmpfiles entry (`chv-node` package) | ✅ Yes |
 
 ## Verify removal
 
@@ -60,10 +62,10 @@ Because data is preserved, you can reinstall CHV and resume operation:
 
 ```bash
 # Debian/Ubuntu
-sudo dpkg -i chv-controlplane_0.1.0_amd64.deb chv-node_0.1.0_amd64.deb chvctl_0.1.0_amd64.deb
+sudo dpkg -i chv-controlplane_<version>_amd64.deb chv-node_<version>_amd64.deb chvctl_<version>_amd64.deb
 
 # RHEL/Rocky/Alma
-sudo rpm -i chv-controlplane-0.1.0-1.x86_64.rpm chv-node-0.1.0-1.x86_64.rpm chvctl-0.1.0-1.x86_64.rpm
+sudo rpm -i chv-controlplane-<version>-1.x86_64.rpm chv-node-<version>-1.x86_64.rpm chvctl-<version>-1.x86_64.rpm
 
 # Start services
 sudo systemctl daemon-reload
@@ -101,11 +103,13 @@ sudo rm -rf /etc/chv
 sudo rm -rf /var/log/chv
 ```
 
-### 4. Remove user and group
+### 4. Remove users and groups
 
 ```bash
 sudo userdel chv
 sudo groupdel chv
+sudo userdel chv-stord
+sudo groupdel chv-stord
 ```
 
 ### 5. Clean up runtime directories
@@ -135,6 +139,7 @@ Critical files to back up:
 - `/var/lib/chv/agent-cache.json` — agent enrollment state
 - `/var/lib/chv/storage/` — volume data and images
 - `/etc/chv/certs/` — TLS certificates
+- `/etc/chv/encryption.env` — credential encryption key (required to decrypt stored S3 credentials)
 - `/etc/chv/bootstrap.token` — enrollment token (if still needed)
 
 ## Troubleshooting

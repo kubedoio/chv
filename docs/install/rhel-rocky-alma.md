@@ -10,12 +10,12 @@ This guide covers installing CHV packages on RHEL-compatible systems.
 | Rocky Linux | 9 |
 | AlmaLinux | 9 |
 
-CHV binaries are compiled for `x86_64`. Other architectures are not yet supported.
+Published CHV packages and release tarballs are `amd64` (`x86_64`) only. The all-in-one installer script (`scripts/install.sh`) also accepts `arm64` hosts, but no `arm64` artifacts are published.
 
 ## Prerequisites
 
 - Root or `sudo` access
-- `cloud-hypervisor` installed at `/usr/bin/cloud-hypervisor` (or let the agent download it automatically)
+- Cloud Hypervisor (the VMM) installed at `/usr/bin/cloud-hypervisor` — the packages neither install nor download it. Pre-stage the binary yourself, or use the all-in-one installer, which downloads it when missing.
 - KVM access (`/dev/kvm` readable)
 
 ## Option 1 — Package repository (future)
@@ -44,10 +44,10 @@ Download the `.rpm` packages from the [GitHub Releases](https://github.com/kubed
 
 ### 1. Download packages
 
-Replace `VERSION` with the release you want (e.g., `0.1.0`):
+Set `VERSION` to the release you want, without the leading `v`:
 
 ```bash
-VERSION="0.1.0"
+VERSION="<version>"
 BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 
 curl -sLO "${BASE_URL}/chv-controlplane-${VERSION}-1.x86_64.rpm"
@@ -132,7 +132,7 @@ To upgrade to a newer version, download the new packages and install them over t
 
 ```bash
 # Download new packages
-VERSION="0.1.1"
+VERSION="<new-version>"
 BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane-${VERSION}-1.x86_64.rpm"
 curl -sLO "${BASE_URL}/chv-node-${VERSION}-1.x86_64.rpm"
@@ -187,7 +187,7 @@ sudo journalctl -u chv-agent -n 50
 Common issues:
 - Missing `jwt_secret` or too short
 - TLS certificates not found at configured paths
-- `control_plane_addr` unreachable from the agent host
+- `control_plane_addr` unreachable from the node
 
 ### `/dev/kvm` not accessible
 

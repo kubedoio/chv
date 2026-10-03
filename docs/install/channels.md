@@ -13,7 +13,7 @@ CHV distributes packages through multiple channels. Choose the channel that matc
 
 ## Stable
 
-Stable releases are tagged with SemVer versions: `v0.1.0`, `v0.2.0`, etc.
+Stable releases are tagged with SemVer versions, for example `v1.2.3`.
 
 - **Quality:** Full CI pipeline passes, container smoke tests pass, lifecycle tests pass, changelog entry required.
 - **Artifacts:** `.deb`, `.rpm`, tarball, checksums, SBOM, build provenance attestation.
@@ -22,8 +22,10 @@ Stable releases are tagged with SemVer versions: `v0.1.0`, `v0.2.0`, etc.
 
 ### Install stable
 
+Set `VERSION` to the release you want, without the leading `v`:
+
 ```bash
-VERSION="0.1.0"
+VERSION="<version>"
 BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
@@ -35,7 +37,7 @@ Full instructions: [Debian / Ubuntu](debian-ubuntu.md) or [RHEL / Rocky / AlmaLi
 
 ## RC (Release Candidate)
 
-RC releases are tagged as `v0.1.0-rc.1`, `v0.1.0-rc.2`, etc.
+RC releases are tagged as `v<version>-rc.1`, `v<version>-rc.2`, and so on.
 
 - **Quality:** Same CI pipeline as stable, but may contain unfinished edge cases.
 - **Artifacts:** Same as stable.
@@ -57,15 +59,15 @@ Download from the GitHub Pre-release page. The install command is identical to s
 Nightly packages are built automatically from every merge to `main`.
 
 - **Quality:** Automated tests pass, but the code may contain regressions, breaking changes, or incomplete features.
-- **Artifacts:** `.deb`, `.rpm`, checksums. SBOM is generated. Provenance attestation may be generated.
+- **Artifacts:** `.deb`, `.rpm`, checksums.
 - **Support:** No support guarantee. File issues against the specific commit if you find bugs.
-- **Upgrade path:** Can upgrade to RC or stable. Nightly versions sort before RC and stable in package manager version ordering.
+- **Upgrade path:** Nightly and RC versions carry a `~` pre-release suffix on both `.deb` and `.rpm` (the CI derives one version string and stamps it on both formats). `~` sorts before the stable release in Debian and RPM ordering alike, so nightly → RC → stable is a forward upgrade on both formats.
 
 ### Version format
 
 ```text
-0.1.0~nightly.20260510.g0872c4a7   (Debian)
-0.1.0^nightly.20260510.g0872c4a7   (RPM)
+<version>~nightly.20260510.g0872c4a7   (Debian)
+<version>^nightly.20260510.g0872c4a7   (RPM)
 ```
 
 The version includes the date and git short SHA, making every nightly build uniquely identifiable.
@@ -105,17 +107,24 @@ Every pull request to `main` triggers a package build. The packages are uploaded
 
 ## Version precedence
 
-Package managers order versions from oldest to newest:
+Package managers order versions from oldest to newest — the same order on both formats as shipped (the CI stamps the Debian-derived `~` string on the `.rpm` too):
 
 ```text
 nightly < RC < stable
 ```
 
 Examples:
-- `0.1.0~nightly.20260510.g0872c4a7` < `0.1.0~rc.1` < `0.1.0`
-- `0.1.0-0.1.rc1` < `0.1.0` (RPM)
+- `<version>~nightly.20260510.g0872c4a7` < `<version>~rc.1` < `<version>` (both formats, as shipped)
 
-This means upgrading from nightly → RC → stable is always a forward upgrade.
+`~` is the pre-release operator in both Debian and RPM version comparison,
+so upgrading from nightly → RC → stable is always a forward upgrade.
+
+One caveat: `scripts/version.sh` has a per-format RPM path that emits a `^`
+(post-release) suffix — `^nightly` would sort **above** the same-base
+stable in RPM. No workflow uses that path today. If the pipeline ever
+adopts per-format version strings, RPM nightly ordering flips to
+above-stable (tracked issue; see
+[versioning policy](../release/versioning-policy.md) §3.1).
 
 ## Switching channels
 
@@ -125,10 +134,10 @@ Install the stable release over the nightly package:
 
 ```bash
 # Debian/Ubuntu
-sudo dpkg -i chv-controlplane_0.1.0_amd64.deb chv-node_0.1.0_amd64.deb chvctl_0.1.0_amd64.deb
+sudo dpkg -i chv-controlplane_<version>_amd64.deb chv-node_<version>_amd64.deb chvctl_<version>_amd64.deb
 
 # RHEL/Rocky/Alma
-sudo rpm -U chv-controlplane-0.1.0-1.x86_64.rpm chv-node-0.1.0-1.x86_64.rpm chvctl-0.1.0-1.x86_64.rpm
+sudo rpm -U chv-controlplane-<version>-1.x86_64.rpm chv-node-<version>-1.x86_64.rpm chvctl-<version>-1.x86_64.rpm
 ```
 
 ### Stable → Nightly (not recommended)
