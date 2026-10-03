@@ -13,8 +13,7 @@ Nightly packages let you test the latest features, verify bug fixes, and validat
 Nightly versions include the date and git short SHA:
 
 ```text
-<version>~nightly.20260510.g0872c4a7   (Debian)
-<version>^nightly.20260510.g0872c4a7   (RPM)
+<version>~nightly.20260510.g0872c4a7   (Debian and RPM, as shipped by CI)
 ```
 
 This guarantees that each nightly build is uniquely identifiable and traceable to a specific commit.
@@ -115,7 +114,7 @@ sudo apt-get install -f
 sudo apt upgrade
 
 # RHEL/CentOS/Fedora
-sudo rpm -U chv-controlplane-<version>^nightly.NEW-1.x86_64.rpm
+sudo rpm -U chv-controlplane-<version>~nightly.NEW-1.x86_64.rpm
 
 # Or via dnf once the repo is configured
 sudo dnf upgrade
@@ -123,14 +122,27 @@ sudo dnf upgrade
 
 ### From nightly to stable
 
-Version precedence between nightly and stable differs by format:
+The CI derives one version string with `scripts/version.sh --deb` and
+stamps it on both the `.deb` and the `.rpm` (`scripts/build-packages.sh`
+applies a single `PACKAGE_VERSION`). So a shipped nightly or RC carries a
+`~` pre-release suffix on **both** formats, and sorts below the stable
+release on both:
 
 | Comparison | Result |
 |------------|--------|
-| `<version>` vs `<version>~nightly.20260510.g0872c4a7` | `<version>` is newer (Debian) |
-| `<version>` vs `<version>^nightly.20260510.g0872c4a7` | The nightly is newer (RPM) |
+| `<version>` vs `<version>~nightly.20260510.g0872c4a7` (`.deb`, as shipped) | `<version>` is newer |
+| `<version>` vs `<version>~nightly.20260510.g0872c4a7` (`.rpm`, as shipped) | `<version>` is newer |
 
-On Debian, `~` sorts below the stable release. Installing a stable release over a nightly is a normal upgrade:
+`~` is the pre-release operator in both Debian and RPM version ordering.
+
+`scripts/version.sh` also has a per-format RPM channel path that emits a
+`^` (post-release) suffix — `^nightly.…` would sort **above** the
+same-base stable in RPM. No workflow uses that path today; if the
+pipeline ever adopts per-format version strings, RPM nightly ordering
+flips to above-stable (tracked issue).
+
+Installing a stable release over a nightly is a normal upgrade on both
+formats:
 
 ```bash
 # Debian/Ubuntu — stable .deb files
@@ -138,7 +150,10 @@ sudo dpkg -i chv-controlplane_<version>_amd64.deb chv-node_<version>_amd64.deb c
 sudo apt-get install -f
 ```
 
-On RPM, `^` marks a post-release snapshot and sorts above the stable release with the same base version. Installing the same-base stable over an RPM nightly is a downgrade. Use `rpm -U --oldpackage` or `dnf downgrade` for that. Upgrading to the next stable version is a normal upgrade:
+On RPM, the same rule holds as shipped: the CI stamps the Debian-derived
+`~` version on the RPM too, so installing the stable release over a
+nightly is a normal upgrade. Only the unused `version.sh --rpm` channel
+path (see above) would sort above stable:
 
 ```bash
 # RHEL/CentOS/Fedora — stable .rpm files

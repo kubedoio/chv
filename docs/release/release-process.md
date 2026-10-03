@@ -203,11 +203,11 @@ See [Package Contract](package-contract.md) for the manual rollback procedure.
 | `vX.Y.Z-rc.1` | `X.Y.Z~rc.1` | `X.Y.Z-0.1.rc1` |
 
 Debian uses `~` for pre-release sorting (`X.Y.Z~rc.1 < X.Y.Z`).  
-RPM uses `^` for nightly/PR and a release segment for RC (`X.Y.Z-0.1.rc1 < X.Y.Z-1`).
+RPM uses a release segment for RC (`X.Y.Z-0.1.rc1 < X.Y.Z-1`). `version.sh --rpm` also has a `^` post-release path for nightly/PR that no workflow currently uses.
 
 ### Channel precedence
 
-On Debian, package managers treat these versions in ascending order:
+Package managers treat these versions in ascending order (the CI stamps the Debian-derived `~` string on both formats, so the same ordering ships for `.deb` and `.rpm`):
 
 ```text
 <version>~nightly.20260510.g0872c4a7   (nightly)
@@ -215,7 +215,7 @@ On Debian, package managers treat these versions in ascending order:
 <version>                              (stable)
 ```
 
-On Debian, upgrading from nightly → RC → stable is always a forward upgrade. On RPM, RC also sorts below stable through its release segment. RPM nightlies use `^`, which sorts above the stable release with the same base version. See [Nightly Packages](nightly-packages.md) for the RPM nightly-to-stable path.
+Upgrading from nightly → RC → stable is always a forward upgrade on both formats as shipped. See [Nightly Packages](nightly-packages.md) for the version-format details and the unused `^` path.
 
 ## Workflow details
 

@@ -258,7 +258,7 @@ git push origin v<version>-rc.1
 | Release workflow fails at "Create GitHub Release" | Missing `contents: write` permission | Check workflow `permissions` block |
 | Signing step shows "SIGNING NOT CONFIGURED" | Secrets not set | Add `CHV_RELEASE_GPG_KEY` or `CHV_RELEASE_COSIGN_KEY` to repo secrets |
 | `local: can only be used in a function` | Bash `local` outside function | Fix: remove `local` keyword from top-level code |
-| Nightly RPM sorts newer than the stable release | `^` in an RPM version marks a post-release snapshot and sorts above the base version | Expected behavior. Upgrade to the next stable version, or force the same-base stable with `rpm -U --oldpackage` |
+| Nightly/RC RPM sorts below the stable release | CI stamps the Debian-derived `~` pre-release string on both formats; `~` sorts before the base version in RPM too | Expected behavior — nightly → RC → stable is a forward upgrade on both formats. (The unused `version.sh --rpm` `^` path would sort above stable; see versioning-policy §3.1) |
 
 ---
 
