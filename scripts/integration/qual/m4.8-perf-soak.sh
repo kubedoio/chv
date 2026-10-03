@@ -396,15 +396,23 @@ record_db_sizes() {
 log_off() { stat -c %s "$1" 2>/dev/null || echo 0; }
 
 # log_shapes_between FILE START_BYTE END_BYTE — normalized distinct
-# message shapes in the byte window: strip the leading timestamp, then
-# mask UUIDs / hex / integers (ids, ports, durations, counters) so a
-# repeated message with varying values collapses to ONE shape.
+# message shapes in the byte window: strip the leading timestamp and ANSI
+# color codes, then mask UUIDs / 0x-hex / bare hex runs ≥8 chars / integers
+# (ids, ports, durations, counters) so a repeated message with varying
+# values collapses to ONE shape. The bare-hex8 mask is load-bearing: VM
+# ids, op-id fragments, and tap names are 8-hex-char words — without the
+# mask every cycle's new VM re-inflates the shape set (~9 kinds × 3 cycles
+# = 27 "new" shapes in run 1 with byte-identical halves, the tell that the
+# normalizer — not the product — was at fault; with it, run 1's logs
+# normalize to 1–2 new shapes per daemon across halves).
 log_shapes_between() {
     tail -c +"$(( $2 + 1 ))" "$1" 2>/dev/null | head -c "$(( $3 - $2 ))" \
         | sed -E \
             -e 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z?[[:space:]]*//' \
+            -e 's/\x1b\[[0-9;]*m//g' \
             -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<UUID>/g' \
             -e 's/0x[0-9a-fA-F]+/<HEX>/g' \
+            -e 's/[0-9a-fA-F]{8,}/<HEX8>/g' \
             -e 's/[0-9]+/<N>/g' \
         | sort -u
 }
