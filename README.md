@@ -193,6 +193,7 @@ cargo build --workspace
 | [`docs/install/`](./docs/install) | Installation guides (Debian, RHEL, channels, uninstall) |
 | [`docs/release/`](./docs/release) | Release process, versioning, and artifact verification |
 | [`docs/governance/`](./docs/governance) | Repository governance: branch protection and hardening records |
+| [`docs/prompts/`](./docs/prompts) | Bounded execution prompt packs (CellHV Core, production readiness, ADR-022) |
 | [`DESIGN.md`](./DESIGN.md) | Design system (typography, color, spacing, dark mode) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development workflow, code style, and PR process |
