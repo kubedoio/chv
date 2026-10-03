@@ -53,7 +53,7 @@ metadata:
 
 ## Servers
 
-Servers are CHV hosts/hypervisors. MVP should register or reference hosts, not perform bare-metal provisioning.
+`servers` lists CHV nodes. The field name is contract-anchored; see the terminology map in the [README](../README.md). The MVP registers or references nodes. It does not provision bare metal.
 
 ```yaml
 servers:
@@ -152,6 +152,8 @@ zfs
 
 Backup targets are separate and must not be modeled as normal datastores.
 
+The model also accepts `pool` as an alternative location field to `path`. A datastore may reference a secret with `secret_ref`.
+
 ## Backup targets
 
 ```yaml
@@ -172,6 +174,13 @@ images:
     source: local://images/ubuntu-24.04.qcow2
     format: qcow2
     datastore: local-nvme
+```
+
+Allowed formats:
+
+```text
+qcow2
+raw
 ```
 
 ## Templates

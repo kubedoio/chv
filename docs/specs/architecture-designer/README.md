@@ -3,11 +3,11 @@
 > **Status:** Implemented (Phases 0–7 shipped 2026-06; **GO disposition recorded** 2026-06-16). The ADRs in this section are `Accepted`. See [`docs/plans/2026-06-13-architecture-designer-implementation-plan.md`](../../plans/2026-06-13-architecture-designer-implementation-plan.md) for the phased implementation history, [`docs/release/architecture-designer-release-notes.md`](../../release/architecture-designer-release-notes.md) for the consolidated release notes, and [`go-no-go-2026-06-16.md`](go-no-go-2026-06-16.md) for the recorded ship-gate decision.
 
 Date: 2026-06-13
-Project: CHV / CellHV
+Project: CHV
 
 ## Purpose
 
-The Architecture Designer is a planned WebUI feature that adds a **design-time** topology editor above the current Fleet Overview. Users will be able to visually compose infrastructure topologies (hosts, networks, datastores, images, templates, instances, users, roles, backup policies), save them, export them as YAML, validate them against the current fleet, generate a plan, and deploy the topology through the existing CHV task system.
+The Architecture Designer is a WebUI feature. It adds a **design-time** topology editor above the Fleet Overview. Users compose topologies from the YAML resource kinds (`servers`, `networks`, `datastores`, `images`, `templates`, `instances`, `ssh_keys`, `instance_users`, `roles`, `users`, `backup_targets`, `backup_policies`, `projects`). They save a topology, export it as YAML, and validate it against the current fleet. They then generate a plan and deploy the topology through the existing CHV task system.
 
 The feature is intentionally narrower than a generic TOSCA/Cloudify engine — see [ADR-006-Designer](../adr/006-designer-no-tosca-engine.md).
 
@@ -54,7 +54,7 @@ docs/
 
 - [`contracts/yaml-contract.md`](contracts/yaml-contract.md) — `CHVArchitecture` YAML structure and rules
 - [`contracts/graph-contract.md`](contracts/graph-contract.md) — Topology graph model (nodes/edges)
-- [`contracts/api-contract.md`](contracts/api-contract.md) — Designer BFF API surface
+- [`contracts/api-contract.md`](contracts/api-contract.md) — Designer backend-for-frontend (BFF) API surface
 - [`contracts/validation-plan-contract.md`](contracts/validation-plan-contract.md) — Validation result + plan result formats
 
 ## Examples and schema
@@ -73,7 +73,7 @@ See [`docs/plans/2026-06-13-architecture-designer-roadmap.md`](../../plans/2026-
 
 ## Core principle
 
-CHV must not become a generic Cloudify/TOSCA clone. The Designer borrows the useful pattern from topology-oriented orchestrators but stays scoped to CHV-native virtualization resources: hosts, networks, datastores, images, templates, instances, users, roles, permissions, backup targets, backup policies.
+CHV must not become a generic Cloudify/TOSCA clone. The Designer borrows the useful pattern from topology-oriented orchestrators but stays scoped to CHV-native virtualization resources: nodes, VMs, networks, datastores, images, templates, users, roles, permissions, backup targets, and backup policies.
 
 ## Non-goals for the first implementation
 
@@ -92,4 +92,13 @@ A user can create a topology in the WebUI, save it, export the generated YAML, r
 
 ## Terminology
 
-The Designer uses the same operator-facing terminology as the rest of the WebUI: **Default Cloud → Hosts → Instances** (per ADR-006-WebUI). The YAML contract uses `servers` for the host list and `instances` for the VM list.
+The Designer uses the same operator-facing terminology as the rest of the WebUI: **Default Cloud → Hosts → Instances** (per [ADR-006-WebUI](../adr/006-webui-navigation-revised.md)). This section maps the terms used across the Designer docs.
+
+| Context | Term | Notes |
+|---|---|---|
+| Prose in these docs | node, VM | Approved documentation terms. |
+| WebUI labels | Hosts, Instances | Deliberate operator-facing synonyms per ADR-006-WebUI. |
+| YAML contract fields | `servers`, `instances` | The `servers` section lists nodes; the `instances` section lists VMs. |
+| Code identifiers | `instance.placement.server`, `HOST_NOT_FOUND` | Contract-anchored; keep them byte-for-byte. |
+
+The YAML contract field names and finding codes are stable contract surface. Do not rename them to match prose terminology.

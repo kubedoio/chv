@@ -4,6 +4,8 @@
 
 The graph JSON stores visual editor layout and node/edge metadata. It is not the authoritative infrastructure contract. The authoritative desired-state contract is `CHVArchitecture` YAML.
 
+The shipped canvas implements the eight MVP node kinds listed below. The remaining kinds (`root`, `backup_target`, `backup_policy`) are design targets and are not yet in the canvas model.
+
 ## Graph structure
 
 ```json
@@ -87,7 +89,9 @@ uses_backup_policy
 | user | role | has_role |
 | instance | backup_policy | uses_backup_policy |
 
-Invalid edge combinations must be rejected in the UI before saving.
+The UI must reject invalid edge combinations before saving.
+
+The MVP canvas enforces every row except `instance → backup_policy`. That row ships when backup-policy nodes are added to the canvas.
 
 ## Synchronization rules
 
