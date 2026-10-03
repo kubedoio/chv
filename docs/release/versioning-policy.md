@@ -39,25 +39,24 @@ All other version references are derived from it:
 | Channel | Purpose | Example Version String |
 |---------|---------|------------------------|
 | `stable` | Production-ready releases | `<version>` |
-| `rc` | Release candidates for soak-testing | `<version>~rc.1` (Debian), `<version>-0.1.rc1` (RPM) |
+| `rc` | Release candidates for soak-testing | `<version>~rc.1` |
 | `nightly` | Automated builds from `main` | `<version>~nightly.<date>.g<sha>` (Debian and RPM, as shipped by CI) |
 | `pr` | Builds from pull requests | `<version>~pr<N>.<date>.g<sha>` (Debian and RPM, as shipped by CI) |
 
 ### 3.1 Package Version Mapping
 
-The following table shows how `scripts/version.sh` maps a single SemVer to Debian and RPM version strings per channel. Note: CI currently derives one string with `version.sh --deb` (plus `CHV_PKG_PRERELEASE`) and stamps it on both formats, so the **as-shipped** RPM versions are the Debian-column strings.
+`scripts/version.sh` maps a single SemVer to the **same** version string for Debian and RPM packages: every pre-release channel uses the `~` suffix, which is the pre-release operator in both `dpkg` and RPM's `rpmvercmp`, so all pre-releases sort before the stable release on both formats. CI currently derives one string with `version.sh --deb` (plus `CHV_PKG_PRERELEASE`) and stamps it on both formats, so the **as-shipped** RPM versions are these strings as well.
 
-| Channel | SemVer | Debian Version | RPM Version (`version.sh --rpm` channel path) |
-|---------|--------|----------------|-------------|
-| `stable` | `X.Y.Z` | `<version>` | `<version>` |
-| `rc` | `X.Y.Z` | `<version>~rc.1` | `<version>-0.1.rc1` |
-| `nightly` | `X.Y.Z` | `<version>~nightly.<date>.g<sha>` | `<version>^nightly.<date>.g<sha>` |
-| `pr` | `X.Y.Z` | `<version>~pr<N>.<date>.g<sha>` | `<version>^pr<N>.<date>.g<sha>` |
+| Channel | SemVer | Package Version (`.deb` and `.rpm`) |
+|---------|--------|-------------------------------------|
+| `stable` | `X.Y.Z` | `<version>` |
+| `rc` | `X.Y.Z` | `<version>~rc.1` |
+| `nightly` | `X.Y.Z` | `<version>~nightly.<date>.g<sha>` |
+| `pr` | `X.Y.Z` | `<version>~pr<N>.<date>.g<sha>` |
 
 > **Notes**
 > - Debian uses `~` to ensure prereleases sort **before** the stable release in `dpkg --compare-versions`.
-> - RPM carries RC in the release segment: `<version>-0.1.rc1` sorts before the stable `<version>-1`.
-> - The `^` entries are the `version.sh --rpm` channel-argument output. In RPM version comparison, `^` is the post-release operator and sorts **after** the stable release with the same base version. **No workflow uses this path today** — CI stamps the Debian-derived `~` string on the RPM, which sorts before stable. If the pipeline ever adopts per-format version strings, RPM nightly ordering flips to above-stable (tracked issue).
+> - RPM's `rpmvercmp` treats `~` the same way: `<version>~rc.1 < <version>`. The `version.sh --rpm` channel path emits the same `~` strings as `--deb`; its former `^` output (RPM's post-release operator, which sorts **after** the stable release) was removed so that nightly < RC < stable holds on both formats even if per-format version strings are ever adopted (#432).
 
 ### 3.2 Git Tags
 

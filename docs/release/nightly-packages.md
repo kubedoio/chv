@@ -135,11 +135,12 @@ release on both:
 
 `~` is the pre-release operator in both Debian and RPM version ordering.
 
-`scripts/version.sh` also has a per-format RPM channel path that emits a
-`^` (post-release) suffix — `^nightly.…` would sort **above** the
-same-base stable in RPM. No workflow uses that path today; if the
-pipeline ever adopts per-format version strings, RPM nightly ordering
-flips to above-stable (tracked issue).
+`scripts/version.sh`'s per-format RPM channel path emits the same `~`
+suffix (`--rpm nightly` produces the same
+`<version>~nightly.…` string as `--deb`), so the below-stable ordering
+holds even if the pipeline ever adopts per-format version strings. That
+path previously emitted a `^` (post-release) suffix, which would have
+sorted **above** the same-base stable in RPM; it was removed (#432).
 
 Installing a stable release over a nightly is a normal upgrade on both
 formats:
@@ -152,8 +153,7 @@ sudo apt-get install -f
 
 On RPM, the same rule holds as shipped: the CI stamps the Debian-derived
 `~` version on the RPM too, so installing the stable release over a
-nightly is a normal upgrade. Only the unused `version.sh --rpm` channel
-path (see above) would sort above stable:
+nightly is a normal upgrade:
 
 ```bash
 # RHEL/CentOS/Fedora — stable .rpm files

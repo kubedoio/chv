@@ -68,17 +68,17 @@ if [ "$RPM_STABLE" != "$VERSION" ]; then
     error "version.sh --rpm stable returned '$RPM_STABLE', expected '$VERSION'"
 fi
 
-# rpm rc 1
+# rpm rc 1 — identical to deb: both formats use the ~ pre-release suffix
 RPM_RC1="$("${REPO_ROOT}/scripts/version.sh" --rpm rc 1)"
-EXPECTED_RPM_RC1="${VERSION}-0.1.rc1"
+EXPECTED_RPM_RC1="${VERSION}~rc.1"
 if [ "$RPM_RC1" != "$EXPECTED_RPM_RC1" ]; then
     error "version.sh --rpm rc 1 returned '$RPM_RC1', expected '$EXPECTED_RPM_RC1'"
 fi
 
-# rpm nightly
+# rpm nightly — identical to deb: both formats use the ~ pre-release suffix
 RPM_NIGHTLY="$("${REPO_ROOT}/scripts/version.sh" --rpm nightly)"
-if ! [[ "$RPM_NIGHTLY" =~ ^${VERSION}\^[a-z0-9]+\.[0-9]{8}(\.g[0-9a-f]+)?$ ]]; then
-    error "version.sh --rpm nightly returned '$RPM_NIGHTLY', expected '${VERSION}^nightly.YYYYMMDD[.gSHORTSHA]'"
+if ! [[ "$RPM_NIGHTLY" =~ ^${VERSION}~nightly\.[0-9]{8}(\.g[0-9a-f]+)?$ ]]; then
+    error "version.sh --rpm nightly returned '$RPM_NIGHTLY', expected '${VERSION}~nightly.YYYYMMDD[.gSHORTSHA]'"
 fi
 
 # ---------------------------------------------------------------------------

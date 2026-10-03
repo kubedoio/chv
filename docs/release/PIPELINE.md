@@ -78,7 +78,7 @@
 ### Version Derivation
 ```
 VERSION ──▶ scripts/version.sh ──▶ deb: <version>~rc.1
-                              ──▶ rpm: <version>-0.1.rc1
+                              ──▶ rpm: <version>~rc.1
                               ──▶ nightly: <version>~nightly.<date>.g<sha>
 ```
 - Called by: `scripts/build-packages.sh`, CI workflows, Makefile
@@ -206,10 +206,14 @@ make bump-version BUMP_TYPE=patch   # or: minor / major
 ./scripts/version.sh --deb        # <version>
 ./scripts/version.sh --rpm        # <version>
 ./scripts/version.sh --deb rc 1   # <version>~rc.1
-./scripts/version.sh --rpm rc 1   # <version>-0.1.rc1
+./scripts/version.sh --rpm rc 1   # <version>~rc.1
 ./scripts/version.sh --deb nightly   # <version>~nightly.<date>.g<sha>
-./scripts/version.sh --rpm nightly   # <version>^nightly.<date>.g<sha>
+./scripts/version.sh --rpm nightly   # <version>~nightly.<date>.g<sha>
 ```
+
+`--rpm` and `--deb` produce identical output: both formats use the `~`
+pre-release suffix, which sorts below the stable release in `dpkg` and in
+RPM's `rpmvercmp` alike (#432).
 
 ### Release a New Version
 
@@ -258,7 +262,7 @@ git push origin v<version>-rc.1
 | Release workflow fails at "Create GitHub Release" | Missing `contents: write` permission | Check workflow `permissions` block |
 | Signing step shows "SIGNING NOT CONFIGURED" | Secrets not set | Add `CHV_RELEASE_GPG_KEY` or `CHV_RELEASE_COSIGN_KEY` to repo secrets |
 | `local: can only be used in a function` | Bash `local` outside function | Fix: remove `local` keyword from top-level code |
-| Nightly/RC RPM sorts below the stable release | CI stamps the Debian-derived `~` pre-release string on both formats; `~` sorts before the base version in RPM too | Expected behavior — nightly → RC → stable is a forward upgrade on both formats. (The unused `version.sh --rpm` `^` path would sort above stable; see versioning-policy §3.1) |
+| Nightly/RC RPM sorts below the stable release | CI stamps the Debian-derived `~` pre-release string on both formats; `~` sorts before the base version in RPM too | Expected behavior — nightly → RC → stable is a forward upgrade on both formats (`version.sh --rpm` emits the same `~` strings as `--deb`; see versioning-policy §3.1) |
 
 ---
 
