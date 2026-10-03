@@ -257,7 +257,9 @@ close_volume() {
     resp="$(stord_rpc "$sock" CloseVolume \
         "{\"volumeId\":\"${volid}\",\"attachmentHandle\":\"${handle}\"}")" \
         || { qual_error "CloseVolume RPC failed for ${volid}"; return 1; }
-    status="$(printf '%s' "$resp" | jq -r '.result.status // empty')"
+    # CloseVolume returns a bare Result (no wrapper object) — unlike
+    # OpenVolume/TriggerDiskMigration which wrap it as .result.
+    status="$(printf '%s' "$resp" | jq -r '.status // empty')"
     if [ "$status" = "OK" ]; then
         qual_pass "CloseVolume accepted for ${volid} (session closed)"
         return 0
@@ -383,11 +385,15 @@ expect_stord_startup_failure() {
     assert_file_contains "${desc}: error names the cause" "$log" "$needle"
 }
 
-# tcp_port_free PORT — a loopback bind on the port succeeds.
+# tcp_port_free PORT — a loopback bind on the port succeeds. SO_REUSEADDR is
+# set so that TIME_WAIT sockets left by closed migration connections do not
+# read as "in use" (an active listener still fails the bind, which is the
+# semantic we want: can a fresh listener bind here?).
 tcp_port_free() {
     python3 - "$1" <<'PYEOF' 2>/dev/null
 import socket, sys
 s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
     s.bind(("127.0.0.1", int(sys.argv[1])))
     raise SystemExit(0)
@@ -808,10 +814,23 @@ expect_stord_startup_failure "N1b receiver fields with enabled=false" \
 # Legs N2/N3/N4/N7 — wrong-identity SOURCES: each starts (the material is
 # structurally valid), triggers a migration at the LIVE DST, and must fail
 # closed at the TLS handshake. run_negative_src NAME CA CERT KEY DEST_NAME
+# ERROR_NEEDLE [LOG_NEEDLE]
+#
+# Two distinct client-side manifestations, both observed against the pinned
+# candidate (see failed-migrations.jsonl):
+#   - client-side rejection (SRC cannot validate DST's cert: N2 wrong CA,
+#     N3 wrong server name): the tonic transport error surfaces as
+#     "failed to connect to peer with mTLS: transport error" — the rustls
+#     detail (unknown issuer vs name mismatch) is NOT surfaced (finding).
+#   - server-side rejection (DST rejects SRC's client identity: N4 rogue
+#     CA, N7 expired leaf): in TLS 1.3 the SRC's handshake completes before
+#     DST processes its cert flight, so the alert lands mid-RPC and the
+#     task error is "operation was canceled" — opaque to the operator
+#     (finding), while the DST logs nothing at all.
 # ===========================================================================
 run_negative_src() {
-    local name="$1" ca="$2" cert="$3" key="$4" dest="$5" needle="$6"
-    local dir sock log pid vol handle mid err
+    local name="$1" ca="$2" cert="$3" key="$4" dest="$5" needle="$6" log_needle="${7:-}"
+    local dir sock log pid vol handle mid err bytes
     dir="${M46_DIR}/${name}"
     mkdir -p "$dir"
     sock="${dir}/api.sock"
@@ -829,8 +848,24 @@ run_negative_src() {
         phase_is "$sock" "$mid" "FAILED" \
         || qual_error "N-${name}: task never failed"
     err="$(migration_field "$sock" "$mid" errorMessage)"
-    assert_contains "N-${name}: error indicates the mTLS connect failure" "$err" "failed to connect to peer with mTLS"
-    assert_contains "N-${name}: ${needle}" "$err" "$needle"
+    assert_contains "N-${name}: error is the deterministic mTLS failure text" "$err" "$needle"
+    if [ -n "$log_needle" ]; then
+        assert_file_contains "N-${name}: SRC log shows the leg's distinguishing input" \
+            "$log" "$log_needle"
+    fi
+    # Fail-closed: nothing left the source and the receiver never
+    # materialized a receiving volume for this identity-rejected source.
+    bytes="$(migration_field "$sock" "$mid" bytesTransferred)"
+    if [ "$bytes" = "0" ]; then
+        qual_pass "N-${name}: zero bytes transferred (fail-closed)"
+    else
+        qual_error "N-${name}: bytes were transferred despite rejection (${bytes})"
+    fi
+    if [ ! -e "${DST_DIR}/${vol}.img" ]; then
+        qual_pass "N-${name}: no receiving volume created on the destination"
+    else
+        qual_error "N-${name}: destination materialized a receiving volume (${DST_DIR}/${vol}.img)"
+    fi
     record_migration_error "leg-${name}" "$sock" "$mid"
     stop_scenario_stord "$pid" "${name}"
     cp "$log" "${EVIDENCE_DIR}/leg-${name}-stord.log" 2>/dev/null || true
@@ -838,27 +873,30 @@ run_negative_src() {
 
 # --- Leg N2: wrong CA -------------------------------------------------------
 qual_info "--- Leg N2: SRC trusts an unrelated CA → destination certificate cannot validate"
+# Differential: identical to Leg P except ca2.crt instead of ca.crt — the
+# failure is attributable to the trust anchor alone.
 run_negative_src n2 "${CERTS_DIR}/ca2.crt" \
     "${CERTS_DIR}/src-client.crt" "${CERTS_DIR}/src-client.key" \
-    "localhost" "invalid peer certificate"
+    "localhost" "failed to connect to peer with mTLS: transport error"
 
 # --- Leg N3: wrong server name ----------------------------------------------
 qual_info "--- Leg N3: dest_server_name does not match the destination certificate SAN"
 run_negative_src n3 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/src-client.crt" "${CERTS_DIR}/src-client.key" \
-    "wrong.example" "invalid peer certificate"
+    "wrong.example" "failed to connect to peer with mTLS: transport error" \
+    "wrong.example"
 
 # --- Leg N4: wrong destination identity (from the receiver side) ------------
 qual_info "--- Leg N4: SRC presents a client identity from the unrelated CA → DST rejects the handshake"
 run_negative_src n4 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/rogue-client.crt" "${CERTS_DIR}/rogue-client.key" \
-    "localhost" "failed to connect to peer with mTLS"
+    "localhost" "operation was canceled"
 
 # --- Leg N7: expired client certificate --------------------------------------
 qual_info "--- Leg N7: SRC's client leaf is expired → handshake-time rejection"
 run_negative_src n7 "${CERTS_DIR}/ca.crt" \
     "${CERTS_DIR}/expired-client.crt" "${CERTS_DIR}/expired-client.key" \
-    "localhost" "failed to connect to peer with mTLS"
+    "localhost" "operation was canceled"
 
 # ===========================================================================
 # Leg N5 — mismatched keypairs: STARTUP errors (both halves)
@@ -973,8 +1011,12 @@ assert_contains "N8: error indicates the mTLS connect failure (no plaintext fall
     "$N8_ERR" "failed to connect to peer with mTLS"
 # The upgrade proof, from the sender's own log: the http:// endpoint was
 # rewritten to https:// before dialing.
+# tracing writes ANSI escapes between the message text and the endpoint=
+# field, so the needle is the upgraded https URL alone — it appears only in
+# the sender's "connecting to migration peer with mTLS" line (the trigger
+# line logs the http:// form the RPC was given).
 assert_file_contains "N8: sender force-upgraded http:// → https:// before dialing (SRC log)" \
-    "$SRC_LOG" "connecting to migration peer with mTLS endpoint=https://127.0.0.1:${PLAIN_PORT}"
+    "$SRC_LOG" "https://127.0.0.1:${PLAIN_PORT}"
 assert_file_contains "N8: the plaintext listener actually received the (upgraded) dial" \
     "$N8_LOG" "accepted connection"
 record_migration_error "leg-N8 plaintext endpoint" "$SRC_SOCK" "$N8_MID"
@@ -1010,6 +1052,10 @@ while :; do
 done
 if [ "$N9_PHASE" = "BULK_COPY" ]; then
     kill -9 "$DST_PID" 2>/dev/null || true
+    # A SIGKILLed stord leaves its UDS socket file behind — `test -S` would
+    # then pass vacuously for the restart below. Remove it so the restart
+    # wait actually gates on the NEW process's socket.
+    rm -f "$DST_SOCK"
     qual_pass "DST stord SIGKILLed during BULK_COPY (transfer interrupted mid-copy)"
     wait_for "N9: interrupted migration task FAILED at the source" "$RPC_TIMEOUT" \
         phase_is "$SRC_SOCK" "$MID9" "FAILED" \
@@ -1025,12 +1071,15 @@ fi
 
 # Recovery: restart DST with the same identity/config. Migration task state
 # is in-memory (no resume): the operator re-triggers, getting a NEW
-# migration_id for the same volume+handle.
-DST_PID="$(start_scenario_stord "${DST_DIR}/stord.toml" "$DST_LOG")"
+# migration_id for the same volume+handle. The restarted instance logs to a
+# FRESH file so its listener assert is unambiguous (the first instance's log
+# is preserved separately as evidence of the interrupted run).
+N9_DST_LOG="${DST_DIR}/stord-restart.log"
+DST_PID="$(start_scenario_stord "${DST_DIR}/stord.toml" "$N9_DST_LOG")"
 wait_for "N9: DST restarted (UDS up)" 20 test -S "$DST_SOCK" \
-    || qual_die "N9: DST did not restart — log: $(tail -20 "$DST_LOG" 2>/dev/null)"
+    || qual_die "N9: DST did not restart — log: $(tail -20 "$N9_DST_LOG" 2>/dev/null)"
 assert_file_contains "N9: restarted DST re-bound the receiver listener" \
-    "$DST_LOG" "storage migration receiver listening on 127.0.0.1:${DST_PORT}"
+    "$N9_DST_LOG" "storage migration receiver listening on 127.0.0.1:${DST_PORT}"
 
 # First retry hits the create_new refusal: the partial receiving volume
 # exists and the receiver REFUSES to truncate it (documented operator step:
@@ -1078,6 +1127,7 @@ fi
 } >> "${EVIDENCE_DIR}/digests.txt"
 cp "$SRC_LOG" "${EVIDENCE_DIR}/leg-n9-src-stord.log" 2>/dev/null || true
 cp "$DST_LOG" "${EVIDENCE_DIR}/leg-n9-dst-stord.log" 2>/dev/null || true
+cp "$N9_DST_LOG" "${EVIDENCE_DIR}/leg-n9-dst-restart-stord.log" 2>/dev/null || true
 
 # ===========================================================================
 # Close-out — sessions closed, daemons stopped, zero residue
