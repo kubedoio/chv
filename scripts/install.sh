@@ -254,16 +254,45 @@ setup_user_and_dirs() {
 # -----------------------------------------------------------------------------
 # Resolve version and download/locate release
 # -----------------------------------------------------------------------------
+# Alternatives shown when the from-GitHub path cannot work yet. Kept in one
+# place so the two failure paths below (latest lookup, tarball download)
+# give the same guidance (#440).
+print_github_install_alternatives() {
+    warn "Supported install alternatives today:"
+    warn "  - nightly .deb/.rpm packages (development only):"
+    warn "      https://github.com/${GITHUB_REPO}/releases/tag/nightly"
+    warn "  - build from source and install from the local tarball:"
+    warn "      make build-release"
+    warn "      sudo INSTALL_CHV_TARBALL_PATH=dist/chv-<version>-linux-amd64.tar.gz ./scripts/install.sh"
+    warn "See docs/install/from-github-release.md for details."
+}
+
 resolve_version() {
     if [ "$INSTALL_CHV_VERSION" = "latest" ]; then
         if cmd_exists curl; then
-            local latest
-            latest=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
-                | grep '"tag_name":' | head -n1 | sed -E 's/.*"v([^"]+)".*/\1/') || true
+            local latest_api="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+            local latest=""
+            local api_body http_code
+            api_body=$(mktemp)
+            http_code=$(curl -sS -o "$api_body" -w '%{http_code}' "$latest_api" 2>/dev/null) || http_code="000"
+            if [ "$http_code" = "200" ]; then
+                latest=$(grep '"tag_name":' "$api_body" | head -n1 | sed -E 's/.*"v([^"]+)".*/\1/') || true
+            fi
+            rm -f "$api_body"
             if [ -n "$latest" ]; then
                 INSTALL_CHV_VERSION="$latest"
+            elif [ "$http_code" = "404" ]; then
+                # Fail fast instead of cascading into the version fallback and
+                # a cryptic tarball 404 below (#440): 404 from releases/latest
+                # means no stable (non-prerelease) release exists yet — the
+                # 'nightly' prerelease is ignored by this endpoint.
+                warn "Lookup failed: ${latest_api} returned 404."
+                warn "The from-GitHub install path needs the first stable GitHub"
+                warn "Release to be published; none exists in ${GITHUB_REPO} yet."
+                print_github_install_alternatives
+                fatal "Cannot resolve 'latest' CHV version — no stable release published yet."
             else
-                warn "Could not determine latest version from GitHub API, falling back to 0.2.0"
+                warn "Could not determine latest version from GitHub API (HTTP ${http_code}), falling back to 0.2.0"
                 INSTALL_CHV_VERSION="0.2.0"
             fi
         else
@@ -271,6 +300,30 @@ resolve_version() {
         fi
     fi
     info "Installing CHV version: $INSTALL_CHV_VERSION"
+}
+
+# Best-effort diagnostics for a failed from-GitHub tarball download: probe
+# whether a GitHub Release exists for the requested tag so the operator gets
+# an actionable message instead of a bare curl error (#440). Only called on
+# the failure path.
+print_tarball_download_diagnostics() {
+    local tarball_url="$1"
+    local release_api="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/v${INSTALL_CHV_VERSION}"
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w '%{http_code}' "$release_api" 2>/dev/null) || http_code="000"
+
+    if [ "$http_code" = "404" ]; then
+        warn "No GitHub Release is published for tag v${INSTALL_CHV_VERSION} in ${GITHUB_REPO}."
+        warn "A git tag alone carries no downloadable assets — a Release must be"
+        warn "created from the tag (automatic when a v* tag is pushed)."
+    elif [ "$http_code" = "200" ]; then
+        warn "A GitHub Release exists for v${INSTALL_CHV_VERSION}, but it does not"
+        warn "carry the expected tarball asset:"
+        warn "  ${tarball_url}"
+    else
+        warn "Could not check release status via the GitHub API (HTTP ${http_code})."
+    fi
+    print_github_install_alternatives
 }
 
 download_release() {
@@ -298,7 +351,10 @@ download_release() {
     CLEANUP_TMPDIR="$tmpdir"
 
     info "Downloading release tarball..."
-    curl -fsSL "$tarball_url" -o "$tarball" || fatal "Failed to download release from $tarball_url"
+    if ! curl -fsSL "$tarball_url" -o "$tarball"; then
+        print_tarball_download_diagnostics "$tarball_url"
+        fatal "Failed to download release from $tarball_url"
+    fi
 
     info "Extracting release tarball..."
     tar -xzf "$tarball" -C "$tmpdir"

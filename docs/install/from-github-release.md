@@ -2,6 +2,16 @@
 
 This guide covers installing CHV by downloading artifacts directly from GitHub Releases. This method works on any Linux distribution that supports `.deb` or `.rpm` packages.
 
+> **Status:** the version-pinned URLs and the release tarball described below
+> become available with the **first stable release** — none has been published
+> yet, so `releases/latest` and `releases/download/v<version>/...` currently
+> return 404. Today's supported install paths are the `.deb`/`.rpm` packages
+> from the rolling [`nightly` pre-release](https://github.com/kubedoio/chv/releases/tag/nightly)
+> (development only) or building from source (`make build-release`, then
+> `INSTALL_CHV_TARBALL_PATH=dist/chv-<version>-linux-amd64.tar.gz ./scripts/install.sh`;
+> see [DEPLOYMENT](../DEPLOYMENT.md#build--package-a-release)). The all-in-one
+> installer exits early with this same guidance until a stable release exists.
+
 ## Choose your release
 
 Go to the [CHV Releases](https://github.com/kubedoio/chv/releases) page and select a release:
@@ -19,10 +29,11 @@ See [Channels](channels.md) for a detailed comparison.
 Each release provides:
 - `.deb` packages (Debian, Ubuntu)
 - `.rpm` packages (RHEL, Rocky, AlmaLinux, Fedora)
-- `SHA256SUMS` — checksums for verification
+- `SHA256SUMS` — checksums for the packages
 - `SHA256SUMS.sig` — GPG or cosign signature (when signing secrets are configured)
 - `sbom.spdx.json` — Software Bill of Materials
 - `chv-<version>-linux-amd64.tar.gz` — release tarball with binaries and install script
+- `chv-<version>-linux-amd64.tar.gz.sha256` — checksum for the release tarball
 
 ### Quick download
 
