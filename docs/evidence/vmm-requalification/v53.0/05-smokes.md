@@ -73,6 +73,13 @@ System pin `/usr/bin/cloud-hypervisor`, expected sha256
 | After M4.2 legs (22:55) | `a250a934…` | v43.0.0 |
 | Host, final sweep (22:56) | `a250a934…` | v43.0.0 |
 
+Checkpoint provenance: six of the nine are preserved file records
+(baseline, the control arms' before/after, host-safety, the M4.2 legs,
+final sweep); the other three (post-build 22:23, post-M4.4-v53 22:26,
+post-M4.5-v53 22:46) were wrapper-terminal checks whose abort-on-mismatch
+logic is the same code path as the preserved ones, bracketed by preserved
+checkpoints that all read `a250a934…`.
+
 Isolation model (campaign-standard, per the [campaign index](README.md)): every
 v53 arm executed inside `unshare --mount` with the candidate bind-mounted over
 `/usr/bin/cloud-hypervisor` namespace-locally (the qual harness hardcodes that
@@ -186,7 +193,7 @@ classified:**
   the campaign workdir for post-mortem.
 - Root cause (proven live): host `fs.inotify.max_user_instances` = **128**,
   and uid 0 currently holds **136** inotify instances — dominated by a
-  co-tenant fleet of **52 `kube-apiserver` processes** (3 instances each)
+  co-tenant fleet of **52 `kube-apiserver` processes**
   started 2026-10-03 20:15:16 UTC, i.e. before this leg (22:18) and after
   the frozen M4.2 runs (Oct 1), which is why the frozen legs passed and
   these did not. The shell's own rlimits are not the constraint
@@ -326,7 +333,11 @@ and frozen-dir restore):
   (29 files) were backed up read-only, moved aside for the duration, and
   restored to their original paths — `diff -r` against the pre-leg backups
   proves both **byte-identical**, and a full sha256 manifest taken pre-leg
-  and post-leg is **identical**. No other file under `/var/lib/chv/qual`
+  and post-leg is **identical**. (The final-sweep script's own
+  frozen-records-present check errored on an unset variable — a sweep-script
+  wart, recorded here for precision; the property it meant to check is
+  proven by the manifests and `diff -r` above, and by the 28/29 files
+  sitting at their original paths with frozen-era mtimes.) No other file under `/var/lib/chv/qual`
   was written this leg (mtime scan; the M4.2 legs ran under a private
   `CHV_QUAL_ROOT`; the frozen `installsh-root`, `nspawn-*` transcripts and
   `packages/` were never opened for write).
