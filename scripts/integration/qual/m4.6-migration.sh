@@ -104,6 +104,7 @@ DEPLOY_STORD_LOG="${QUAL_LOGS_DIR}/stord.log"
 GRPCURL_VERSION="1.9.3"
 GRPCURL_TARBALL="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
 GRPCURL_CHECKSUMS="grpcurl_${GRPCURL_VERSION}_checksums.txt"
+GRPCURL_CHECKSUMS_ASSET="${SCRIPT_DIR}/assets/${GRPCURL_CHECKSUMS}"
 GRPCURL_BASE="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}"
 
 # Scenario ports (loopback only; asserted free before use).
@@ -180,27 +181,29 @@ else
     qual_warn "no candidate sha available — identity check skipped; results apply to THIS tree only"
 fi
 
-# provision_grpcurl — download the pinned release + verify its checksum
-# against the release's own checksums.txt (no unpinned trust).
+# provision_grpcurl — download the pinned release and verify its checksum
+# against the CHECKED-IN copy of the release's checksums.txt
+# (scripts/integration/qual/assets/grpcurl_1.9.3_checksums.txt). Vendoring
+# the checksums gives an immutable, reviewable anchor: a later compromise
+# of the release assets cannot move both halves together at runtime.
 provision_grpcurl() {
     command -v curl >/dev/null 2>&1 || qual_die "curl missing (env-preflight)"
     command -v tar >/dev/null 2>&1 || qual_die "tar missing"
+    [ -s "$GRPCURL_CHECKSUMS_ASSET" ] \
+        || qual_die "checked-in grpcurl checksums asset missing: ${GRPCURL_CHECKSUMS_ASSET}"
     mkdir -p "$GRPCURL_DIR"
     qual_info "downloading grpcurl v${GRPCURL_VERSION} (official release) ..."
     curl -fsSL --retry 3 -o "${GRPCURL_DIR}/${GRPCURL_TARBALL}" \
         "${GRPCURL_BASE}/${GRPCURL_TARBALL}" \
         || qual_die "grpcurl download failed (${GRPCURL_BASE}/${GRPCURL_TARBALL})"
-    curl -fsSL --retry 3 -o "${GRPCURL_DIR}/${GRPCURL_CHECKSUMS}" \
-        "${GRPCURL_BASE}/${GRPCURL_CHECKSUMS}" \
-        || qual_die "grpcurl checksums download failed (${GRPCURL_BASE}/${GRPCURL_CHECKSUMS})"
     # Isolate the expected line and verify with sha256sum -c (the line is
     # "<sha256>  <tarball>"; grep with an end anchor, NOT -F — a literal
     # '$' would never match).
-    grep " ${GRPCURL_TARBALL}\$" "${GRPCURL_DIR}/${GRPCURL_CHECKSUMS}" \
+    grep " ${GRPCURL_TARBALL}\$" "$GRPCURL_CHECKSUMS_ASSET" \
         > "${GRPCURL_DIR}/expected.sha256" \
-        || qual_die "no checksum entry for ${GRPCURL_TARBALL} in ${GRPCURL_CHECKSUMS}"
+        || qual_die "no checksum entry for ${GRPCURL_TARBALL} in the checked-in ${GRPCURL_CHECKSUMS_ASSET}"
     if (cd "$GRPCURL_DIR" && sha256sum -c expected.sha256 >/dev/null 2>&1); then
-        qual_pass "grpcurl v${GRPCURL_VERSION} checksum verified against the release checksums.txt"
+        qual_pass "grpcurl v${GRPCURL_VERSION} checksum verified against the checked-in release checksums"
     else
         qual_die "grpcurl checksum VERIFICATION FAILED — refusing to run unverified binaries"
     fi
@@ -211,6 +214,7 @@ provision_grpcurl() {
     qual_info "grpcurl: $("$GRPCURL" --version 2>&1 | head -1), sha256 $(sha256_of "${GRPCURL_DIR}/${GRPCURL_TARBALL}")"
     {
         echo "### m4.6 grpcurl provisioning record ($(date -u +%FT%TZ))"
+        echo "verified against checked-in asset: ${GRPCURL_CHECKSUMS_ASSET}"
         cat "${GRPCURL_DIR}/expected.sha256"
         "$GRPCURL" --version 2>&1 | head -1
     } >> "${EVIDENCE_DIR}/grpcurl-provisioning.txt"
