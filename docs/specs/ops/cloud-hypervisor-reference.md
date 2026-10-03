@@ -78,7 +78,7 @@ cloud-hypervisor [OPTIONS]
 | `--vdpa <vdpa>` | `path=<path>,num_queues=<n>,iommu=on\|off,id=<id>,pci_segment=<id>` (repeatable) | |
 | `--vsock <vsock>` | `cid=<cid>,socket=<path>,iommu=on\|off,id=<id>,pci_segment=<id>` | |
 | `--pvpanic` | Enable pvpanic device | |
-| `--numa <numa>` | `guest_numa_id=<id>,cpus=<ids>,distances=<list>,memory_zones=<list>,sgx_epc_sections=<list>,pci_segments=<list>` (repeatable) | |
+| `--numa <numa>` | `guest_numa_id=<id>,cpus=<ids>,distances=<list>,memory_zones=<list>,sgx_epc_sections=<list>,pci_segments=<list>` (repeatable; `sgx_epc_sections` removed upstream v48.0 — not in the pinned v53.0) | |
 | `--watchdog` | Enable virtio-watchdog | |
 | `-v` | Increase debug output level (repeatable) | |
 | `--log-file <path>` | Log file path (stderr if not set) | |
@@ -87,7 +87,7 @@ cloud-hypervisor [OPTIONS]
 | `--restore <restore>` | Restore from snapshot: `source_url=<url>,prefault=on\|off` | |
 | `--seccomp <mode>` | `true\|false\|log` | `true` |
 | `--tpm <tpm>` | TPM device: `socket=<path>` | |
-| `--sgx-epc <epc>` | SGX EPC: `id=<id>,size=<size>,prefault=on\|off` (repeatable) | |
+| `--sgx-epc <epc>` | SGX EPC: `id=<id>,size=<size>,prefault=on\|off` (repeatable) — **removed upstream v48.0; not in the pinned v53.0** | |
 
 **The CLI does NOT have `--user-data` or any cloud-init flag.** Cloud-init userdata must be injected via a seed disk image.
 

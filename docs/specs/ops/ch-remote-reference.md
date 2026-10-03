@@ -13,8 +13,11 @@ option (b); campaign evidence:
 `docs/evidence/vmm-requalification/v53.0/`). The v43.0 → v53.0 `ch-remote`
 command surface is **additions-only** (`resize-disk`, added with the
 `/vm.resize-disk` endpoint in v50.0, and `add-generic-vhost-user`); no command
-was removed or renamed, so the table below documents the pinned v53.0
-surface directly.
+was removed or renamed, so the table below remains accurate for every
+command it lists. The pinned v53.0 binary adds two commands beyond the
+tabulated surface (`resize-disk`, `add-generic-vhost-user` — both verified
+present in the pinned binary's `--help`); they are tabulated at the bottom
+of the table.
 
 ## Usage
 
@@ -61,6 +64,8 @@ For CHV-managed VMs, the socket is at:
 | `send-migration` | Initiate live migration | `ch-remote --api-socket vm.sock send-migration tcp://dest:port` |
 | `receive-migration` | Receive live migration | `ch-remote --api-socket vm.sock receive-migration tcp://0.0.0.0:port` |
 | `create` | Create VM from JSON config | `ch-remote --api-socket vm.sock create path/to/vm-config.json` |
+| `resize-disk` | Resize an attached disk (added upstream v50.0; in the pinned v53.0) | `ch-remote --api-socket vm.sock resize-disk --disk <disk_id> --size 2G` |
+| `add-generic-vhost-user` | Add a generic vhost-user device (in the pinned v53.0) | `ch-remote --api-socket vm.sock add-generic-vhost-user "device_type=<id>,socket=<path>,queue_sizes=<list>"` |
 
 ## CHV Operations Examples
 

@@ -103,7 +103,7 @@ KVM-VERIFIED, and multi-host behavior is reported as unproven.
 | Dependency | Version fact | Notes |
 |---|---|---|
 | Cloud Hypervisor | Qualified pin **v53.0** (moved from v43.0 by the #448 re-qualification campaign — decision D6, option (b); `scripts/integration/kvm-smoke.sh` default `v53.0`) | `scripts/install.sh` downloads the same **v53.0** and verifies the qualified sha256 digests before install (campaign evidence: [v53.0 tree](evidence/vmm-requalification/v53.0/README.md)). |
-| rust-hypervisor-firmware | 0.5.0 (qualification firmware; `scripts/install.sh:373` URL) | `download_firmware` is commented out in the install flow (`scripts/install.sh:1535`); `copy_firmware` only copies a pre-placed local `/root/CLOUDHV.fd`. |
+| rust-hypervisor-firmware | 0.5.0 (qualification firmware; `scripts/install.sh` `FIRMWARE_URL`) | `download_firmware` is commented out in the install flow; `copy_firmware` only copies a pre-placed local `/root/CLOUDHV.fd`. |
 | fabric-linux | v0.1.5 (`Cargo.toml` git tag pin) | Consumed by `chv-nwd` for the (design-only) fabric. |
 | Host OS | Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` | Qualified on Ubuntu noble amd64; `.rpm` built but untested in prompt-04 (declaration §3, m4.2). |
 
@@ -244,7 +244,7 @@ evidenced at container tier.**
 | Includes | Everything in §2; core-managed authority; enrollment with real mTLS; seeded admin (forced password change), base image, default network, `dev-vm-1`. |
 | Excludes | Multi-host anything (UC-6), fabric (UC-7), backup/restore as DR (declaration §3), HA (UC-9). |
 | Evidence | Declaration §3/§5; prompt-04 milestones ran this topology on the qualification host (m4.3–m4.8). The install.sh path itself has permanent coverage via `scripts/integration/qual/install-sh-leg.sh` (m4.2 §"New harness leg"): clean container, all four units active, contract assertions — with `NO_SEED`/`NO_BRIDGE` set, so it proves the packaging/systemd contract, not VM end-to-end behavior. |
-| Disclosed conflicts | (a) `GITHUB_REPO` defaulted to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — **resolved via #425**: the default is now the canonical `kubedoio/chv`; the old name survives only in the `get.cellhv.com` hosting surface (§9). (b) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. (The former installer/qualification VMM version conflict was resolved by pinning `scripts/install.sh` to the qualified **v43.0** — decision D6, option (a).) |
+| Disclosed conflicts | (a) `GITHUB_REPO` defaulted to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — **resolved via #425**: the default is now the canonical `kubedoio/chv`; the old name survives only in the `get.cellhv.com` hosting surface (§9). (b) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out in the install flow) versus the qualification's 0.5.0 firmware. (The former installer/qualification VMM version conflict was resolved by pinning `scripts/install.sh` to the qualified **v43.0** — decision D6, option (a).) |
 
 ### UC-2 — Package-based clean-host install
 
