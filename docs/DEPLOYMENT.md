@@ -539,6 +539,67 @@ The static `map` approach is production-standard for small-to-medium clusters (t
 
 ---
 
+## Serving the Web UI in package mode
+
+> **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. The packages
+> install no web server and start no listener. Serving the packaged UI
+> tree is an operator-provided step. `scripts/install.sh` remains the
+> qualified deployment path.
+
+The `chv-controlplane` package ships the Web UI static tree at
+`/usr/share/chv/ui`. The package also ships an example nginx
+configuration at
+`/usr/share/doc/chv-controlplane/examples/chv-example.conf`.
+
+### Prerequisites
+
+1. Provision the control plane first. Provide the TLS CA and
+   certificates, a real `jwt_secret`, and the admin user. The control
+   plane fails closed without them. See
+   [PACKAGING.md](PACKAGING.md) "Post-Install Steps".
+2. Start the CHV services and verify the loopback listeners: the BFF
+   on `127.0.0.1:8080`, the agent serial console on `127.0.0.1:8444`.
+   Do not expose either listener directly; nginx is the edge.
+
+### Steps
+
+1. Install nginx.
+2. Install the example configuration:
+   ```bash
+   sudo cp /usr/share/doc/chv-controlplane/examples/chv-example.conf \
+        /etc/nginx/sites-available/chv
+   sudo ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
+   sudo rm -f /etc/nginx/sites-enabled/default
+   ```
+3. Test and start nginx:
+   ```bash
+   sudo nginx -t
+   sudo systemctl enable --now nginx
+   ```
+
+The example configuration serves `/usr/share/chv/ui`. It proxies
+`/api/` and `/v1/` to the BFF on `127.0.0.1:8080`.
+
+### Serial console requires the `/ws/` proxy
+
+In proxied mode the BFF returns console URLs of the form
+`/ws/vms/{node_id}/{vm_id}/console?token=...`. These URLs work only
+through an edge that proxies `/ws/` to the agent on `127.0.0.1:8444`.
+The example configuration includes this proxy. Do not remove it; the
+VM serial console stops working without it.
+
+### Notes
+
+- TLS termination at the edge is an operator concern. See
+  [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) §8 D7.
+- The example configuration mirrors the one written by
+  `scripts/install.sh`. The two copies can drift. Convergence is
+  tracked in the D3 target issue (#447).
+- The target state is to serve the UI from `chv-controlplane` itself
+  (decision D3, option (d)). See issue #447.
+
+---
+
 ## Hosting the Installer (`get.cellhv.com`)
 
 The `curl -sfL https://get.cellhv.com/ | sh -` pattern requires a lightweight endpoint that serves `scripts/install.sh` as plain text.

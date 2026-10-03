@@ -27,6 +27,10 @@ contents:
   - src: ui/build/
     dst: /usr/share/chv/ui
     type: tree
+  # D3 interim: example reverse-proxy config for serving the packaged
+  # UI tree. Documentation only — nothing in the package enables it.
+  - src: packaging/nginx/chv-example.conf
+    dst: /usr/share/doc/chv-controlplane/examples/chv-example.conf
   - src: cmd/chv-controlplane/migrations/
     dst: /usr/share/chv/migrations
     type: tree

@@ -32,18 +32,25 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 /usr/bin/chv-controlplane
 /usr/share/chv/ui/           # Web UI static assets
 /usr/share/chv/migrations/   # Database migrations
+/usr/share/doc/chv-controlplane/examples/chv-example.conf   # Example reverse-proxy config
 /etc/chv/controlplane.toml   # Default config (noreplace)
 /lib/systemd/system/chv-controlplane.service
 ```
 
-> **Note: the packaged UI tree is not served by anything (#423).** No packaged
-> component serves `/usr/share/chv/ui/`. `chv-controlplane`'s HTTP listener
-> (loopback `:8080`) exposes the BFF API only — there is no static file server
-> in the binary, and the packages install no web server. Packages are headless:
-> drive them with `chvctl`. A working Web UI requires `scripts/install.sh`,
-> which installs and configures nginx serving `/opt/chv/ui`. Whether (and how)
-> packages should serve the UI is open decision D3 in
-> [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) (§5 UC-3, §8 D3).
+> **Note: the packaged UI tree is not served by the package (#423, resolved
+> as D3 interim).** No packaged component serves `/usr/share/chv/ui/`.
+> `chv-controlplane`'s HTTP listener (loopback `:8080`) exposes the BFF API
+> only — there is no static file server in the binary, and the packages
+> install no web server. The package ships an example nginx configuration
+> at `/usr/share/doc/chv-controlplane/examples/chv-example.conf`, and
+> [DEPLOYMENT.md](DEPLOYMENT.md) ("Serving the Web UI in package mode")
+> documents how to use it; that serving path is
+> [CODE-SUPPORTED, UNQUALIFIED]. The qualified UI path is still
+> `scripts/install.sh`, which installs and configures nginx serving
+> `/opt/chv/ui`. Decision D3 in
+> [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) (§5 UC-3, §8 D3)
+> is resolved as interim (b), target (d) — the target (serving from the
+> binary) is tracked in #447.
 
 ### `chv-node`
 
@@ -183,7 +190,7 @@ sudo rpm -e chvctl chv-controlplane chv-node
 
 - **No apt / dnf repository yet.** Packages must be downloaded and installed manually.
 - **Checksum signing depends on configured secrets.** CI signs `SHA256SUMS` (GPG or cosign) only when signing keys are configured. Verify checksums out-of-band until then.
-- **Packaged UI assets are unserved (#423).** `chv-controlplane` ships `/usr/share/chv/ui/`, but no packaged component serves it; see the note under [File Layout](#file-layout) and [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) §5 UC-3 / §8 D3.
+- **Packaged UI assets are not served by the package (#423, resolved as D3 interim).** `chv-controlplane` ships `/usr/share/chv/ui/` and an example reverse-proxy config, but no packaged component serves the tree; see the note under [File Layout](#file-layout) and [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) §5 UC-3 / §8 D3.
 
 ## Building Packages Locally
 
