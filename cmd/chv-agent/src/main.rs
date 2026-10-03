@@ -240,7 +240,17 @@ async fn start_core_managed(
             resources,
             config.runtime_dir.clone(),
         )
-        .with_network_usage(network_usage_lookup(config)),
+        .with_network_usage(network_usage_lookup(config))
+        // #405: delete-time side-effect fallback drain. The in-memory
+        // handle map dies with the process; without this, a delete of a
+        // VM created before an agent restart leaks its host taps and
+        // stord sessions behind an HTTP 200. The cache's VM axis is
+        // re-seeded from the Core store by the startup rebuild above,
+        // BEFORE the executor starts, so it is a durable observed
+        // source for exactly those pre-restart VMs.
+        .with_observed_attachments(Arc::new(
+            chv_agent_core::resources::NodeCacheAttachmentSource::new(cache.clone()),
+        )),
     );
     // M2.2b: wrap the single effector with the NodeCache compatibility
     // projection — Succeeded Core outcomes are projected into NodeCache and

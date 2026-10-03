@@ -16,12 +16,14 @@ pub type RecordedOpenOptions = (String, HashMap<String, String>);
 /// Records every controller call as a canonical log line (for example
 /// `open:<volume_id>`, `attach:<volume_id>`, `ensure:<network_id>`,
 /// `attach_nic:<nic_id>`, `detach:<volume_id>`, `close:<volume_id>`,
-/// `detach_nic:<nic_id>`) and can inject a single failure at a named step via
-/// [`MockHostResourceController::fail_next`], keyed as `"<step>:<ordinal>"` —
-/// `"open:2"` fails when opening the 2nd volume, `"attach_nic:1"` fails the
-/// 1st NIC attach, and so on. This supports asserting exact side-effect
-/// sequencing (create open/attach/ensure ordering, create-unwind
-/// close/detach pairing, delete drain ordering) without real daemons.
+/// `detach_nic:<nic_id>`) and can inject a single failure at a named step
+/// via [`MockHostResourceController::fail_next`], keyed as `"<step>:<ordinal>"`
+/// — `"open:2"` fails when opening the 2nd volume, `"attach_nic:1"` fails
+/// the 1st NIC attach, and so on (the delete-drain steps `detach`, `close`
+/// and `detach_nic` are injectable too, for fail-open drain tests). This
+/// supports asserting exact side-effect sequencing (create open/attach/
+/// ensure ordering, create-unwind close/detach pairing, delete drain
+/// ordering) without real daemons.
 ///
 /// Exported `pub` (not `cfg(test)`) so OTHER crates' integration tests can
 /// drive the Core runtime, mirroring `MockCloudHypervisorAdapter`.
@@ -115,6 +117,7 @@ impl HostResourceController for MockHostResourceController {
         _force: bool,
         _operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
+        self.begin_step("detach")?;
         self.record("detach", volume_id);
         Ok(())
     }
@@ -125,6 +128,7 @@ impl HostResourceController for MockHostResourceController {
         _attachment_handle: &str,
         _operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
+        self.begin_step("close")?;
         self.record("close", volume_id);
         Ok(())
     }
@@ -193,6 +197,7 @@ impl HostResourceController for MockHostResourceController {
         _network_id: &str,
         _operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
+        self.begin_step("detach_nic")?;
         self.record("detach_nic", nic_id);
         Ok(())
     }
