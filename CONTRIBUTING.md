@@ -6,7 +6,7 @@ Thank you for contributing to CHV. This document covers development setup, code 
 
 ### Required Tools
 
-- **Rust** — the exact toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml); install it via [rustup](https://rustup.rs/) and rustup will select the pinned version automatically for any command run in this repository
+- **Rust** — the exact toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml); install it via [rustup](https://rustup.rs/), which selects the pinned version automatically for any command run in this repository
 - **Node.js 20+** and npm — for the Web UI
 - **protobuf-compiler** — for regenerating gRPC bindings when proto files change
 - **Docker** (optional) — for containerized local deployment (`docker compose up`)
@@ -100,7 +100,7 @@ All mutating actions MUST use `mutateWithRefresh()` from `$lib/stores/mutation.s
 
 ### Compliance
 
-CI runs `mutation-compliance.test.ts` which scans all `+page.svelte` files. Adding direct `invalidateAll` or `invalidatePattern` imports will break the build.
+CI runs `mutation-compliance.test.ts` which scans all `+page.svelte` files. Adding direct `invalidateAll` or `invalidatePattern` imports breaks the build.
 
 ### New Resource Types
 
@@ -113,8 +113,8 @@ When adding a new resource with mutations:
 
 1. Edit the `.proto` file in `/proto/`
 2. Run `cargo build --workspace` to regenerate Rust bindings
-3. Update any affected TypeScript types in `ui/src/lib/types/` if the BFF contract changes
-4. Update [`docs/specs/proto/`](./docs/specs/proto/) documentation if the API semantics change
+3. Update any affected TypeScript types in [`ui/src/lib/bff/types.ts`](ui/src/lib/bff/types.ts) if the backend-for-frontend (BFF) contract changes
+4. Update the BFF API spec in [`docs/specs/spec/webui-api-bff-spec.md`](docs/specs/spec/webui-api-bff-spec.md) if the API semantics change
 
 ## Commit Messages
 
@@ -139,9 +139,9 @@ Add quota enforcement to VM create path
 
 Some changes carry production risk regardless of who wrote them — the rule is
 about the change, not the author. If your PR does any of the following, say so
-explicitly in the PR description and link evidence (tests, qualification runs,
-or an evidence doc under `docs/evidence/`) that the behavior was verified, not
-just that it compiles:
+explicitly in the PR description. Link evidence that the behavior was verified,
+not just that it compiles. Acceptable evidence includes tests, qualification
+runs, or an evidence doc under `docs/evidence/`:
 
 - create, delete, or migrate VMs, volumes, or disks (data-loss paths);
 - alter storage or network isolation (capabilities, sandboxing, firewall
@@ -161,6 +161,7 @@ a review defect in itself.
 - **User-facing features** → update `CHANGELOG.md`
 - **Deployment changes** → update `docs/DEPLOYMENT.md`
 - **Design system changes** → update `DESIGN.md`
+- **Load testing** → follow [`docs/load-testing.md`](docs/load-testing.md)
 
 ## Getting Help
 
@@ -170,7 +171,7 @@ a review defect in itself.
 
 ## Adding a new architecture resource kind
 
-The Architecture Designer (see [`docs/specs/architecture-designer/`](docs/specs/architecture-designer/) and [ADR-001-Designer](docs/specs/adr/001-designer-first-class-surface.md) through [ADR-006-Designer](docs/specs/adr/006-designer-no-tosca-engine.md)) ships a closed set of CHV-native resource kinds — by design, not as a TOSCA-style open type system. Adding a new kind is an end-to-end change that touches the YAML model, schema, validation, diff, UI, and reviewer ladder.
+The Architecture Designer ships a closed set of CHV-native resource kinds — by design, not as a TOSCA-style open type system. See [`docs/specs/architecture-designer/`](docs/specs/architecture-designer/) and [ADR-001-Designer](docs/specs/adr/001-designer-first-class-surface.md) through [ADR-006-Designer](docs/specs/adr/006-designer-no-tosca-engine.md). Adding a new kind is an end-to-end change that touches the YAML model, schema, validation, diff, UI, and reviewer ladder.
 
 Use this 8-step recipe. The `server` kind is a good reference: search `crates/chv-architecture-validate/src/model.rs` for `Server` to see every touchpoint.
 
@@ -178,13 +179,13 @@ Use this 8-step recipe. The `server` kind is a good reference: search `crates/ch
 
 2. **JSON Schema** — Update the embedded YAML schema in `crates/chv-architecture-validate/src/schema.rs`. The schema and the Rust type must drift together; the `schema_drift_test` CI gate catches mismatches.
 
-3. **Static checks** — Add validation rules in `crates/chv-architecture-validate/src/static_checks.rs`. At minimum: name uniqueness within the kind, references resolve (e.g. a NIC's `network` points to a defined network), capacity bounds (CPU / memory / disk in the project's accepted ranges). Findings carry stable `code` strings — register the new codes in `crates/chv-architecture-validate/src/codes.rs` (the registry is CI-snapshotted; renames are blocked).
+3. **Static checks** — Add validation rules in `crates/chv-architecture-validate/src/static_checks.rs`. At minimum: name uniqueness within the kind, and references that resolve (a NIC's `network` points to a defined network). Also add capacity bounds for CPU, memory, and disk within the project's accepted ranges. Findings carry stable `code` strings — register the new codes in `crates/chv-architecture-validate/src/codes.rs` (the registry is CI-snapshotted; renames are blocked).
 
-4. **Fleet check** — If the kind has a live counterpart on the running cluster (most do — networks, datastores, instances), wire it into the fleet consistency checker under `crates/chv-architecture-validate/src/fleet/`. The check compares the desired YAML against the latest `inventory_snapshot` and reports `BLOCKED_BY_FLEET` findings when prerequisites aren't satisfied.
+4. **Fleet check** — If the kind has a live counterpart on the cluster (most do — networks, datastores, instances), wire it into the fleet consistency checker under `crates/chv-architecture-validate/src/fleet/`. The check compares the desired YAML against the latest `inventory_snapshot` and reports `BLOCKED_BY_FLEET` findings when prerequisites aren't satisfied.
 
-5. **Diff rules** — Update `crates/chv-architecture-reconcile/src/diff.rs` with the create / update / delete / replace / noop rules for the kind. Field-level rules decide which mutations are in-place vs. require replacement (e.g. CPU resize is in-place; storage backend change is replace). The diff feeds the planner and shapes the user-visible plan preview.
+5. **Diff rules** — Update `crates/chv-architecture-reconcile/src/plan/diff.rs` with the create / update / delete / replace / noop rules for the kind. Field-level rules decide which mutations are in-place vs. require replacement (e.g. CPU resize is in-place; storage backend change is replace). The diff feeds the planner and shapes the user-visible plan preview.
 
-6. **UI palette and inspector** — Add a draggable palette node under `ui/src/lib/components/architectures/palette/` with the canonical icon and label. Add a corresponding inspector pane (right-hand panel) that exposes every editable field. Keep components under ~300 lines; extract sub-components if the inspector grows. Wire the new kind into the YAML serializer in `ui/src/lib/architectures/yaml.ts` so canvas → YAML round-trips.
+6. **UI palette and inspector** — Add a draggable palette node under `ui/src/lib/components/architectures/nodes/` with the canonical icon and label. Add a corresponding inspector pane (right-hand panel) that exposes every editable field. Keep components under ~300 lines; extract sub-components if the inspector grows. Wire the new kind into the canvas graph and `graphToYaml()` in `ui/src/lib/stores/architecture-canvas-store.svelte.ts` so canvas → YAML round-trips.
 
 7. **Fixtures** — Add at least three fixtures to `crates/chv-architecture-validate/tests/fixtures/`:
    - **Positive** — a minimal valid topology that includes the new kind.
