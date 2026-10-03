@@ -1,0 +1,23 @@
+-- 0056: drop the dead `firewall_rules` table
+--
+-- The `firewall_rules` table (migration 0014) was written only by the
+-- BFF `/v1/firewall-rules` CRUD, which served the network-detail
+-- FirewallRuleEditor UI. That surface was dead: nothing on the dispatch
+-- path ever read the table, and the editor spoke a legacy rule dialect
+-- (`ingress`/`egress`, `allow`/`deny`, `port_range`, `priority`) that the
+-- engine vocabulary (#369 gate in `firewall_rules_payload()`) rejects,
+-- so rules authored there could never reach a host. The editor, its BFF
+-- client, and the CRUD handlers were removed in the same change (#355
+-- Phase 1).
+--
+-- The qualified network-policy path is untouched: the `networks/update`
+-- `firewall_rules` field, validated against the engine vocabulary and
+-- persisted to `network_desired_state.firewall_rules_json`, dispatched
+-- at the next VM-spec dispatch (attach-time application, #361).
+--
+-- Rows in this table, if any, were never enforced anywhere; dropping
+-- them loses no live configuration. Migration 0014 itself stays in
+-- place (applied migration history is append-only; deleting it would
+-- break the `_sqlx_migrations` ledger on deployed databases).
+
+DROP TABLE IF EXISTS firewall_rules;

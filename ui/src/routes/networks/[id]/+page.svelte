@@ -12,7 +12,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle, Pencil } from 'lucide-svelte';
 	import CreateNetworkModal from '$lib/components/networks/CreateNetworkModal.svelte';
-	import FirewallRuleEditor from '$lib/components/networks/FirewallRuleEditor.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -151,10 +150,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 						{:else}
 							<p class="empty-hint">No events in the last 24 hours.</p>
 						{/if}
-					</SectionCard>
-
-					<SectionCard title="Firewall" icon={Shield}>
-						<FirewallRuleEditor networkId={detail.network_id} />
 					</SectionCard>
 				</div>
 			</section>

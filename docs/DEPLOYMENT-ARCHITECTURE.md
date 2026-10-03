@@ -368,7 +368,7 @@ define them is decision **D5**.
 | Agent drain on stop | **[QUALIFIED — KVM-VERIFIED]** | SIGTERM drains in-flight journal operations for up to 60 s; the unit's `TimeoutStopSec=75` protects the budget (unit file; m4.7 F1→F2 ordering). |
 | Node-upgrade orchestration | **[CODE-SUPPORTED, UNQUALIFIED]** — partial, and narrower than documented | What exists: the compatibility-matrix boot gate (`crates/chv-controlplane-service/src/compat.rs`, wired at startup via `cmd/chv-controlplane/src/bootstrap.rs`, opt-in through `CHV_COMPAT_MATRIX_PATH`, fail-closed) and the `DrainNode` / `EnterMaintenance` / resume-scheduling gRPC handlers. What does **not** exist: the `SystemdNodeUpgrader` rolling-upgrade stack was **deleted as dead code** (PR #213, commit `26209555`); [ARCHITECTURE.md](ARCHITECTURE.md) still references it (stale — see §9). ADR-007's bundle-upgrade/one-step-rollback model is not implemented by the package lifecycle; how to present that gap is decision **D8**. |
 | `chvctl upgrade` subcommands | **Removed** | `chvctl upgrade start/status/rollback/list` POSTed to BFF `/v1/upgrades` routes, which were **never registered** in the BFF router (`crates/chv-webui-bff/src/router.rs`), so the commands could not succeed. Originally recorded here as a finding (same class as the fixed #320); the dead surface was **removed** in #427. |
-| Live network-policy update | **Half-open** | Policy enforcement end-to-end is qualified (attach-time materialization, m4.4), but the UI firewall editor writes a dead-end store (**#355**, open) and legacy `set_firewall_policy` call sites can apply empty rulesets (**#360**, open). |
+| Live network-policy update | **Half-open** | Policy enforcement end-to-end is qualified (attach-time materialization, m4.4). The UI firewall editor that wrote a dead-end store was **removed** with its `/v1/firewall-rules` CRUD and backing table (#355 Phase 1; the issue stays open for the live re-dispatch path). Remaining: legacy `set_firewall_policy` call sites can apply empty rulesets (**#360**, open). |
 | Storage migration during upgrade | Boundary | Quiescent-source migration only (**#394**): concurrent-write migration silently loses data and is not claimed. Migration task state is in-memory; no cross-restart resume. |
 
 ## 7. Supported envelope
@@ -466,8 +466,11 @@ disclosures added here):**
   (reboot rotation, drain-then-close, console healing) carries forward and
   the gate above KVM-VERIFIED survives any pin move, including the #448
   campaign.
-- **#355 / #360** — UI firewall editor writes a dead-end store; legacy call
-  sites can apply empty rulesets. Pre-fix stored data caveats apply
+- **#355 / #360** — the UI firewall editor that wrote a dead-end store was
+  removed (#355 Phase 1; the issue stays open for live re-dispatch), and
+  the legacy empty-ruleset hazard at the two legacy `set_firewall_policy`
+  call sites was fixed by #452. Pre-fix stored data caveats apply
+  (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
   (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
 - **#378 / #379** — snapshot/clone accepted then fails closed on
   core-managed nodes; LVM unreachable from the VM lifecycle.
