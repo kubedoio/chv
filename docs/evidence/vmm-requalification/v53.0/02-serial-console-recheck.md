@@ -204,7 +204,7 @@ fcntl(128, F_DUPFD_CLOEXEC) = 129            # writer clone
 epoll_ctl(…, EPOLL_CTL_ADD, 128, {EPOLLIN})  # input only — never EPOLLOUT
 write(129, "[", 1) = 1                       # flush begins: ONE byte per
 write(129, "I", 1) = 1                       #   write() syscall
-…  332 one-byte writes in ~21 ms …
+…  279 one-byte writes in ~21 ms before the EAGAIN …
 write(129, "N", 1) = -1 EAGAIN               # flush loop breaks HERE
 ( zero further syscalls on this thread for 68 s — blocked in the epoll wait;
   all subsequent backlog bytes were written by the vCPU thread )
@@ -237,7 +237,8 @@ sender accounting charges each 1-byte skb ~766 B of truesize
      E3's replay of exactly 278 B is the fingerprint;
    - **trickling guest + 20 ms-poll reader:** ~0.6–1.3 KB/s crawl;
    - **tight continuously-draining reader:** the first vCPU-triggered session
-     pushes the whole backlog — E3f delivered **75,281 B in 0.4 s**, full
+     pushes the whole backlog — E3f delivered **~72.7 KB in 0.4 s**
+     (cumulative client-side arrival; 75,281 B first reached at ≈1.8 s), full
      86,379 B (backlog + live trickle, ending at the `ubuntu login:` prompt)
      over the 68 s window.
 6. Live output after a late attach is stuck **behind** the stalled backlog
@@ -267,7 +268,7 @@ vm.info, CH log; probe client 15 s; power-button press at +60 s.
 
 | Arm | serial-manager after RST | CH log | Probe client | Press |
 |---|---|---|---|---|
-| **v53.0** | **dead at t+0.0 s** (every sample) | **no line at all** about the RST | connect OK (kernel backlog) but **0 B in 15 s, never served, no EOF** | honored — ACPI cascade, CH exit rc=0 in 1.4 s (guest healthy) |
+| **v53.0** | **dead at t+0.0 s** (every sample) | **no line at all** about the RST | connect OK (kernel backlog) but **0 B in 15 s, never served, no EOF** | honored — CH exit rc=0 in 1.4 s (guest healthy; the cascade text was unobservable — serial was dead) |
 | v43.0 control | alive (this run's RST landed on the graceful-EOF branch: `Remote end closed serial socket` logged) | EOF line logged | served (2,296 B) | cascade +1.4 s, **but CH never exited: SIGTERM ineffective, SIGKILL required, sockets left — #345-class wedge** |
 
 v53 source confirms the m2.5 defect byte-for-byte (§3.5). The thread never
@@ -349,7 +350,8 @@ defective precisely in CHV's reconnect scenario.
   Rotation logic that waits for a marker (login prompt, health banner) in
   replayed output will time out. Mitigation if the pin moves anyway: the
   reattach client **must drain continuously and promptly** — a fast reader
-  recovers the full backlog in ~0.5 s while the guest is producing output —
+  recovers the ~74–75 KB attachment backlog in ~0.5 s while the guest is
+  producing output —
   and marker waits need crawl-aware timeouts (~1 KB/s with a poll-style
   reader).
 - **#292 (drain-then-close):** vindicated at v53 and now *load-bearing*:
