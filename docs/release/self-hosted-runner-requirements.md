@@ -79,21 +79,21 @@ cat /sys/module/kvm_intel/parameters/nested  # should print "Y" or "1"
 cat /sys/module/kvm_amd/parameters/nested    # should print "1"
 ```
 
-## cloud-hypervisor
+## `cloud-hypervisor`
 
-The integration test will attempt to locate `cloud-hypervisor` at `/usr/bin/cloud-hypervisor`. If it is not present, the test script can download it automatically from GitHub releases.
+The integration test attempts to locate `cloud-hypervisor` at `/usr/bin/cloud-hypervisor`. If the binary is not present, the test script downloads it automatically from GitHub releases.
 
 ### Manual installation (recommended for faster tests)
 
 ```bash
-CHV_VERSION="v43.0"
-curl -sL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_VERSION}/cloud-hypervisor-static" \
+CH_VERSION="v43.0"
+curl -sL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static" \
   -o /usr/bin/cloud-hypervisor
 chmod +x /usr/bin/cloud-hypervisor
 cloud-hypervisor --version
 ```
 
-> **Pin the version** in your runner image to avoid test flakiness from upstream releases.
+> **Pin the version** in your runner image to avoid test flakiness from upstream releases. The test script pins `v43.0` by default; override it with `--chv-version VER` or the `CHV_CLOUD_HYPERVISOR_VERSION` environment variable.
 
 ## Required Privileges
 

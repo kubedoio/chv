@@ -8,7 +8,7 @@ The following binaries are built from this repository and included in packages:
 
 | Binary | Crate | Type | Package |
 |--------|-------|------|---------|
-| `chvctl` | `cmd/chvctl` | CLI client | `chvctl` (also pulled in by `chv-node`) |
+| `chvctl` | `cmd/chvctl` | CLI client | `chvctl` |
 | `chv-controlplane` | `cmd/chv-controlplane` | Daemon | `chv-controlplane` |
 | `chv-agent` | `cmd/chv-agent` | Daemon | `chv-node` |
 | `chv-stord` | `cmd/chv-stord` | Daemon | `chv-node` |
@@ -30,7 +30,7 @@ The following binaries are built from this repository and included in packages:
 /usr/bin/chvctl
 ```
 
-**Depends:** None.
+**Depends:** `libssl3` (`.deb`), `openssl-libs` (`.rpm`). The binary links against OpenSSL 3 via `native-tls`.
 
 **Scripts:** None.
 
@@ -69,7 +69,7 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 /etc/chv/controlplane.toml          # type: config|noreplace
 ```
 
-**Depends:** None.
+**Depends:** `libssl3` (`.deb`), `openssl-libs` (`.rpm`). The binary links against OpenSSL 3 via `native-tls`.
 
 **Scripts:**
 - `postinstall`: `packaging/scripts/postinstall.sh`
@@ -80,7 +80,7 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 
 ### `chv-node`
 
-**Purpose:** Hypervisor node services. Installs the agent, storage daemon, and network daemon. Pulls in `chvctl` so the node can be administered locally.
+**Purpose:** Node services. Installs `chv-agent`, `chv-stord`, and `chv-nwd`. `chvctl` is not included; install the standalone `chvctl` package where you need the CLI on a node.
 
 **Systemd services:**
 - `chv-agent.service`
@@ -96,21 +96,22 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 **Contents:**
 
 ```text
-/usr/bin/chvctl                     # convenience inclusion for local admin
 /usr/bin/chv-agent
 /usr/bin/chv-stord
 /usr/bin/chv-nwd
 /lib/systemd/system/chv-agent.service
 /lib/systemd/system/chv-stord.service
 /lib/systemd/system/chv-nwd.service
+/usr/lib/tmpfiles.d/chv-node.conf    # creates /run/chv at boot
 /etc/chv/agent.toml                 # type: config|noreplace
 /etc/chv/stord.toml                 # type: config|noreplace
 /etc/chv/nwd.toml                   # type: config|noreplace
+/etc/chv/chv.yaml                   # reference config; type: config|noreplace
 ```
 
-**Depends:** `chv-controlplane`
+**Depends:** `chv-controlplane`, plus `wireguard-tools`. On `.deb`, `wireguard-tools` is a hard dependency. On `.rpm`, it is a `recommends` (it is EPEL-only on EL distributions, and a hard requirement would break installs without EPEL).
 
-> **Note:** `chvctl` is not included in `chv-node` to avoid file conflicts. Operators who want the CLI on a node host should install `chvctl` separately.
+> **Note:** `chvctl` is not included in `chv-node` to avoid file conflicts. Operators who want the CLI on a node should install `chvctl` separately.
 
 > **Rationale:** The current agent unit file declares `Wants=chv-controlplane.service`. For single-node deployments this ensures ordering; for multi-node deployments operators may override this with drop-ins.
 
@@ -154,6 +155,7 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 | `/etc/chv/stord.toml` | `root:root` | install | `chv-node` | Config file; `config|noreplace` |
 | `/etc/chv/nwd.toml` | `root:root` | install | `chv-node` | Config file; `config|noreplace` |
 | `/etc/chv/chv.yaml` | `root:root` | install | `chv-node` | Reference config; `config|noreplace` |
+| `/usr/lib/tmpfiles.d/chv-node.conf` | `root:root` | install | `chv-node` | Creates `/run/chv` at boot |
 | `/var/lib/chv` | `chv:chv` | postinstall | any CHV package | Persistent state directory |
 | `/var/log/chv` | `chv:chv` | postinstall | `chv-node` | Log directory |
 | `/run/chv` | `chv:chv` | postinstall / runtime | `chv-node` | Runtime sockets, PID files |
@@ -169,7 +171,7 @@ All CHV packages share a set of generic, safe maintainer scripts under `packagin
 ### Preserved on remove
 
 - `/var/lib/chv` — **NEVER deleted by package removal.** Contains enrolled node identity, SQLite databases, and VM state. Destructive cleanup requires explicit operator action.
-- `/etc/chv/` — **NEVER deleted by package removal.** Config files marked `config|noreplace` are owned by the package manager; on `purge` (Debian) the operator may opt to delete them, but standard `remove` preserves them.
+- `/etc/chv/` — **NEVER deleted by package removal.** Config files marked `config|noreplace` are owned by the package manager. On Debian `purge` the operator may opt to delete them. Standard `remove` preserves them.
 - `/var/log/chv` — preserved on remove; may be rotated by the OS.
 
 ### Removed on purge (optional future behavior)
@@ -260,7 +262,7 @@ The following directories contain persistent or sensitive state and must survive
 
 ### Rationale
 
-Enterprise hosts often require config editing (`jwt_secret`, `control_plane_addr`, TLS certs) before services can start. Auto-starting a service with default/example config would produce immediate failure loops. The postinstall scripts create the runtime environment; the operator brings services online.
+Enterprise deployments often require config editing (`jwt_secret`, `control_plane_addr`, TLS certs) before services can start. Auto-starting a service with default/example config produces immediate failure loops. The postinstall scripts create the runtime environment; the operator brings services online.
 
 ### Security Context
 
@@ -370,6 +372,6 @@ If an upgrade fails and you need to revert:
 |-----|--------|------|
 | `chv` meta-package not implemented | Operators must install `chv-controlplane` + `chv-node` separately | Implement when single-command install is a priority |
 | No purge script | `/var/lib/chv` and `/etc/chv` remain after `apt purge` / `rpm -e` | Add `postrm` / `%postun` purge logic in a future release |
-| `chv-node` depends on `chv-controlplane` | Multi-node deployments install control plane on every hypervisor host | Revisit after node-to-control-plane topology is configurable at package level |
+| `chv-node` depends on `chv-controlplane` | Multi-node deployments install the control plane on every node | Revisit after node-to-control-plane topology is configurable at package level |
 | No logrotate config | Logs in `/var/log/chv` may grow unbounded | Add `packaging/logrotate/chv` in a future release |
 | No SELinux policy | `chv-nwd` with `CAP_NET_ADMIN` may trip MLS/MCS policies | Document or provide policy module if requested by enterprise users |

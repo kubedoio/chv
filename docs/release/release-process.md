@@ -6,8 +6,8 @@ This document describes how CHV release candidates and stable releases are built
 
 | Type | Tag format | Example | GitHub Release | Package channel |
 |------|------------|---------|----------------|-----------------|
-| **Stable** | `vX.Y.Z` | `v0.1.0` | Full release | `stable` |
-| **RC** | `vX.Y.Z-rc.N` | `v0.1.0-rc.1` | Pre-release | `rc` |
+| **Stable** | `vX.Y.Z` | `v<version>` | Full release | `stable` |
+| **RC** | `vX.Y.Z-rc.N` | `v<version>-rc.1` | Pre-release | `rc` |
 
 ## Preparing a release
 
@@ -16,24 +16,27 @@ This document describes how CHV release candidates and stable releases are built
 Update the project version before tagging:
 
 ```bash
-# Bump patch version (0.1.0 → 0.1.1)
+# Bump the patch version
 make bump-version BUMP_TYPE=patch
 
-# Or bump minor (0.1.0 → 0.2.0)
+# Or bump the minor version
 make bump-version BUMP_TYPE=minor
 ```
 
 This updates:
 - `VERSION` file
-- `Cargo.toml` workspace version
-- `ui/package.json`
+- All `Cargo.toml` files
+- `ui/package.json` and `ui/package-lock.json`
+- The UI sidebar version label
+- Version references in `README.md`, `docs/DEPLOYMENT.md`, and `scripts/install.sh`
+- `Cargo.lock`
 
 ### 2. Update CHANGELOG.md
 
 Add a section for the new version:
 
 ```markdown
-## [0.1.1] - 2026-05-15
+## [<version>] - YYYY-MM-DD
 
 ### Added
 - ...
@@ -42,11 +45,11 @@ Add a section for the new version:
 - ...
 ```
 
-Stable releases **require** a changelog entry. The CI workflow will fail if it is missing.
+Stable releases **require** a changelog entry. The CI workflow fails if it is missing.
 
 ### 3. Schema-bump checklist (architecture model)
 
-If this release adds, removes, or renames a required field on `chv_architecture_validate::model::CHVArchitecture`, the six embedded starter topology YAMLs in `crates/chv-controlplane-seed/fixtures/` must be updated atomically — the seeder fails closed on a fixture that doesn't parse, so a bumped schema with stale fixtures takes the controlplane down on first boot.
+If this release adds, removes, or renames a required field on `chv_architecture_validate::model::CHVArchitecture`, update the six embedded starter topology YAMLs in `crates/chv-controlplane-seed/fixtures/` atomically. The seeder fails closed on a fixture that does not parse. A bumped schema with stale fixtures takes the control plane down on first boot.
 
 Run the per-fixture round-trip suite as a release-cut gate:
 
@@ -61,7 +64,7 @@ If `fixtures_round_trip` fails, update each affected starter YAML to satisfy the
 
 ```bash
 git add VERSION Cargo.toml ui/package.json CHANGELOG.md
-git commit -m "Release v0.1.1"
+git commit -m "Release v<version>"
 git push origin main
 ```
 
@@ -77,11 +80,11 @@ git checkout main
 git pull origin main
 
 # Create and push the RC tag
-git tag v0.1.1-rc.1
-git push origin v0.1.1-rc.1
+git tag v<version>-rc.1
+git push origin v<version>-rc.1
 ```
 
-The workflow will:
+The workflow performs the following steps:
 1. Build release binaries and UI
 2. Build `.deb` and `.rpm` packages
 3. Run package smoke and lifecycle tests
@@ -96,11 +99,11 @@ Download the RC artifacts and validate:
 
 ```bash
 # Download and verify
-gh release download v0.1.1-rc.1
+gh release download v<version>-rc.1
 sha256sum -c SHA256SUMS
 
 # Install on a test host
-sudo dpkg -i chv-controlplane_0.1.1~rc.1_amd64.deb ...
+sudo dpkg -i chv-controlplane_<version>~rc.1_amd64.deb ...
 
 # Run smoke tests
 make package-smoke-deb
@@ -109,8 +112,8 @@ make package-smoke-deb
 If issues are found, fix them on `main`, bump the RC number, and retag:
 
 ```bash
-git tag v0.1.1-rc.2
-git push origin v0.1.1-rc.2
+git tag v<version>-rc.2
+git push origin v<version>-rc.2
 ```
 
 ### Promote RC to stable
@@ -122,13 +125,13 @@ git checkout main
 git pull origin main
 
 # Tag the exact commit that passed RC validation
-git tag v0.1.1
-git push origin v0.1.1
+git tag v<version>
+git push origin v<version>
 ```
 
 > **Do not add new commits between the final RC and the stable tag.** The stable release should be byte-for-byte identical to the tested RC, minus the version string.
 
-The workflow will:
+The workflow performs the following steps:
 1. Validate the changelog entry exists
 2. Build release binaries and UI
 3. Build `.deb` and `.rpm` packages
@@ -144,13 +147,13 @@ After the release workflow completes, verify the artifacts before announcing:
 
 ```bash
 # Download the release artifacts
-gh release download v0.1.1
+gh release download v<version>
 
 # Verify checksums
 sha256sum -c SHA256SUMS
 
 # Verify GitHub attestation
-gh attestation verify chv-0.1.1-linux-amd64.tar.gz --repo kubedoio/chv
+gh attestation verify chv-<version>-linux-amd64.tar.gz --repo kubedoio/chv
 
 # Inspect SBOM
 jq '.packages | length' sbom.spdx.json
@@ -166,7 +169,7 @@ See [Verify Release Artifacts](verify-release-artifacts.md) for full instruction
 ### If a stable release is broken
 
 1. **Do not delete the release.** Deleting a release breaks links and confuses users who already downloaded it.
-2. **Edit the release notes** to add a prominent warning: `⚠️ This release has a critical issue. Use vX.Y.Z+1 instead.`
+2. **Edit the release notes** to add a prominent warning: `⚠️ This release has a critical issue. Use a newer stable release instead.`
 3. **Cut a hotfix release** with the fix: bump the patch version, tag, and publish.
 4. **Update CHANGELOG.md** to document the issue and the fix.
 
@@ -196,23 +199,23 @@ See [Package Contract](package-contract.md) for the manual rollback procedure.
 
 | Tag | Debian package | RPM package |
 |-----|----------------|-------------|
-| `v0.1.0` | `0.1.0` | `0.1.0` |
-| `v0.1.0-rc.1` | `0.1.0~rc.1` | `0.1.0-0.1.rc1` |
+| `vX.Y.Z` | `X.Y.Z` | `X.Y.Z` |
+| `vX.Y.Z-rc.1` | `X.Y.Z~rc.1` | `X.Y.Z-0.1.rc1` |
 
-Debian uses `~` for pre-release sorting (`0.1.0~rc.1 < 0.1.0`).  
-RPM uses `^` for nightly/PR and a release segment for RC (`0.1.0-0.1.rc1 < 0.1.0-1`).
+Debian uses `~` for pre-release sorting (`X.Y.Z~rc.1 < X.Y.Z`).  
+RPM uses a release segment for RC (`X.Y.Z-0.1.rc1 < X.Y.Z-1`). `version.sh --rpm` also has a `^` post-release path for nightly/PR that no workflow currently uses.
 
 ### Channel precedence
 
-Package managers treat these versions in ascending order:
+Package managers treat these versions in ascending order (the CI stamps the Debian-derived `~` string on both formats, so the same ordering ships for `.deb` and `.rpm`):
 
 ```text
-0.1.0~nightly.20260510.g0872c4a7   (nightly)
-0.1.0~rc.1                         (RC)
-0.1.0                              (stable)
+<version>~nightly.20260510.g0872c4a7   (nightly)
+<version>~rc.1                         (RC)
+<version>                              (stable)
 ```
 
-This means upgrading from nightly → RC → stable is always a forward upgrade.
+Upgrading from nightly → RC → stable is always a forward upgrade on both formats as shipped. See [Nightly Packages](nightly-packages.md) for the version-format details and the unused `^` path.
 
 ## Workflow details
 
@@ -265,7 +268,7 @@ In dry-run mode:
 Stable releases **require** a changelog entry. The workflow looks for a section like:
 
 ```markdown
-## [0.1.0] - 2026-05-10
+## [<version>] - YYYY-MM-DD
 
 ### Added
 - ...
@@ -330,7 +333,7 @@ make bump-version BUMP_TYPE=patch
 | Artifact | Description |
 |----------|-------------|
 | `chv-<VERSION>-linux-amd64.tar.gz` | Release tarball with binaries, UI, configs, install script |
-| `chv-controlplane_*.deb` / `*.rpm` | Control plane package |
+| `chv-controlplane_*.deb` / `*.rpm` | Control-plane package |
 | `chv-node_*.deb` / `*.rpm` | Node services package |
 | `chvctl_*.deb` / `*.rpm` | CLI package |
 | `SHA256SUMS` | Checksums for all packages |
