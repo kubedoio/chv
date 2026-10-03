@@ -10,7 +10,9 @@ This guide covers installing CHV by downloading artifacts directly from GitHub R
 > (development only) or building from source (`make build-release`, then
 > `INSTALL_CHV_TARBALL_PATH=dist/chv-<version>-linux-amd64.tar.gz ./scripts/install.sh`;
 > see [DEPLOYMENT](../DEPLOYMENT.md#build--package-a-release)). The all-in-one
-> installer exits early with this same guidance until a stable release exists.
+> installer exits early with this same guidance on its default `latest` path
+> until a stable release exists; with an explicit `INSTALL_CHV_VERSION` it
+> instead fails at the tarball download with per-tag diagnostics.
 
 ## Choose your release
 

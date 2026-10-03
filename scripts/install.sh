@@ -268,6 +268,15 @@ print_github_install_alternatives() {
 }
 
 resolve_version() {
+    # A local tarball/directory needs no GitHub API lookup — and the 404
+    # fail-fast below must not abort the documented local-tarball install
+    # path while no stable release is published yet (#440, #454 review).
+    # Preserve main's semantics when no explicit version is given: the same
+    # default the failed-'latest' fallback uses, which only names the
+    # extracted top-level directory (EXTRACT_DIR) in download_release().
+    if [ -n "$INSTALL_CHV_TARBALL_PATH" ] && [ "$INSTALL_CHV_VERSION" = "latest" ]; then
+        INSTALL_CHV_VERSION="0.2.0"
+    fi
     if [ "$INSTALL_CHV_VERSION" = "latest" ]; then
         if cmd_exists curl; then
             local latest_api="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
@@ -315,7 +324,9 @@ print_tarball_download_diagnostics() {
     if [ "$http_code" = "404" ]; then
         warn "No GitHub Release is published for tag v${INSTALL_CHV_VERSION} in ${GITHUB_REPO}."
         warn "A git tag alone carries no downloadable assets — a Release must be"
-        warn "created from the tag (automatic when a v* tag is pushed)."
+        warn "created from the tag (release.yml does this automatically for tags"
+        warn "matching vX.Y.Z or vX.Y.Z-rc.N; any other tag needs a manual"
+        warn "Release or a workflow_dispatch run)."
     elif [ "$http_code" = "200" ]; then
         warn "A GitHub Release exists for v${INSTALL_CHV_VERSION}, but it does not"
         warn "carry the expected tarball asset:"
