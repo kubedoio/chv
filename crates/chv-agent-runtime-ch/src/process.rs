@@ -1821,8 +1821,12 @@ impl ProcessCloudHypervisorAdapter {
     /// silently orphaned a live VMM, and the error names the
     /// documented operator escape. The caller must hold the VM's
     /// lifecycle op lock (every removal site does, and every insert
-    /// path for the same id holds it too), so the restore cannot race
-    /// a concurrent create or re-spawn.
+    /// path under lifecycle-op control — create, re-spawn, re-adopt —
+    /// holds it too), so the restore cannot race a concurrent create
+    /// or re-spawn. The ONE lock-free insert, `adopt_running_vms`,
+    /// runs only at startup, before the agent serves lifecycle ops;
+    /// if a mid-service adoption/reconcile pass is ever added it MUST
+    /// take the per-VM op lock or this restore claim is void.
     ///
     /// On success the process is dead and reaped (an `Owned` child is
     /// reaped by the confirmation loop) and `proc` is consumed AFTER
@@ -1844,9 +1848,14 @@ impl ProcessCloudHypervisorAdapter {
         } else {
             "kill refused: process identity unproven"
         };
+        let pid = proc
+            .child
+            .vmm_pid()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
         warn!(
             vm_id = %vm_id,
-            pid = ?proc.child.vmm_pid(),
+            pid = ?pid,
             outcome,
             "VMM still alive after the force kill: restoring the runtime-map \
              entry and failing the op (the process holds the vm's runtime \
@@ -1855,27 +1864,35 @@ impl ProcessCloudHypervisorAdapter {
         {
             let mut map = self.vms.write().await;
             // The slot is vacant — this entry was removed under the
-            // lifecycle op lock, which every insert path for this
-            // vm_id also holds. The vacancy check is defense in depth:
-            // a newer entry, were one somehow present, stays
-            // authoritative rather than being clobbered by the restore.
+            // lifecycle op lock, which every insert path under
+            // lifecycle-op control for this vm_id also holds (the one
+            // lock-free insert, `adopt_running_vms`, is pre-service
+            // only; see the doc comment above). The vacancy check is
+            // defense in depth and MUST stay unreachable in
+            // production: were a newer entry somehow present, keeping
+            // it means DROPPING `proc` — a live handle whose
+            // console_io covers a provably-alive VMM (the exact
+            // close-over-live-VMM hazard this fn exists to prevent) —
+            // so it is logged loudly, never silent.
             if !map.contains_key(vm_id) {
                 map.insert(vm_id.to_string(), proc);
             } else {
                 warn!(
                     vm_id = %vm_id,
                     "runtime-map entry was re-created while a failed force \
-                     kill held the lifecycle op lock; keeping the newer entry"
+                     kill held the lifecycle op lock; keeping the newer \
+                     entry (the failed kill's live VMM handle is dropped — \
+                     operator attention required)"
                 );
             }
         }
         Err(ChvError::Internal {
             reason: format!(
-                "VMM for vm '{vm_id}' is still alive after the force SIGKILL \
-                 ({outcome}): it still holds the vm's runtime dir, sockets, \
-                 and disk; manual operator intervention required (SIGKILL \
-                 the pid directly — the documented escape), then retry the \
-                 operation"
+                "VMM for vm '{vm_id}' (pid {pid}) is still alive after the \
+                 force SIGKILL ({outcome}): it still holds the vm's runtime \
+                 dir, sockets, and disk; manual operator intervention \
+                 required (SIGKILL pid {pid} directly — the documented \
+                 escape), then retry the operation"
             ),
         })
     }
@@ -3897,6 +3914,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         // force-kill site since #351).
                         let still_alive = !Self::confirm_vmm_death(&mut child, signaled).await;
                         if still_alive {
+                            // Capture before the handle is restored
+                            // below: the operator acting on the error
+                            // alone gets the pid directly.
+                            let pid = child
+                                .vmm_pid()
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "<unknown>".to_string());
                             // Restore the truthful handle: the process
                             // is alive (just proven), so the entry must
                             // keep it — a retry stop or a later start
@@ -3914,9 +3938,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                             }
                             return Err(ChvError::Internal {
                                 reason: format!(
-                                    "VMM for vm '{vm_id}' is still alive after the \
+                                    "VMM for vm '{vm_id}' (pid {pid}) is still alive after the \
                                      post-stop SIGKILL ({}): manual operator \
-                                     intervention required (SIGKILL the pid \
+                                     intervention required (SIGKILL pid {pid} \
                                      directly — the documented escape)",
                                     if signaled {
                                         "kill ineffective"
