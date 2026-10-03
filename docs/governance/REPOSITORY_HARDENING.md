@@ -2,7 +2,7 @@
 
 This checklist covers repository-level protections for the CHV project. Items marked **(file)** are enforced by files in the repo. Items marked **(admin)** require a repository admin to configure in GitHub settings.
 
-> **Status (2026-10-03):** the `protect-main` ruleset is enforced on `main`. The branch-protection controls in section 1 and the CODEOWNERS review requirement (6.2) are active. See [`BRANCH_PROTECTION.md`](./BRANCH_PROTECTION.md) for the ruleset contents and activation evidence.
+> **Status (2026-10-03):** the `protect-main` ruleset is enforced on `main`. The branch-protection controls in section 1 and the CODEOWNERS review requirement (6.2) are active. See [`BRANCH_PROTECTION.md`](./BRANCH_PROTECTION.md) for the ruleset contents and activation evidence. (BRANCH_PROTECTION.md's own status note flips from "staged" to "active" when the activation-record PR merges.)
 
 ---
 
@@ -106,8 +106,8 @@ repos:
 |---|---------|--------|-----|
 | 5.1 | Dependabot is enabled for Cargo, npm, and GitHub Actions | ✅ | `.github/dependabot.yml` |
 | 5.2 | Security updates are grouped separately from version updates | ✅ | `cargo-security`, `npm-security`, `actions-security` groups |
-| 5.3 | `cargo audit` runs on every PR touching Cargo files | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
-| 5.4 | `cargo deny` runs on every PR touching Cargo files | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
+| 5.3 | `cargo audit` runs on every PR | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
+| 5.4 | `cargo deny` runs on every PR | ✅ | `.github/workflows/security.yml` runs on every PR — no path filter, because `protect-main` requires its checks |
 | 5.5 | `cargo deny` is configured (`deny.toml`) | ✅ | At repo root |
 | 5.6 | Action versions are pinned to commit SHAs | ✅ | Third-party `uses:` lines pin immutable commit SHAs with the moving tag in a trailing comment (pin policy in `.github/dependabot.yml`) |
 
@@ -120,7 +120,7 @@ repos:
 | 6.1 | CODEOWNERS file exists and is valid | ✅ | `.github/CODEOWNERS` |
 | 6.2 | CODEOWNERS review requirement is enabled | ✅ | `protect-main` ruleset requires code-owner review |
 | 6.3 | CODEOWNERS owners have write access | **(admin)** | Current entries list individual users (`@zoorpha`, `@senolcolak`); the `kubedoio` teams below are the planned migration |
-| 6.4 | Admin-only paths (`.github/`, `SECURITY.md`) require admin team review | ✅ | `.github/CODEOWNERS` |
+| 6.4 | Admin-only paths (`.github/`, `SECURITY.md`) require review by a code owner | ✅ | `.github/CODEOWNERS` (individual owners; no team references) |
 
 ### Team inventory
 
