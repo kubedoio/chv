@@ -48,7 +48,7 @@ where measured, not compared.
 | #345/#409-verification thread coupling | [02 §4.4–4.6](02-serial-console-recheck.md) · [03 §4](03-m43-lifecycle.md) | raw-CH re-check in leg 02; stack-level corroboration in leg 03 (v43 control reproduces the #345 wedge, v53 does not) |
 | M4.3 lifecycle | [03-m43-lifecycle.md](03-m43-lifecycle.md) | **PASS — full tier** (119 PASS / 0 errors; v43 control reproduces the frozen #345 wedge, v53 clean) |
 | M4.6 scoped migration | [04-m46-migration.md](04-m46-migration.md) | **PASS** (141 PASS / 0 / 0; v43 control reproduces frozen run-5 exactly) — stord-layer matrix, no VM booted; migration contract proven version-independent |
-| M4.2/M4.4/M4.5 smoke | — | pending |
+| M4.2/M4.4/M4.5 smoke | [05-smokes.md](05-smokes.md) | **PASS** — M4.4 92/0/1 and M4.5 103/0/2 (both version-independent, controls = frozen counts exactly); M4.2 Leg A PASS, boot legs environment-blocked (host inotify co-tenancy, not CHV/VMM); install.sh checksum gap recorded as pin-move item |
 | Security regression | — | pending |
 | Pin-move PR (campaign close) | — | pending — all class-(i) v43.0 references move together |
 
