@@ -215,7 +215,7 @@ ls /dev/kvm
 
 #### Cloud Hypervisor
 ```bash
-CHV_VERSION="<version>"
+CHV_VERSION="51.1"
 curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${CHV_VERSION}/cloud-hypervisor-static" \
   -o /usr/local/bin/cloud-hypervisor
 chmod +x /usr/local/bin/cloud-hypervisor

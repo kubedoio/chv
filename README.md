@@ -55,7 +55,7 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
                               │ mTLS gRPC
 ┌─────────────────────────────▼───────────────────────────────┐
 │                      chv-agent                                │
-│           (VM lifecycle · Cloud Hypervisor runtime · Serial console) │
+│  (VM lifecycle · Cloud Hypervisor runtime · Serial console) │
 ├─────────────────────────────┬───────────────────────────────┤
 │         chv-stord           │           chv-nwd             │
 │   (Volumes · Pools · Images)│  (Networks · Firewall · NAT)  │
