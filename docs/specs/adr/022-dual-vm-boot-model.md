@@ -206,7 +206,7 @@ The existing control-plane and `chv-agent` authority boundaries do not change. T
 
 ### 11. Compatibility with existing path-based state
 
-Existing journal and cache entries use `kernel_path` and optional `firmware_path`. CHV must preserve recovery across the transition.
+Existing durable journal and VM-definition entries serialize the boot model as `boot.kernel`, `boot.firmware`, and `boot.initial_disk` (the `BootSpec` shape, matching contract §17). The agent cache and runtime spec instead use `kernel_path` and optional `firmware_path`. CHV must preserve recovery across the transition for both shapes.
 
 Readers MUST continue to deserialize the legacy shape until the migration gate proves no required legacy state remains.
 

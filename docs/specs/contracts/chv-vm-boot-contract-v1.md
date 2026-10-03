@@ -327,10 +327,12 @@ The legacy shape is path-based:
 ~~~json
 {
   "kernel": "/path/to/kernel",
-  "firmware": "/path/to/firmware-or-null",
-  "initial_disk": "/optional/path"
+  "firmware": null,
+  "initial_disk": null
 }
 ~~~
+
+(`firmware` and `initial_disk` are optional and absent-or-null unless set; the interpretation table below carries the semantics.)
 
 Legacy readers remain required during the migration window.
 
