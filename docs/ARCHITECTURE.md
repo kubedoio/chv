@@ -175,7 +175,7 @@ ADR-007 defines the policy: bundle-tested node releases by default, selective co
 ### Upgrade orchestration
 
 > **Qualification status:** The surfaces below are code-supported but
-> unqualified. No qualified path exercises them. A tracked issue covers the
+> unqualified. No qualified path exercises them. Issue #427 tracks the
 > missing end-to-end upgrade flow.
 
 The former control-plane upgrade stack (`UpgradeOrchestrator`, `SystemdNodeUpgrader`) was deleted as dead code in PR #213. No automated agent binary-swap path survives. ADR-007 defines bundle policy; it does not describe a swap mechanism. The surviving surfaces are:
