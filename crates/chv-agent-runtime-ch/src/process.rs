@@ -1756,6 +1756,130 @@ impl ProcessCloudHypervisorAdapter {
     /// hangs forever — it fails loudly instead.
     const KILL_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
+    /// Confirms a force-killed VMM actually died — #345's contract
+    /// (a live VMM must not outlive a successful stop or delete)
+    /// extends to the kill itself: verify death, never assume it
+    /// (#348; applied to every force-kill site by #351). The kill can
+    /// be REFUSED (an adopted pid whose identity can no longer be
+    /// proven — e.g. the VMM binary was replaced on disk while the
+    /// process ran — must never be signalled) or INEFFECTIVE (a
+    /// D-state process survives even SIGKILL).
+    ///
+    /// Returns `true` once the process is confirmed gone: an `Owned`
+    /// child is confirmed AND reaped by the polling itself
+    /// (`try_wait`), an adopted orphan is gone once it leaves
+    /// `/proc`, and a `Dead` handle (or an already-exited process)
+    /// confirms immediately — stop and delete stay idempotent for the
+    /// already-dead VMM. Returns `false` when the process is still
+    /// alive: immediately for a refused kill (no signal was issued,
+    /// waiting cannot help), or once `KILL_CONFIRM_WINDOW` elapses
+    /// over an ineffective one. Callers must then fail loudly with
+    /// the documented operator escape instead of reporting success
+    /// over the live process.
+    async fn confirm_vmm_death(child: &mut VmmChild, signaled: bool) -> bool {
+        let deadline = std::time::Instant::now() + Self::KILL_CONFIRM_WINDOW;
+        loop {
+            let gone = match child {
+                // try_wait confirms AND reaps an Owned child in one
+                // step.
+                VmmChild::Owned(owned) => owned
+                    .try_wait()
+                    .map(|status| status.is_some())
+                    .unwrap_or(true),
+                // An adopted orphan is parented to init; gone once it
+                // leaves /proc.
+                VmmChild::Adopted(pid) => !pid_exists(*pid),
+                VmmChild::Dead => true,
+            };
+            if gone {
+                return true;
+            }
+            if !signaled || std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Force-kills the VMM of an entry that was just REMOVED from the
+    /// runtime map — `delete_vm`, and `stop_vm`'s force and
+    /// graceful-timeout branches — and confirms its death (#351,
+    /// mirroring #348's stop-path handling). The pre-#351 shape
+    /// (`kill` + `wait`, return value ignored) reported success over
+    /// a live VMM whenever the kill was refused or ineffective: the
+    /// process survived while holding the VM's runtime dir, sockets,
+    /// and disk, and the removed entry meant the VM's state no longer
+    /// referenced it — the #345 bug class. Delete's cleanup semantics
+    /// do NOT legitimize continuing past a surviving VMM: the
+    /// artifact removal below would unlink sockets a live VMM still
+    /// holds and drop the runtime evidence, and a later re-create
+    /// would target the disk it still owns.
+    ///
+    /// On a refused or ineffective kill the removed entry is RESTORED
+    /// to the map (the truthful state: the VMM is provably alive) so
+    /// a retry re-validates liveness instead of the op having
+    /// silently orphaned a live VMM, and the error names the
+    /// documented operator escape. The caller must hold the VM's
+    /// lifecycle op lock (every removal site does, and every insert
+    /// path for the same id holds it too), so the restore cannot race
+    /// a concurrent create or re-spawn.
+    ///
+    /// On success the process is dead and reaped (an `Owned` child is
+    /// reaped by the confirmation loop) and `proc` is consumed AFTER
+    /// that reap — preserving the kill-before-drop invariant on the
+    /// serial descriptor (see `stop_vm`'s force branch): the caller's
+    /// cleanup (artifact deletion, log rotation) then runs against a
+    /// dead VMM only.
+    async fn kill_removed_vmm_or_restore(
+        &self,
+        vm_id: &str,
+        mut proc: VmProcess,
+    ) -> Result<(), ChvError> {
+        let signaled = proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
+        if Self::confirm_vmm_death(&mut proc.child, signaled).await {
+            return Ok(());
+        }
+        let outcome = if signaled {
+            "kill ineffective"
+        } else {
+            "kill refused: process identity unproven"
+        };
+        warn!(
+            vm_id = %vm_id,
+            pid = ?proc.child.vmm_pid(),
+            outcome,
+            "VMM still alive after the force kill: restoring the runtime-map \
+             entry and failing the op (the process holds the vm's runtime \
+             dir, sockets, and disk)"
+        );
+        {
+            let mut map = self.vms.write().await;
+            // The slot is vacant — this entry was removed under the
+            // lifecycle op lock, which every insert path for this
+            // vm_id also holds. The vacancy check is defense in depth:
+            // a newer entry, were one somehow present, stays
+            // authoritative rather than being clobbered by the restore.
+            if !map.contains_key(vm_id) {
+                map.insert(vm_id.to_string(), proc);
+            } else {
+                warn!(
+                    vm_id = %vm_id,
+                    "runtime-map entry was re-created while a failed force \
+                     kill held the lifecycle op lock; keeping the newer entry"
+                );
+            }
+        }
+        Err(ChvError::Internal {
+            reason: format!(
+                "VMM for vm '{vm_id}' is still alive after the force SIGKILL \
+                 ({outcome}): it still holds the vm's runtime dir, sockets, \
+                 and disk; manual operator intervention required (SIGKILL \
+                 the pid directly — the documented escape), then retry the \
+                 operation"
+            ),
+        })
+    }
+
     /// Builds the cloud-hypervisor serial-console config object for the
     /// VM creation payload. `Socket` (the default transport) points the
     /// serial console at a unix-stream listener inside the VM runtime
@@ -3519,7 +3643,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 let mut map = self.vms.write().await;
                 map.remove(vm_id)
             };
-            let log_path = if let Some(mut proc) = removed {
+            let log_path = if let Some(proc) = removed {
                 // Clear in-memory scrollback before dropping the process.
                 {
                     let mut sb = proc.pty_scrollback.write().await;
@@ -3535,11 +3659,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // freeze the guest — see `abandon_serial_connection`).
                 // With the VMM already dead there is no peer left to reset.
                 // Any future reordering of these steps must preserve this.
-                proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
-                // Reap before dropping the entry: the agent is the parent
-                // of an Owned child, and an unreaped exit would linger as
-                // a zombie for the agent's lifetime.
-                proc.child.wait().await;
+                // #351: a refused or ineffective kill no longer drops the
+                // entry — `kill_removed_vmm_or_restore` restores it instead,
+                // so the descriptor never closes over a live VMM on that
+                // path either. Reap before dropping the entry: the agent is
+                // the parent of an Owned child, and an unreaped exit would
+                // linger as a zombie for the agent's lifetime.
+                self.kill_removed_vmm_or_restore(vm_id, proc).await?;
                 vm_dir
             } else {
                 None
@@ -3610,15 +3736,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     let mut map = self.vms.write().await;
                     map.remove(vm_id)
                 };
-                let log_path = if let Some(mut proc) = removed {
+                let log_path = if let Some(proc) = removed {
                     {
                         let mut sb = proc.pty_scrollback.write().await;
                         sb.clear();
                     }
                     let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
-                    proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
-                    // Reap before dropping the entry (zombie prevention).
-                    proc.child.wait().await;
+                    // #351: same contract as the force branch above —
+                    // the timeout's SIGKILL can be refused or
+                    // ineffective, and a stop that reports success
+                    // must not leave a live VMM behind (the #345 bug
+                    // class). Fail loudly and restore the entry.
+                    self.kill_removed_vmm_or_restore(vm_id, proc).await?;
                     vm_dir
                 } else {
                     None
@@ -3763,29 +3892,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         // SIGKILL). #345's contract — a live VMM must
                         // not outlive a successful stop — extends to the
                         // remediation itself: verify death, never
-                        // assume it.
-                        let deadline = std::time::Instant::now() + Self::KILL_CONFIRM_WINDOW;
-                        let still_alive = loop {
-                            let gone = match &mut child {
-                                // try_wait confirms AND reaps an Owned
-                                // child in one step.
-                                VmmChild::Owned(owned) => owned
-                                    .try_wait()
-                                    .map(|status| status.is_some())
-                                    .unwrap_or(true),
-                                // An adopted orphan is parented to init;
-                                // gone once it leaves /proc.
-                                VmmChild::Adopted(pid) => !pid_exists(*pid),
-                                VmmChild::Dead => true,
-                            };
-                            if gone {
-                                break false;
-                            }
-                            if !signaled || std::time::Instant::now() >= deadline {
-                                break true;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        };
+                        // assume it (#348; the shared confirmation is
+                        // `confirm_vmm_death`, used by every
+                        // force-kill site since #351).
+                        let still_alive = !Self::confirm_vmm_death(&mut child, signaled).await;
                         if still_alive {
                             // Restore the truthful handle: the process
                             // is alive (just proven), so the entry must
@@ -3833,7 +3943,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             let mut map = self.vms.write().await;
             map.remove(vm_id)
         };
-        let mut proc = match removed {
+        let proc = match removed {
             Some(proc) => proc,
             None => {
                 // Force-stop residual / create-window crash: no in-memory
@@ -3852,15 +3962,28 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "deleting vm");
 
-        proc.child.kill(&proc.api_socket, self.expected_vmm_exe());
-        proc.child.wait().await;
+        // #351: the delete's force kill can be REFUSED (an adopted pid
+        // whose identity can no longer be proven — e.g. the VMM binary
+        // was replaced on disk while the process ran) or INEFFECTIVE (a
+        // D-state process survives even SIGKILL). The pre-#351 shape
+        // removed the entry, unlinked the artifacts, and reported
+        // success over the live VMM — which then kept holding the
+        // runtime dir, sockets, and disk with no state referencing it.
+        // Mirror #348's stop-path handling: verify death, fail loudly
+        // with the operator escape, and keep the entry so a retry
+        // re-validates. A VMM that already exited cleanly still deletes
+        // successfully (the confirmation sees it gone) — the delete
+        // stays idempotent for the already-dead case.
+        let api_socket = proc.api_socket.clone();
+        let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
+        self.kill_removed_vmm_or_restore(vm_id, proc).await?;
         // Remove the runtime artifacts this adapter owns: the api socket,
         // the pid file and the persisted creation payload. Disk images and
         // the VM directory itself belong to the storage/authority layers.
-        let _ = tokio::fs::remove_file(&proc.api_socket).await;
-        if let Some(vm_dir) = proc.api_socket.parent() {
-            let _ = tokio::fs::remove_file(vm_pid_file(vm_dir)).await;
-            let _ = tokio::fs::remove_file(vm_config_file(vm_dir)).await;
+        let _ = tokio::fs::remove_file(&api_socket).await;
+        if let Some(vm_dir) = vm_dir {
+            let _ = tokio::fs::remove_file(vm_pid_file(&vm_dir)).await;
+            let _ = tokio::fs::remove_file(vm_config_file(&vm_dir)).await;
         }
         __guard.succeeded = true;
         Ok(())
@@ -6380,19 +6503,25 @@ mod tests {
     }
 
     /// Between `spawn()` returning and the child's `execve` completing there
-    /// is a small window in which `/proc/<pid>/cmdline` still reads empty;
-    /// tests that assert on process identity wait for it to be observable.
-    async fn wait_for_cmdline(pid: u32) -> String {
+    /// is a small window in which `/proc/<pid>/cmdline` still reads the
+    /// PARENT's (the test runner's) argv — posix_spawn's child shares the
+    /// parent's memory until exec — so waiting for a merely NON-EMPTY
+    /// cmdline is not enough: an identity assertion directly after it can
+    /// race a pre-exec read and fail under parallel test load. Tests that
+    /// assert on process identity therefore wait for a needle only the
+    /// stand-in's own post-exec argv contains (typically its api-socket
+    /// path).
+    async fn wait_for_cmdline_containing(pid: u32, needle: &str) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(cmdline) = super::proc_cmdline(pid) {
-                if !cmdline.is_empty() {
+                if cmdline.contains(needle) {
                     return cmdline;
                 }
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "cmdline for pid {pid} never became observable"
+                "cmdline for pid {pid} never contained {needle:?}"
             );
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
@@ -6436,7 +6565,7 @@ mod tests {
             .spawn()
             .unwrap();
         let adopted_pid = adopted_proc.id().expect("freshly spawned child has a pid");
-        wait_for_cmdline(adopted_pid).await;
+        wait_for_cmdline_containing(adopted_pid, &api_socket.to_string_lossy()).await;
         // The stand-in's real executable — what the exe cross-check
         // compares against (the adapter passes its chv_binary's file
         // name in production).
@@ -6477,7 +6606,7 @@ mod tests {
             .spawn()
             .unwrap();
         let unrelated_pid = unrelated.id().expect("freshly spawned child has a pid");
-        let unrelated_cmdline = wait_for_cmdline(unrelated_pid).await;
+        let unrelated_cmdline = wait_for_cmdline_containing(unrelated_pid, "sleep").await;
         assert!(
             unrelated_cmdline.contains("sleep"),
             "stand-in must be running"
@@ -6541,7 +6670,7 @@ mod tests {
             .spawn()
             .unwrap();
         let orphan_pid = orphan.id().expect("freshly spawned child has a pid");
-        wait_for_cmdline(orphan_pid).await;
+        wait_for_cmdline_containing(orphan_pid, &live_api_socket.to_string_lossy()).await;
         std::fs::write(live_dir.join("ch.pid"), format!("{orphan_pid}")).unwrap();
         std::fs::write(live_dir.join("vm-config.json"), "{}").unwrap();
         std::fs::write(live_dir.join("console.log"), "history\n").unwrap();
@@ -8192,7 +8321,7 @@ mod tests {
             .spawn()
             .unwrap();
         let orphan_pid = orphan.id().expect("freshly spawned child has a pid");
-        wait_for_cmdline(orphan_pid).await;
+        wait_for_cmdline_containing(orphan_pid, &live_api_socket.to_string_lossy()).await;
         std::fs::write(live_dir.join("ch.pid"), format!("{orphan_pid}")).unwrap();
         let orphan_exe = std::fs::read_link(format!("/proc/{orphan_pid}/exe")).unwrap();
 
@@ -8665,7 +8794,7 @@ mod tests {
             .spawn()
             .unwrap();
         let stand_in_pid = stand_in.id().expect("stand-in pid");
-        wait_for_cmdline(stand_in_pid).await;
+        wait_for_cmdline_containing(stand_in_pid, &vm_dir.join("vm.sock").to_string_lossy()).await;
         assert!(
             super::pid_is_cloud_hypervisor(stand_in_pid, &vm_dir.join("vm.sock"), None),
             "stand-in must match the loose (argv-only) identity check"
@@ -8726,6 +8855,340 @@ mod tests {
                 "a live VMM must keep its Adopted handle after a failed stop"
             );
         }
+
+        let _ = stand_in.start_kill();
+        let _ = stand_in.wait().await;
+    }
+
+    /// #351: delete_vm must not report success over a live VMM when the
+    /// force kill is REFUSED — the delete counterpart of
+    /// `stop_vm_graceful_fails_loudly_when_kill_is_refused`. An adopted
+    /// stand-in with matching argv but a non-VMM executable (as when the
+    /// binary is replaced on disk while the VMM runs) refuses the
+    /// SIGKILL authorization: the delete must fail loudly, leave the
+    /// runtime artifacts in place (the live VMM still holds them), and
+    /// restore the entry so the VM's state stays truthful.
+    #[tokio::test]
+    async fn delete_vm_fails_loudly_when_kill_is_refused() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-del-refused");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        std::fs::write(&api_socket, b"").unwrap();
+        std::fs::write(vm_dir.join("ch.pid"), "12345").unwrap();
+        std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        // `sh -c "sleep 30; true"` keeps its argv (including the
+        // api-socket flag and path) for its lifetime — a perfect argv
+        // match for an adopted VMM — while its executable (`sh`) fails
+        // the exe cross-check, so the SIGKILL authorization is refused.
+        let mut stand_in = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30; true")
+            .arg("--api-socket")
+            .arg(&api_socket)
+            .spawn()
+            .unwrap();
+        let stand_in_pid = stand_in.id().expect("stand-in pid");
+        wait_for_cmdline_containing(stand_in_pid, &api_socket.to_string_lossy()).await;
+        assert!(
+            super::pid_is_cloud_hypervisor(stand_in_pid, &api_socket, None),
+            "stand-in must match the loose (argv-only) identity check"
+        );
+        assert!(
+            !super::pid_is_cloud_hypervisor(
+                stand_in_pid,
+                &api_socket,
+                Some(std::ffi::OsStr::new("chv"))
+            ),
+            "stand-in must fail the exe-strict identity check"
+        );
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-del-refused".to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child: VmmChild::Adopted(stand_in_pid),
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // The delete must fail, not report success over the live VMM.
+        let err = adapter
+            .delete_vm("vm-del-refused", Some("op-test"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChvError::Internal { .. }),
+            "refused kill must fail the delete, got: {err:?}"
+        );
+
+        // The stand-in survived the refused kill.
+        assert!(
+            super::pid_exists(stand_in_pid),
+            "the refused kill must not have signalled the stand-in"
+        );
+
+        // The runtime artifacts stay: the live VMM still holds the
+        // runtime dir, and the delete's cleanup must not unlink
+        // evidence out from under it.
+        assert!(
+            api_socket.exists(),
+            "api socket must survive a failed delete"
+        );
+        assert!(
+            vm_dir.join("ch.pid").exists(),
+            "pidfile must survive a failed delete"
+        );
+        assert!(
+            vm_dir.join("vm-config.json").exists(),
+            "persisted config must survive a failed delete"
+        );
+
+        // The entry is restored with the truthful Adopted handle: a
+        // retry re-validates liveness instead of the delete having
+        // silently orphaned a live VMM.
+        {
+            let vms = adapter.vms.read().await;
+            let proc = vms
+                .get("vm-del-refused")
+                .expect("entry survives failed delete");
+            assert!(
+                matches!(proc.child, VmmChild::Adopted(pid) if pid == stand_in_pid),
+                "a live VMM must keep its Adopted handle after a failed delete"
+            );
+        }
+
+        let _ = stand_in.start_kill();
+        let _ = stand_in.wait().await;
+    }
+
+    /// #351's idempotency invariant: a REFUSED kill on a DEAD adopted
+    /// VMM must still delete successfully. The kill refuses because the
+    /// pid no longer proves identity (it left /proc), but the death
+    /// confirmation sees it gone — only a refused or ineffective kill
+    /// on a LIVE VMM may fail the delete.
+    #[tokio::test]
+    async fn delete_vm_succeeds_when_adopted_vmm_already_exited() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-del-dead");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        std::fs::write(&api_socket, b"").unwrap();
+        std::fs::write(vm_dir.join("ch.pid"), "12345").unwrap();
+        std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        // A process that already exited: cloud-hypervisor v43 exits
+        // with the guest, so a stopped VM's adopted pid is normally in
+        // exactly this state when the delete arrives.
+        let mut dead = tokio::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id().expect("dead stand-in pid");
+        let _ = dead.wait().await;
+        assert!(
+            !super::pid_exists(dead_pid),
+            "precondition: the stand-in must have left /proc"
+        );
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-del-dead".to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child: VmmChild::Adopted(dead_pid),
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx,
+                    pty_scrollback,
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        adapter.delete_vm("vm-del-dead", None).await.unwrap();
+        assert!(!api_socket.exists(), "api socket must be removed");
+        assert!(!vm_dir.join("ch.pid").exists(), "pidfile must be removed");
+        assert!(
+            !vm_dir.join("vm-config.json").exists(),
+            "persisted config must be removed"
+        );
+        assert!(!adapter.vms.read().await.contains_key("vm-del-dead"));
+    }
+
+    /// #351's idempotency invariant, `Dead`-handle arm: a VM whose
+    /// graceful stop already marked the entry `Dead` (the truthful
+    /// post-stop state) must delete successfully — there is nothing to
+    /// signal, and the death confirmation sees the handle as gone.
+    #[tokio::test]
+    async fn delete_vm_succeeds_for_dead_handle() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-del-dead-handle");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        std::fs::write(&api_socket, b"").unwrap();
+        std::fs::write(vm_dir.join("ch.pid"), "12345").unwrap();
+        std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-del-dead-handle".to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child: VmmChild::Dead,
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx,
+                    pty_scrollback,
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        adapter.delete_vm("vm-del-dead-handle", None).await.unwrap();
+        assert!(!api_socket.exists(), "api socket must be removed");
+        assert!(!vm_dir.join("ch.pid").exists(), "pidfile must be removed");
+        assert!(
+            !vm_dir.join("vm-config.json").exists(),
+            "persisted config must be removed"
+        );
+        assert!(
+            !adapter.vms.read().await.contains_key("vm-del-dead-handle"),
+            "entry must be removed by the successful delete"
+        );
+    }
+
+    /// #351: stop_vm's force branch must not report success over a live
+    /// VMM when the kill is REFUSED — the force-stop counterpart of
+    /// `stop_vm_graceful_fails_loudly_when_kill_is_refused` (which pins
+    /// the graceful-completion remediation). Same stand-in: argv
+    /// matches, executable does not.
+    #[tokio::test]
+    async fn stop_vm_force_fails_loudly_when_kill_is_refused() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-force-refused");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let console_io = std::fs::File::open("/dev/null").unwrap().into();
+
+        let mut stand_in = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30; true")
+            .arg("--api-socket")
+            .arg(&api_socket)
+            .spawn()
+            .unwrap();
+        let stand_in_pid = stand_in.id().expect("stand-in pid");
+        wait_for_cmdline_containing(stand_in_pid, &api_socket.to_string_lossy()).await;
+        assert!(
+            super::pid_is_cloud_hypervisor(stand_in_pid, &api_socket, None),
+            "stand-in must match the loose (argv-only) identity check"
+        );
+        assert!(
+            !super::pid_is_cloud_hypervisor(
+                stand_in_pid,
+                &api_socket,
+                Some(std::ffi::OsStr::new("chv"))
+            ),
+            "stand-in must fail the exe-strict identity check"
+        );
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-force-refused".to_string(),
+                VmProcess {
+                    api_socket: api_socket.clone(),
+                    child: VmmChild::Adopted(stand_in_pid),
+                    console_io,
+                    serial_transport: SerialTransport::Pty,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // Force stop over a refused kill: must fail, not report success
+        // over the live process.
+        let err = adapter
+            .stop_vm("vm-force-refused", true, Some("op-test"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChvError::Internal { .. }),
+            "refused kill must fail the force stop, got: {err:?}"
+        );
+
+        // The stand-in survived the refused kill.
+        assert!(
+            super::pid_exists(stand_in_pid),
+            "the refused kill must not have signalled the stand-in"
+        );
+
+        // The entry is restored with the truthful Adopted handle: a
+        // retry stop or a later start re-validates liveness instead of
+        // assuming the VMM is gone.
+        {
+            let vms = adapter.vms.read().await;
+            let proc = vms
+                .get("vm-force-refused")
+                .expect("entry survives failed force stop");
+            assert!(
+                matches!(proc.child, VmmChild::Adopted(pid) if pid == stand_in_pid),
+                "a live VMM must keep its Adopted handle after a failed force stop"
+            );
+        }
+
+        // The console evidence is not rotated out from under the live
+        // VMM (rotation only runs on the force path's success leg).
+        assert!(
+            vm_dir.join("console.log").exists(),
+            "console.log must survive a failed force stop"
+        );
+        assert!(
+            !vm_dir.join("console.log.last").exists(),
+            "console.log must not be rotated by a failed force stop"
+        );
 
         let _ = stand_in.start_kill();
         let _ = stand_in.wait().await;
