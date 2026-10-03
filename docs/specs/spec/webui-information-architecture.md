@@ -6,8 +6,8 @@
 
 1. Overview
 2. Datacenters / Clusters
-3. Nodes
-4. Virtual Machines
+3. Nodes (shown as "Hosts" in the UI — see below)
+4. Virtual Machines (shown as "Instances" in the UI — see below)
 5. Volumes
 6. Networks
 7. Images / Templates
