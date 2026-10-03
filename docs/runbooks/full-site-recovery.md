@@ -1,5 +1,9 @@
 # Runbook: Full Site Recovery
 
+> Qualification status: the multi-node rebuild procedures in this runbook
+> are code-supported but unqualified. The qualified topology is
+> single-host. See `docs/OPERATIONS.md` for details.
+
 **Severity:** SEV-1 (complete infrastructure loss)  
 **Automation Level:** Manual  
 **Estimated Time:** 1–4 hours (depending on VM count and backup destination)  
@@ -65,16 +69,19 @@ If the old control plane and the DB backup are both lost, reconstruct the topolo
 
 ## 3. Rebuild Hypervisor Nodes
 
-### 3a. Install CHV Agent
+### 3a. Install the node daemons
 
 ```bash
 # On each hypervisor node
-dpkg -i chv-agent_<version>_amd64.deb
+dpkg -i chv-node_<version>_amd64.deb
 
 # Or from tarball
 tar xzf chv-<version>-linux-amd64.tar.gz
-sudo ./install.sh --component agent
+sudo ./install.sh
 ```
+
+The `chv-node` package installs `chv-agent`, `chv-stord`, and `chv-nwd`.
+`install.sh` installs the full stack. It has no component selection.
 
 ### 3b. Configure Agent
 
@@ -120,8 +127,10 @@ chvctl node list | jq '.nodes[] | {node_id, status}'
 ### 4a. Install `chv-stord`
 
 ```bash
-dpkg -i chv-stord_<version>_amd64.deb
+dpkg -i chv-node_<version>_amd64.deb
 ```
+
+The `chv-node` package installs `chv-agent`, `chv-stord`, and `chv-nwd`.
 
 ### 4b. Configure Storage Backend
 

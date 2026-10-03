@@ -42,8 +42,10 @@ dpkg -i chv-controlplane_<version>_amd64.deb
 
 # Or from release tarball
 tar xzf chv-<version>-linux-amd64.tar.gz
-sudo ./install.sh --component controlplane
+sudo ./install.sh
 ```
+
+`install.sh` installs the full stack. It has no component selection.
 
 ### 2b. Restore the Database
 
