@@ -46,9 +46,6 @@ export const BFFEndpoints = {
 	updateHypervisorSettings: '/v1/settings/hypervisor/update',
 	applyHypervisorProfile: '/v1/settings/hypervisor/apply-profile',
 	listHypervisorProfiles: '/v1/settings/hypervisor/profiles',
-	listFirewallRules: '/v1/firewall-rules',
-	createFirewallRule: '/v1/firewall-rules/create',
-	deleteFirewallRule: '/v1/firewall-rules/delete',
 
 	// Backup endpoints
 	listBackupJobs: '/v1/backups/jobs',

@@ -168,10 +168,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             get(crate::handlers::templates::list_cloud_init_templates),
         )
         .route(
-            "/v1/firewall-rules",
-            post(crate::handlers::firewall::list_firewall_rules),
-        )
-        .route(
             "/v1/vms/snapshots",
             post(crate::handlers::snapshots::list_vm_snapshots),
         )
@@ -333,14 +329,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/cloud-init-templates/:id/render",
             post(crate::handlers::templates::render_cloud_init_template),
-        )
-        .route(
-            "/v1/firewall-rules/create",
-            post(crate::handlers::firewall::create_firewall_rule),
-        )
-        .route(
-            "/v1/firewall-rules/delete",
-            post(crate::handlers::firewall::delete_firewall_rule),
         )
         .route(
             "/v1/vms/snapshots/create",
