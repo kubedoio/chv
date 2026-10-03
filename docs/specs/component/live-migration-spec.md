@@ -1,13 +1,13 @@
 # Live Migration Orchestration Spec
 
 ## Purpose
-Orchestrates VM migration between two nodes, coordinating disk pre-copy (quiescent-volume; see *Claimed mode / not claimed*), memory migration via Cloud Hypervisor, and post-migration validation. Runs as part of the single control plane orchestrator.
+Orchestrates VM migration between two nodes, coordinating disk pre-copy (quiescent-volume; see *Claimed mode / not claimed*), memory migration via Cloud Hypervisor, and post-migration validation. Runs as part of the single control plane (CP) orchestrator.
 
 ## Owner
 chv-controlplane-service (orchestrator module)
 
 ## Scope
-- Coordinates: source agent, destination agent, source stord, destination stord, source nwd, destination nwd
+- Coordinates: source agent, destination agent, and the `chv-stord` and `chv-nwd` daemons on both nodes
 - Does NOT: perform actual data transfer (stord does that), manage VXLAN tunnels (nwd does that)
 
 ## Claimed mode / not claimed
@@ -97,11 +97,11 @@ aligned (see Configuration).
 
 ### Phase 3: MemoryMigration
 **Actions:**
-1. CP instructs dest agent: open CH migration receiving socket (TCP, port from pool)
-2. Dest agent calls CH API: `PUT /api/v1/vm.receive-migration` with `{"receiver_url": "tcp://0.0.0.0:{port}"}`
+1. CP instructs dest agent: open the Cloud Hypervisor migration receiving socket (TCP, port from pool)
+2. Dest agent calls the Cloud Hypervisor API: `PUT /api/v1/vm.receive-migration` with `{"receiver_url": "tcp://0.0.0.0:{port}"}`
 3. CP instructs source agent: start memory migration to dest socket
-4. Source agent calls CH API: `PUT /api/v1/vm.send-migration` with `{"receiver_url": "tcp://{dest_ip}:{port}"}`
-5. CH handles iterative memory pre-copy (dirty pages tracked internally by CH)
+4. Source agent calls the Cloud Hypervisor API: `PUT /api/v1/vm.send-migration` with `{"receiver_url": "tcp://{dest_ip}:{port}"}`
+5. Cloud Hypervisor handles iterative memory pre-copy (dirty pages tracked internally by Cloud Hypervisor)
 6. CP monitors: `wait_for_memory_migration` polls the migration record's phase (driven by agent-reported `MigrationProgress`) until Paused/Completed (`crates/chv-controlplane-service/src/migration.rs`)
 
 **Note:** by the time memory migration starts, the disk phase has already
@@ -111,15 +111,15 @@ the agent runs disk pre-copy to completion, then calls send-migration
 
 **Exit conditions:**
 - Success: memory transfer completes (the migration record reaches Paused/Completed) → Paused
-- Failure: dest agent unreachable, CH API error, timeout → Failed (NOT RolledBack — partial state may exist on dest)
+- Failure: dest agent unreachable, Cloud Hypervisor API error, timeout → Failed (NOT RolledBack — partial state may exist on dest)
 
 ### Phase 4: Paused (Final Sync)
 **Actions:**
-1. Disk final sync happens inside the agent-driven disk phase, before memory migration: when the stord task reaches PausedFinalSync it signals `needs_vm_pause`; the agent pauses the VM via the CH API and signals stord back via `ResumeDiskMigration(vm_paused=true)` (`crates/chv-agent-core/src/migration.rs`, `crates/chv-stord-core/src/handlers.rs`)
+1. Disk final sync happens inside the agent-driven disk phase, before memory migration: when the stord task reaches PausedFinalSync it signals `needs_vm_pause`; the agent pauses the VM via the Cloud Hypervisor API and signals stord back via `ResumeDiskMigration(vm_paused=true)` (`crates/chv-agent-core/src/migration.rs`, `crates/chv-stord-core/src/handlers.rs`)
 2. Source stord sends `FinalSync{vm_paused: true}` — there is **no post-pause dirty sweep** (issue #394): the last dirty round ran before the pause; for a quiescent volume there is nothing left to flush
 3. Dest stord flushes its ack window at the FinalSync boundary; the sender drains until every chunk is acknowledged (fail-closed: a CRC-mismatch or write-error Ack fails the migration)
 4. Finalize verification: the sender computes a versioned full-volume SHA-256 digest (`"sha256:"` + 32 raw bytes) over the source — after the pause — and carries it in `FinalizeComplete.volume_checksum`; the receiver re-computes it over the destination and answers `FinalizeAck{verified}`. `verified=false` (digest mismatch, unknown digest format, unreadable destination) fails the task with `Status::data_loss`, so Completed genuinely means "destination verified" (`crates/chv-stord-core/src/migration/volume_digest.rs`, `migration/sender.rs`, `migration/receiver.rs`)
-5. CP explicitly pauses the source VM (best-effort — it may already be paused by the disk final sync / CH send-migration), then instructs the dest agent to resume the VM on the destination (`crates/chv-controlplane-service/src/migration.rs`)
+5. CP explicitly pauses the source VM (best-effort — it may already be paused by the disk final sync / Cloud Hypervisor send-migration), then instructs the dest agent to resume the VM on the destination (`crates/chv-controlplane-service/src/migration.rs`)
 6. On any post-pause failure the agent best-effort resumes the VM on the source (`PausedVmGuard::resume_if_paused`, `crates/chv-agent-core/src/migration.rs`)
 
 **Exit conditions:**
@@ -141,7 +141,7 @@ the agent runs disk pre-copy to completion, then calls send-migration
 |---|---|---|
 | Phase 1 (PreCopyDisk) | Mark migration RolledBack (`rollback_precopy`, `crates/chv-controlplane-service/src/migration.rs`); the agent's cancel/failure paths stop the disk phase. Partial destination volumes are not auto-deleted (see Recovery model) | VM never stopped, continues on source |
 | Phase 2 (ConvergingDisk) | Same as Phase 1 | VM never stopped, continues on source |
-| Phase 3 (MemoryMigration) | Cannot cleanly rollback if CH is mid-transfer. Mark Failed. | Manual recovery required |
+| Phase 3 (MemoryMigration) | Cannot cleanly rollback if Cloud Hypervisor is mid-transfer. Mark Failed. | Manual recovery required |
 | Phase 4 (Paused) | If dest fails to resume: best-effort resume on source (`rollback_paused`; the agent's `PausedVmGuard` also best-effort resumes on every post-pause failure path) | Brief pause experienced by VM |
 
 ## Timeouts
@@ -265,7 +265,7 @@ not under `[migration]`): the destination endpoint host of every
 | Send window (max unacked) | 128 chunks | `crates/chv-stord-core/src/migration/flow_control.rs` |
 | Ack-wait timeout | 30 s | `crates/chv-stord-core/src/migration/flow_control.rs` |
 | Max gRPC message size (`MAX_MIGRATION_MESSAGE_SIZE_BYTES`) | 8 MiB (2 × block size; a `BlockChunk` carries a full 4 MiB block plus protobuf overhead, exceeding tonic's 4 MiB default) | `crates/chv-stord-core/src/migration/mod.rs` |
-| CH memory-migration port pool | 49152–49200 | `crates/chv-agent-core/src/migration.rs` |
+| Cloud Hypervisor memory-migration port pool | 49152–49200 | `crates/chv-agent-core/src/migration.rs` |
 
 The CP-side `MigrationConfig` values (`dirty_threshold_blocks`,
 `max_convergence_rounds`, `block_size_bytes`, `total_timeout_seconds`) exist
@@ -282,7 +282,7 @@ constants above.
 | MigrateVm operation dispatch | orchestrator.rs | DONE |
 | Phase 1: PreCopyDisk orchestration | migration.rs | DONE |
 | Phase 2: ConvergingDisk monitoring | migration.rs `wait_for_convergence` | DONE — agent polls stord `GetDiskMigrationStatus` and reports `MigrationProgress`; CP polls the persisted state |
-| Phase 3: MemoryMigration via CH | migration.rs | DONE |
+| Phase 3: MemoryMigration via Cloud Hypervisor | migration.rs | DONE |
 | Phase 4: Paused / final sync | migration.rs, agent-core/migration.rs | DONE — pause handshake + `FinalSync{vm_paused:true}` + finalize digest verification; no post-pause dirty sweep (issue #394, see Claimed mode) |
 | Phase 5: Completed / cleanup | migration.rs | DONE |
 | Rollback per phase | migration.rs | DONE |
@@ -332,7 +332,7 @@ constants above.
 - Automatic retry of failed migrations (operator must review)
 - Multi-VM batch migration (one at a time per orchestrator)
 - Post-copy disk fallback (v1 is pre-copy only)
-- Cross-controlplane migration (each CP manages its own cluster)
+- Cross-control-plane migration (each CP manages its own cluster)
 - Concurrent-write ("live") disk migration — not claimed; see *Claimed mode / not claimed* (issue #394)
 
 ## Recovery model

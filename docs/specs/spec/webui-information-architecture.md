@@ -16,6 +16,12 @@
 10. Maintenance / Upgrades
 11. Settings / Access
 
+## UI label mapping
+
+The UI deliberately uses different labels from docs and API routes. The nav shows
+"Hosts" for nodes and "Instances" for VMs (ADR-006-WebUI). Route paths keep
+`/nodes` and `/vms`.
+
 ## Overview page
 Shows:
 - fleet health summary

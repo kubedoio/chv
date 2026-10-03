@@ -17,7 +17,7 @@
 ## Inputs
 - desired state from control plane
 - local durable cache
-- host inventory
+- node inventory
 - health from `chv-stord` and `chv-nwd`
 - Cloud Hypervisor API responses
 

@@ -8,7 +8,7 @@
 - server-side data loading for core pages
 - form actions or safe mutation handlers
 - design system implemented as reusable component library
-- BFF/API integration through server routes, not direct browser access to internal services
+- backend-for-frontend (BFF)/API integration through server routes, not direct browser access to internal services
 
 ## Route groups
 - `/`

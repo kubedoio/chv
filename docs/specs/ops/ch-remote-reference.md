@@ -1,9 +1,11 @@
 # ch-remote CLI Reference
 
-Version: v51.1
+Version: v43.0 (qualified pin); v51.1 (downloaded by `scripts/install.sh`)
 Binary: `ch-remote-static`
 Download: https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.1/ch-remote-static
 Install path: `/usr/local/bin/ch-remote`
+
+The command syntax below matches the qualified v43.0 `ch-remote`.
 
 ## Usage
 
@@ -11,7 +13,7 @@ Install path: `/usr/local/bin/ch-remote`
 ch-remote --api-socket <socket_path> <COMMAND>
 ```
 
-The `--api-socket` flag points to the UNIX domain socket created by cloud-hypervisor's `--api-socket` flag.
+The `--api-socket` flag points to the Unix socket created by Cloud Hypervisor's `--api-socket` flag.
 
 For CHV-managed VMs, the socket is at:
 ```
@@ -42,13 +44,13 @@ For CHV-managed VMs, the socket is at:
 | `add-user-device` | Hot-add a userspace device | `ch-remote --api-socket vm.sock add-user-device socket=/path/to/socket` |
 | `add-vdpa` | Hot-add a vDPA device | `ch-remote --api-socket vm.sock add-vdpa path=/dev/vhost-vdpa-0` |
 | `add-vsock` | Hot-add a vsock device | `ch-remote --api-socket vm.sock add-vsock cid=3,socket=/path/to/vsock` |
-| `remove-device` | Hot-remove a device | `ch-remote --api-socket vm.sock remove-device --id device_id` |
+| `remove-device` | Hot-remove a device | `ch-remote --api-socket vm.sock remove-device <device_id>` |
 | `snapshot` | Create VM snapshot | `ch-remote --api-socket vm.sock snapshot file:///path/to/snapshot` |
 | `restore` | Restore VM from snapshot | `ch-remote --api-socket vm.sock restore source_url=file:///path/to/snapshot` |
 | `coredump` | Generate VM coredump | `ch-remote --api-socket vm.sock coredump file:///path/to/coredump` |
 | `counters` | Get VM performance counters | `ch-remote --api-socket vm.sock counters` |
-| `send-migration` | Initiate live migration | `ch-remote --api-socket vm.sock send-migration --url tcp://dest:port` |
-| `receive-migration` | Receive live migration | `ch-remote --api-socket vm.sock receive-migration --url tcp://0.0.0.0:port` |
+| `send-migration` | Initiate live migration | `ch-remote --api-socket vm.sock send-migration tcp://dest:port` |
+| `receive-migration` | Receive live migration | `ch-remote --api-socket vm.sock receive-migration tcp://0.0.0.0:port` |
 | `create` | Create VM from JSON config | `ch-remote --api-socket vm.sock create path/to/vm-config.json` |
 
 ## CHV Operations Examples

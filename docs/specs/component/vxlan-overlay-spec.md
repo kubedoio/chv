@@ -9,7 +9,7 @@ Kernel VXLAN is the overlay datapath. `chv-nwd` is responsible for VXLAN interfa
 
 ## Owner
 - **chv-nwd**: VXLAN interface lifecycle, FDB management, eBPF program loading
-- **Control plane**: VNI assignment, VTEP registry, topology coordination
+- **Control plane (CP)**: VNI assignment, VTEP registry, topology coordination
 
 ## Scope
 - L2 overlay across nodes for tenant VM networks
@@ -320,7 +320,7 @@ message OverlayStatus {
 1. CP decides to migrate VM from Node A → Node B
 2. CP → Node B nwd: UpdateOverlay (ensure VNI joined, FDB entries current)
 3. [Disk migration happens]
-4. [Memory migration happens - CH live migration]
+4. [Memory migration happens - Cloud Hypervisor live migration]
 5. VM resumes on Node B
 6. CP → Node B nwd: send gratuitous ARP for VM's IP
 7. CP → All peer nwd: UpdateOverlay (FDB: VM's MAC now at Node B's VTEP)

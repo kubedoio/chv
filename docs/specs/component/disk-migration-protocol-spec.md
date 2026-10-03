@@ -1,7 +1,7 @@
 # Disk Migration Protocol Spec (stord-to-stord)
 
 ## Purpose
-Defines the block-level data transfer protocol between two stord instances during VM live migration. This is the stord-level wire companion of `live-migration-spec.md` (the CP-side orchestration): where the two overlap, that spec covers orchestration and this one covers the stream itself.
+Defines the block-level data transfer protocol between two `chv-stord` instances during VM live migration. This is the stord-level wire companion of `live-migration-spec.md`, which covers the control plane (CP) side of orchestration: where the two overlap, that spec covers orchestration and this one covers the stream itself.
 
 ## Participants
 - **Source stord**: reads volume blocks, tracks dirty blocks, streams data (`crates/chv-stord-core/src/migration/sender.rs`)
@@ -125,7 +125,8 @@ Source stord                Agent                   Destination
   │  PausedFinalSync; sender  │                         │
   │  blocks on the pause      │                         │
   │  channel)                 │                         │
-  │──────────────────────────►│  pause VM via CH API    │
+  │──────────────────────────►│  pause VM via the       │
+  │                           │  Cloud Hypervisor API   │
   │                           │                         │
   │  ResumeDiskMigration(vm_paused=true)                │
   │◄──────────────────────────│                         │
@@ -135,7 +136,7 @@ Source stord                Agent                   Destination
 ```
 
 - When the dirty rounds are done, the task moves to `PausedFinalSync` and sets `needs_vm_pause = true`; the sender blocks on the task's pause channel (`crates/chv-stord-core/src/migration/sender.rs`, `migration/task.rs`)
-- The agent (polling `GetDiskMigrationStatus`) pauses the VM via the CH API and signals back with `ResumeDiskMigration{vm_paused: true}` (`crates/chv-stord-core/src/handlers.rs`, `crates/chv-agent-core/src/migration.rs`)
+- The agent (polling `GetDiskMigrationStatus`) pauses the VM via the Cloud Hypervisor API and signals back with `ResumeDiskMigration{vm_paused: true}` (`crates/chv-stord-core/src/handlers.rs`, `crates/chv-agent-core/src/migration.rs`)
 - Only then does the sender emit `FinalSync{vm_paused: true}`
 - There is **no post-pause dirty sweep** (issue #394): the last dirty round ran before the pause; for a quiescent volume there is nothing left to flush
 - The receiver flushes its ack window at the `FinalSync` boundary, and the sender drains until every chunk is acknowledged before announcing finalization (fail-closed)

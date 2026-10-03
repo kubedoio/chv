@@ -12,7 +12,7 @@ Provide local operator-safe inspection and limited recovery workflows for the CH
 ## Implemented Commands
 
 ### Authentication
-- `chvctl login` — Authenticate against the BFF and store token locally
+- `chvctl login` — Authenticate against the backend-for-frontend (BFF) and store token locally
 
 ### Virtual Machines
 - `chvctl vm list` — List all VMs

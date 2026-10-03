@@ -1,6 +1,13 @@
 # Cloud Hypervisor Reference
 
-Version: v51.1
+Version: v43.0 (qualified pin); v51.1 (downloaded by `scripts/install.sh`)
+
+The qualified integration and KVM-qualification pin is v43.0
+(`scripts/integration/kvm-smoke.sh`, `scripts/integration/qual/env-preflight.sh`).
+`scripts/install.sh` downloads v51.1 for fresh installs. The split is a
+recorded reconciliation item (see the M2.5 KVM qualification evidence under
+`docs/evidence/production-readiness/v0.3.0-rc1/02-single-authority-cutover/`).
+
 Source of truth: [Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md)
 OpenAPI spec: https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/master/vmm/src/api/openapi/cloud-hypervisor.yaml
 
@@ -14,7 +21,7 @@ OpenAPI spec: https://raw.githubusercontent.com/cloud-hypervisor/cloud-hyperviso
 ## Architecture
 
 The CLI can only be used for **launching** cloud-hypervisor. Once running, all
-control goes through the REST API (on the UNIX socket) or ch-remote (which wraps
+control goes through the REST API (on the Unix socket) or ch-remote (which wraps
 the REST API). The CLI cannot control a running VM.
 
 ```
@@ -59,7 +66,7 @@ cloud-hypervisor [OPTIONS]
 | `--watchdog` | Enable virtio-watchdog | |
 | `-v` | Increase debug output level (repeatable) | |
 | `--log-file <path>` | Log file path (stderr if not set) | |
-| `--api-socket <socket>` | HTTP API socket (UNIX domain): `path=<path>` or `fd=<fd>` | |
+| `--api-socket <socket>` | HTTP API Unix socket: `path=<path>` or `fd=<fd>` | |
 | `--event-monitor <monitor>` | Event file: `path=<path>` or `fd=<fd>` | |
 | `--restore <restore>` | Restore from snapshot: `source_url=<url>,prefault=on\|off` | |
 | `--seccomp <mode>` | `true\|false\|log` | `true` |
@@ -70,7 +77,7 @@ cloud-hypervisor [OPTIONS]
 
 ## REST API
 
-Available as soon as cloud-hypervisor starts, on the UNIX socket from `--api-socket`.
+Available as soon as cloud-hypervisor starts, on the Unix socket from `--api-socket`.
 
 ### VMM Actions
 
@@ -95,11 +102,11 @@ Available as soon as cloud-hypervisor starts, on the UNIX socket from `--api-soc
 | Coredump VM | `/vm.coredump` | `VmCoredumpData` | N/A | **VM paused** (x86_64 + guest_debug only) |
 | Restore VM | `/vm.restore` | `RestoreConfig` | N/A | Created but not booted |
 | Resize VM | `/vm.resize` | `VmResize` | N/A | VM booted |
-| Resize disk | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
+| Resize disk (v51.1 only; absent from the qualified v43.0) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
 | Resize memory zone | `/vm.resize-zone` | `VmResizeZone` | N/A | VM booted |
 | VM info | `/vm.info` | N/A | `VmInfo` | VM created |
 | VM counters | `/vm.counters` | N/A | `VmCounters` | VM booted |
-| Inject NMI | `/vm.nmi` | N/A | N/A | VM booted |
+| Inject NMI | `/vmm.nmi` | N/A | N/A | VM booted |
 | Add VFIO device | `/vm.add-device` | `VmAddDevice` | `PciDeviceInfo` | VM booted |
 | Add disk | `/vm.add-disk` | `DiskConfig` | `PciDeviceInfo` | VM booted |
 | Add fs | `/vm.add-fs` | `FsConfig` | `PciDeviceInfo` | VM booted |
@@ -108,7 +115,6 @@ Available as soon as cloud-hypervisor starts, on the UNIX socket from `--api-soc
 | Add user device | `/vm.add-user-device` | `VmAddUserDevice` | `PciDeviceInfo` | VM booted |
 | Add vdpa | `/vm.add-vdpa` | `VdpaConfig` | `PciDeviceInfo` | VM booted |
 | Add vsock | `/vm.add-vsock` | `VsockConfig` | `PciDeviceInfo` | VM booted |
-| Add generic vhost-user | `/vm.add-generic-vhost-user` | `GenericVhostUserConfig` | `PciDeviceInfo` | VM booted |
 | Remove device | `/vm.remove-device` | `VmRemoveDevice` | N/A | VM booted |
 | Receive migration | `/vm.receive-migration` | `ReceiveMigrationData` | N/A | N/A |
 | Send migration | `/vm.send-migration` | `SendMigrationData` | N/A | VM booted + shared mem or hugepages |
@@ -138,7 +144,7 @@ curl --unix-socket /tmp/ch.sock -i -X PUT 'http://localhost/api/v1/vm.reboot'
 curl --unix-socket /tmp/ch.sock -i -X PUT 'http://localhost/api/v1/vm.shutdown'
 ```
 
-## CHV Usage Pattern
+## How CHV launches Cloud Hypervisor
 
 CHV spawns cloud-hypervisor with these standard flags:
 
@@ -154,7 +160,7 @@ cloud-hypervisor \
   --serial tty={pty_slave_path}
 ```
 
-After spawning, the VM is controlled entirely via the HTTP API on the UNIX socket.
+After spawning, the VM is controlled entirely via the HTTP API on the Unix socket.
 The CHV agent uses direct HTTP requests; operators can use `ch-remote` for manual interaction.
 
 ## Important Notes for CHV Development
@@ -163,7 +169,7 @@ The CHV agent uses direct HTTP requests; operators can use `ch-remote` for manua
 2. There is **no `--user-data` flag**. Cloud-init must use a seed disk.
 3. `--firmware` is for UEFI boot (CLOUDHV.fd); `--kernel` is for direct kernel boot (vmlinux).
 4. `--net` requires a pre-created tap device (nwd creates these via `ip tuntap add`).
-5. `--api-socket` creates the UNIX socket used by ch-remote and the CHV agent.
+5. `--api-socket` creates the Unix socket used by ch-remote and the CHV agent.
 6. **Snapshots require the VM to be paused first** (`/vm.pause` then `/vm.snapshot`).
 7. **Restore requires the VM to be in Created-but-not-booted state** (`/vm.restore`).
 8. VM coredump is x86_64-only and requires the `guest_debug` feature.

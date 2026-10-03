@@ -17,9 +17,9 @@
 | `chv-stord` persistent failure | `Degraded` to `Failed` depending on scope | denied | affected VMs may lose storage service | escalate, block risky ops, operator action | S4 |
 | `chv-nwd` persistent failure | `Degraded` to `Failed` depending on scope | denied | connectivity impact likely | deterministic rebuild attempt, operator action | S4 |
 | Cloud Hypervisor process crash for one VM | VM-scoped degraded condition | allowed depending on node health | impacted VM only | restart or honor VM policy | S3 |
-| host disk full in runtime paths | `Degraded` | denied | continue only if safe | block new ops, emit alert | S3 |
-| host memory pressure beyond threshold | `Degraded` | denied | at risk | trigger protection policy, alert | S3 |
-| host network uplink failure | `Degraded` or `Failed` | denied | connectivity loss likely | alert, preserve local runtime state | S4 |
+| node disk full in runtime paths | `Degraded` | denied | continue only if safe | block new ops, emit alert | S3 |
+| node memory pressure beyond threshold | `Degraded` | denied | at risk | trigger protection policy, alert | S3 |
+| node network uplink failure | `Degraded` or `Failed` | denied | connectivity loss likely | alert, preserve local runtime state | S4 |
 | node reboot | `Bootstrapping` then readiness path | denied until `TenantReady` | restart per policy | reconstruct services and VMs | S3 |
 | stale desired-state generation received | unchanged | unchanged | unchanged | reject request, emit event | S1 |
 | certificate expiration near threshold | unchanged | unchanged | unchanged | rotate cert proactively | S1 |
