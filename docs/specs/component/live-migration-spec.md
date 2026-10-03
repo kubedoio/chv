@@ -242,8 +242,10 @@ Fail-closed gating rules (issues #390, #395):
 - `enabled = false` with **any** client identity field set → startup error
 - `enabled = false` with **any** receiver field set → startup error (an
   operator who believes migration is off must not get an inbound TCP listener)
-- `enabled = true` with any *individual* client or receiver field missing →
-  startup error (both halves are all-or-nothing)
+- `enabled = true` with any *individual* client field missing → startup error
+  (the client half is all-or-nothing). The receiver half is all-or-nothing
+  *when any receiver field is set*; `enabled = true` with **no** receiver
+  fields is a legitimate source-only stord (no listener, logged at startup)
 - Receiver files unreadable, keypair mismatch, empty/invalid CA bundle, or an
   unparseable `listen_addr` → startup error
 
@@ -322,9 +324,9 @@ constants above.
    hosts) for agent-driven migrations to connect.
 
 3. **`docs/specs/component/disk-migration-protocol-spec.md`** (the stord-level
-   protocol spec) still carries the pre-#393/#396/#397 status table
-   (dirty rounds / mTLS / verification marked MISSING); this spec supersedes
-   it for those rows until it receives its own correction pass.
+   protocol spec) was corrected to the same M4.6 reality in #403 (issue #399):
+   its status table now marks dirty rounds / mTLS / verification DONE and it
+   carries the same claimed/not-claimed boundary (issue #394).
 
 ## Non-goals
 - Automatic retry of failed migrations (operator must review)

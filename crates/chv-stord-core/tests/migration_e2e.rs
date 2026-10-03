@@ -24,9 +24,15 @@
 //!   blocked until `ResumeDiskMigration{vm_paused:true}` semantics (a
 //!   `true` on the task's `pause_tx` watch) release it into FinalSync.
 //!
-//! Fail-closed semantics (CRC mismatch, out-of-bounds rejection) are covered
-//! by the receiver/sender unit tests and the negative mTLS listener tests in
-//! `tests/migration_mtls.rs`.
+//! Fail-closed semantics at the chunk level — the receiver's
+//! CRC-mismatch rejection and out-of-bounds chunk rejection, and the
+//! sender failing on a CRC-mismatch Ack arriving at the FinalizeAck
+//! wait — are pinned by `tests/migration_failclosed.rs`, which drives
+//! the *served* receiver with a hand-crafted protocol client (the
+//! receiver has no unit-test module of its own). TLS-layer peer
+//! rejection is covered by the negative mTLS listener tests in
+//! `tests/migration_mtls.rs`; the finalize-digest corruption direction
+//! is covered by the last test below.
 //!
 //! Since the destination-digest verification landed (issue #392), the
 //! finalize exchange carries a versioned full-volume SHA-256 digest

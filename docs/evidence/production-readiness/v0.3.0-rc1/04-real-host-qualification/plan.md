@@ -346,7 +346,8 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
 - **M4.6 — two-stord mTLS migration: COMPLETE** (scenario + evidence PR; evidence
   [m4.6-migration.md](m4.6-migration.md)). Final run (run 5, on the post-review
   artifact with the vendored grpcurl checksums asset; binaries `6a1dfa06`,
-  code-identical to main `80afd8db` for crates/proto): **135 passes, 0 errors,
+  code-identical to the main of the runs `80afd8db` for crates/proto — #403,
+  merged after run 5, is comment-only in `sender.rs` and behavior-identical): **135 passes, 0 errors,
   0 warnings, rc=0**, teardown all-green.
   One scenario (Leg P + N1–N9 via `deploy.sh --exec`): the positive path
   (seeded 4 GiB volume → BULK_COPY → dirty-round machinery → pause handshake →
@@ -359,16 +360,20 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   (mid-BULK_COPY destination SIGKILL → create_new refusal → documented operator
   recovery → COMPLETED + digest). Every identity-rejection leg asserts
   fail-closed: task FAILED, zero bytes transferred, no receiving volume on the
-  destination. No product code was changed by the milestone (campaign rule);
-  three product characteristics recorded in the evidence doc: the #394
+  destination. The scenario+evidence PR itself changed no product code (campaign
+  rule) — the milestone's product fixes landed ahead of it as #393 (mTLS
+  receiver listener), #396 (ack protocol) and #397 (finalize digest), with
+  #403 (comment-only) after the runs; three product characteristics recorded
+  in the evidence doc: the #394
   concurrent-write boundary (dirty-round evidence is quiescent-source only —
   dirty-block transfer is proven at protocol level by the in-repo e2e test
   alone), destination-only (receiver-only) stords are not expressible
-  (`enabled=true` makes the client identity mandatory), and mTLS rejection
-  observability (client-side rejections collapse to one transport-error text;
-  server-side rejections surface as an opaque race-dependent form and the
-  destination logs nothing). The stale `live-migration-spec.md` "Critical
-  Implementation Gaps" section was corrected on main by #398 (docs-only,
-  post-run) — the spec now records quiescent-volume migration as the claimed
-  mode, matching the #394 boundary above.
+  (`enabled=true` makes the client identity mandatory — **issue #401**), and
+  mTLS rejection observability (client-side rejections collapse to one
+  transport-error text; server-side rejections surface as an opaque
+  race-dependent form and the destination logs nothing — **issue #402**). The
+  stale `live-migration-spec.md` "Critical Implementation Gaps" section was
+  corrected on main by #398, and the sibling `disk-migration-protocol-spec.md`
+  by #403 (both docs-only, post-run) — the specs now record quiescent-volume
+  migration as the claimed mode, matching the #394 boundary above.
 - M4.7–M4.9: not started.
