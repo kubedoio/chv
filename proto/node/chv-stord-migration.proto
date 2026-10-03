@@ -77,7 +77,11 @@ message FinalSync {
 message FinalizeComplete {
   uint64 total_bytes = 1;
   uint64 total_chunks = 2;
-  bytes volume_checksum = 3;   // optional, for small volumes
+  // Versioned, self-describing full-volume digest the receiver must
+  // re-compute over the destination before reporting verified=true:
+  // "sha256:" (7 ASCII bytes) followed by 32 raw digest bytes. Receivers
+  // fail closed on unrecognized formats. (Previously optional/unused.)
+  bytes volume_checksum = 3;
 }
 
 message FinalizeAck {

@@ -1069,6 +1069,7 @@ dependencies = [
  "rcgen",
  "rusqlite",
  "rustls",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-stream",
