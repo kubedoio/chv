@@ -1,6 +1,6 @@
 # Left Panel Redesign Specification
 
-> **Status (2026-10-03):** implemented and shipped, with drift. The WebUI left panel follows this specification's naming, routes, and instance action model. Two items drifted from the text below. First, the nav tree shows only instances under each host; the host-scoped Networks/Storage/Images links in section 1 did not ship in the left panel. Host-scoped filtered views exist elsewhere via `?node_id={id}` links. Second, the platform is now named CHV; this document predates that naming and retains historical references. Verified against `main` at `1fbb2b04` (`ui/src/lib/components/shell/NavInfrastructureTree.svelte`, `ui/src/lib/components/shell/NavGlobalLinks.svelte`, `ui/src/lib/shell/instance-actions.ts`).
+> **Status (2026-10-03):** implemented and shipped, with drift. The WebUI left panel follows this specification's naming, routes, and instance action model. Two items drifted from the text below. First, the nav tree shows only instances under each host; the host-scoped Networks/Storage/Images links in section 1 did not ship in the left panel. Host-scoped filtered views exist elsewhere via `?node_id={id}` links. Second, the platform is now named CHV; this document predates that naming and retains the historical labels only in the old-label renaming tables below. Verified against `main` at `1fbb2b04` (`ui/src/lib/components/shell/NavInfrastructureTree.svelte`, `ui/src/lib/components/shell/NavGlobalLinks.svelte`, `ui/src/lib/shell/instance-actions.ts`).
 
 ## 1. Information Architecture
 

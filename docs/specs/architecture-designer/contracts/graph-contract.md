@@ -25,7 +25,7 @@ The shipped canvas implements the eight MVP node kinds listed below. The remaini
   "edges": [
     {
       "id": "edge-instance-app-01-to-host-chv-node-01",
-      "type": "placement",
+      "type": "placed_on",
       "source": "node-instance-app-01",
       "target": "node-host-chv-node-01",
       "data": {

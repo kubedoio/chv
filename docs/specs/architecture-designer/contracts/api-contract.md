@@ -140,7 +140,9 @@ Request:
 }
 ```
 
-`refresh_inventory` defaults to `true`. `allow_warnings` is a forward-compatibility hook consumed by the apply path.
+`refresh_inventory` defaults to `true`. `allow_warnings` is a
+forward-compatibility hook accepted at plan time; the apply path enforces
+warnings through `acknowledged_warnings`.
 
 Response:
 
@@ -160,12 +162,25 @@ Response:
     "no_op": 0,
     "warnings": 1
   },
-  "changes": [],
+  "changes": [
+    {
+      "action": "create",
+      "resource_type": "instance",
+      "resource_name": "app-01",
+      "resource_ref": "instances/app-01",
+      "description": "Create instance app-01 on chv-node-01",
+      "risk": "medium",
+      "requires_confirmation": false
+    }
+  ],
   "warnings": [],
   "expires_at": "2026-06-13T09:15:00Z",
   "created_at": "2026-06-13T09:00:00Z"
 }
 ```
+
+The `changes` array carries one entry per planned action, with the fields
+shown above. The example is truncated; the summary counts five changes total.
 
 ## Apply
 
