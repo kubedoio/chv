@@ -148,6 +148,9 @@ risk; campaign declaration updates if any boundary changed.
 
 ## 4. Evidence matrix (prompt-04 acceptance → milestone)
 
+Filled matrix with verdicts, final-run numbers, and per-row boundaries:
+**[m4.9-status.md](m4.9-status.md) §1** (the campaign close-out). Skeleton:
+
 | Acceptance criterion | Milestone |
 |---|---|
 | exact candidate passes real-KVM lifecycle and recovery | M4.3 (host-reboot leg: recorded not-provable, subset exercised) |
@@ -424,4 +427,26 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   harness bug (log-shape normalizer missed bare-hex VM ids — 27/18/21
   false "new" shapes with byte-identical halves), fixed in `f318d979` and
   validated against run 1's preserved logs before run 2.
-- M4.9: not started.
+- **M4.9 — COMPLETE** (campaign close-out, PR-9; evidence
+  [m4.9-status.md](m4.9-status.md)): the prompt-04 campaign is **complete**.
+  All eight acceptance criteria are dispositioned in the filled evidence
+  matrix (§1 there): 7 PASS (M4.3 qualified with its one recorded finding
+  #345, fixed on main and exercised in later milestones' runs; M4.5 within
+  the declared local-file + LVM profiles), 1 explicitly narrowed (backup —
+  claim absent per declaration §3). 39 issues were filed across the
+  campaign: 25 fixed/resolved and re-proven on the real host, **14 open and
+  disclosed** — worst-first: #394 concurrent-write migration (quiescent-
+  volume is the claimed mode; specs corrected by #398/#403), #368
+  journaled-create wedge (disclosed not gated), the CH v43 stop-wedge root
+  and serial-console upstream defect (contained/remediated machinery-side,
+  gate above KVM-VERIFIED stands), #355's UI firewall store, #378/#379
+  storage-surface boundaries, #384/#385/#386, #401/#402, #351/#336/#360/
+  #372. Host reboot, multi-host, and scale claims remain not provable/not
+  made on this single shared host (KVM-VERIFIED cap, declaration §5).
+  Declaration check (§4 there): **no boundary change needed** — the #398/
+  #403 spec corrections brought the specs in line with the boundary the
+  declaration already scoped; a wording-precision recommendation for the
+  Prompt-05 release notes is recorded, not applied. 53 campaign PRs merged
+  (#319–#412); 848 scenario PASS lines across the six scenario milestones'
+  final green runs (at six different candidate SHAs — per-milestone
+  candidates named in the matrix).
