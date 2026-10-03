@@ -1,12 +1,14 @@
 # Cloud Hypervisor Reference
 
-Version: v43.0 (qualified pin); v51.1 (downloaded by `scripts/install.sh`)
+Version: v43.0 (qualified pin; downloaded by `scripts/install.sh`)
 
 The qualified integration and KVM-qualification pin is v43.0
 (`scripts/integration/kvm-smoke.sh`, `scripts/integration/qual/env-preflight.sh`).
-`scripts/install.sh` downloads v51.1 for fresh installs. The split is a
-recorded reconciliation item (see the M2.5 KVM qualification evidence under
-`docs/evidence/production-readiness/v0.3.0-rc1/02-single-authority-cutover/`).
+`scripts/install.sh` downloads the same v43.0 for fresh installs. The
+installer/qualification version split previously recorded as a reconciliation
+item (see the M2.5 KVM qualification evidence under
+`docs/evidence/production-readiness/v0.3.0-rc1/02-single-authority-cutover/`)
+was resolved by pinning the installer to the qualified version.
 
 Source of truth: [Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md)
 OpenAPI spec: https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/master/vmm/src/api/openapi/cloud-hypervisor.yaml
@@ -15,8 +17,8 @@ OpenAPI spec: https://raw.githubusercontent.com/cloud-hypervisor/cloud-hyperviso
 
 | Binary | Download | Install path |
 |--------|----------|-------------|
-| `cloud-hypervisor-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.1/cloud-hypervisor-static | `/usr/local/bin/cloud-hypervisor` |
-| `ch-remote-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.1/ch-remote-static | `/usr/local/bin/ch-remote` |
+| `cloud-hypervisor-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/cloud-hypervisor-static | `/usr/local/bin/cloud-hypervisor` |
+| `ch-remote-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/ch-remote-static | `/usr/local/bin/ch-remote` |
 
 ## Architecture
 
@@ -102,7 +104,7 @@ Available as soon as cloud-hypervisor starts, on the Unix socket from `--api-soc
 | Coredump VM | `/vm.coredump` | `VmCoredumpData` | N/A | **VM paused** (x86_64 + guest_debug only) |
 | Restore VM | `/vm.restore` | `RestoreConfig` | N/A | Created but not booted |
 | Resize VM | `/vm.resize` | `VmResize` | N/A | VM booted |
-| Resize disk (v51.1 only; absent from the qualified v43.0) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
+| Resize disk (upstream-only; not available in the pinned v43.0) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
 | Resize memory zone | `/vm.resize-zone` | `VmResizeZone` | N/A | VM booted |
 | VM info | `/vm.info` | N/A | `VmInfo` | VM created |
 | VM counters | `/vm.counters` | N/A | `VmCounters` | VM booted |

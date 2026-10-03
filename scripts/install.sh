@@ -343,7 +343,7 @@ install_cloud_hypervisor() {
         return
     fi
 
-    local chv_version="51.1"
+    local chv_version="43.0"
     info "Downloading Cloud Hypervisor v${chv_version}..."
     curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/cloud-hypervisor-static" \
         -o /usr/local/bin/cloud-hypervisor

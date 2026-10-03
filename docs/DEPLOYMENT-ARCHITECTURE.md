@@ -102,7 +102,7 @@ KVM-VERIFIED, and multi-host behavior is reported as unproven.
 
 | Dependency | Version fact | Notes |
 |---|---|---|
-| Cloud Hypervisor | Qualified pin **v43.0** (declaration §3; `scripts/integration/kvm-smoke.sh` default `v43.0`) | `scripts/install.sh` downloads **v51.1** (`scripts/install.sh:346`) — a conflict with the qualified pin; see decision D6. |
+| Cloud Hypervisor | Qualified pin **v43.0** (declaration §3; `scripts/integration/kvm-smoke.sh` default `v43.0`) | `scripts/install.sh` downloads the same **v43.0** (`scripts/install.sh:346`), aligned with the qualified pin (decision D6, option (a), implemented). |
 | rust-hypervisor-firmware | 0.5.0 (qualification firmware; `scripts/install.sh:373` URL) | `download_firmware` is commented out in the install flow (`scripts/install.sh:1535`); `copy_firmware` only copies a pre-placed local `/root/CLOUDHV.fd`. |
 | fabric-linux | v0.1.5 (`Cargo.toml` git tag pin) | Consumed by `chv-nwd` for the (design-only) fabric. |
 | Host OS | Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` | Qualified on Ubuntu noble amd64; `.rpm` built but untested in prompt-04 (declaration §3, m4.2). |
@@ -244,7 +244,7 @@ evidenced at container tier.**
 | Includes | Everything in §2; core-managed authority; enrollment with real mTLS; seeded admin (forced password change), base image, default network, `dev-vm-1`. |
 | Excludes | Multi-host anything (UC-6), fabric (UC-7), backup/restore as DR (declaration §3), HA (UC-9). |
 | Evidence | Declaration §3/§5; prompt-04 milestones ran this topology on the qualification host (m4.3–m4.8). The install.sh path itself has permanent coverage via `scripts/integration/qual/install-sh-leg.sh` (m4.2 §"New harness leg"): clean container, all four units active, contract assertions — with `NO_SEED`/`NO_BRIDGE` set, so it proves the packaging/systemd contract, not VM end-to-end behavior. |
-| Disclosed conflicts | (a) `GITHUB_REPO` defaulted to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — **resolved via #425**: the default is now the canonical `kubedoio/chv`; the old name survives only in the `get.cellhv.com` hosting surface (§9). (b) install.sh downloads Cloud Hypervisor **v51.1** (`scripts/install.sh:346`), conflicting with the qualified pin **v43.0** — decision D6. (c) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. |
+| Disclosed conflicts | (a) `GITHUB_REPO` defaulted to `cellhv/chv` (`scripts/install.sh:59`) while the install docs and canonical repository URLs use `kubedoio/chv` — **resolved via #425**: the default is now the canonical `kubedoio/chv`; the old name survives only in the `get.cellhv.com` hosting surface (§9). (b) Firmware is local-copy only (`/root/CLOUDHV.fd`; `download_firmware` commented out at `scripts/install.sh:1535`) versus the qualification's 0.5.0 firmware. (The former installer/qualification VMM version conflict was resolved by pinning `scripts/install.sh` to the qualified **v43.0** — decision D6, option (a).) |
 
 ### UC-2 — Package-based clean-host install
 
@@ -400,7 +400,7 @@ options, the trade-offs, and what would unblock it.
 | D3 | Serving the UI from packages | (a) Headless-only posture: document `chvctl` as the package-mode interface; UI requires install.sh. (b) Document an operator-provided reverse proxy against `/usr/share/chv/ui` + the BFF/console proxies. (c) The deb configures nginx itself (or ships a snippet). | (a) Cheapest, narrows the product. (b) Flexible, pushes TLS/edge concerns to the operator with no contract. (c) Best out-of-box parity with install.sh, but adds a web-server dependency and edge ownership to the packages. | Prompt-06 reference-deployment profile choice; UC-3 demand. |
 | D4 | Air-gapped support | (a) Not supported; state it. (b) Document an offline recipe from the existing escape hatches (`INSTALL_CHV_TARBALL_PATH`, `INSTALL_CHV_SKIP_DEPS`, `INSTALL_CHV_SKIP_CLOUD_HV`, pre-staged images). (c) Add a first-class offline mode to the installer. | (a) Free, loses sovereign/edge adopters the positioning targets. (b) Cheap documentation work; the hatches exist but are untested as a recipe. (c) Real installer work plus a qualification leg. | Maintainer priority; a qualification leg if (b) or (c). |
 | D5 | Edge / resource profiles | (a) None; the current units and defaults are the only profile. (b) Document one "small" profile (documented unit overrides). (c) Ship alternate unit/config variants in the packages. | (a) Honest, no false edge signal. (b) Documentation-only, unqualified. (c) Real surface area, needs evidence on constrained hardware. | Field evidence from Prompt-06; ADR-011 positioning vs. actual demand. |
-| D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | Prompt-05 release-notes wording forces the choice: the published installer and the qualified pin cannot silently disagree. |
+| D6 | Installer VMM pin reconciliation | (a) Change `scripts/install.sh` to download the qualified pin (v43.0). (b) Re-qualify against the newer VMM and move the pin. (c) Make the VMM version an installer variable with the qualified pin as default. | (a) Aligns installer with evidence; pins all installs to a VMM with a known serial-console defect (contained, not cured — m4.9 §3). (b) Gets fixes but requires full re-qualification and re-verification of the #345/#409-class thread-name coupling. (c) Flexible, but a default that differs from evidence is a footgun either way. | **Resolved 2026-10-03 — option (a) implemented**: the installer downloads the qualified v43.0 pin (#422); the v51.1 drift is closed. |
 | D7 | TLS termination at the edge | (a) Keep `:80` plaintext as the documented default; recommend TLS in nginx. (b) Make the installer configure TLS by default (self-signed or operator cert). | (a) Matches all qualified evidence; ships plaintext by default in a product positioned for sovereign environments. (b) Stronger default posture; no qualified evidence for the TLS-edge shape, cert-management burden lands on install.sh. | Prompt-06 deployment profile; security review appetite. |
 | D8 | Presenting ADR-007 (upgrade/rollback policy) against reality | (a) Mark ADR-007 as aspirational relative to the shipped lifecycle and point here. (b) Update ADR-007 to the qualified package-upgrade model. (c) Re-implement the rolling-upgrade stack (deleted in #213) and qualify it. | (a) Cheap, leaves a stale-looking ADR. (b) Honest and small, narrows the design promise. (c) Largest effort, restores the designed capability, needs qualification evidence that does not exist. | Maintainer decision on whether node rolling upgrade is roadmap or non-goal; the dead `chvctl upgrade` surface was removed via #427, so option (c) would also require re-adding a client surface (§6). |
 
@@ -476,10 +476,11 @@ this branch changes only this file):**
   not).
 - `packaging/config/chv.yaml` shipped `authority_mode: legacy` while every
   shipped `.toml` config selected core-managed (§10) — resolved via #424.
-- `scripts/install.sh` downloads Cloud Hypervisor v51.1 (§5 UC-1, decision
-  D6; also `get.cellhv.com` hosting in
-  [DEPLOYMENT.md](DEPLOYMENT.md)). Its repository default was `cellhv/chv`
-  until #425 aligned it with the canonical `kubedoio/chv`; the
+- `scripts/install.sh` formerly defaulted to the `cellhv/chv` repository and
+  downloaded Cloud Hypervisor v51.1 (§5 UC-1, decision D6; also
+  `get.cellhv.com` hosting in [DEPLOYMENT.md](DEPLOYMENT.md)). Both are
+  resolved — #425 aligned the repository default with the canonical
+  `kubedoio/chv`, and the installer now pins the qualified v43.0 (#422). The
   `get.cellhv.com` hosting surface still references the old name.
 
 ## 10. Legacy and unsupported surfaces
