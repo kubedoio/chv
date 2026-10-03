@@ -47,7 +47,7 @@ where measured, not compared.
 | Serial-console re-check (m2.5 e-series against v53.0) | [02-serial-console-recheck.md](02-serial-console-recheck.md) | **Mixed** — 2 FIXED, 1 BROKEN (#8322 buffering stalls in the reconnect scenario), 1 STILL PRESENT (silent thread death), #345 wedge NOT REPRODUCED, thread/seccomp unchanged. Material input to the pin-move decision — see the leg's §5 |
 | #345/#409-verification thread coupling | [02 §4.4–4.6](02-serial-console-recheck.md) · [03 §4](03-m43-lifecycle.md) | raw-CH re-check in leg 02; stack-level corroboration in leg 03 (v43 control reproduces the #345 wedge, v53 does not) |
 | M4.3 lifecycle | [03-m43-lifecycle.md](03-m43-lifecycle.md) | **PASS — full tier** (119 PASS / 0 errors; v43 control reproduces the frozen #345 wedge, v53 clean) |
-| M4.6 scoped migration | — | pending |
+| M4.6 scoped migration | [04-m46-migration.md](04-m46-migration.md) | **PASS** (141 PASS / 0 / 0; v43 control reproduces frozen run-5 exactly) — stord-layer matrix, no VM booted; migration contract proven version-independent |
 | M4.2/M4.4/M4.5 smoke | — | pending |
 | Security regression | — | pending |
 | Pin-move PR (campaign close) | — | pending — all class-(i) v43.0 references move together |
