@@ -174,12 +174,12 @@ recorded gate above KVM-VERIFIED; machinery-side remediation is complete
 and verified per M2.5 run 10b).
 
 **Stale-docs note (from the declaration):**
-`docs/specs/component/live-migration-spec.md:212` claims dirty rounds are
+`docs/specs/component/live-migration-spec.md:212` claimed dirty rounds are
 never sent — contradicted by `sender.rs` (and by the M4.6 scenario's
-dirty-round log evidence). The planned correction did **not** land in the
-M4.6 scenario PR (campaign rule: no product/spec code changes there);
-it is recorded as an open follow-up in
-[m4.6-migration.md](m4.6-migration.md) §6.
+dirty-round log evidence). Corrected on main by **#398** (docs-only, after the
+M4.6 scenario's final run): the spec now records quiescent-volume migration as
+the claimed mode and #394's concurrent-write boundary as not claimed — see
+[m4.6-migration.md](m4.6-migration.md) §4.1/§6.
 
 ## 6. Status
 
@@ -366,7 +366,8 @@ it is recorded as an open follow-up in
   (`enabled=true` makes the client identity mandatory), and mTLS rejection
   observability (client-side rejections collapse to one transport-error text;
   server-side rejections surface as an opaque race-dependent form and the
-  destination logs nothing). Follow-up recorded: the stale
-  `live-migration-spec.md` "Critical Implementation Gaps" section (closed by
-  #393/#396/#397) still needs its correction PR.
+  destination logs nothing). The stale `live-migration-spec.md` "Critical
+  Implementation Gaps" section was corrected on main by #398 (docs-only,
+  post-run) — the spec now records quiescent-volume migration as the claimed
+  mode, matching the #394 boundary above.
 - M4.7–M4.9: not started.
