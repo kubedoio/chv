@@ -61,7 +61,7 @@ Nightly packages are built automatically from every merge to `main`.
 - **Quality:** Automated tests pass, but the code may contain regressions, breaking changes, or incomplete features.
 - **Artifacts:** `.deb`, `.rpm`, checksums.
 - **Support:** No support guarantee. File issues against the specific commit if you find bugs.
-- **Upgrade path:** Can upgrade to RC or stable. Nightly versions sort before RC and stable in package manager version ordering.
+- **Upgrade path:** Debian: can upgrade to RC or stable (`~` sorts before the release, so nightly → RC → stable is a forward upgrade). RPM: nightlies carry a `^` post-release suffix and sort **above** the same-base stable — moving from an RPM nightly to that stable release is a **downgrade** (`dnf downgrade` or `dnf install --oldpackage`).
 
 ### Version format
 
@@ -107,17 +107,21 @@ Every pull request to `main` triggers a package build. The packages are uploaded
 
 ## Version precedence
 
-Package managers order versions from oldest to newest:
+Package managers order versions differently by format:
 
 ```text
-nightly < RC < stable
+Debian (apt):  nightly < RC < stable        (~ sorts before the release)
+RPM (dnf/yum): stable < nightly (same base) (^ is the post-release operator)
 ```
 
 Examples:
-- `<version>~nightly.20260510.g0872c4a7` < `<version>~rc.1` < `<version>`
-- `<version>-0.1.rc1` < `<version>` (RPM)
+- Debian: `<version>~nightly.20260510.g0872c4a7` < `<version>~rc.1` < `<version>`
+- RPM: `<version>-0.1.rc1` < `<version>` < `<version>^nightly.20260510.g0872c4a7`
 
-This means upgrading from nightly → RC → stable is always a forward upgrade.
+On Debian, nightly → RC → stable is always a forward upgrade. On RPM, an
+RPM nightly sorts above the same-base stable release: moving to that
+stable release is a downgrade. Use `dnf downgrade` (or
+`dnf install --oldpackage`) for that step.
 
 ## Switching channels
 
