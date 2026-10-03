@@ -66,8 +66,7 @@ Nightly packages are built automatically from every merge to `main`.
 ### Version format
 
 ```text
-<version>~nightly.20260510.g0872c4a7   (Debian)
-<version>^nightly.20260510.g0872c4a7   (RPM)
+<version>~nightly.20260510.g0872c4a7   (Debian and RPM)
 ```
 
 The version includes the date and git short SHA, making every nightly build uniquely identifiable.
@@ -119,11 +118,11 @@ Examples:
 `~` is the pre-release operator in both Debian and RPM version comparison,
 so upgrading from nightly → RC → stable is always a forward upgrade.
 
-One caveat: `scripts/version.sh` has a per-format RPM path that emits a `^`
-(post-release) suffix — `^nightly` would sort **above** the same-base
-stable in RPM. No workflow uses that path today. If the pipeline ever
-adopts per-format version strings, RPM nightly ordering flips to
-above-stable (tracked issue; see
+`scripts/version.sh`'s per-format RPM path emits the same `~` suffix as
+the Debian path, so nightly stays below stable on RPM even if the
+pipeline ever adopts per-format version strings (the former `^`
+post-release output, which would have sorted above the same-base stable,
+was removed; see
 [versioning policy](../release/versioning-policy.md) §3.1).
 
 ## Switching channels
