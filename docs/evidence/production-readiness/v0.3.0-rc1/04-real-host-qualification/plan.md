@@ -403,8 +403,9 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   (F3/F4), not gated. Not claimed: CP-orchestrated
   migration, host reboot, multi-node, M2.5 delete retention (warned, not
   gated).
-- **M4.8 — IN PROGRESS** (`m4.8-perf-soak.sh` + `m4.8-perf-soak.md` skeleton
-  committed; live run pending): prelude + idle baseline (P1) → sequential
+- **M4.8 — COMPLETE** (final green run 2: 193 pass / 0 errors / 1 warn,
+  rc=0, candidate `af2dfdcd`; log `/tmp/opencode/m4.8-run2.log`):
+  `m4.8-perf-soak.sh` — prelude + idle baseline (P1) → sequential
   soak, N=6 cycles of create→start→stop→delete with zero-residue assertions
   per cycle and lifecycle latency distributions measured on the cycles (P2) →
   idle-after-soak fd/socket leak verdict vs the pre-registered thresholds
@@ -413,4 +414,14 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   two-stord mTLS path, 4 GiB seed (P5) → final sweep (P6). Measurements are
   records, not gates; leak/forbidden-outcome checks are assertions, with
   thresholds pre-registered in the script and evidence doc before the run.
+  **No product findings** — every leak-shaped assertion green (zero residue
+  per cycle; fd delta 1 and 0-byte at-rest DB growth; 0–1 new log shapes
+  per daemon; 22 constant metric series; all-200s under ~25.6k concurrent
+  reads; migration digest equal at 205.6 MiB/s). Headline baselines in
+  `m4.8-perf-soak.md` §3 (lifecycle medians: create 4.6 s, start 1.0 s,
+  graceful stop 34.4 s, delete 1.1–2.1 s; idle RSS 8–25 MB per daemon at
+  <0.15 % CPU; ~51 KB/op CP journal growth). Run 1's 3 errors were a
+  harness bug (log-shape normalizer missed bare-hex VM ids — 27/18/21
+  false "new" shapes with byte-identical halves), fixed in `f318d979` and
+  validated against run 1's preserved logs before run 2.
 - M4.9: not started.
