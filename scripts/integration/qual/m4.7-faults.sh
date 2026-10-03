@@ -35,12 +35,16 @@
 #       has none), disk row ↔ physical volume consistency, no orphaned
 #       tap, and the base VM undisturbed. Cleanup, then RETRY the
 #       create → must converge.
-#   F2  Agent SIGKILL mid-start: a created-stopped VM; submit start,
-#       SIGKILL the agent the moment the StartVm op is claimed; restart
-#       the agent. No double-spawn (≤1 CH process for the VM; exactly
-#       one stord/nwd — the restarted supervisor must adopt the living
-#       daemons, not respawn duplicates); VM ends Running or the start
-#       fails cleanly; retry start → Running; base VM undisturbed.
+#   F2  Agent SIGKILL mid-boot: a created-stopped VM; submit start,
+#       then kill the agent the moment the FIRMWARE starts printing to
+#       the console (the deterministic #409 exposure — run 2 proved a
+#       kill in this window wedges the guest half-booted while
+#       everything reports Running; #410's serial heal must recover
+#       it); restart the agent. No double-spawn (≤1 CH process for the
+#       VM; exactly one stord/nwd — the restarted supervisor must adopt
+#       the living daemons, not respawn duplicates); the guest must
+#       reach full boot evidence (kernel banner + logind); retry start
+#       idempotent; base VM undisturbed.
 #   F3  Stord SIGKILL mid-provision: base VM Running; submit a fresh VM
 #       create (its boot-volume provision+attach is the only operator-
 #       reachable volume path on a core-managed node — the standalone
@@ -1311,10 +1315,25 @@ TAPS_EXPECTED=$((TAPS_EXPECTED + 1))
 qual_chvctl vm start "$F2_VM" >/dev/null 2>&1 \
     && qual_pass "F2: vm start accepted" \
     || qual_error "F2: vm start rejected"
-if wait_op_running "$F2_VM" StartVm 60; then
-    qual_pass "F2: StartVm op observed Running (CH spawn in flight) — killing the agent inside the window"
+# Deterministic mid-boot kill window (the run-2/#409 lesson): the CP op
+# reaching Succeeded is submit-level (#368), so killing on it lands at a
+# variable offset from the actual boot — run 1 hit post-boot (trivial
+# pass), run 2 hit mid-firmware (the wedge). The firmware's first
+# console lines are the earliest observable proof the payload push has
+# begun booting; killing the agent the moment they appear lands INSIDE
+# the firmware boot window every run — the exact #409 exposure, with
+# the #410 heal expected to recover it on the re-driven start.
+F2_BOOT_WINDOW=missed
+F2_BOOT_DEADLINE=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$F2_BOOT_DEADLINE" ]; do
+    if console_has "$F2_VM" "Booting with PVH"; then F2_BOOT_WINDOW=hit; break; fi
+    [ "$(count_boots "$F2_VM")" -ge 1 ] && { F2_BOOT_WINDOW=hit; break; }
+    sleep 0.05
+done
+if [ "$F2_BOOT_WINDOW" = "hit" ]; then
+    qual_pass "F2: firmware boot in progress (console output started) — killing the agent inside the boot window (#409 exposure)"
 else
-    qual_warn "F2: StartVm window missed (op state '$(cp_op_status "$F2_VM" StartVm)') — killing the agent anyway; recovery assertions unchanged"
+    qual_warn "F2: boot window not observed within 30s (console: $(wc -c < "$(vm_console_log "$F2_VM")" 2>/dev/null || echo 0) bytes) — killing the agent anyway; recovery assertions unchanged"
 fi
 kill -9 "$AGENT_PID" 2>/dev/null || true
 wait_gone "$AGENT_PID" \
