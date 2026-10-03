@@ -403,4 +403,14 @@ the claimed mode and #394's concurrent-write boundary as not claimed — see
   (F3/F4), not gated. Not claimed: CP-orchestrated
   migration, host reboot, multi-node, M2.5 delete retention (warned, not
   gated).
-- M4.8–M4.9: not started.
+- **M4.8 — IN PROGRESS** (`m4.8-perf-soak.sh` + `m4.8-perf-soak.md` skeleton
+  committed; live run pending): prelude + idle baseline (P1) → sequential
+  soak, N=6 cycles of create→start→stop→delete with zero-residue assertions
+  per cycle and lifecycle latency distributions measured on the cycles (P2) →
+  idle-after-soak fd/socket leak verdict vs the pre-registered thresholds
+  (P3) → bounded concurrent API workload, 4 readers + 2 writers for 90 s,
+  labeled bounded-by-this-host (P4) → migration throughput on the M4.6
+  two-stord mTLS path, 4 GiB seed (P5) → final sweep (P6). Measurements are
+  records, not gates; leak/forbidden-outcome checks are assertions, with
+  thresholds pre-registered in the script and evidence doc before the run.
+- M4.9: not started.
