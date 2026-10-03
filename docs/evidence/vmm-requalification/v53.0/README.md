@@ -49,7 +49,7 @@ where measured, not compared.
 | M4.3 lifecycle | [03-m43-lifecycle.md](03-m43-lifecycle.md) | **PASS — full tier** (119 PASS / 0 errors; v43 control reproduces the frozen #345 wedge, v53 clean) |
 | M4.6 scoped migration | [04-m46-migration.md](04-m46-migration.md) | **PASS** (141 PASS / 0 / 0; v43 control reproduces frozen run-5 exactly) — stord-layer matrix, no VM booted; migration contract proven version-independent |
 | M4.2/M4.4/M4.5 smoke | [05-smokes.md](05-smokes.md) | **PASS** — M4.4 92/0/1 and M4.5 103/0/2 (both version-independent, controls = frozen counts exactly); M4.2 Leg A PASS, boot legs environment-blocked (host inotify co-tenancy, not CHV/VMM); install.sh checksum gap recorded as pin-move item |
-| Security regression | — | pending |
+| Security regression | [06-security-regression.md](06-security-regression.md) | **PASS — both CVEs closed at v53** (CVE-2026-27211 with runtime proof: full chain reproduced at v43 under the CHV shape incl. `image_type: Raw`, fail-closed at v53; CVE-2026-45782 at records tier); no new advisories affect v53.0; no new regressions; disk-image locking confirmed as an improvement |
 | Pin-move PR (campaign close) | — | pending — all class-(i) v43.0 references move together |
 
 ## Standing rules
