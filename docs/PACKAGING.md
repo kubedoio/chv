@@ -36,6 +36,15 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 /lib/systemd/system/chv-controlplane.service
 ```
 
+> **Note: the packaged UI tree is not served by anything (#423).** No packaged
+> component serves `/usr/share/chv/ui/`. `chv-controlplane`'s HTTP listener
+> (loopback `:8080`) exposes the BFF API only — there is no static file server
+> in the binary, and the packages install no web server. Packages are headless:
+> drive them with `chvctl`. A working Web UI requires `scripts/install.sh`,
+> which installs and configures nginx serving `/opt/chv/ui`. Whether (and how)
+> packages should serve the UI is open decision D3 in
+> [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) (§5 UC-3, §8 D3).
+
 ### `chv-node`
 
 ```
@@ -174,6 +183,7 @@ sudo rpm -e chvctl chv-controlplane chv-node
 
 - **No apt / dnf repository yet.** Packages must be downloaded and installed manually.
 - **Checksum signing depends on configured secrets.** CI signs `SHA256SUMS` (GPG or cosign) only when signing keys are configured. Verify checksums out-of-band until then.
+- **Packaged UI assets are unserved (#423).** `chv-controlplane` ships `/usr/share/chv/ui/`, but no packaged component serves it; see the note under [File Layout](#file-layout) and [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) §5 UC-3 / §8 D3.
 
 ## Building Packages Locally
 
