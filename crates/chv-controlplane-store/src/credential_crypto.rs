@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Errors returned by [`CredentialEncryption::decrypt`].
 ///
@@ -41,13 +41,22 @@ pub struct CredentialEncryption {
 
 impl CredentialEncryption {
     pub fn new() -> Self {
-        // NOTE (#335 review round 4): CHV_JWT_SECRET is a legacy fallback
-        // shared with the JWT signing secret (chv-config). Rotating it
-        // invalidates credentials encrypted under it — tracked in #336;
+        // NOTE (#336): the CHV_JWT_SECRET fallback below is a legacy path.
+        // Both install surfaces have minted a dedicated CHV_ENCRYPTION_KEY
+        // since #334/#335, so only pre-#335 hosts and env-driven deployments
+        // reach it. It shares the JWT signing secret (chv-config): rotating
+        // CHV_JWT_SECRET invalidates credentials encrypted under it — the
+        // warn! below makes that hazard visible at startup instead of
+        // surfacing later as opaque S3 AuthFailed errors. Dropping the
+        // fallback entirely is a maintainer decision tracked in #336;
         // do not add new consumers.
-        let key_str = std::env::var("CHV_ENCRYPTION_KEY")
-            .or_else(|_| std::env::var("CHV_JWT_SECRET"))
-            .unwrap_or_else(|_| String::new());
+        let (key_str, jwt_fallback) = match std::env::var("CHV_ENCRYPTION_KEY") {
+            Ok(key) => (key, false),
+            Err(_) => match std::env::var("CHV_JWT_SECRET") {
+                Ok(jwt) => (jwt, true),
+                Err(_) => (String::new(), false),
+            },
+        };
 
         // Unset AND present-but-empty must both warn: an empty value (e.g. a
         // truncated /etc/chv/encryption.env) otherwise disables encryption
@@ -59,6 +68,25 @@ impl CredentialEncryption {
                  S3 credentials will be stored in plaintext"
             );
             return Self { cipher: None };
+        }
+
+        // Key-source observability (#336): the operator must be able to tell
+        // from the logs which secret the credential cipher was keyed from.
+        if jwt_fallback {
+            warn!(
+                "CHV_ENCRYPTION_KEY is unset; using the legacy CHV_JWT_SECRET \
+                 fallback: S3 credentials are being encrypted under the JWT \
+                 signing secret. Rotating CHV_JWT_SECRET will invalidate all \
+                 stored S3 credentials — decryption fails closed (AuthFailed) \
+                 and the credentials must be re-entered. See \
+                 docs/runbooks/control-plane-dr.md for how to mint a \
+                 dedicated CHV_ENCRYPTION_KEY and migrate off this fallback."
+            );
+        } else {
+            info!(
+                "CHV_ENCRYPTION_KEY is set; \
+                 S3 credentials will be encrypted with the dedicated key"
+            );
         }
 
         let mut hasher = Sha256::new();
@@ -194,6 +222,74 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// Minimal `tracing` subscriber that records the message text of
+    /// INFO- and WARN-level events, so tests can assert which key-source
+    /// log line `CredentialEncryption::new` emitted (#336). Installed
+    /// per-thread with `tracing::subscriber::set_default`, mirroring the
+    /// warn-capture convention in `chv-nwd-core`'s fabric tests.
+    mod log_capture {
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing::field::Visit;
+        use tracing::span::{Attributes, Id};
+        use tracing::{Event, Level, Metadata};
+
+        #[derive(Clone, Default)]
+        pub struct LogCollector {
+            events: Arc<StdMutex<Vec<(Level, String)>>>,
+        }
+
+        impl LogCollector {
+            pub fn messages_at(&self, level: Level) -> Vec<String> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(l, _)| *l == level)
+                    .map(|(_, m)| m.clone())
+                    .collect()
+            }
+        }
+
+        struct MessageVisitor(Option<String>);
+
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{:?}", value));
+                }
+            }
+        }
+
+        impl tracing::Subscriber for LogCollector {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                matches!(*metadata.level(), Level::INFO | Level::WARN)
+            }
+
+            fn new_span(&self, _span: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let mut visitor = MessageVisitor(None);
+                event.record(&mut visitor);
+                if let Some(message) = visitor.0 {
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push((*event.metadata().level(), message));
+                }
+            }
+
+            fn enter(&self, _span: &Id) {}
+
+            fn exit(&self, _span: &Id) {}
+        }
+    }
+
     /// Serializes all tests in this module so they don't race on the
     /// process-global `CHV_ENCRYPTION_KEY` and `CHV_JWT_SECRET` env vars.
     /// Tests that mutate these env vars MUST acquire this lock.
@@ -247,6 +343,93 @@ mod tests {
 
         let decrypted = crypto.decrypt(&encrypted).expect("roundtrip succeeds");
         assert_eq!(decrypted, plaintext);
+    }
+
+    /// #336: the dedicated-key path must log an info line (so the key
+    /// source is visible at startup) and must NOT warn — a warning here
+    /// would train operators to ignore the real fallback warning.
+    #[test]
+    fn dedicated_key_logs_info_and_does_not_warn() {
+        let _g = EnvGuard::lock();
+        std::env::set_var("CHV_ENCRYPTION_KEY", "dedicated-key-observability");
+        std::env::remove_var("CHV_JWT_SECRET");
+
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let crypto = CredentialEncryption::new();
+
+        let warnings = logs.messages_at(tracing::Level::WARN);
+        assert!(
+            warnings.is_empty(),
+            "dedicated key must not warn, got {:?}",
+            warnings
+        );
+        assert!(
+            logs.messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("CHV_ENCRYPTION_KEY")),
+            "dedicated key must log an info line naming CHV_ENCRYPTION_KEY"
+        );
+
+        // The key-source logging is observability only: the cipher still
+        // round-trips exactly as before.
+        let encrypted = crypto.encrypt("dedicated-key-plaintext");
+        assert!(encrypted.starts_with("enc:"));
+        assert_eq!(
+            crypto.decrypt(&encrypted).expect("roundtrip succeeds"),
+            "dedicated-key-plaintext"
+        );
+    }
+
+    /// #336: the legacy CHV_JWT_SECRET fallback must log a warn-level
+    /// startup warning that states the rotation hazard plainly (S3
+    /// credentials encrypted under the JWT signing secret; rotating
+    /// CHV_JWT_SECRET invalidates them, fail-closed) and points at the
+    /// runbook for migrating to a dedicated key.
+    #[test]
+    fn jwt_fallback_logs_rotation_hazard_warning() {
+        let _g = EnvGuard::lock();
+        std::env::remove_var("CHV_ENCRYPTION_KEY");
+        std::env::set_var("CHV_JWT_SECRET", "jwt-secret-legacy-fallback");
+
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let crypto = CredentialEncryption::new();
+
+        let warnings = logs.messages_at(tracing::Level::WARN);
+        let warning = warnings
+            .iter()
+            .find(|m| m.contains("CHV_JWT_SECRET"))
+            .expect("fallback must warn, got no warning");
+        assert!(
+            warning.contains("JWT signing secret"),
+            "warning must say the credentials ride the JWT signing secret: {}",
+            warning
+        );
+        assert!(
+            warning.contains("Rotating CHV_JWT_SECRET will invalidate"),
+            "warning must state the rotation hazard: {}",
+            warning
+        );
+        assert!(
+            warning.contains("AuthFailed"),
+            "warning must name the fail-closed outcome: {}",
+            warning
+        );
+        assert!(
+            warning.contains("control-plane-dr.md"),
+            "warning must point at the migration runbook: {}",
+            warning
+        );
+
+        // Behavior is unchanged: the fallback key still encrypts and
+        // decrypts round-trip exactly as before.
+        let encrypted = crypto.encrypt("jwt-fallback-plaintext");
+        assert!(encrypted.starts_with("enc:"));
+        assert_eq!(
+            crypto.decrypt(&encrypted).expect("roundtrip succeeds"),
+            "jwt-fallback-plaintext"
+        );
     }
 
     #[test]
