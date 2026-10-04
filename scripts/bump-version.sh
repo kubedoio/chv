@@ -73,6 +73,10 @@ NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 escape_sed_pattern() {
   # Bracket list: ] [ \ . * ^ $ — every BRE metacharacter that can appear
   # in a version string. Each match is prefixed with a literal backslash.
+  # Assumption: versions are backslash-free (semver-validated VERSION,
+  # package.json semver, sidebar [0-9][0-9.]* extraction). A literal
+  # backslash would double-escape and fail to MATCH (fail-safe: no
+  # corruption, just no rewrite) — no realistic source can produce one.
   printf '%s' "$1" | sed 's/[][\.*^$]/\\&/g'
 }
 
