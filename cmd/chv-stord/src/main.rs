@@ -95,7 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fail-closed: a partially configured client half, unreadable material or
     // a mismatched keypair is a startup error (never a runtime downgrade).
     // `migration.enabled = false` (default) starts without credentials and
-    // migration actions fail with a failed_precondition error in the sender.
+    // migration actions fail with a failed_precondition error in the sender;
+    // the wiring logs a single `storage migration is disabled` confirmation
+    // line at startup (see `load_migration_materials`).
     // Under `enabled = true` the client half is independently optional
     // (issue #401): no client fields = destination-only stord that never
     // initiates migrations (outbound migration actions fail with the same
@@ -170,6 +172,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `ensure_migration_half_configured` call — is unit-testable in this
 /// crate: a regression that drops or bypasses a step fails the tests
 /// below.
+///
+/// This function also owns the disabled-migration startup confirmation
+/// line: `migration.enabled = false` (the default) logs one info line so
+/// a stord that starts without migration capability says so. #483's
+/// extraction dropped `main`'s `else` branch for this case; the line now
+/// lives here — and only here, the loaders no longer emit their own
+/// copies — so it fires exactly once for a disabled config and never for
+/// the three enabled shapes (source-only, destination-only, both), whose
+/// startup lines come from the loaders and the `is_some` branches in
+/// `main`.
 fn load_migration_materials(
     migration: &chv_config::StordMigrationConfig,
 ) -> Result<
@@ -194,6 +206,13 @@ fn load_migration_materials(
         migration.client_ca_path.as_deref(),
     )?;
     ensure_migration_half_configured(migration.enabled, client_tls.as_ref(), server_tls.as_ref())?;
+    // Only reachable for a *clean* disabled section: `enabled = false`
+    // with any field set anywhere in the section already failed above.
+    if !migration.enabled {
+        info!(
+            "storage migration is disabled (migration.enabled = false): migration actions will be unavailable"
+        );
+    }
     Ok((client_tls, server_tls))
 }
 
@@ -202,12 +221,85 @@ mod tests {
     use super::load_migration_materials;
     use chv_config::StordMigrationConfig;
 
-    /// Write a self-signed cert/key pair plus a client CA bundle (the cert
-    /// itself — the loader only requires the bundle to parse) and return
-    /// the receiver-half paths. `keep` must stay alive for the paths to
-    /// remain readable.
+    /// Minimal `tracing` subscriber that records the message text of
+    /// INFO- and WARN-level events, so tests can assert which startup log
+    /// line the wiring emitted. Installed per-thread with
+    /// `tracing::subscriber::set_default` — the same convention as the
+    /// loader tests in `chv-stord-core`'s `tls_config` (round-2 review of
+    /// #401) and `chv-controlplane-store`'s credential key-source log
+    /// capture (#336). Duplicated here because this is a bin crate.
+    mod log_capture {
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing::field::Visit;
+        use tracing::span::{Attributes, Id};
+        use tracing::{Event, Level, Metadata};
+
+        #[derive(Clone, Default)]
+        pub struct LogCollector {
+            events: Arc<StdMutex<Vec<(Level, String)>>>,
+        }
+
+        impl LogCollector {
+            pub fn messages_at(&self, level: Level) -> Vec<String> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(l, _)| *l == level)
+                    .map(|(_, m)| m.clone())
+                    .collect()
+            }
+        }
+
+        struct MessageVisitor(Option<String>);
+
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{:?}", value));
+                }
+            }
+        }
+
+        impl tracing::Subscriber for LogCollector {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                matches!(*metadata.level(), Level::INFO | Level::WARN)
+            }
+
+            fn new_span(&self, _span: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let mut visitor = MessageVisitor(None);
+                event.record(&mut visitor);
+                if let Some(message) = visitor.0 {
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push((*event.metadata().level(), message));
+                }
+            }
+
+            fn enter(&self, _span: &Id) {}
+
+            fn exit(&self, _span: &Id) {}
+        }
+    }
+
+    /// Write a self-signed cert/key pair plus a CA bundle (the cert
+    /// itself — the loaders only require the bundle to parse) and return
+    /// the material paths. Valid for either half: the receiver fields
+    /// (`server_cert_path`, `server_key_path`, `client_ca_path`) and the
+    /// client fields (`client_cert_path`, `client_key_path`,
+    /// `ca_cert_path`) accept the same shape. `keep` must stay alive for
+    /// the paths to remain readable.
     #[allow(clippy::type_complexity)]
-    fn receiver_material() -> (
+    fn self_signed_material() -> (
         tempfile::TempDir,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -249,7 +341,7 @@ mod tests {
     /// identity, receiver material present.
     #[test]
     fn destination_only_config_loads() {
-        let (_keep, cert, key, ca) = receiver_material();
+        let (_keep, cert, key, ca) = self_signed_material();
         let config = StordMigrationConfig {
             enabled: true,
             listen_addr: Some("127.0.0.1:50052".to_string()),
@@ -280,6 +372,119 @@ mod tests {
         assert!(
             load_migration_materials(&config).is_err(),
             "enabled = false with a stray client field must be a startup error"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Startup log lines (second-pass review of #483): the
+    // disabled-migration confirmation line that #483's extraction dropped
+    // is restored at the wiring seam, fires exactly once (the loaders no
+    // longer emit their own copies), and never fires for the enabled
+    // shapes.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn disabled_config_logs_disabled_startup_line_exactly_once() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let config = StordMigrationConfig::default();
+        let (client, server) =
+            load_migration_materials(&config).expect("disabled config must load");
+        assert!(client.is_none() && server.is_none());
+        let hits: Vec<String> = logs
+            .messages_at(tracing::Level::INFO)
+            .into_iter()
+            .filter(|m| m.contains("storage migration is disabled"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the disabled-migration line must fire exactly once, got: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn source_only_config_does_not_log_disabled_line() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let (_keep, cert, key, ca) = self_signed_material();
+        let config = StordMigrationConfig {
+            enabled: true,
+            client_cert_path: Some(cert),
+            client_key_path: Some(key),
+            ca_cert_path: Some(ca),
+            dest_server_name: Some("stord-peer".to_string()),
+            ..Default::default()
+        };
+        let (client, server) =
+            load_migration_materials(&config).expect("source-only config must load");
+        assert!(client.is_some() && server.is_none());
+        assert!(
+            !logs
+                .messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("storage migration is disabled")),
+            "source-only startup must not log the disabled-migration line"
+        );
+    }
+
+    #[test]
+    fn destination_only_config_does_not_log_disabled_line() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let (_keep, cert, key, ca) = self_signed_material();
+        let config = StordMigrationConfig {
+            enabled: true,
+            listen_addr: Some("127.0.0.1:50052".to_string()),
+            server_cert_path: Some(cert),
+            server_key_path: Some(key),
+            client_ca_path: Some(ca),
+            ..Default::default()
+        };
+        let (client, server) =
+            load_migration_materials(&config).expect("destination-only config must load");
+        assert!(client.is_none() && server.is_some());
+        assert!(
+            !logs
+                .messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("storage migration is disabled")),
+            "destination-only startup must not log the disabled-migration line"
+        );
+        assert!(
+            logs.messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("client identity not configured")),
+            "destination-only startup keeps the loader's own info line"
+        );
+    }
+
+    #[test]
+    fn both_halves_config_does_not_log_disabled_line() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let (_keep_client, c_cert, c_key, c_ca) = self_signed_material();
+        let (_keep_server, s_cert, s_key, s_ca) = self_signed_material();
+        let config = StordMigrationConfig {
+            enabled: true,
+            client_cert_path: Some(c_cert),
+            client_key_path: Some(c_key),
+            ca_cert_path: Some(c_ca),
+            dest_server_name: Some("stord-peer".to_string()),
+            listen_addr: Some("127.0.0.1:50052".to_string()),
+            server_cert_path: Some(s_cert),
+            server_key_path: Some(s_key),
+            client_ca_path: Some(s_ca),
+        };
+        let (client, server) =
+            load_migration_materials(&config).expect("both-halves config must load");
+        assert!(client.is_some() && server.is_some());
+        assert!(
+            !logs
+                .messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("storage migration is disabled")),
+            "both-halves startup must not log the disabled-migration line"
         );
     }
 }
