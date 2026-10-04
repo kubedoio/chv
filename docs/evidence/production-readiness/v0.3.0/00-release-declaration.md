@@ -15,7 +15,7 @@ action that follows approval of this declaration.
 
 **Release line:** `v0.3.0` — the first **stable** release, cut from current
 `main`. The maintainer decision (2026-10-04) is to cut now; the host-OS support
-list is derived separately and signed off by the maintainer (§10 placeholder).
+list is recorded in §10 (maintainer sign-off 2026-10-04).
 
 ---
 
@@ -64,8 +64,8 @@ already existed in the frozen m4.9 §4 close-out.
   [vmm-requalification/v53.0/](../../../vmm-requalification/v53.0/README.md).
 - **Host OS profile:** Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` packages.
   Qualified on Ubuntu noble amd64 (nested KVM); `.rpm` untested in prompt-04.
-  **The exact host-OS support list is derived separately and signed off by the
-  maintainer — see the placeholder in §10.**
+  **The exact host-OS support list is recorded in §10 (maintainer sign-off
+  2026-10-04).**
 - **Network profile:** one CHV-owned overlay topology, host-safe after
   Prompt 01 (must not affect unrelated host/container/SSH/forwarded traffic).
   Precision record (frozen m4.9 §4.5, unchanged): the qualified topology is a
@@ -322,19 +322,32 @@ transparently.
    closed without it).
 5. **With the Release published**, `install.sh`'s from-GitHub path resolves
    `latest` → `0.3.0`, downloads, verifies, and installs; **#440 closes**.
-6. **Host-OS support list:** see the placeholder section §10 — derived
-   separately, signed off by the maintainer; this declaration does not invent
-   it.
+6. **Host-OS support list:** recorded in §10 (maintainer sign-off
+   2026-10-04); this declaration does not invent it.
 
-## 10. Host-OS support list — PLACEHOLDER (maintainer sign-off pending)
+## 10. Host-OS support list (maintainer sign-off recorded 2026-10-04)
 
-> **This section is intentionally empty of content.** The supported host-OS
-> list for v0.3.0 is being derived in a separate workstream and will be
-> recorded by the maintainer's sign-off before or with the release
-> publication. Nothing in this declaration should be read as claiming any
-> specific host-OS support beyond §3's profile statement (Linux x86_64;
-> `.deb` + `.rpm`; qualified on Ubuntu noble amd64, nested KVM; `.rpm`
-> untested in prompt-04).
+Derived from the install docs, the packaging pipeline, and the
+qualification evidence; signed off by the maintainer on 2026-10-04
+(release decision: cut v0.3.0 stable). Every line carries its evidence
+tier.
+
+| Dimension | Support statement | Tier / evidence |
+|---|---|---|
+| Architecture | **x86_64 (amd64) only.** The release tarball is `linux-amd64`; all published packages are x86_64. `install.sh` *accepts* `arm64`/`aarch64` at the script level, but no released artifact exists for it — script-level acceptance is **not** a support claim. | Artifact inventory (`build-release.sh` `ARCH="linux-amd64"`; nightly assets x86_64-only) |
+| `.deb` distros | **Debian 12, Ubuntu 24.04** | CI tier: package smoke + upgrade/downgrade lifecycle tests in `debian:12` and `ubuntu:24.04` containers (`scripts/package/smoke-deb.sh`, `lifecycle-deb.sh`), run in the release pipeline before publishing |
+| `.rpm` distros | **Rocky Linux 9** | CI tier: same smoke + lifecycle coverage in `rockylinux:9` (`smoke-rpm.sh`, `lifecycle-rpm.sh`) |
+| glibc floor | **≥ 2.35** — release binaries are built on the pinned `ubuntu-22.04` runner specifically so they load on the oldest matrix distro (Debian 12 = glibc 2.36) | `release.yml` build-pin rationale |
+| Kernel / virtualization | Linux with `/dev/kvm` (VT-x / AMD-V) required | Qualification tier: the qualified host ran Ubuntu 24.04, kernel `6.8.0-142-generic`, 16 vCPU AMD EPYC 9554P, 31 GiB |
+| Hardware minimums | 4 cores / 8 GB RAM / 50 GB disk — **documented guideline only, explicitly unevidenced**; no scale claims are derivable from the qualified host | `docs/DEPLOYMENT.md` (self-labeled) |
+| Source installs | Ubuntu/Debian build host, Rust toolchain (`rustup`), Node.js 22+ and `npm` | `docs/DEPLOYMENT.md` build prerequisites |
+| VMM (pinned dependency) | Cloud Hypervisor **v53.0** — downloaded by `install.sh` with sha256 digest verification; rust-hypervisor-firmware 0.5.0 | Qualification tier: the #448 re-qualification campaign (`docs/evidence/vmm-requalification/v53.0/`) |
+
+Honesty notes carried into the release notes: (1) the distro matrix is
+**CI container tier**, not per-distro real-host qualification — the
+real-host qualified deployment was Ubuntu 24.04 amd64; (2) the hardware
+minimums remain labeled as an unevidenced guideline; (3) arm64 is not
+supported in v0.3.0.
 
 ## 11. Rollback / withdrawal of the release
 
@@ -387,8 +400,8 @@ Listed explicitly, not papered over:
 7. **Multi-host, FIELD-QUALIFIED, and bare-metal tiers remain unproven on
    this infrastructure** (single physical host, nested KVM) — unchanged from
    rc1 §5.
-8. **The host-OS support list is not in this document** (§10 placeholder) —
-   derived separately, maintainer sign-off pending.
+8. **The host-OS support list** is recorded in §10 (maintainer sign-off
+   2026-10-04).
 
 ## 13. Non-scope (carried from rc1 §6, plus additions)
 
