@@ -378,6 +378,11 @@ ca_cert_path = "/etc/chv/certs/ca.crt"
 # a marker-based detector cannot distinguish a frozen boot from a quiet
 # marker-less guest, nor from an adopted guest whose console wrapped
 # past its banner (all bounded by max_reboots).
+# The stall window is progress-based, not rate-based: any console byte
+# resets it. A console crawling through a v53.0 pre-connect backlog
+# (CH #8322 — after a late attach, the boot marker can arrive well over
+# a minute behind the backlog head) is waited out; only a console that
+# goes genuinely silent for stall_secs fires.
 [watchdog]
 enabled = false
 boot_marker = "systemd-logind"  # printed by every systemd boot
