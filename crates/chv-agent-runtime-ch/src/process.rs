@@ -468,8 +468,11 @@ struct VmProcess {
     console_io: OwnedFd,
     /// Which transport `console_io` speaks; drives respawn semantics.
     serial_transport: SerialTransport,
-    pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    pty_scrollback: Arc<std::sync::RwLock<Vec<u8>>>,
+    /// The console fan-out for this VM (issue #476): the lossless
+    /// console.log feed, the lossy WS live view and the scrollback,
+    /// bundled so every producer feeds all three sinks or none. See
+    /// [`ConsoleFanout`].
+    console_fanout: ConsoleFanout,
     broadcaster_alive: Arc<AtomicBool>,
     /// Console-capture byte offset at which the CURRENT VMM generation's
     /// boot begins. Bytes before it belong to earlier VMM generations
@@ -1720,12 +1723,154 @@ async fn run_genisoimage(
     }
 }
 
-/// Borrowed console fan-out pair (broadcast channel + scrollback) used
-/// by the serial abandonment paths to preserve drained guest output.
-type ConsoleFanout<'a> = (
-    &'a tokio::sync::broadcast::Sender<Vec<u8>>,
-    &'a Arc<std::sync::RwLock<Vec<u8>>>,
-);
+/// Per-VM console fan-out: the three sinks a slice of guest serial
+/// output is delivered to, bundled into one type so that no producer
+/// can feed one sink and skip another (the #476 bug class: the
+/// console.log writer was fed from the lossy live-view channel, and
+/// its `Lagged → continue` branch silently dropped bytes from the
+/// durable record under a 1-byte-flush flood).
+///
+/// Sink contracts:
+/// - **console.log (persistence)** — the unbounded mpsc whose receiving
+///   end [`ConsoleFanout::new`] returns, consumed by
+///   [`ProcessCloudHypervisorAdapter::spawn_console_log_writer`].
+///   LOSSLESS and order-preserving: the file is the durable record of
+///   what the guest printed (boot evidence, incident forensics), so a
+///   writer draining slower than the serial reader produces must
+///   buffer, never skip. The channel is unbounded by design — a
+///   bounded or blocking send would park the #469/#471
+///   drain-continuously reader and reintroduce the #8322 backlog
+///   truncation — and its growth is bounded in practice by the guest's
+///   console output rate against a local-file writer (with the
+///   [`CONSOLE_LOG_MAX_BYTES`] wraparound cap on the file itself). A
+///   host whose console.log writes stall indefinitely has a node-level
+///   storage incident, and the pre-fix behavior there was silent
+///   evidence loss — strictly worse for this sink.
+/// - **live view (WS clients)** — a capacity-[`LIVE_CAPACITY`]
+///   broadcast. Lossy BY DESIGN: a slow console-stream client skips
+///   forward and resumes rather than pinning agent memory per client;
+///   the client's recovery path is reconnect + scrollback replay. The
+///   WS handler's `Lagged` branch logs the skip so it stays
+///   observable.
+/// - **scrollback (last 256 KiB)** — appended synchronously by the
+///   producer itself under a sync lock, so it can never lag.
+///
+/// [`send`](ConsoleFanout::send) is and must remain await-free: the
+/// serial drain loop calls it back-to-back between blocking reads with
+/// nothing else in between, and a park inside the fan-out would
+/// truncate CH v53.0's pre-connect backlog flush (upstream #8322 —
+/// see `drain_console_endpoint`).
+#[derive(Clone)]
+struct ConsoleFanout {
+    /// Lossless persistence feed for the console.log writer (issue
+    /// #476). Unbounded mpsc: see the type doc for the sizing
+    /// rationale.
+    log_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// Lossy live-view broadcast for WS console clients.
+    live_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    /// In-memory scrollback (last [`CONSOLE_SCROLLBACK_BYTES`]).
+    scrollback: Arc<std::sync::RwLock<Vec<u8>>>,
+}
+
+impl ConsoleFanout {
+    /// Capacity, in messages, of the lossy live-view broadcast. Sized
+    /// for a WS client that briefly parks on a slow TCP drain; a
+    /// client slower than that lags and reconnects (scrollback replay),
+    /// by design.
+    const LIVE_CAPACITY: usize = 4096;
+
+    /// Creates the fan-out over the given initial scrollback contents
+    /// (empty in production; pre-seeded by scrollback tests), together
+    /// with the console.log writer's receiving end. The receiver exists
+    /// before any producer can send, so the persistence sink has no
+    /// subscribe-time loss window (the live view's subscribe still
+    /// happens at WS connect time and may miss earlier output — the
+    /// scrollback replay covers exactly that gap).
+    fn new(initial_scrollback: Vec<u8>) -> (Self, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, _) = tokio::sync::broadcast::channel(Self::LIVE_CAPACITY);
+        (
+            Self {
+                log_tx,
+                live_tx,
+                scrollback: Arc::new(std::sync::RwLock::new(initial_scrollback)),
+            },
+            log_rx,
+        )
+    }
+
+    /// Fans one slice of guest serial output out to all three sinks.
+    /// Await-free by contract (see the type doc). A failed send is a
+    /// sink that has gone away (the writer exited, no WS client), never
+    /// a reason to stop draining the console.
+    fn send(&self, data: &[u8]) {
+        self.push_scrollback(data);
+        let _ = self.live_tx.send(data.to_vec());
+        let _ = self.log_tx.send(data.to_vec());
+    }
+
+    /// Subscribes a new consumer to the lossy live view (WS clients).
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
+        self.live_tx.subscribe()
+    }
+
+    /// Whether two fan-outs are the same per-VM instance — identity for
+    /// the broadcaster supersede checks: a replaced map entry mints a
+    /// fresh fan-out, and an old broadcaster must stand down for it.
+    /// The live-view channel is the witness (both channels are minted
+    /// together, so either would do).
+    fn same_channel(&self, other: &Self) -> bool {
+        self.live_tx.same_channel(&other.live_tx)
+    }
+
+    /// Clears the in-memory scrollback (the stop paths: the session's
+    /// evidence lives on in console.log / console.log.last).
+    fn clear_scrollback(&self) {
+        Self::lock_scrollback_write(&self.scrollback).clear();
+    }
+
+    /// Clones the current scrollback contents (the WS connect-time
+    /// replay read).
+    fn scrollback_snapshot(&self) -> Vec<u8> {
+        Self::lock_scrollback_read(&self.scrollback).clone()
+    }
+
+    /// Appends drained console bytes to the shared scrollback buffer,
+    /// enforcing the [`CONSOLE_SCROLLBACK_BYTES`] cap. The single place
+    /// the cap policy lives: every producer pushes through
+    /// [`ConsoleFanout::send`], so the WS scrollback contract (last
+    /// 256 KiB, exact, in-order) is identical on every path.
+    fn push_scrollback(&self, data: &[u8]) {
+        let mut sb = Self::lock_scrollback_write(&self.scrollback);
+        sb.extend_from_slice(data);
+        if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+            let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+            sb.drain(0..excess);
+        }
+    }
+
+    /// Lock the scrollback for writing, recovering from a poisoned
+    /// lock: the buffer is an append-only log with no cross-field
+    /// invariants, so a panic that poisoned the lock cannot leave it
+    /// unsafe to use — and re-panicking here would take the drain
+    /// thread (or a WS session) down over a stale console buffer.
+    fn lock_scrollback_write(
+        scrollback: &std::sync::RwLock<Vec<u8>>,
+    ) -> std::sync::RwLockWriteGuard<'_, Vec<u8>> {
+        scrollback
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Read-side counterpart of [`ConsoleFanout::lock_scrollback_write`].
+    fn lock_scrollback_read(
+        scrollback: &std::sync::RwLock<Vec<u8>>,
+    ) -> std::sync::RwLockReadGuard<'_, Vec<u8>> {
+        scrollback
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 impl ProcessCloudHypervisorAdapter {
     /// How long a graceful stop waits, after pressing the ACPI power
@@ -2069,43 +2214,6 @@ impl ProcessCloudHypervisorAdapter {
         drained
     }
 
-    /// Lock the scrollback for writing, recovering from a poisoned lock:
-    /// the buffer is an append-only log with no cross-field invariants,
-    /// so a panic that poisoned the lock cannot leave it unsafe to use —
-    /// and re-panicking here would take the drain thread (or a WS
-    /// session) down over a stale console buffer.
-    fn lock_scrollback_write(
-        scrollback: &std::sync::RwLock<Vec<u8>>,
-    ) -> std::sync::RwLockWriteGuard<'_, Vec<u8>> {
-        scrollback
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Read-side counterpart of [`Self::lock_scrollback_write`].
-    fn lock_scrollback_read(
-        scrollback: &std::sync::RwLock<Vec<u8>>,
-    ) -> std::sync::RwLockReadGuard<'_, Vec<u8>> {
-        scrollback
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Appends drained console bytes to the shared scrollback buffer,
-    /// enforcing the [`CONSOLE_SCROLLBACK_BYTES`] cap. The single place
-    /// the cap policy lives: the broadcaster's drain loop, the
-    /// abandoned-connection drain and the shutdown drain all push through
-    /// here, so the WS scrollback contract (last 256 KiB, exact,
-    /// in-order) is identical on every path.
-    fn push_console_scrollback(scrollback: &std::sync::RwLock<Vec<u8>>, data: &[u8]) {
-        let mut sb = Self::lock_scrollback_write(scrollback);
-        sb.extend_from_slice(data);
-        if sb.len() > CONSOLE_SCROLLBACK_BYTES {
-            let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
-            sb.drain(0..excess);
-        }
-    }
-
     /// The per-connection console drain loop (issue #469): a tight
     /// BLOCKING read loop with no awaits between reads.
     ///
@@ -2126,9 +2234,10 @@ impl ProcessCloudHypervisorAdapter {
     /// 0.4 s). This loop provides that property by construction: plain
     /// blocking `read()` (returns as soon as any data is readable), the
     /// fan-out between reads is a bounded memcpy under a sync lock plus
-    /// a non-blocking broadcast send, and nothing else — no sleeps, no
-    /// poll intervals, no awaits that could park the connection with
-    /// unread data pending.
+    /// two non-blocking channel sends (the lossy live view and the
+    /// lossless console.log feed — see [`ConsoleFanout::send`]), and
+    /// nothing else — no sleeps, no poll intervals, no awaits that
+    /// could park the connection with unread data pending.
     ///
     /// Endpoint-loss contract (unchanged from the async read loop this
     /// replaces): `Ok(0)` (EOF — the #284 reboot rotation's `SHUT_RD`
@@ -2136,19 +2245,13 @@ impl ProcessCloudHypervisorAdapter {
     /// cycle; the caller's self-heal reconnect then takes over. The
     /// descriptor is consumed and closed on return, ending the cycle's
     /// dup exactly as before.
-    fn drain_console_endpoint(
-        cycle_fd: OwnedFd,
-        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: &std::sync::RwLock<Vec<u8>>,
-    ) {
+    fn drain_console_endpoint(cycle_fd: OwnedFd, fanout: &ConsoleFanout) {
         let mut buf = [0u8; 4096];
         loop {
             match nix::unistd::read(&cycle_fd, &mut buf) {
                 Ok(0) | Err(_) => return, // endpoint lost
                 Ok(n) => {
-                    let data = &buf[..n];
-                    Self::push_console_scrollback(pty_scrollback, data);
-                    let _ = pty_tx.send(data.to_vec());
+                    fanout.send(&buf[..n]);
                 }
             }
         }
@@ -2186,11 +2289,7 @@ impl ProcessCloudHypervisorAdapter {
     /// connection: it makes the peer's writes fail EPIPE while the
     /// connection is still open, which is itself a freeze trigger on
     /// v43 (the skipped-THRE path above).
-    async fn abandon_serial_connection(
-        vm_id: &str,
-        fd: OwnedFd,
-        fanout: Option<ConsoleFanout<'_>>,
-    ) {
+    async fn abandon_serial_connection(vm_id: &str, fd: OwnedFd, fanout: Option<ConsoleFanout>) {
         if let Err(e) =
             nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Write)
         {
@@ -2204,9 +2303,8 @@ impl ProcessCloudHypervisorAdapter {
         if drained.is_empty() {
             return;
         }
-        if let Some((tx, scrollback)) = fanout {
-            Self::push_console_scrollback(scrollback, &drained);
-            let _ = tx.send(drained.clone());
+        if let Some(fanout) = fanout {
+            fanout.send(&drained);
         }
         info!(
             vm_id = %vm_id,
@@ -2259,7 +2357,7 @@ impl ProcessCloudHypervisorAdapter {
             // Hold the vm-map write lock across both passes: lifecycle
             // endpoint swaps and the broadcaster heal's swap are blocked
             // behind it, and the heal re-checks the draining latch after
-            // acquiring it. (Lock order vms -> pty_scrollback matches
+            // acquiring it. (Lock order vms -> fanout scrollback matches
             // every other holder.)
             let mut vms = self.vms.write().await;
             for (vm_id, proc) in vms.iter() {
@@ -2293,8 +2391,7 @@ impl ProcessCloudHypervisorAdapter {
                 if drained.is_empty() {
                     continue;
                 }
-                Self::push_console_scrollback(&proc.pty_scrollback, &drained);
-                let _ = proc.pty_tx.send(drained.clone());
+                proc.console_fanout.send(&drained);
                 info!(
                     vm_id = %vm_id,
                     bytes = drained.len(),
@@ -2342,8 +2439,7 @@ impl ProcessCloudHypervisorAdapter {
         &self,
         vm_id: &str,
         serial_transport: &SerialTransport,
-        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: &Arc<std::sync::RwLock<Vec<u8>>>,
+        fanout: &ConsoleFanout,
         broadcaster_alive: &Arc<AtomicBool>,
     ) {
         if broadcaster_alive.load(Ordering::SeqCst) {
@@ -2398,23 +2494,18 @@ impl ProcessCloudHypervisorAdapter {
                             // possibly-unread data (an abortive close
                             // resets the connection and can kill the
                             // serial manager).
-                            Some(proc) if proc.pty_tx.same_channel(pty_tx) => {
+                            Some(proc) if proc.console_fanout.same_channel(fanout) => {
                                 proc.console_io = fresh;
                                 Some(dup)
                             }
                             superseded => {
-                                let fanout = superseded
-                                    .map(|proc| (proc.pty_tx.clone(), proc.pty_scrollback.clone()));
+                                let fanout = superseded.map(|proc| proc.console_fanout.clone());
                                 drop(vms);
                                 drop(dup);
                                 match fanout {
-                                    Some((tx, sb)) => {
-                                        Self::abandon_serial_connection(
-                                            vm_id,
-                                            fresh,
-                                            Some((&tx, &sb)),
-                                        )
-                                        .await;
+                                    Some(f) => {
+                                        Self::abandon_serial_connection(vm_id, fresh, Some(f))
+                                            .await;
                                     }
                                     None => {
                                         Self::abandon_serial_connection(vm_id, fresh, None).await;
@@ -2447,8 +2538,7 @@ impl ProcessCloudHypervisorAdapter {
                 vm_id.to_string(),
                 broadcaster_fd,
                 serial_transport.clone(),
-                pty_tx.clone(),
-                pty_scrollback.clone(),
+                fanout.clone(),
                 broadcaster_alive.clone(),
                 self.console_draining.clone(),
             );
@@ -2532,20 +2622,29 @@ impl ProcessCloudHypervisorAdapter {
         Ok(pty_master)
     }
 
-    /// Spawns the console.log persistence task: subscribes to the VM's
-    /// console fan-out channel and writes output to `log_path`, capped at
-    /// [`CONSOLE_LOG_MAX_BYTES`] with wraparound (in-memory scrollback keeps
-    /// the recent tail either way). The task ends when every sender for the
-    /// channel drops — i.e. when the VM entry (and its broadcaster) are
-    /// replaced or removed.
+    /// Spawns the console.log persistence task: consumes the VM's
+    /// lossless persistence feed ([`ConsoleFanout::new`]'s mpsc) and
+    /// writes output to `log_path`, capped at
+    /// [`CONSOLE_LOG_MAX_BYTES`] with wraparound (in-memory scrollback
+    /// keeps the recent tail either way). The task ends when every
+    /// fan-out clone drops — i.e. when the VM entry (and its
+    /// broadcaster) are replaced or removed.
+    ///
+    /// Losslessness (issue #476): the feed is an unbounded mpsc, so a
+    /// writer draining slower than the serial reader produces (e.g.
+    /// parked mid-`write_all` under a CH v53.0-style 1-byte-flush
+    /// flood) buffers and catches up instead of skipping — the
+    /// broadcast `Lagged → continue` this writer used to run on
+    /// silently dropped the missed bytes from the durable record while
+    /// WS and scrollback stayed complete. The live-view broadcast's
+    /// lossy semantics are unchanged; only the file sink is lossless.
     fn spawn_console_log_writer(
         vm_id: &str,
-        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+        mut log_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
         log_path: std::path::PathBuf,
         mode: ConsoleLogMode,
     ) {
         let vm_id_log = vm_id.to_string();
-        let mut pty_rx_log = pty_tx.subscribe();
         tokio::spawn(async move {
             let mut options = tokio::fs::OpenOptions::new();
             options.create(true);
@@ -2566,25 +2665,19 @@ impl ProcessCloudHypervisorAdapter {
                 }
             };
             let mut written: u64 = 0;
-            loop {
-                match pty_rx_log.recv().await {
-                    Ok(data) => {
-                        if written + data.len() as u64 > CONSOLE_LOG_MAX_BYTES {
-                            // Safety cap: truncate and continue. In-memory scrollback
-                            // preserves the last 256 KiB so recent output is still
-                            // visible via WebSocket.
-                            let _ = writer.set_len(0).await;
-                            let _ = writer.seek(SeekFrom::Start(0)).await;
-                            written = 0;
-                        }
-                        if writer.write_all(&data).await.is_ok() {
-                            written += data.len() as u64;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // If lagged, just continue reading
-                    }
+            // `None` = every fan-out clone dropped (entry replaced or
+            // removed): the capture is over, exit.
+            while let Some(data) = log_rx.recv().await {
+                if written + data.len() as u64 > CONSOLE_LOG_MAX_BYTES {
+                    // Safety cap: truncate and continue. In-memory scrollback
+                    // preserves the last 256 KiB so recent output is still
+                    // visible via WebSocket.
+                    let _ = writer.set_len(0).await;
+                    let _ = writer.seek(SeekFrom::Start(0)).await;
+                    written = 0;
+                }
+                if writer.write_all(&data).await.is_ok() {
+                    written += data.len() as u64;
                 }
             }
         });
@@ -2628,8 +2721,7 @@ impl ProcessCloudHypervisorAdapter {
         vm_id: String,
         pty_fd: OwnedFd,
         transport: SerialTransport,
-        pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: Arc<std::sync::RwLock<Vec<u8>>>,
+        fanout: ConsoleFanout,
         broadcaster_alive: Arc<AtomicBool>,
         console_draining: Arc<AtomicBool>,
     ) {
@@ -2652,10 +2744,9 @@ impl ProcessCloudHypervisorAdapter {
                 // A panic inside the drain loop ends the broadcaster —
                 // the same end state the old in-task read loop panicking
                 // produced (AliveGuard drops; the next start_vm respawns).
-                let drain_tx = pty_tx.clone();
-                let drain_scrollback = pty_scrollback.clone();
+                let drain_fanout = fanout.clone();
                 let drained = tokio::task::spawn_blocking(move || {
-                    Self::drain_console_endpoint(cycle_fd, &drain_tx, &drain_scrollback)
+                    Self::drain_console_endpoint(cycle_fd, &drain_fanout)
                 })
                 .await;
                 if drained.is_err() {
@@ -2707,32 +2798,28 @@ impl ProcessCloudHypervisorAdapter {
                                     Some(proc) => {
                                         // Supersede check: a VMM re-spawn or
                                         // re-adoption replaces the map entry
-                                        // (fresh channel, fresh broadcaster).
-                                        // If this entry's channel is no
+                                        // (fresh fan-out, fresh broadcaster).
+                                        // If this entry's fan-out is no
                                         // longer ours, a replacement
                                         // broadcaster owns the console now —
                                         // exit instead of swapping endpoints
                                         // under it. This also drops the last
-                                        // Sender of the old channel, so the
-                                        // old console.log writer observes
-                                        // Closed and exits (no duplicate
-                                        // appends). The fresh connection is
-                                        // abandoned CLEANLY — dropping it
-                                        // with unread receive-queue data
-                                        // would reset the connection and
-                                        // can kill the (new) serial manager
-                                        // (see `abandon_serial_connection`).
-                                        if !proc.pty_tx.same_channel(&pty_tx) {
-                                            let (tx, sb) =
-                                                (proc.pty_tx.clone(), proc.pty_scrollback.clone());
+                                        // clone of the old fan-out, so the
+                                        // old console.log writer observes a
+                                        // closed feed and exits (no
+                                        // duplicate appends). The fresh
+                                        // connection is abandoned CLEANLY —
+                                        // dropping it with unread
+                                        // receive-queue data would reset the
+                                        // connection and can kill the (new)
+                                        // serial manager (see
+                                        // `abandon_serial_connection`).
+                                        if !proc.console_fanout.same_channel(&fanout) {
+                                            let f = proc.console_fanout.clone();
                                             drop(map);
                                             drop(next);
-                                            Self::abandon_serial_connection(
-                                                &vm_id,
-                                                fresh,
-                                                Some((&tx, &sb)),
-                                            )
-                                            .await;
+                                            Self::abandon_serial_connection(&vm_id, fresh, Some(f))
+                                                .await;
                                             break;
                                         }
                                         proc.console_io = fresh;
@@ -2890,14 +2977,13 @@ impl ProcessCloudHypervisorAdapter {
             }
         };
 
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, log_rx) = ConsoleFanout::new(Vec::new());
         let broadcaster_fd = Self::dup_cloexec(&console_io).ok();
         // Claim capture alive only when a broadcaster will actually run.
         let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
 
         // Hand-off under the write lock with no intervening await, then
-        // swap the entry: the replaced entry's fan-out channel closes
+        // swap the entry: the replaced entry's fan-out closes
         // (the old console.log writer and any lingering broadcaster exit),
         // and lifecycle ownership moves to the new child. The boot
         // watermark pins where THIS VMM generation's output starts: the
@@ -2917,8 +3003,7 @@ impl ProcessCloudHypervisorAdapter {
                 child: VmmChild::Owned(child),
                 console_io,
                 serial_transport: serial_transport.clone(),
-                pty_tx: pty_tx.clone(),
-                pty_scrollback: pty_scrollback.clone(),
+                console_fanout: fanout.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
                 last_cpu_seconds: 0.0,
                 last_cpu_at: None,
@@ -2933,15 +3018,14 @@ impl ProcessCloudHypervisorAdapter {
                 vm_id.to_string(),
                 broadcaster_fd,
                 serial_transport,
-                pty_tx.clone(),
-                pty_scrollback.clone(),
+                fanout.clone(),
                 broadcaster_alive,
                 self.console_draining.clone(),
             );
         }
         Self::spawn_console_log_writer(
             vm_id,
-            &pty_tx,
+            log_rx,
             vm_console_log(&vm_dir),
             ConsoleLogMode::Append,
         );
@@ -3516,8 +3600,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .await?
         };
 
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, log_rx) = ConsoleFanout::new(Vec::new());
         let serial_transport = if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
             SerialTransport::Socket(serial_socket_path.clone())
         } else {
@@ -3548,8 +3631,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // transport), or the pty slave under explicit Pty tuning.
                 console_io,
                 serial_transport: serial_transport.clone(),
-                pty_tx: pty_tx.clone(),
-                pty_scrollback: pty_scrollback.clone(),
+                console_fanout: fanout.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
                 last_cpu_seconds: 0.0,
                 last_cpu_at: None,
@@ -3558,24 +3640,24 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         );
         drop(map);
 
-        // Spawn background broadcaster: read PTY output and fan out via broadcast channel
+        // Spawn background broadcaster: read PTY output and fan out to
+        // the live view, the scrollback and the console.log feed.
         if let Some(broadcaster_fd) = broadcaster_fd {
             Self::spawn_pty_broadcaster(
                 self.vms.clone(),
                 config.vm_id.clone(),
                 broadcaster_fd,
                 serial_transport,
-                pty_tx.clone(),
-                pty_scrollback.clone(),
+                fanout.clone(),
                 broadcaster_alive.clone(),
                 self.console_draining.clone(),
             );
         }
 
-        // Subscribe to broadcast channel and persist to console.log
+        // Consume the lossless persistence feed and write console.log.
         Self::spawn_console_log_writer(
             &config.vm_id,
-            &pty_tx,
+            log_rx,
             vm_console_log(vm_runtime_dir),
             ConsoleLogMode::Fresh,
         );
@@ -3639,7 +3721,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             Liveness::Alive => {}
         }
 
-        let (api_socket, serial_transport, pty_tx, pty_scrollback, broadcaster_alive) = {
+        let (api_socket, serial_transport, fanout, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
@@ -3648,8 +3730,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             (
                 proc.api_socket.clone(),
                 proc.serial_transport.clone(),
-                proc.pty_tx.clone(),
-                proc.pty_scrollback.clone(),
+                proc.console_fanout.clone(),
                 proc.broadcaster_alive.clone(),
             )
         };
@@ -3677,14 +3758,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Respawn broadcaster if it died while the VM was running.
         // This must happen BEFORE the idempotent early return so console
         // output doesn't stall when start_vm is called on an already-running VM.
-        self.respawn_broadcaster_if_dead(
-            vm_id,
-            &serial_transport,
-            &pty_tx,
-            &pty_scrollback,
-            &broadcaster_alive,
-        )
-        .await;
+        self.respawn_broadcaster_if_dead(vm_id, &serial_transport, &fanout, &broadcaster_alive)
+            .await;
 
         match action {
             StartVmAction::AlreadyRunning => {
@@ -3740,7 +3815,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             };
             let log_path = if let Some(proc) = removed {
                 // Clear in-memory scrollback before dropping the process.
-                Self::lock_scrollback_write(&proc.pty_scrollback).clear();
+                proc.console_fanout.clear_scrollback();
                 let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                 // INVARIANT — kill and reap the VMM BEFORE `proc` (and its
                 // console_io descriptor, plus any dup the broadcaster still
@@ -3829,7 +3904,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     map.remove(vm_id)
                 };
                 let log_path = if let Some(proc) = removed {
-                    Self::lock_scrollback_write(&proc.pty_scrollback).clear();
+                    proc.console_fanout.clear_scrollback();
                     let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                     // #351: same contract as the force branch above —
                     // the timeout's SIGKILL can be refused or
@@ -3880,17 +3955,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // evidence is traded for that continuity by design; only
             // the force paths (which drop the entry and its writer)
             // rotate.
-            let (pty_scrollback, log_path) = {
+            let log_path = {
                 let vms = self.vms.read().await;
                 let proc = vms.get(vm_id);
-                (
-                    proc.map(|p| p.pty_scrollback.clone()),
-                    proc.and_then(|p| p.api_socket.parent().map(vm_console_log)),
-                )
+                if let Some(p) = proc {
+                    p.console_fanout.clear_scrollback();
+                }
+                proc.and_then(|p| p.api_socket.parent().map(vm_console_log))
             };
-            if let Some(sb) = pty_scrollback {
-                Self::lock_scrollback_write(&sb).clear();
-            }
             if let Some(path) = log_path {
                 match tokio::fs::OpenOptions::new()
                     .create(true)
@@ -4640,7 +4712,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        Some(proc.pty_tx.subscribe())
+        Some(proc.console_fanout.subscribe())
     }
 
     async fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
@@ -4651,8 +4723,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // this critical section is a bounded clone with no awaits inside.
         // Poison recovery matches the write side: the scrollback is an
         // append-only log, so a poisoned lock is still safe to read.
-        let sb = Self::lock_scrollback_read(&proc.pty_scrollback);
-        Some(sb.clone())
+        Some(proc.console_fanout.scrollback_snapshot())
     }
 }
 
@@ -4879,8 +4950,7 @@ impl ProcessCloudHypervisorAdapter {
             _ => (Self::eof_placeholder_fd(), false),
         };
 
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, log_rx) = ConsoleFanout::new(Vec::new());
         // Take the broadcaster's endpoint BEFORE the entry consumes
         // console_io (mirrors adoption); capture is only claimed alive
         // when the dup (and with it the broadcaster spawn) happens.
@@ -4931,8 +5001,7 @@ impl ProcessCloudHypervisorAdapter {
                     child,
                     console_io,
                     serial_transport: serial_transport.clone(),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -4947,14 +5016,13 @@ impl ProcessCloudHypervisorAdapter {
                 vm_id.to_string(),
                 broadcaster_fd,
                 serial_transport,
-                pty_tx.clone(),
-                pty_scrollback.clone(),
+                fanout.clone(),
                 broadcaster_alive,
                 self.console_draining.clone(),
             );
             Self::spawn_console_log_writer(
                 vm_id,
-                &pty_tx,
+                log_rx,
                 vm_console_log(&vm_dir),
                 ConsoleLogMode::Append,
             );
@@ -5205,8 +5273,7 @@ impl ProcessCloudHypervisorAdapter {
                 (Self::eof_placeholder_fd(), false)
             };
 
-            let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-            let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+            let (fanout, log_rx) = ConsoleFanout::new(Vec::new());
             // Take the broadcaster's endpoint BEFORE the entry consumes
             // console_io, so the map never needs to be re-read on the
             // just-inserted entry. Capture is only claimed alive when the
@@ -5227,8 +5294,7 @@ impl ProcessCloudHypervisorAdapter {
                         child: VmmChild::Adopted(pid),
                         console_io,
                         serial_transport: serial_transport.clone(),
-                        pty_tx: pty_tx.clone(),
-                        pty_scrollback: pty_scrollback.clone(),
+                        console_fanout: fanout.clone(),
                         broadcaster_alive: broadcaster_alive.clone(),
                         last_cpu_seconds: 0.0,
                         last_cpu_at: None,
@@ -5243,14 +5309,13 @@ impl ProcessCloudHypervisorAdapter {
                     vm_id.clone(),
                     broadcaster_fd,
                     serial_transport,
-                    pty_tx.clone(),
-                    pty_scrollback.clone(),
+                    fanout.clone(),
                     broadcaster_alive,
                     self.console_draining.clone(),
                 );
                 Self::spawn_console_log_writer(
                     &vm_id,
-                    &pty_tx,
+                    log_rx,
                     vm_console_log(&vm_dir),
                     ConsoleLogMode::Append,
                 );
@@ -5305,6 +5370,8 @@ mod tests {
     use super::build_cpus_config;
     use super::cloud_init_meta_data;
     use super::parse_http_status;
+    use super::ConsoleFanout;
+    use super::ConsoleLogMode;
     use super::ProcessCloudHypervisorAdapter;
     use super::SerialTransport;
     use super::VmProcess;
@@ -5528,8 +5595,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5546,8 +5612,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -5558,13 +5623,12 @@ mod tests {
 
         // Subscribe before the respawn so the broadcaster's fan-out is
         // observable.
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
         adapter
             .respawn_broadcaster_if_dead(
                 "vm-respawn",
                 &SerialTransport::Socket(sock_path),
-                &pty_tx,
-                &pty_scrollback,
+                &fanout,
                 &broadcaster_alive,
             )
             .await;
@@ -5607,8 +5671,7 @@ mod tests {
         std::fs::create_dir_all(&vm_dir).unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5625,8 +5688,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -5635,13 +5697,12 @@ mod tests {
             );
         }
 
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
         adapter
             .respawn_broadcaster_if_dead(
                 "vm-respawn-pty",
                 &SerialTransport::Pty,
-                &pty_tx,
-                &pty_scrollback,
+                &fanout,
                 &broadcaster_alive,
             )
             .await;
@@ -5709,8 +5770,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5727,8 +5787,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -5737,13 +5796,12 @@ mod tests {
             );
         }
 
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
         adapter
             .respawn_broadcaster_if_dead(
                 "vm-heal",
                 &SerialTransport::Socket(sock_path.clone()),
-                &pty_tx,
-                &pty_scrollback,
+                &fanout,
                 &broadcaster_alive,
             )
             .await;
@@ -5856,8 +5914,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5872,8 +5929,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -5888,8 +5944,7 @@ mod tests {
             .respawn_broadcaster_if_dead(
                 "vm-flush",
                 &SerialTransport::Socket(sock_path),
-                &pty_tx,
-                &pty_scrollback,
+                &fanout,
                 &broadcaster_alive,
             )
             .await;
@@ -5902,10 +5957,7 @@ mod tests {
         // inside the deadline — the E3f one-pass behavior.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let received = pty_scrollback
-                .read()
-                .expect("scrollback lock poisoned")
-                .clone();
+            let received = fanout.scrollback_snapshot();
             if received == backlog {
                 break;
             }
@@ -5981,8 +6033,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5997,8 +6048,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: dead_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6011,8 +6061,7 @@ mod tests {
             .respawn_broadcaster_if_dead(
                 "vm-blocking",
                 &SerialTransport::Socket(sock_path),
-                &pty_tx,
-                &pty_scrollback,
+                &fanout,
                 &broadcaster_alive,
             )
             .await;
@@ -6023,10 +6072,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let received = pty_scrollback
-                .read()
-                .expect("scrollback lock poisoned")
-                .clone();
+            let received = fanout.scrollback_snapshot();
             if received == stream {
                 break;
             }
@@ -6041,6 +6087,134 @@ mod tests {
         }
 
         drop(standin.join().expect("stand-in thread"));
+    }
+
+    /// Issue #476: the console.log file sink must stay byte-complete
+    /// under the CH v53.0 backlog-flush shape — a flood of 1-byte
+    /// messages larger than the console fan-out's live-view capacity —
+    /// even while the writer task is not being polled.
+    ///
+    /// Determinism: on the current-thread test runtime the spawned
+    /// writer task cannot run while this task never awaits, and
+    /// [`ConsoleFanout::send`] never yields, so the flood below
+    /// completes with the writer's feed provably untouched — the exact
+    /// state a writer parked mid-`write_all` is in when the drain
+    /// thread floods past the live-view capacity. No scheduling race
+    /// is involved: the assertion is content equality between the file
+    /// and what was fanned out, which must hold under ANY interleaving
+    /// with a lossless persistence feed. On the pre-#476 design (the
+    /// writer fed from the lossy broadcast, `Lagged → continue`) this
+    /// test failed deterministically: the writer lagged by exactly the
+    /// overflow and console.log ended up holding only the flood's
+    /// tail — the head of the stream, where a kernel banner lives, was
+    /// silently dropped.
+    #[tokio::test]
+    async fn console_log_writer_stays_complete_when_flooded_past_live_capacity() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let log_path = dir.path().join("console.log");
+
+        let (fanout, log_rx) = ConsoleFanout::new(Vec::new());
+        ProcessCloudHypervisorAdapter::spawn_console_log_writer(
+            "vm-476",
+            log_rx,
+            log_path.clone(),
+            ConsoleLogMode::Fresh,
+        );
+
+        // The v53.0 serial replay shape, scaled down: byte-at-a-time
+        // fan-out, more messages than the live-view capacity (45,699 of
+        // 45,736 live messages were 1 byte in the observed run). Every
+        // byte differs so a failure identifies exactly WHICH bytes went
+        // missing, not just how many.
+        let total = ConsoleFanout::LIVE_CAPACITY + 512;
+        let expected: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        for byte in &expected {
+            fanout.send(&[*byte]);
+        }
+
+        // Drop every fan-out clone: the writer's feed closes, it drains
+        // everything it still holds and exits — the same end state a VM
+        // entry replacement (the last fan-out clone dropping) produces
+        // in production.
+        drop(fanout);
+
+        // Bounded wait for the writer to finish. The wait is the only
+        // timing-dependent part; the content assertion below is the
+        // deterministic contract.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+            if len as usize == expected.len() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "console.log must reach {} bytes; stuck at {} \
+                 (the file writer is skipping fanned-out bytes — issue #476)",
+                expected.len(),
+                len
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let contents = std::fs::read(&log_path).unwrap();
+        assert_eq!(
+            contents, expected,
+            "console.log must be byte-complete under a 1-byte flood past the \
+             live-view capacity (issue #476)"
+        );
+    }
+
+    /// Pins the per-sink loss contracts of the #476 fan-out split: the
+    /// WS live view is the ONLY lossy sink — a subscriber that stops
+    /// polling while the producer floods past the capacity lags by
+    /// exactly the overflow and resumes from the retained tail (by
+    /// design: a slow client skips forward rather than pinning agent
+    /// memory, and recovers via reconnect + scrollback replay) — while
+    /// the console.log persistence feed and the scrollback stay
+    /// byte-complete under the same flood.
+    #[tokio::test]
+    async fn console_fanout_live_view_lags_while_log_feed_and_scrollback_stay_complete() {
+        let (fanout, mut log_rx) = ConsoleFanout::new(Vec::new());
+
+        // A live-view subscriber that stops polling (a slow WS client):
+        // subscribed, then never polled while the producer floods.
+        let mut live_rx = fanout.subscribe();
+        let overflow: usize = 100;
+        let total = ConsoleFanout::LIVE_CAPACITY + overflow;
+        let expected: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        for byte in &expected {
+            fanout.send(&[*byte]);
+        }
+
+        // Live view: lagged by exactly the overflow …
+        match live_rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                assert_eq!(
+                    n, overflow as u64,
+                    "the live view must lag by exactly the flood's overflow"
+                );
+            }
+            other => panic!("a subscriber flooded past capacity must lag, got {other:?}"),
+        }
+        // … then it resumes from the retained tail (the last
+        // LIVE_CAPACITY messages) — the documented reconnect shape.
+        let mut live_tail = Vec::with_capacity(ConsoleFanout::LIVE_CAPACITY);
+        while let Ok(data) = live_rx.try_recv() {
+            live_tail.extend_from_slice(&data);
+        }
+        assert_eq!(live_tail, expected[overflow..]);
+
+        // console.log feed: every message, in order, none skipped.
+        let mut logged = Vec::with_capacity(total);
+        while let Ok(data) = log_rx.try_recv() {
+            logged.extend_from_slice(&data);
+        }
+        assert_eq!(logged, expected);
+
+        // Scrollback: every byte — it is appended synchronously by the
+        // producer itself and cannot lag.
+        assert_eq!(fanout.scrollback_snapshot(), expected);
     }
 
     /// Pins the exact AF_UNIX kernel semantics the clean-disconnect
@@ -6119,8 +6293,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6136,8 +6309,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6149,7 +6321,7 @@ mod tests {
         // Subscribe BEFORE the drain: broadcast sends without a
         // receiver are dropped, and the drained bytes are the assertion
         // target.
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
         // Let the burst land in the receive queue, then run the
         // graceful-shutdown drain.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -6161,10 +6333,7 @@ mod tests {
             .expect("drained output must reach the console fan-out")
             .expect("channel must be live");
         assert_eq!(got, b"late guest output".to_vec());
-        assert!(pty_scrollback
-            .read()
-            .expect("scrollback lock poisoned")
-            .ends_with(b"late guest output"));
+        assert!(fanout.scrollback_snapshot().ends_with(b"late guest output"));
 
         // The serial manager observes a clean EOF — never a reset.
         let mut conn = server.join().expect("server thread");
@@ -6197,8 +6366,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6215,8 +6383,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6232,13 +6399,12 @@ mod tests {
             "vm-latch".to_string(),
             broadcaster_fd,
             SerialTransport::Socket(sock_path.clone()),
-            pty_tx.clone(),
-            pty_scrollback.clone(),
+            fanout.clone(),
             broadcaster_alive.clone(),
             adapter.console_draining.clone(),
         );
         // Subscribe before writing the probe so the send has a receiver.
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
 
         // Accept the agent's connection (retry: the listener is
         // non-blocking) and stream one probe through it.
@@ -6340,8 +6506,7 @@ mod tests {
         });
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6357,8 +6522,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: zombie_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6385,12 +6549,11 @@ mod tests {
             "vm-reboot-rotate".to_string(),
             broadcaster_fd,
             SerialTransport::Socket(sock_path.clone()),
-            pty_tx.clone(),
-            pty_scrollback.clone(),
+            fanout.clone(),
             broadcaster_alive.clone(),
             adapter.console_draining.clone(),
         );
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
 
         adapter.reboot_vm("vm-reboot-rotate", None).await.unwrap();
         api_server.join().expect("api server thread");
@@ -6449,8 +6612,7 @@ mod tests {
         let original_fd = console_io.as_raw_fd();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6464,8 +6626,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6474,7 +6635,7 @@ mod tests {
             );
         }
 
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
 
         // The broadcaster streams from the live connection.
         let broadcaster_fd = ProcessCloudHypervisorAdapter::dup_cloexec(
@@ -6492,8 +6653,7 @@ mod tests {
             "vm-reboot-fail".to_string(),
             broadcaster_fd,
             SerialTransport::Socket(vm_dir.join("serial.sock")),
-            pty_tx.clone(),
-            pty_scrollback.clone(),
+            fanout.clone(),
             broadcaster_alive.clone(),
             adapter.console_draining.clone(),
         );
@@ -6650,8 +6810,7 @@ mod tests {
         std::fs::write(vm_console_log(&vm_dir), "frozen console\n").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(bin.clone());
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         {
             let mut map = adapter.vms.write().await;
@@ -6662,8 +6821,7 @@ mod tests {
                     child: VmmChild::Adopted(standin.pid()),
                     console_io: wedge_console_io,
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6683,12 +6841,11 @@ mod tests {
             "vm-heal".to_string(),
             broadcaster_fd,
             SerialTransport::Socket(sock_path.clone()),
-            pty_tx.clone(),
-            pty_scrollback.clone(),
+            fanout.clone(),
             broadcaster_alive.clone(),
             adapter.console_draining.clone(),
         );
-        let mut rx = pty_tx.subscribe();
+        let mut rx = fanout.subscribe();
 
         // start_vm stays idempotent-successful AND heals on the way
         // through: the op must not turn into an error over a console
@@ -6777,8 +6934,8 @@ mod tests {
         let (owned_peer, owned_agent_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let live_fd = live_agent_end.as_raw_fd();
         let owned_fd = owned_agent_end.as_raw_fd();
-        let (live_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
-        let (owned_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let (live_fanout, _) = ConsoleFanout::new(Vec::new());
+        let (owned_fanout, _) = ConsoleFanout::new(Vec::new());
         let owned_child = tokio::process::Command::new("sleep")
             .arg("60")
             .spawn()
@@ -6792,8 +6949,7 @@ mod tests {
                     child: VmmChild::Adopted(live_standin.pid()),
                     console_io: OwnedFd::from(live_agent_end),
                     serial_transport: SerialTransport::Socket(vm_live_dir.join("serial.sock")),
-                    pty_tx: live_tx,
-                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                    console_fanout: live_fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6807,8 +6963,7 @@ mod tests {
                     child: VmmChild::Owned(owned_child),
                     console_io: OwnedFd::from(owned_agent_end),
                     serial_transport: SerialTransport::Socket(vm_owned_dir.join("serial.sock")),
-                    pty_tx: owned_tx,
-                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                    console_fanout: owned_fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -7075,7 +7230,7 @@ mod tests {
                 live.broadcaster_alive.load(Ordering::SeqCst),
                 "console capture must resume for the adopted orphan"
             );
-            live_rx = live.pty_tx.subscribe();
+            live_rx = live.console_fanout.subscribe();
 
             let dead = vms.get("vm-dead").expect("dead VMM dir must be adopted");
             let VmmChild::Adopted(dead_tracked_pid) = &dead.child else {
@@ -7140,7 +7295,7 @@ mod tests {
         // The chv binary does not exist: any re-spawn attempt surfaces the
         // spawn failure immediately instead of hanging.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv-missing"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
         {
@@ -7152,8 +7307,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: std::fs::File::open("/dev/null").unwrap().into(),
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
-                    pty_tx,
-                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                    console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -7591,15 +7745,14 @@ mod tests {
             .arg("60")
             .spawn()
             .unwrap();
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         (
             VmProcess {
                 api_socket: vm_dir.join("vm.sock"),
                 child: VmmChild::Owned(child),
                 console_io: OwnedFd::from(console_agent_end),
                 serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
-                pty_tx,
-                pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                console_fanout: fanout,
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(watermark),
                 last_cpu_seconds: 0.0,
@@ -8446,7 +8599,7 @@ mod tests {
             .arg("60")
             .spawn()
             .unwrap();
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         adapter.vms.write().await.insert(
             "vm-wd-pty".to_string(),
             VmProcess {
@@ -8454,8 +8607,7 @@ mod tests {
                 child: VmmChild::Owned(child),
                 console_io: OwnedFd::from(console_agent_end),
                 serial_transport: SerialTransport::Pty,
-                pty_tx,
-                pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                console_fanout: fanout,
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(0),
                 last_cpu_seconds: 0.0,
@@ -8705,7 +8857,7 @@ mod tests {
         std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
         {
@@ -8717,8 +8869,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io: std::fs::File::open("/dev/null").unwrap().into(),
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
-                    pty_tx,
-                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
+                    console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -8958,8 +9109,7 @@ mod tests {
 
         // Create a fake VmProcess directly in the adapter's map.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::from(b"scrollback data")));
+        let (fanout, _) = ConsoleFanout::new(Vec::from(b"scrollback data"));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         {
@@ -8971,8 +9121,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9025,8 +9174,7 @@ mod tests {
         // stays in the map and we clear its scrollback and truncate the log.
         // We test this by manually exercising the internal logic via the adapter.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::from(b"scrollback data")));
+        let (fanout, _) = ConsoleFanout::new(Vec::from(b"scrollback data"));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately so the graceful shutdown loop
@@ -9043,8 +9191,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9096,8 +9243,7 @@ mod tests {
         std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately and DO NOT wait for it:
@@ -9114,8 +9260,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9171,8 +9316,7 @@ mod tests {
         std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // A child that will NOT exit on its own: the loop below ends on
@@ -9192,8 +9336,7 @@ mod tests {
                     child: VmmChild::Owned(child),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9245,8 +9388,7 @@ mod tests {
         std::fs::write(vm_dir.join("console.log"), b"boot log\n").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // `sh -c "sleep 30; true"` never execs (compound command), so
@@ -9285,8 +9427,7 @@ mod tests {
                     child: VmmChild::Adopted(stand_in_pid),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9347,8 +9488,7 @@ mod tests {
         std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // `sh -c "sleep 30; true"` keeps its argv (including the
@@ -9386,8 +9526,7 @@ mod tests {
                     child: VmmChild::Adopted(stand_in_pid),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9462,8 +9601,7 @@ mod tests {
         std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // A process that already exited: cloud-hypervisor v43 exits
@@ -9486,8 +9624,7 @@ mod tests {
                     child: VmmChild::Adopted(dead_pid),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx,
-                    pty_scrollback,
+                    console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9521,8 +9658,7 @@ mod tests {
         std::fs::write(vm_dir.join("vm-config.json"), "{}").unwrap();
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         {
@@ -9534,8 +9670,7 @@ mod tests {
                     child: VmmChild::Dead,
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx,
-                    pty_scrollback,
+                    console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -9571,8 +9706,7 @@ mod tests {
         let api_socket = vm_dir.join("vm.sock");
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
-        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         let mut stand_in = tokio::process::Command::new("sh")
@@ -9606,8 +9740,7 @@ mod tests {
                     child: VmmChild::Adopted(stand_in_pid),
                     console_io,
                     serial_transport: SerialTransport::Pty,
-                    pty_tx: pty_tx.clone(),
-                    pty_scrollback: pty_scrollback.clone(),
+                    console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
