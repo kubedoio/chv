@@ -47,3 +47,7 @@ chv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }
 cellhv-core-api = { path = "../cellhv-core-api" }
 http-body-util = "0.1"
 tempfile = { workspace = true }
+# Test-only hyper-util features for driving the console router over an
+# in-memory duplex pair (WS upgrade path); the workspace line already
+# provides client/server/tokio, so this adds no new crate to the graph.
+hyper-util = { workspace = true, features = ["http1", "service"] }

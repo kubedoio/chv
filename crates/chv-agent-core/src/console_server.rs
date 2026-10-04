@@ -245,8 +245,19 @@ impl ConsoleServer {
                         }
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                        // If lagged, continue reading latest data
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                        // The live view is lossy BY DESIGN (issue #476): a
+                        // client whose TCP drain parks the WS send skips
+                        // forward instead of pinning agent memory, and
+                        // recovers via reconnect + scrollback replay. The
+                        // skip is logged so a lagging client stays
+                        // observable instead of silently missing bytes.
+                        tracing::warn!(
+                            vm_id = %vm_id,
+                            skipped,
+                            "console live view lagged; the WS client skipped ahead \
+                             (reconnect replays the scrollback)"
+                        );
                     }
                     Err(_) => {
                         tracing::info!("console connection idle timeout on read");
@@ -376,7 +387,12 @@ fn validate_console_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use chv_errors::ChvError;
+    use chv_hypervisor_api::{AddDiskParams, AddNetParams, VmConfig, VmCounters, VmInfo};
+    use std::os::fd::OwnedFd;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::AsyncReadExt;
 
     fn test_secret() -> String {
         "test-secret-do-not-use-in-production".to_string()
@@ -573,5 +589,562 @@ mod tests {
         assert!(ConsoleServer::check_replay("token-def", &consumed)
             .await
             .is_none());
+    }
+
+    // ---- WS live-view lag observability (issue #476) ------------------------
+    //
+    // The skip/count semantics of the live view are pinned in
+    // chv-agent-runtime-ch's ConsoleFanout tests; these tests pin the
+    // *emission* of the WS handler's `Lagged` warn: it fires on the
+    // lagging path carrying the vm_id and the skipped count, and does
+    // not fire when the client keeps up.
+
+    /// Minimal `tracing` subscriber that records WARN-level events
+    /// together with all their fields, so tests can assert on the
+    /// structured content of a warn (here: `vm_id` and `skipped`).
+    /// Installed per-thread with `tracing::subscriber::set_default` —
+    /// the warn-capture convention from chv-nwd-core's fabric tests
+    /// and chv-controlplane-store's log_capture — which the
+    /// current-thread `#[tokio::test]` runtime keeps visible to every
+    /// task spawned by the connection under test.
+    mod warn_capture {
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing::field::Visit;
+        use tracing::span::{Attributes, Id};
+        use tracing::{Event, Metadata};
+
+        /// One captured WARN event: every field it recorded, as
+        /// `(field name, rendered value)` pairs.
+        #[derive(Clone, Debug)]
+        pub struct CapturedWarn {
+            pub fields: Vec<(String, String)>,
+        }
+
+        impl CapturedWarn {
+            pub fn field(&self, name: &str) -> Option<&str> {
+                self.fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.as_str())
+            }
+
+            pub fn message(&self) -> &str {
+                self.field("message").unwrap_or("")
+            }
+        }
+
+        #[derive(Clone, Default)]
+        pub struct WarnCollector {
+            warnings: Arc<StdMutex<Vec<CapturedWarn>>>,
+        }
+
+        impl WarnCollector {
+            pub fn warnings(&self) -> Vec<CapturedWarn> {
+                self.warnings.lock().unwrap().clone()
+            }
+
+            pub fn warnings_containing(&self, needle: &str) -> Vec<CapturedWarn> {
+                self.warnings()
+                    .into_iter()
+                    .filter(|w| w.message().contains(needle))
+                    .collect()
+            }
+        }
+
+        struct FieldVisitor(Vec<(String, String)>);
+
+        impl Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .push((field.name().to_string(), format!("{:?}", value)));
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push((field.name().to_string(), value.to_string()));
+            }
+
+            // `skipped` in the lag warn is a bare u64 field.
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                self.0.push((field.name().to_string(), value.to_string()));
+            }
+
+            fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+                self.0.push((field.name().to_string(), value.to_string()));
+            }
+        }
+
+        impl tracing::Subscriber for WarnCollector {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                *metadata.level() == tracing::Level::WARN
+            }
+
+            fn new_span(&self, _span: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let mut visitor = FieldVisitor(Vec::new());
+                event.record(&mut visitor);
+                self.warnings
+                    .lock()
+                    .unwrap()
+                    .push(CapturedWarn { fields: visitor.0 });
+            }
+
+            fn enter(&self, _span: &Id) {}
+
+            fn exit(&self, _span: &Id) {}
+        }
+    }
+
+    /// Test adapter pinning the PTY seams `handle_socket` consumes: a
+    /// broadcast channel the test drives as the guest serial feed
+    /// (capacity deliberately tiny — the handler reacts to
+    /// `RecvError::Lagged`, whose semantics do not depend on the
+    /// production 4096-message capacity pinned in
+    /// chv-agent-runtime-ch's ConsoleFanout tests), a writable fd
+    /// standing in for the PTY write side (never written to here: the
+    /// test client sends no messages), and an empty scrollback. Every
+    /// non-PTY trait method delegates to the stock mock.
+    struct LagPtyAdapter {
+        inner: chv_agent_runtime_ch::MockCloudHypervisorAdapter,
+        live_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+        subscribed: Arc<tokio::sync::Notify>,
+        pty_fd: OwnedFd,
+    }
+
+    impl LagPtyAdapter {
+        fn new(
+            live_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+            subscribed: Arc<tokio::sync::Notify>,
+        ) -> Self {
+            let pty_fd = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .expect("open stand-in fd for the PTY write side")
+                .into();
+            Self {
+                inner: chv_agent_runtime_ch::MockCloudHypervisorAdapter::default(),
+                live_tx,
+                subscribed,
+                pty_fd,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl chv_agent_runtime_ch::CloudHypervisorAdapter for LagPtyAdapter {
+        async fn create_vm(
+            &self,
+            config: &VmConfig,
+            operation_id: Option<&str>,
+        ) -> Result<String, ChvError> {
+            self.inner.create_vm(config, operation_id).await
+        }
+
+        async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+            self.inner.start_vm(vm_id, operation_id).await
+        }
+
+        async fn stop_vm(
+            &self,
+            vm_id: &str,
+            force: bool,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner.stop_vm(vm_id, force, operation_id).await
+        }
+
+        async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+            self.inner.delete_vm(vm_id, operation_id).await
+        }
+
+        async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+            self.inner.reboot_vm(vm_id, operation_id).await
+        }
+
+        async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+            self.inner.pause_vm(vm_id, operation_id).await
+        }
+
+        async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+            self.inner.resume_vm(vm_id, operation_id).await
+        }
+
+        async fn power_button(
+            &self,
+            vm_id: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner.power_button(vm_id, operation_id).await
+        }
+
+        async fn resize_vm(
+            &self,
+            vm_id: &str,
+            cpus: Option<u32>,
+            memory_bytes: Option<u64>,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .resize_vm(vm_id, cpus, memory_bytes, operation_id)
+                .await
+        }
+
+        async fn add_disk(
+            &self,
+            vm_id: &str,
+            params: &AddDiskParams,
+            operation_id: Option<&str>,
+        ) -> Result<String, ChvError> {
+            self.inner.add_disk(vm_id, params, operation_id).await
+        }
+
+        async fn remove_device(
+            &self,
+            vm_id: &str,
+            device_id: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .remove_device(vm_id, device_id, operation_id)
+                .await
+        }
+
+        async fn add_net(
+            &self,
+            vm_id: &str,
+            params: &AddNetParams,
+            operation_id: Option<&str>,
+        ) -> Result<String, ChvError> {
+            self.inner.add_net(vm_id, params, operation_id).await
+        }
+
+        async fn resize_disk(
+            &self,
+            vm_id: &str,
+            disk_id: &str,
+            new_size_bytes: u64,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .resize_disk(vm_id, disk_id, new_size_bytes, operation_id)
+                .await
+        }
+
+        async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+            self.inner.vm_info(vm_id).await
+        }
+
+        async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError> {
+            self.inner.vm_counters(vm_id).await
+        }
+
+        async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
+            self.inner.ping(vm_id).await
+        }
+
+        async fn snapshot_vm(
+            &self,
+            vm_id: &str,
+            destination: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .snapshot_vm(vm_id, destination, operation_id)
+                .await
+        }
+
+        async fn restore_snapshot(
+            &self,
+            vm_id: &str,
+            source: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .restore_snapshot(vm_id, source, operation_id)
+                .await
+        }
+
+        async fn send_migration(
+            &self,
+            vm_id: &str,
+            destination_url: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .send_migration(vm_id, destination_url, operation_id)
+                .await
+        }
+
+        async fn receive_migration(
+            &self,
+            vm_id: &str,
+            receiver_url: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner
+                .receive_migration(vm_id, receiver_url, operation_id)
+                .await
+        }
+
+        async fn get_vm_state(&self, vm_id: &str) -> Result<String, ChvError> {
+            self.inner.get_vm_state(vm_id).await
+        }
+
+        async fn coredump(
+            &self,
+            vm_id: &str,
+            destination: &str,
+            operation_id: Option<&str>,
+        ) -> Result<(), ChvError> {
+            self.inner.coredump(vm_id, destination, operation_id).await
+        }
+
+        async fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
+            nix::unistd::dup(&self.pty_fd).ok()
+        }
+
+        async fn pty_output_rx(
+            &self,
+            _vm_id: &str,
+        ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+            // Subscribe first, then notify: the stored permit makes a
+            // later `notified().await` in the test complete
+            // immediately, and by then the receiver exists, so test
+            // sends cannot race the subscription (mirrors the
+            // create_parked knob in the stock mock).
+            let rx = self.live_tx.subscribe();
+            self.subscribed.notify_one();
+            Some(rx)
+        }
+
+        async fn pty_scrollback(&self, _vm_id: &str) -> Option<Vec<u8>> {
+            Some(Vec::new())
+        }
+    }
+
+    /// Serves the console router over one end of an in-memory duplex
+    /// pair (the same `serve_connection_with_upgrades` shape the Core
+    /// API listener uses) and hands back the other end plus the
+    /// adapter's controls. The duplex buffer is deliberately tiny: a
+    /// WS frame larger than it parks the server's `ws_tx.send` until
+    /// the test client reads, which is what makes the lag sequencing
+    /// deterministic without real TCP kernel buffers.
+    async fn lag_test_console() -> (
+        tokio::io::DuplexStream,
+        tokio::sync::broadcast::Sender<Vec<u8>>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let (live_tx, _) = tokio::sync::broadcast::channel(8);
+        let subscribed = Arc::new(tokio::sync::Notify::new());
+        let adapter = LagPtyAdapter::new(live_tx.clone(), subscribed.clone());
+        let vm_runtime = crate::vm_runtime::VmRuntime::new(Arc::new(adapter));
+        let app = ConsoleServer::new(vm_runtime, test_secret()).router();
+
+        let (client, server_io) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            // Connection errors after the test client drops are
+            // expected; nothing is asserted on this task.
+            let _ =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(
+                        hyper_util::rt::TokioIo::new(server_io),
+                        hyper_util::service::TowerToHyperService::new(app),
+                    )
+                    .await;
+        });
+        (client, live_tx, subscribed)
+    }
+
+    /// Performs the HTTP→WebSocket upgrade from the raw client end of
+    /// the duplex pair (hand-rolled: no WS client dependency) and
+    /// consumes the 101 head. No frame bytes can arrive before the
+    /// test feeds the broadcast channel, so the head ends exactly at
+    /// the blank line.
+    async fn ws_upgrade_over_duplex(client: &mut tokio::io::DuplexStream, vm_id: &str) {
+        use tokio::io::AsyncWriteExt;
+
+        let token = encode_claims(vm_id, "admin", future_exp(), &test_secret());
+        let request = format!(
+            "GET /vms/{vm_id}/console?token={token} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("write WS upgrade request");
+
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            client.read_exact(&mut byte).await.expect("read 101 head");
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&head);
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "expected 101 Switching Protocols, got: {}",
+            head
+        );
+    }
+
+    /// Issue #476, emission side: when the live-view broadcast skips a
+    /// lagging WS client forward, the handler must emit a WARN naming
+    /// the VM and the number of skipped messages (the skip is by
+    /// design; the warn keeps it observable). The sequencing is
+    /// deterministic: the first message's WS frame is larger than the
+    /// duplex buffer, so the read loop parks inside `ws_tx.send`
+    /// after consuming exactly one message; the test floods the
+    /// broadcast past its capacity while the server is parked, and
+    /// only then lets the frame through. The next `recv` therefore
+    /// reports `Lagged(total_sent - capacity - 1)`.
+    #[tokio::test]
+    async fn console_live_view_lag_emits_warn_with_vm_id_and_skipped() {
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+
+        // Fail fast instead of hanging on the 300 s idle timeout if
+        // the sequencing ever regresses.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let vm_id = "lag-vm";
+            let (mut client, live_tx, subscribed) = lag_test_console().await;
+            ws_upgrade_over_duplex(&mut client, vm_id).await;
+
+            // The handler has subscribed to the live view.
+            subscribed.notified().await;
+
+            // Message 0: its WS frame (4-byte header + 4096 payload)
+            // cannot fit through the 64-byte duplex buffer, so the
+            // read loop parks inside the WS send after consuming it.
+            live_tx
+                .send(vec![b'a'; 4096])
+                .expect("send the first live message");
+
+            // The first frame byte arriving proves the read loop
+            // consumed message 0 and is parked inside its send.
+            let mut first = [0u8; 1];
+            client
+                .read_exact(&mut first)
+                .await
+                .expect("read first frame byte");
+            assert_eq!(first[0], 0x82, "expected the binary frame opcode");
+
+            // Flood past the capacity of 8 while the server is
+            // parked: messages 1..=20.
+            for i in 1..=20u8 {
+                live_tx
+                    .send(vec![b'0' + i; 4])
+                    .expect("flood the live view");
+            }
+
+            // Let the parked frame through. The read loop then calls
+            // recv() again with its position at message 1 of 21 sent;
+            // the retained window starts at 21 - 8 = 13, so exactly
+            // 12 messages are reported as skipped.
+            let mut rest = vec![0u8; 4099];
+            client
+                .read_exact(&mut rest)
+                .await
+                .expect("read rest of first frame");
+            assert_eq!(&rest[..3], &[0x7e, 0x10, 0x00], "16-bit length 4096");
+            assert!(
+                rest[3..].iter().all(|&b| b == b'a'),
+                "first message payload must round-trip"
+            );
+
+            // The Lagged warn fires before the retained tail is
+            // forwarded; the client receiving all 8 retained frames
+            // proves the loop passed through the Lagged branch.
+            let mut tail = vec![0u8; 8 * 6];
+            client
+                .read_exact(&mut tail)
+                .await
+                .expect("read the retained tail frames");
+            let mut expected_tail = Vec::new();
+            for i in 13u8..=20 {
+                expected_tail.extend_from_slice(&[
+                    0x82,
+                    0x04,
+                    b'0' + i,
+                    b'0' + i,
+                    b'0' + i,
+                    b'0' + i,
+                ]);
+            }
+            assert_eq!(
+                tail, expected_tail,
+                "the client must resume from the retained tail"
+            );
+
+            let lagged = logs.warnings_containing("console live view lagged");
+            assert_eq!(
+                lagged.len(),
+                1,
+                "exactly one lag warn expected; captured: {:?}",
+                logs.warnings()
+            );
+            assert_eq!(lagged[0].field("vm_id"), Some(vm_id));
+            assert_eq!(lagged[0].field("skipped"), Some("12"));
+        })
+        .await
+        .expect("lag test must complete within 30 s");
+    }
+
+    /// The counter-case: a client that keeps up with the live view
+    /// receives every message and no warn is emitted.
+    #[tokio::test]
+    async fn console_live_view_kept_up_client_emits_no_warn() {
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let vm_id = "kept-up-vm";
+            let (mut client, live_tx, subscribed) = lag_test_console().await;
+            ws_upgrade_over_duplex(&mut client, vm_id).await;
+            subscribed.notified().await;
+
+            // A handful of messages, well under the capacity of 8.
+            for i in 0..3u8 {
+                live_tx.send(vec![b'0' + i; 4]).expect("send live message");
+            }
+
+            // The client receives all three frames.
+            let mut received = vec![0u8; 3 * 6];
+            client
+                .read_exact(&mut received)
+                .await
+                .expect("read live frames");
+            let mut expected = Vec::new();
+            for i in 0..3u8 {
+                expected.extend_from_slice(&[0x82, 0x04, b'0' + i, b'0' + i, b'0' + i, b'0' + i]);
+            }
+            assert_eq!(
+                received, expected,
+                "a kept-up client must receive every message"
+            );
+
+            let warnings = logs.warnings();
+            assert!(
+                warnings.is_empty(),
+                "a kept-up client must not produce warns, got {:?}",
+                warnings
+            );
+        })
+        .await
+        .expect("kept-up test must complete within 30 s");
     }
 }
