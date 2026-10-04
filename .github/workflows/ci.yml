@@ -183,6 +183,17 @@ jobs:
             echo "scripts/smoke-version.sh not found, skipping"
           fi
 
+      - name: Run smoke-bump-version.sh if present
+        # Regression test for the sed-escaping bug that corrupted the
+        # bridge CIDR during the 0.3.0 release cut (PR #473 follow-up).
+        # Self-contained: fixture tree, no cargo/network.
+        run: |
+          if [ -x ./scripts/smoke-bump-version.sh ]; then
+            ./scripts/smoke-bump-version.sh
+          else
+            echo "scripts/smoke-bump-version.sh not found, skipping"
+          fi
+
   ui:
     name: UI checks
     runs-on: ubuntu-latest
