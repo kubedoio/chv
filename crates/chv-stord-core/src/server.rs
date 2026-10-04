@@ -14,6 +14,7 @@ use nix::unistd::{chown, Group};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
@@ -21,7 +22,7 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct StorageServer<B: StorageBackend> {
     inner: StorageServiceImpl<B>,
@@ -199,6 +200,10 @@ impl<B: StorageBackend> StorageServer<B> {
 /// Serve `StorageMigrationService` on an already-bound TCP listener with
 /// mandatory client-certificate (mTLS) authentication.
 ///
+/// Applies [`MIGRATION_HANDSHAKE_TIMEOUT`]; tests that need to exercise the
+/// timeout behavior use [`serve_migration_tls_with_handshake_timeout`]
+/// instead.
+///
 /// # What enforces mandatory client auth
 ///
 /// The rustls `ServerConfig` is built by [`migration_server_rustls_config`]
@@ -225,13 +230,49 @@ impl<B: StorageBackend> StorageServer<B> {
 /// material.
 ///
 /// This function is also the seam exercised by the loopback mTLS proof tests
-/// (`tests/migration_mtls.rs`), which assert that clients without a valid
-/// identity are rejected at the TLS layer *and* that the rejection is
-/// visible in destination logs.
+/// (`tests/migration_mtls.rs`, `tests/migration_accept_loop.rs`), which
+/// assert that clients without a valid identity are rejected at the TLS
+/// layer *and* that the rejection is visible in destination logs.
 pub async fn serve_migration_tls<B: StorageBackend>(
     listener: TcpListener,
     tls: MigrationServerTls,
     service: StorageMigrationServiceImpl<B>,
+) -> Result<(), ChvError> {
+    serve_migration_tls_with_handshake_timeout(listener, tls, service, MIGRATION_HANDSHAKE_TIMEOUT)
+        .await
+}
+
+/// How long an accepted connection may take to complete its TLS handshake
+/// before the migration receiver gives up on it and closes the connection
+/// (post-#479 hardening of the accept loop chv now owns).
+///
+/// This only guards the ClientHello-never-arrives case: a handshake is a
+/// handful of round trips over an already-established TCP connection (the
+/// loopback proof tests complete in single-digit milliseconds), so 30 s is
+/// orders of magnitude above any legitimate completion time. Without a
+/// bound, an idle TCP connection pins one spawned handshake task plus its
+/// file descriptor forever, and the exposure scales linearly with
+/// connection count (slow-loris on the migration port). Deliberately not a
+/// config knob: tonic's internal handshake path — which this loop replaced
+/// — had no timeout either, so this is parity hardening, not a tunable;
+/// pass an explicit duration via
+/// [`serve_migration_tls_with_handshake_timeout`] if a caller ever needs
+/// something else.
+const MIGRATION_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// [`serve_migration_tls`] with an explicit TLS-handshake timeout.
+///
+/// Production callers must use [`serve_migration_tls`], which applies
+/// [`MIGRATION_HANDSHAKE_TIMEOUT`]. This constructor exists so the
+/// loopback hardening tests (`tests/migration_accept_loop.rs`) can drive
+/// the timeout behavior with a shortened duration instead of sleeping 30 s
+/// — the timeout is a fixed constant by design (see its docs), so the test
+/// seam is a function parameter, not a config knob.
+pub async fn serve_migration_tls_with_handshake_timeout<B: StorageBackend>(
+    listener: TcpListener,
+    tls: MigrationServerTls,
+    service: StorageMigrationServiceImpl<B>,
+    handshake_timeout: Duration,
 ) -> Result<(), ChvError> {
     let acceptor = TlsAcceptor::from(Arc::new(migration_server_rustls_config(&tls)?));
 
@@ -254,11 +295,26 @@ pub async fn serve_migration_tls<B: StorageBackend>(
                     let acceptor = acceptor.clone();
                     let conn_tx = conn_tx.clone();
                     tokio::spawn(async move {
-                        match acceptor.accept(stream).await {
-                            Ok(tls_stream) => {
-                                let _ = conn_tx.send(Ok(tls_stream)).await;
+                        match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await
+                        {
+                            Ok(Ok(tls_stream)) => {
+                                if conn_tx.send(Ok(tls_stream)).await.is_err() {
+                                    // The serving future — and with it the
+                                    // channel's receiver half — was dropped
+                                    // while this handshake ran: server
+                                    // shutdown raced a completing handshake.
+                                    // Debug, not warn: nothing was rejected;
+                                    // the completed stream is simply dropped.
+                                    // Content-free like every other
+                                    // handshake log line (peer only).
+                                    debug!(
+                                        peer = %peer,
+                                        "migration TLS handshake completed after server shutdown; \
+                                         connection dropped"
+                                    );
+                                }
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 // Quality-of-failure only (issue #402): the
                                 // handshake is refused exactly as before;
                                 // the rejection is now visible. Content-free
@@ -268,6 +324,23 @@ pub async fn serve_migration_tls<B: StorageBackend>(
                                     peer = %peer,
                                     reason = %e,
                                     "rejected migration TLS handshake"
+                                );
+                            }
+                            Err(_elapsed) => {
+                                // The peer never sent a ClientHello (or
+                                // stalled mid-handshake): give up on it
+                                // instead of pinning this task and its fd
+                                // forever. Dropping the timed-out accept
+                                // future drops the TcpStream, closing the
+                                // connection. Info, not warn: a peer that
+                                // never started a handshake was not
+                                // rejected by mTLS policy — this is a
+                                // housekeeping line, and the timeout only
+                                // observes and closes, never admits.
+                                // Content-free (peer address, no more).
+                                info!(
+                                    peer = %peer,
+                                    "migration TLS handshake timed out; closing connection"
                                 );
                             }
                         }

@@ -385,6 +385,7 @@ not under `[migration]`): the destination endpoint host of every
 | Ack-wait timeout | 30 s | `crates/chv-stord-core/src/migration/flow_control.rs` |
 | Max gRPC message size (`MAX_MIGRATION_MESSAGE_SIZE_BYTES`) | 8 MiB (2 × block size; a `BlockChunk` carries a full 4 MiB block plus protobuf overhead, exceeding tonic's 4 MiB default) | `crates/chv-stord-core/src/migration/mod.rs` |
 | Max migrated volume size (`MAX_MIGRATION_SIZE_BYTES`) | 16 TiB | `crates/chv-stord-core/src/migration/service.rs` |
+| Migration TLS handshake timeout (`MIGRATION_HANDSHAKE_TIMEOUT`) | 30 s (how long an accepted connection may take to complete its TLS handshake before the migration receiver gives up on it and closes it; guards only the ClientHello-never-arrives case — deliberately not a tunable) | `crates/chv-stord-core/src/server.rs` |
 
 ## Non-goals
 - Compression (may add later if network is bottleneck)
@@ -446,11 +447,27 @@ not under `[migration]`): the destination endpoint host of every
    configuring the receiver half alone
    (`crates/chv-stord-core/src/migration/tls_config.rs`).
 
-3. **mTLS rejection observability**: identity rejections surface at the
+3. **mTLS rejection observability (RESOLVED — issue #402 / PR #479,
+   further hardened in #485)**: identity rejections used to surface at the
    client as opaque, race-dependent transport-level errors, and the
-   destination logs nothing about a rejected handshake — fail-closed holds,
-   but triage requires reproducing the handshake out-of-band (M4.6 evidence
-   doc §4.3).
+   destination logged nothing about a rejected handshake — fail-closed
+   held, but triage required reproducing the handshake out-of-band.
+   Recorded as a handshake-observability finding in the M4.6 evidence doc
+   (§4.3). Resolved in #479: the sender now walks the tonic connect
+   error's source chain and surfaces the terminal rustls alert/reason
+   (wrong CA, wrong server name, expired destination certificate are
+   distinguishable) in the failure message and the migration task's
+   `error_message`, and the destination completes the handshake in its
+   own accept loop and warn-logs every rejected handshake with the peer
+   address and the reason — including received fatal alerts, so a
+   sender-aborted handshake is distinguishable from a
+   receiver-initiated rejection. Hardened in #485: the fatal-alert leg
+   is pinned by test, a peer that goes silent mid-handshake is closed by
+   a 30 s handshake timeout (info line with the peer) instead of pinning
+   the accept loop, and a handshake completing after a raced shutdown is
+   debug-logged rather than silently dropped
+   (`crates/chv-stord-core/src/migration/sender.rs`,
+   `crates/chv-stord-core/src/server.rs`).
 
 What was actually exercised on a real host — the positive two-stord mTLS
 migration and every fail-closed identity/plaintext/interruption negative — is
