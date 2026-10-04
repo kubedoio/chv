@@ -10,11 +10,19 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # Storage migration (disk migration between stord peers).
 #
 # Migration is DISABLED by default: the daemon starts without credentials and
-# migration actions fail as unavailable (never a plaintext fallback).
+# migration actions fail as unavailable (never a plaintext fallback). With
+# enabled = false, ANY field below being set is a startup error (fail-closed).
 #
-# To enable storage migration over mTLS, set enabled = true and provide the
-# node identity material issued by the CHV CA. All four fields are required
-# and validated at startup:
+# Under enabled = true the two halves are INDEPENDENTLY OPTIONAL — configure
+# the client half to send migrations, the receiver half to accept them, or
+# both. Each half is all-or-nothing within itself (a partial half is a
+# startup error), and enabled = true with NEITHER half configured is also a
+# startup error (an enabled migration section that configures nothing is a
+# misconfiguration).
+#
+# Client half (source: this stord initiates migrations to peers). All four
+# fields are required TOGETHER; omitting all four under enabled = true makes
+# this a destination-only stord that never initiates migrations:
 #
 # [migration]
 # enabled = true
@@ -22,6 +30,16 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # client_key_path  = "/etc/chv/tls/stord-client.key"   # node private key (PEM)
 # ca_cert_path     = "/etc/chv/tls/chv-ca.crt"         # CA bundle validating the destination
 # dest_server_name = "stord-peer.internal"             # expected destination identity (DNS SAN)
+#
+# Destination-only stord (receiver only — no client identity to mint or
+# maintain; outbound migration actions simply fail as unavailable):
+#
+# [migration]
+# enabled = true
+# listen_addr      = "0.0.0.0:50052"                   # receiver bind address
+# server_cert_path = "/etc/chv/tls/stord-server.crt"   # receiver certificate (PEM)
+# server_key_path  = "/etc/chv/tls/stord-server.key"   # receiver private key (PEM)
+# client_ca_path   = "/etc/chv/tls/chv-ca.crt"         # CA authenticating migration peers
 #
 # File ownership/permissions: chv-stord runs as the 'chv' service user
 # (see the packaged chv-stord.service), so cert and key should be owned by

@@ -18,13 +18,22 @@
 //!   **error**: an operator who believes migration is disabled must not
 //!   have a half-configured identity silently ignored (fail-closed,
 //!   symmetric with the receiver half, issue #395).
-//! - `enabled = true` → all four identity inputs are required, files must be
+//! - `enabled = true` → the client half is all-or-nothing: with **no**
+//!   client fields set it is simply absent → `Ok(None)` (destination-only
+//!   stord, issue #401: this stord never initiates migrations, and outbound
+//!   migration actions fail as *unavailable* in the sender); with **any**
+//!   client field set, all four identity inputs are required, files must be
 //!   readable, the certificate/key pair must match, and the CA bundle must
 //!   parse. Any problem is a **startup error** (fail-closed).
 //! - Receiver (server) fields are all-or-nothing: none set → `Ok(None)`
 //!   (source-only stord, a legitimate deployment); *partially* set, an
 //!   unreadable file, a mismatched keypair, an invalid/empty client CA
 //!   bundle, or an unparseable `listen_addr` → **startup error**.
+//! - `enabled = true` with **neither** half configured → startup **error**
+//!   (see [`ensure_migration_half_configured`], issue #401): an enabled
+//!   migration section that configures nothing is a misconfiguration — the
+//!   daemon would run with migrations unavailable in both directions while
+//!   the operator believes migration is on.
 //!
 //! # Security rules honored here
 //!
@@ -81,7 +90,8 @@ impl std::error::Error for MigrationTlsLoadError {
     }
 }
 
-/// Load and validate the migration mTLS identity from configuration fields.
+/// Load and validate the migration mTLS identity (client/source half) from
+/// configuration fields.
 ///
 /// Returns `Ok(None)` when `enabled` is `false` **and** no client identity
 /// field is configured. Setting any client field (`client_cert_path`,
@@ -90,9 +100,21 @@ impl std::error::Error for MigrationTlsLoadError {
 /// migration is disabled must not have a half-configured identity silently
 /// ignored (fail-closed, symmetric with the receiver half — issue #395).
 ///
-/// When `enabled` is `true`, requires and validates `client_cert_path`,
-/// `client_key_path`, `ca_cert_path`, and `dest_server_name`, returning a
-/// fully validated [`MigrationTlsConfig`] on success.
+/// When `enabled` is `true`, the client half is all-or-nothing (issue #401):
+///
+/// - with **no** client field set → `Ok(None)`: this stord is
+///   destination-only — it never initiates migrations, and outbound
+///   migration actions fail as *unavailable* in the sender (no plaintext
+///   fallback, exactly as when migration is disabled);
+/// - with **any** client field set → all four inputs are required, files
+///   must be readable, the certificate/key pair must match, and the CA
+///   bundle must parse, returning a fully validated
+///   [`MigrationTlsConfig`] on success. A partially configured client half
+///   is a startup **error** (fail-closed).
+///
+/// The `enabled = true`-but-nothing-at-all case (neither this half nor the
+/// receiver half configured) is rejected by
+/// [`ensure_migration_half_configured`], which sees both halves.
 pub fn load_migration_tls(
     enabled: bool,
     client_cert_path: Option<&Path>,
@@ -117,19 +139,40 @@ pub fn load_migration_tls(
         return Ok(None);
     }
 
+    // Client half absent under `enabled = true` (issue #401): a stord may be
+    // destination-only. `Ok(None)` means "this stord never initiates
+    // migrations" — the sender refuses to run without `MigrationTlsConfig`,
+    // so outbound migration actions fail as unavailable, never as plaintext.
+    let any_client_set = client_cert_path.is_some()
+        || client_key_path.is_some()
+        || ca_cert_path.is_some()
+        || dest_server_name.is_some();
+    if !any_client_set {
+        tracing::info!(
+            "storage migration client identity not configured: this stord will not initiate storage migrations"
+        );
+        return Ok(None);
+    }
+
     let cert_path = client_cert_path.ok_or_else(|| {
         MigrationTlsLoadError::Missing(
-            "migration.client_cert_path is required when migration.enabled = true".into(),
+            "migration.client_cert_path is required when any migration client field is set \
+             (migration.enabled = true)"
+                .into(),
         )
     })?;
     let key_path = client_key_path.ok_or_else(|| {
         MigrationTlsLoadError::Missing(
-            "migration.client_key_path is required when migration.enabled = true".into(),
+            "migration.client_key_path is required when any migration client field is set \
+             (migration.enabled = true)"
+                .into(),
         )
     })?;
     let ca_path = ca_cert_path.ok_or_else(|| {
         MigrationTlsLoadError::Missing(
-            "migration.ca_cert_path is required when migration.enabled = true".into(),
+            "migration.ca_cert_path is required when any migration client field is set \
+             (migration.enabled = true)"
+                .into(),
         )
     })?;
     let dest = dest_server_name
@@ -137,7 +180,9 @@ pub fn load_migration_tls(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             MigrationTlsLoadError::Missing(
-                "migration.dest_server_name is required when migration.enabled = true".into(),
+                "migration.dest_server_name is required when any migration client field is set \
+                 (migration.enabled = true)"
+                    .into(),
             )
         })?;
 
@@ -267,6 +312,37 @@ pub fn load_migration_server_tls(
         key_pem,
         client_ca_pem,
     }))
+}
+
+/// Fail-closed cross-half check (issue #401): `migration.enabled = true`
+/// must configure at least one of the two migration halves.
+///
+/// The halves are independently optional under `enabled = true` — a stord
+/// may be source-only (client identity, no receiver), destination-only
+/// (receiver, no client identity), or both — but an *enabled* migration
+/// section that configures **nothing** is a misconfiguration: the daemon
+/// would run with migrations unavailable in both directions while the
+/// operator believes migration is on. That case is a startup **error**.
+///
+/// Call this after both [`load_migration_tls`] and
+/// [`load_migration_server_tls`] have succeeded, passing their results and
+/// the same `enabled` flag. With `enabled = false` it is always `Ok(())`
+/// (each loader already rejects half-configured fields on its own).
+pub fn ensure_migration_half_configured(
+    enabled: bool,
+    client_tls: Option<&MigrationTlsConfig>,
+    server_tls: Option<&MigrationServerTls>,
+) -> Result<(), MigrationTlsLoadError> {
+    if !enabled || client_tls.is_some() || server_tls.is_some() {
+        return Ok(());
+    }
+    Err(MigrationTlsLoadError::Invalid(
+        "migration.enabled = true but neither the client half (client_cert_path, \
+         client_key_path, ca_cert_path, dest_server_name) nor the receiver half \
+         (listen_addr, server_cert_path, server_key_path, client_ca_path) is configured — \
+         configure at least one half or set migration.enabled = false"
+            .into(),
+    ))
 }
 
 /// Read a PEM identity file. Errors are surfaced without file contents.
@@ -495,11 +571,74 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Client half independently optional under enabled = true (issue #401):
+    // no client fields = destination-only stord (Ok(None)); any client
+    // field set = all four required (all-or-nothing within the half).
+    // -----------------------------------------------------------------
+
     #[test]
-    fn enabled_requires_all_fields() {
-        match load_migration_tls(true, None, None, None, None) {
-            Err(MigrationTlsLoadError::Missing(_)) => {}
-            Ok(_) => panic!("expected a Missing error, but a TLS config was produced"),
+    fn enabled_with_no_client_fields_returns_none() {
+        // Destination-only stord: `enabled = true` with no client identity
+        // must load as Ok(None) (previously a startup error — issue #401).
+        match load_migration_tls(true, None, None, None, None).expect("no error when enabled") {
+            None => {}
+            Some(_) => panic!("unconfigured client half must not produce a TLS config"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_only_client_cert_path_fails() {
+        match load_migration_tls(true, Some(Path::new("/tmp/unused.crt")), None, None, None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_key_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("partial client half must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_only_client_key_path_fails() {
+        match load_migration_tls(true, None, Some(Path::new("/tmp/unused.key")), None, None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("partial client half must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_only_ca_bundle_fails() {
+        match load_migration_tls(true, None, None, Some(Path::new("/tmp/unused.ca")), None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("partial client half must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_only_dest_server_name_fails() {
+        match load_migration_tls(true, None, None, None, Some("stord-peer")) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("partial client half must not load"),
             Err(other) => panic!("unexpected error variant: {other:?}"),
         }
     }
@@ -688,6 +827,20 @@ mod tests {
     }
 
     #[test]
+    fn server_missing_server_key_fails() {
+        // Receiver cert without key: the receiver half is all-or-nothing.
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, _, ap)) = write_all(&c, &k, &a);
+        match load_server(Some("127.0.0.1:50052"), Some(&cp), None, Some(&ap)) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(msg.contains("server_key_path"), "unexpected message: {msg}");
+            }
+            Ok(_) => panic!("partial receiver config must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn server_invalid_listen_addr_fails() {
         let (c, k, a) = matching_pair("node-a");
         let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
@@ -792,5 +945,91 @@ mod tests {
         assert!(mat.cert_pem == c, "server cert PEM must be preserved");
         assert!(mat.key_pem == k, "server key PEM must be preserved");
         assert!(mat.client_ca_pem == a, "client CA PEM must be preserved");
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-half gating (issue #401): the two halves are independently
+    // optional under enabled = true, but enabled = true with NEITHER half
+    // configured is a startup error (misconfiguration).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn enabled_with_neither_half_configured_is_an_error() {
+        match ensure_migration_half_configured(true, None, None) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = true"),
+                    "error must name the contradiction: {msg}"
+                );
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the client fields: {msg}"
+                );
+                assert!(
+                    msg.contains("listen_addr"),
+                    "error must name the receiver fields: {msg}"
+                );
+            }
+            Ok(()) => panic!("enabled migration with neither half must not pass"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_destination_only_loads() {
+        // The shape issue #401 makes expressible: `enabled = true` with only
+        // the receiver half configured. The client loader must yield None
+        // (no client identity required), the server loader must yield the
+        // receiver material, and the cross-half check must pass.
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+
+        let client_tls = load_migration_tls(true, None, None, None, None)
+            .expect("destination-only client half must load");
+        assert!(
+            client_tls.is_none(),
+            "destination-only stord must not carry a client identity"
+        );
+
+        let server_tls = load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), Some(&ap))
+            .expect("valid receiver material should load");
+        assert!(server_tls.is_some(), "receiver half must be configured");
+
+        ensure_migration_half_configured(true, client_tls.as_ref(), server_tls.as_ref())
+            .expect("destination-only stord must pass the cross-half check");
+    }
+
+    #[test]
+    fn enabled_source_only_passes_half_check() {
+        // Source-only stord (works today, must keep working): client
+        // identity configured, no receiver fields.
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        let client_tls =
+            load_migration_tls(true, Some(&cp), Some(&kp), Some(&ap), Some("stord-peer"))
+                .expect("valid client identity should load");
+        let server_tls = load_server(None, None, None, None).expect("no error when unset");
+        assert!(server_tls.is_none(), "unconfigured receiver must be None");
+        ensure_migration_half_configured(true, client_tls.as_ref(), server_tls.as_ref())
+            .expect("source-only stord must pass the cross-half check");
+    }
+
+    #[test]
+    fn enabled_both_halves_pass_half_check() {
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        let client_tls =
+            load_migration_tls(true, Some(&cp), Some(&kp), Some(&ap), Some("stord-peer"))
+                .expect("valid client identity should load");
+        let server_tls = load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), Some(&ap))
+            .expect("valid receiver material should load");
+        ensure_migration_half_configured(true, client_tls.as_ref(), server_tls.as_ref())
+            .expect("both halves configured must pass the cross-half check");
+    }
+
+    #[test]
+    fn disabled_passes_half_check_without_any_halves() {
+        ensure_migration_half_configured(false, None, None)
+            .expect("disabled migration must pass the cross-half check");
     }
 }

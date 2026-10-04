@@ -3,7 +3,9 @@ use chv_observability::init_logger;
 use chv_stord_backends::{
     CephRbdBackend, IscsiBackend, LVMBackend, LocalFileBackend, StorageBackend,
 };
-use chv_stord_core::migration::tls_config::{load_migration_server_tls, load_migration_tls};
+use chv_stord_core::migration::tls_config::{
+    ensure_migration_half_configured, load_migration_server_tls, load_migration_tls,
+};
 use chv_stord_core::store::SessionStore;
 use chv_stord_core::StorageServer;
 use std::path::PathBuf;
@@ -90,10 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Load + validate the storage-migration mTLS identity at startup (issue #232).
-    // Fail-closed: `migration.enabled = true` with missing/unreadable material or
+    // Fail-closed: a partially configured client half, unreadable material or
     // a mismatched keypair is a startup error (never a runtime downgrade).
     // `migration.enabled = false` (default) starts without credentials and
-    // migration actions fail as unavailable in the sender.
+    // migration actions fail as unavailable in the sender. Under
+    // `enabled = true` the client half is independently optional (issue #401):
+    // no client fields = destination-only stord that never initiates
+    // migrations (outbound migration actions fail as unavailable).
     let migration_tls = load_migration_tls(
         config.migration.enabled,
         config.migration.client_cert_path.as_deref(),
@@ -103,8 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if migration_tls.is_some() {
         info!("storage migration mTLS enabled (credentials validated at startup)");
-    } else {
-        info!("storage migration is disabled: migration actions will be unavailable");
     }
 
     // Server half (issue #390): load + validate the migration receiver's mTLS
@@ -130,6 +133,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "storage migration receiver mTLS material validated (listener binds in server startup)"
         );
     }
+
+    // Cross-half check (issue #401): the two halves are independently
+    // optional under `enabled = true` (source-only, destination-only, or
+    // both), but an enabled migration section that configures NEITHER half
+    // is a misconfiguration — the daemon would run with migrations
+    // unavailable in both directions while the operator believes migration
+    // is on. Fail-closed at startup.
+    ensure_migration_half_configured(
+        config.migration.enabled,
+        migration_tls.as_ref(),
+        migration_server_tls.as_ref(),
+    )?;
 
     let server = StorageServer::new(
         backend,
