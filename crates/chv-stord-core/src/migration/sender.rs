@@ -141,7 +141,27 @@ impl<B: StorageBackend> MigrationSender<B> {
                 .connect()
                 .await
                 .map_err(|e| {
-                    tonic::Status::unavailable(format!("failed to connect to peer with mTLS: {e}"))
+                    // Quality-of-failure (issue #402): a TLS-layer rejection
+                    // otherwise collapses to the single text "transport
+                    // error", so an operator cannot tell a misconfigured CA
+                    // from a wrong server name from an expired certificate.
+                    // Walk the tonic error's source chain (the technique
+                    // already used by tests/migration_mtls.rs to surface the
+                    // rustls fatal alert) and include the terminal error
+                    // display, which for an mTLS rejection is the rustls
+                    // alert/reason name (e.g. UnknownIssuer,
+                    // CertNotValidForName, Expired). Content-free by
+                    // construction: rustls error displays carry alert/reason
+                    // names only, never certificate contents or key
+                    // material.
+                    let status = tonic::Status::unavailable(format!(
+                        "failed to connect to peer with mTLS: transport error: {}",
+                        terminal_error_display(&e)
+                    ));
+                    if let Some(ref task) = self.task {
+                        task.mark_failed(status.message().to_string());
+                    }
+                    status
                 })?
         } else {
             return Err(tonic::Status::failed_precondition(
@@ -790,6 +810,23 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
         sender = sender.with_task(t);
     }
     sender.start_migration(endpoint).await
+}
+
+/// Walk an error's source chain to its terminal (deepest) cause and return
+/// its display — the same chain-walking `tests/migration_mtls.rs` uses to
+/// surface the rustls fatal alert hidden under a tonic "transport error".
+///
+/// For an mTLS rejection this is the rustls alert/reason name (e.g.
+/// "invalid peer certificate: UnknownIssuer"); it never contains
+/// certificate contents or key material.
+fn terminal_error_display(err: &dyn std::error::Error) -> String {
+    let mut display = err.to_string();
+    let mut source = err.source();
+    while let Some(err) = source {
+        display = err.to_string();
+        source = err.source();
+    }
+    display
 }
 
 /// Check if a byte slice is all zeros (indicates a sparse block).

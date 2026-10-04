@@ -14,10 +14,14 @@ use nix::unistd::{chown, Group};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::{TcpListener, UnixListener};
-use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener};
+use tokio::sync::mpsc;
+use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct StorageServer<B: StorageBackend> {
     inner: StorageServiceImpl<B>,
@@ -197,44 +201,158 @@ impl<B: StorageBackend> StorageServer<B> {
 ///
 /// # What enforces mandatory client auth
 ///
-/// The `ServerTlsConfig` is built with `client_ca_root(...)` and *without*
-/// `client_auth_optional(true)` (tonic 0.12). Internally tonic then builds a
-/// rustls `WebPkiClientVerifier` **without** `allow_unauthenticated()` and
-/// installs it via `ServerConfig::with_client_cert_verifier`, so the TLS
-/// handshake itself fails unless the peer presents a certificate that chains
-/// to `tls.client_ca_pem`. This is the same mechanism the control plane uses
+/// The rustls `ServerConfig` is built by [`migration_server_rustls_config`]
+/// with a `WebPkiClientVerifier` over `tls.client_ca_pem` and **without**
+/// `allow_unauthenticated()` (mirroring exactly what tonic's
+/// `ServerTlsConfig` builds from `client_ca_root(...)` without
+/// `client_auth_optional(true)`), installed via
+/// `ServerConfig::with_client_cert_verifier`, so the TLS handshake itself
+/// fails unless the peer presents a certificate that chains to
+/// `tls.client_ca_pem`. This is the same mechanism the control plane uses
 /// (`cmd/chv-controlplane/src/bootstrap.rs`).
+///
+/// # Why the TLS handshake runs in our own accept loop
+///
+/// tonic performs the TLS handshake inside its hyper accept path and drops
+/// transport-level failures — including mTLS rejections — with at most a
+/// debug-level log line carrying no peer address, so a peer refused at the
+/// handshake is invisible in destination logs (issue #402). Here each
+/// accepted TCP connection completes its handshake *before* it is handed
+/// to the tonic server: a rejected handshake never becomes a connection,
+/// and the rejection is logged at warn level with the peer address and the
+/// alert/reason name (`invalid peer certificate: ...`, `peer sent no
+/// certificates`, ...) — content-free, never certificate contents or key
+/// material.
 ///
 /// This function is also the seam exercised by the loopback mTLS proof tests
 /// (`tests/migration_mtls.rs`), which assert that clients without a valid
-/// identity are rejected at the TLS layer.
+/// identity are rejected at the TLS layer *and* that the rejection is
+/// visible in destination logs.
 pub async fn serve_migration_tls<B: StorageBackend>(
     listener: TcpListener,
     tls: MigrationServerTls,
     service: StorageMigrationServiceImpl<B>,
 ) -> Result<(), ChvError> {
-    let identity = tonic::transport::Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone());
-    let tls_config = tonic::transport::ServerTlsConfig::new()
-        .identity(identity)
-        .client_ca_root(tonic::transport::Certificate::from_pem(
-            tls.client_ca_pem.clone(),
-        ));
+    let acceptor = TlsAcceptor::from(Arc::new(migration_server_rustls_config(&tls)?));
 
-    Server::builder()
+    // Connections that completed the mTLS handshake, fed to the tonic
+    // server below. Handshake failures are logged and dropped; they are
+    // never yielded (fail-closed: a rejected peer gets no HTTP/2
+    // connection at all, exactly as before).
+    let (conn_tx, conn_rx) = mpsc::channel::<Result<TlsStream<TcpStream>, std::io::Error>>(64);
+
+    // The accept task must not outlive the serving future (tests drop it;
+    // the daemon runs it to process exit). Aborting on drop also closes
+    // the channel once the last handshake task finishes, ending the
+    // serving stream.
+    let accept_guard = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer)) => {
+                    // Parity with tonic's TCP listener (nodelay on accept).
+                    let _ = stream.set_nodelay(true);
+                    let acceptor = acceptor.clone();
+                    let conn_tx = conn_tx.clone();
+                    tokio::spawn(async move {
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => {
+                                let _ = conn_tx.send(Ok(tls_stream)).await;
+                            }
+                            Err(e) => {
+                                // Quality-of-failure only (issue #402): the
+                                // handshake is refused exactly as before;
+                                // the rejection is now visible. Content-free
+                                // by construction: the error display is the
+                                // rustls alert/reason name.
+                                warn!(
+                                    peer = %peer,
+                                    reason = %e,
+                                    "rejected migration TLS handshake"
+                                );
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!(error = %e, "migration TLS listener accept failed");
+                }
+            }
+        }
+    }));
+
+    let result = Server::builder()
         .layer(chv_observability::GrpcMetricsLayer::new())
-        .tls_config(tls_config)
-        .map_err(|e| ChvError::Internal {
-            reason: format!("migration TLS server config error: {e}"),
-        })?
         .add_service(
             StorageMigrationServiceServer::new(service)
                 // BlockChunks carry a full 4 MiB migration block plus
                 // protobuf overhead, exceeding tonic's 4 MiB default.
                 .max_decoding_message_size(MAX_MIGRATION_MESSAGE_SIZE_BYTES),
         )
-        .serve_with_incoming(TcpListenerStream::new(listener))
-        .await
+        .serve_with_incoming(ReceiverStream::new(conn_rx))
+        .await;
+
+    drop(accept_guard);
+    result.map_err(|e| ChvError::Internal {
+        reason: format!("migration TLS server error: {e}"),
+    })
+}
+
+/// Build the rustls server config for the migration receiver listener.
+///
+/// Mirrors what tonic's `ServerTlsConfig` (built with `client_ca_root(...)`
+/// and *without* `client_auth_optional(true)`) constructs internally: a
+/// `WebPkiClientVerifier` over the configured client CA **without**
+/// `allow_unauthenticated()`, plus the `h2` ALPN entry the gRPC server
+/// requires. Any parse failure of the configured material is an error
+/// (fail-closed); no PEM/key material is included in errors.
+fn migration_server_rustls_config(tls: &MigrationServerTls) -> Result<ServerConfig, ChvError> {
+    let mut roots = RootCertStore::empty();
+    let mut ca_pem = std::io::Cursor::new(tls.client_ca_pem.clone());
+    for cert in rustls_pemfile::certs(&mut ca_pem) {
+        let cert = cert.map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS client CA parse error: {e}"),
+        })?;
+        roots.add(cert).map_err(|_| ChvError::Internal {
+            reason: "migration TLS client CA contains an unparseable certificate".to_string(),
+        })?;
+    }
+    let verifier = WebPkiClientVerifier::builder(roots.into())
+        .build()
         .map_err(|e| ChvError::Internal {
-            reason: format!("migration TLS server error: {e}"),
-        })
+            reason: format!("migration TLS client verifier error: {e}"),
+        })?;
+
+    let mut cert_pem = std::io::Cursor::new(tls.cert_pem.clone());
+    let certs = rustls_pemfile::certs(&mut cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS server certificate parse error: {e}"),
+        })?;
+    let mut key_pem = std::io::Cursor::new(tls.key_pem.clone());
+    let key = rustls_pemfile::private_key(&mut key_pem)
+        .map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS server key parse error: {e}"),
+        })?
+        .ok_or_else(|| ChvError::Internal {
+            reason: "migration TLS server key PEM contains no private key".to_string(),
+        })?;
+
+    let mut config = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)
+        .map_err(|e| ChvError::Internal {
+            reason: format!("migration TLS server config error: {e}"),
+        })?;
+    config.alpn_protocols.push(b"h2".to_vec());
+    Ok(config)
+}
+
+/// Aborts the wrapped task when dropped, so an accept loop tied to a
+/// serving future cannot outlive it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
