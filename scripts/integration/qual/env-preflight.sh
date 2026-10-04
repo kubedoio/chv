@@ -6,7 +6,7 @@
 #
 # Verifies / provides:
 #   - root + /dev/kvm
-#   - cloud-hypervisor v43.0.0 (pinned) at /usr/bin/cloud-hypervisor
+#   - cloud-hypervisor v53.0 (pinned) at /usr/bin/cloud-hypervisor
 #   - rust-hypervisor-firmware 0.5.0 (pinned) under CHV_QUAL_ROOT
 #   - Ubuntu noble cloud image (qcow2) under CHV_QUAL_ROOT
 #   - host tools: openssl, curl, python3, htpasswd (apache2-utils), jq
@@ -17,7 +17,7 @@
 #
 # Environment:
 #   CHV_QUAL_ROOT   persistent root (default: /var/lib/chv/qual)
-#   CHV_VERSION     pinned cloud-hypervisor version (default: v43.0)
+#   CHV_VERSION     pinned cloud-hypervisor version (default: v53.0)
 #   FW_VERSION      pinned rust-hypervisor-firmware version (default: 0.5.0)
 #   GUEST_IMAGE     guest seed filename (default: noble-server-cloudimg-amd64.img)
 
@@ -37,7 +37,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 CHV_QUAL_ROOT="${CHV_QUAL_ROOT:-/var/lib/chv/qual}"
-CHV_VERSION="${CHV_VERSION:-v43.0}"
+CHV_VERSION="${CHV_VERSION:-v53.0}"
 FW_VERSION="${FW_VERSION:-0.5.0}"
 GUEST_IMAGE="${GUEST_IMAGE:-noble-server-cloudimg-amd64.img}"
 

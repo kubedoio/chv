@@ -12,7 +12,7 @@
 #   --binary-dir DIR   Use binaries from DIR instead of /usr/bin
 #   --source           Shorthand for --binary-dir target/release
 #   --skip-cleanup     Do not stop services or remove temp files on exit
-#   --chv-version VER  Pin cloud-hypervisor version (default: v43.0)
+#   --chv-version VER  Pin cloud-hypervisor version (default: v53.0)
 #
 # Environment:
 #   CHV_CLOUD_HYPERVISOR_VERSION   Override pinned CH version. When set (or
@@ -40,7 +40,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PACKAGE_DIR=""
 BINARY_DIR=""
 SKIP_CLEANUP=false
-CHV_PINNED_VERSION="${CHV_CLOUD_HYPERVISOR_VERSION:-v43.0}"
+CHV_PINNED_VERSION="${CHV_CLOUD_HYPERVISOR_VERSION:-v53.0}"
 # True when a version was explicitly requested (env var or --chv-version):
 # explicit overrides must never install to or overwrite the system
 # /usr/bin/cloud-hypervisor pin (#458).
@@ -243,7 +243,8 @@ download_cloud_hypervisor() {
 
     local arch
     arch="$(uname -m)"
-    # v43.0 asset names: "cloud-hypervisor-static" (x86_64) and
+    # Asset names are identical across v43.0–v53.0 (verified by the #448
+    # campaign, legs 01–06): "cloud-hypervisor-static" (x86_64) and
     # "cloud-hypervisor-static-aarch64" — the x86_64 build is unsuffixed.
     local asset
     case "$arch" in

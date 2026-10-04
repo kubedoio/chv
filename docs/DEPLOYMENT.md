@@ -223,9 +223,11 @@ ls /dev/kvm
 
 #### Cloud Hypervisor
 ```bash
-CHV_VERSION="43.0"
+CHV_VERSION="53.0"
+CHV_SHA256="448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
 curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${CHV_VERSION}/cloud-hypervisor-static" \
   -o /usr/local/bin/cloud-hypervisor
+echo "${CHV_SHA256}  /usr/local/bin/cloud-hypervisor" | sha256sum -c -
 chmod +x /usr/local/bin/cloud-hypervisor
 ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
 cloud-hypervisor --version
@@ -367,9 +369,11 @@ tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "/etc/chv/certs/ca.crt"
 
 # Guest-liveness (boot) watchdog — OPT-IN, disabled when omitted.
-# Detects a guest frozen mid-boot (the cloud-hypervisor v43 serial-manager
-# defect: the console stalls with no boot-complete marker while vm.info
-# keeps reporting Running) and recovers it with a bounded vm.reboot.
+# Detects a guest frozen mid-boot (the cloud-hypervisor serial-manager
+# defect, present at both the former v43.0 pin and the current v53.0 pin
+# — #448 campaign leg 02: the console stalls with no boot-complete
+# marker while vm.info keeps reporting Running) and recovers it with a
+# bounded vm.reboot.
 # Only enable this on nodes whose guest images print the marker:
 # a marker-based detector cannot distinguish a frozen boot from a quiet
 # marker-less guest, nor from an adopted guest whose console wrapped

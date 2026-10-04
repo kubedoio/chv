@@ -35,7 +35,7 @@ tag, package channel, or `latest` image is not a pin. Git inputs require a
 40-character commit ID and binary/image inputs require a SHA-256 digest.
 
 The proposed baseline is Ubuntu Server 24.04 on x86_64, Cloud Hypervisor
-v43.0, and the OpenStack 2025.1 stable series. These are discovery inputs, not
+v53.0, and the OpenStack 2025.1 stable series. These are discovery inputs, not
 a support matrix. The exact kernel, Nova, libvirt, firmware, and guest image
 builds observed must also appear in the collected gap report.
 

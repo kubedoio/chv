@@ -94,7 +94,7 @@ Production packaging runs `chv-agent` as user/group `chv` with supplementary `kv
 
 ## Test and qualification evidence
 
-Unit and mock coverage exists throughout the three agent crates. stord has Unix-socket and SQLite round-trip smoke tests (`crates/chv-stord-core/tests/smoke.rs:18-573`); nwd has daemon handler tests with `MockExecutor` (`crates/chv-nwd-core/tests/nwd_daemon.rs:19-519`). `.github/workflows/integration-kvm.yml` targets a manually/labeled self-hosted `chv-kvm` runner and invokes `scripts/integration/kvm-smoke.sh`, whose default VMM pin is v43.0 and which checks `/dev/kvm` and service health.
+Unit and mock coverage exists throughout the three agent crates. stord has Unix-socket and SQLite round-trip smoke tests (`crates/chv-stord-core/tests/smoke.rs:18-573`); nwd has daemon handler tests with `MockExecutor` (`crates/chv-nwd-core/tests/nwd_daemon.rs:19-519`). `.github/workflows/integration-kvm.yml` targets a manually/labeled self-hosted `chv-kvm` runner and invokes `scripts/integration/kvm-smoke.sh`, whose default VMM pin was v43.0 at this inspection (2026-07-21; the pin moved to v53.0 on 2026-10-03 via the #448 campaign) and which checks `/dev/kvm` and service health.
 
 That workflow is evidence of a real-KVM-capable test path, not evidence for the Core acceptance profile: the smoke script starts the control plane, tests installation/health, and does not prove VM boot, agent-death survival, process re-adoption, host reboot, identity conflict, corruption failure, 100-cycle leaks, or manager absence. No checked-in run digest demonstrates those outcomes.
 

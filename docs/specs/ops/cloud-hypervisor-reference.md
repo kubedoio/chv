@@ -1,39 +1,38 @@
 # Cloud Hypervisor Reference
 
-Version: v43.0 (qualified pin; downloaded by `scripts/install.sh`)
+Version: v53.0 (qualified pin; downloaded by `scripts/install.sh` with sha256 verification)
 
-The qualified integration and KVM-qualification pin is v43.0
+The qualified integration and KVM-qualification pin is v53.0
 (`scripts/integration/kvm-smoke.sh`, `scripts/integration/qual/env-preflight.sh`).
-`scripts/install.sh` downloads the same v43.0 for fresh installs. The
-installer/qualification version split previously recorded as a reconciliation
-item (see the M2.5 KVM qualification evidence under
+`scripts/install.sh` downloads the same v53.0 for fresh installs and verifies
+the qualified sha256 digests before install. The installer/qualification
+version split previously recorded as a reconciliation item (see the M2.5 KVM
+qualification evidence under
 `docs/evidence/production-readiness/v0.3.0-rc1/02-single-authority-cutover/`)
 was resolved by pinning the installer to the qualified version.
 
-**Upstream gap (disclosed, deliberate):** upstream Cloud Hypervisor stable at
-time of writing (2026-10-03) is **v53.0** (released 2026-07-12). The 10-release
-gap between the pin and upstream stable is a deliberate decision
-(DEPLOYMENT-ARCHITECTURE.md §8, decision D6, option (a)); closing it via
-re-qualification is tracked as issue #448. The pinned v43.0 is in the affected
-range of two upstream High-severity advisories — CVE-2026-27211
-(GHSA-jmr4-g2hv-mjj6, host-file exfiltration via QCOW backing-file abuse) and
-CVE-2026-45782 (GHSA-f47p-p25q-83rh, use-after-free in virtio-block async I/O)
-— disclosed with exposure characterization in DEPLOYMENT-ARCHITECTURE.md §9.
+**Pin history (disclosed):** the qualified pin was v43.0 until 2026-10-03,
+when the #448 re-qualification campaign (decision D6, option (b)) moved it to
+v53.0 after six evidence legs (anchor, serial re-check, M4.3 lifecycle, M4.6
+migration, M4.2/M4.4/M4.5 smokes, security regression — campaign evidence:
+`docs/evidence/vmm-requalification/v53.0/`). The former v43.0 pin's exposure
+to CVE-2026-27211 and CVE-2026-45782 is closed at v53.0 (runtime proof for
+CVE-2026-27211 — leg 06); no advisory affects v53.0 as of 2026-10-03.
 "Upstream-only" annotations in this document refer to features present in
 upstream releases **at or above the listed version** and absent from the
-pinned v43.0; nothing here is a claim that CHV exercises them.
+pinned v53.0; nothing here is a claim that CHV exercises them.
 
-Source of truth (pinned to the v43.0 tag so it does not silently track main):
-[Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v43.0/docs/api.md)
-OpenAPI spec (same v43.0 pin):
-https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/v43.0/vmm/src/api/openapi/cloud-hypervisor.yaml
+Source of truth (pinned to the v53.0 tag so it does not silently track main):
+[Cloud Hypervisor API docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v53.0/docs/api.md)
+OpenAPI spec (same v53.0 pin):
+https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/v53.0/vmm/src/api/openapi/cloud-hypervisor.yaml
 
 ## Binaries
 
 | Binary | Download | Install path |
 |--------|----------|-------------|
-| `cloud-hypervisor-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/cloud-hypervisor-static | `/usr/local/bin/cloud-hypervisor` |
-| `ch-remote-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/ch-remote-static | `/usr/local/bin/ch-remote` |
+| `cloud-hypervisor-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static | `/usr/local/bin/cloud-hypervisor` |
+| `ch-remote-static` | https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/ch-remote-static | `/usr/local/bin/ch-remote` |
 
 ## Architecture
 
@@ -79,7 +78,7 @@ cloud-hypervisor [OPTIONS]
 | `--vdpa <vdpa>` | `path=<path>,num_queues=<n>,iommu=on\|off,id=<id>,pci_segment=<id>` (repeatable) | |
 | `--vsock <vsock>` | `cid=<cid>,socket=<path>,iommu=on\|off,id=<id>,pci_segment=<id>` | |
 | `--pvpanic` | Enable pvpanic device | |
-| `--numa <numa>` | `guest_numa_id=<id>,cpus=<ids>,distances=<list>,memory_zones=<list>,sgx_epc_sections=<list>,pci_segments=<list>` (repeatable) | |
+| `--numa <numa>` | `guest_numa_id=<id>,cpus=<ids>,distances=<list>,memory_zones=<list>,sgx_epc_sections=<list>,pci_segments=<list>` (repeatable; `sgx_epc_sections` removed upstream v48.0 — not in the pinned v53.0) | |
 | `--watchdog` | Enable virtio-watchdog | |
 | `-v` | Increase debug output level (repeatable) | |
 | `--log-file <path>` | Log file path (stderr if not set) | |
@@ -88,7 +87,7 @@ cloud-hypervisor [OPTIONS]
 | `--restore <restore>` | Restore from snapshot: `source_url=<url>,prefault=on\|off` | |
 | `--seccomp <mode>` | `true\|false\|log` | `true` |
 | `--tpm <tpm>` | TPM device: `socket=<path>` | |
-| `--sgx-epc <epc>` | SGX EPC: `id=<id>,size=<size>,prefault=on\|off` (repeatable) | |
+| `--sgx-epc <epc>` | SGX EPC: `id=<id>,size=<size>,prefault=on\|off` (repeatable) — **removed upstream v48.0; not in the pinned v53.0** | |
 
 **The CLI does NOT have `--user-data` or any cloud-init flag.** Cloud-init userdata must be injected via a seed disk image.
 
@@ -119,11 +118,11 @@ Available as soon as cloud-hypervisor starts, on the Unix socket from `--api-soc
 | Coredump VM | `/vm.coredump` | `VmCoredumpData` | N/A | **VM paused** (x86_64 + guest_debug only) |
 | Restore VM | `/vm.restore` | `RestoreConfig` | N/A | Created but not booted |
 | Resize VM | `/vm.resize` | `VmResize` | N/A | VM booted |
-| Resize disk (upstream-only; not available in the pinned v43.0 — added upstream v50.0, #7476) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
+| Resize disk (available in the pinned v53.0 — added upstream v50.0, #7476; not exercised by CHV) | `/vm.resize-disk` | `VmResizeDisk` | N/A | VM created |
 | Resize memory zone | `/vm.resize-zone` | `VmResizeZone` | N/A | VM booted |
 | VM info | `/vm.info` | N/A | `VmInfo` | VM created |
 | VM counters | `/vm.counters` | N/A | `VmCounters` | VM booted |
-| Inject NMI | `/vm.nmi` (the v43.0 OpenAPI file carried a typo listing `/vmm.nmi`, corrected upstream v53.0; the real endpoint was always `/vm.nmi` — `ch-remote` v43.0 already issued the correct path) | N/A | N/A | VM booted |
+| Inject NMI | `/vm.nmi` (the v43.0 OpenAPI file carried a typo listing `/vmm.nmi`, corrected upstream; the real endpoint was always `/vm.nmi` — the pinned v53.0 OpenAPI carries the correct path) | N/A | N/A | VM booted |
 | Add VFIO device | `/vm.add-device` | `VmAddDevice` | `PciDeviceInfo` | VM booted |
 | Add disk | `/vm.add-disk` | `DiskConfig` | `PciDeviceInfo` | VM booted |
 | Add fs | `/vm.add-fs` | `FsConfig` | `PciDeviceInfo` | VM booted |
