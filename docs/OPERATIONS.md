@@ -333,7 +333,7 @@ curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
 
 | Symptom | Diagnostic | Resolution |
 |---------|-----------|------------|
-| `FAILED_PRECONDITION: mTLS is required` | TLS not configured on sender | Set `migration.client_cert_path`, `migration.client_key_path`, `migration.ca_cert_path` (and `migration.dest_server_name`) with `migration.enabled = true` in `/etc/chv/stord.toml` |
+| `FAILED_PRECONDITION: no migration client identity` | Sender node has no migration client identity configured (migration disabled, or a destination-only stord) | This node does not initiate migrations. Set `migration.client_cert_path`, `migration.client_key_path`, `migration.ca_cert_path`, and `migration.dest_server_name` with `migration.enabled = true` in `/etc/chv/stord.toml` **only if this node should send migrations** — a destination-only stord legitimately has no client identity |
 | `failed to connect to peer with mTLS` | Certificate mismatch or network issue | Verify CA cert matches on both nodes; check firewall rules |
 | `CRC mismatch reported by receiver` | Data corruption in transit | Check network for packet corruption; retry migration |
 | `deadline_exceeded waiting for Ack` | Receiver not acknowledging | Check receiver node health; disk I/O saturation on destination |

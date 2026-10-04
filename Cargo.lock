@@ -1024,7 +1024,9 @@ dependencies = [
  "chv-observability",
  "chv-stord-backends",
  "chv-stord-core",
+ "rcgen",
  "rustls",
+ "tempfile",
  "tokio",
  "tracing",
 ]

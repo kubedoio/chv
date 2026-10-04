@@ -95,21 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fail-closed: a partially configured client half, unreadable material or
     // a mismatched keypair is a startup error (never a runtime downgrade).
     // `migration.enabled = false` (default) starts without credentials and
-    // migration actions fail as unavailable in the sender. Under
-    // `enabled = true` the client half is independently optional (issue #401):
-    // no client fields = destination-only stord that never initiates
-    // migrations (outbound migration actions fail as unavailable).
-    let migration_tls = load_migration_tls(
-        config.migration.enabled,
-        config.migration.client_cert_path.as_deref(),
-        config.migration.client_key_path.as_deref(),
-        config.migration.ca_cert_path.as_deref(),
-        config.migration.dest_server_name.as_deref(),
-    )?;
-    if migration_tls.is_some() {
-        info!("storage migration mTLS enabled (credentials validated at startup)");
-    }
-
+    // migration actions fail with a failed_precondition error in the sender.
+    // Under `enabled = true` the client half is independently optional
+    // (issue #401): no client fields = destination-only stord that never
+    // initiates migrations (outbound migration actions fail with the same
+    // failed_precondition error).
+    //
     // Server half (issue #390): load + validate the migration receiver's mTLS
     // material. `migration.enabled` is the master switch here too: receiver
     // fields with enabled = false are a startup error (an operator who
@@ -121,30 +112,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is opened. Client-certificate authentication is mandatory on the
     // listener; there is no plaintext fallback. The "listening" log line is
     // emitted only after the TCP socket is actually bound (see server.rs).
-    let migration_server_tls = load_migration_server_tls(
-        config.migration.enabled,
-        config.migration.listen_addr.as_deref(),
-        config.migration.server_cert_path.as_deref(),
-        config.migration.server_key_path.as_deref(),
-        config.migration.client_ca_path.as_deref(),
-    )?;
-    if migration_server_tls.is_some() {
-        info!(
-            "storage migration receiver mTLS material validated (listener binds in server startup)"
-        );
-    }
-
+    //
     // Cross-half check (issue #401): the two halves are independently
     // optional under `enabled = true` (source-only, destination-only, or
     // both), but an enabled migration section that configures NEITHER half
     // is a misconfiguration — the daemon would run with migrations
     // unavailable in both directions while the operator believes migration
     // is on. Fail-closed at startup.
-    ensure_migration_half_configured(
-        config.migration.enabled,
-        migration_tls.as_ref(),
-        migration_server_tls.as_ref(),
-    )?;
+    let (migration_tls, migration_server_tls) = load_migration_materials(&config.migration)?;
+    if migration_tls.is_some() {
+        info!("storage migration mTLS enabled (credentials validated at startup)");
+    }
+    if migration_server_tls.is_some() {
+        info!(
+            "storage migration receiver mTLS material validated (listener binds in server startup)"
+        );
+    }
 
     let server = StorageServer::new(
         backend,
@@ -177,4 +160,126 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+/// Load and validate both migration mTLS halves from the `[migration]`
+/// config section, in the daemon's startup order: client (source) half,
+/// receiver (destination) half, then the cross-half check (issue #401).
+///
+/// Extracted from `main` so the wiring sequence — in particular the
+/// `ensure_migration_half_configured` call — is unit-testable in this
+/// crate: a regression that drops or bypasses a step fails the tests
+/// below.
+fn load_migration_materials(
+    migration: &chv_config::StordMigrationConfig,
+) -> Result<
+    (
+        Option<chv_stord_core::migration::sender::MigrationTlsConfig>,
+        Option<chv_stord_core::migration::tls_config::MigrationServerTls>,
+    ),
+    chv_stord_core::migration::tls_config::MigrationTlsLoadError,
+> {
+    let client_tls = load_migration_tls(
+        migration.enabled,
+        migration.client_cert_path.as_deref(),
+        migration.client_key_path.as_deref(),
+        migration.ca_cert_path.as_deref(),
+        migration.dest_server_name.as_deref(),
+    )?;
+    let server_tls = load_migration_server_tls(
+        migration.enabled,
+        migration.listen_addr.as_deref(),
+        migration.server_cert_path.as_deref(),
+        migration.server_key_path.as_deref(),
+        migration.client_ca_path.as_deref(),
+    )?;
+    ensure_migration_half_configured(migration.enabled, client_tls.as_ref(), server_tls.as_ref())?;
+    Ok((client_tls, server_tls))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_migration_materials;
+    use chv_config::StordMigrationConfig;
+
+    /// Write a self-signed cert/key pair plus a client CA bundle (the cert
+    /// itself — the loader only requires the bundle to parse) and return
+    /// the receiver-half paths. `keep` must stay alive for the paths to
+    /// remain readable.
+    #[allow(clippy::type_complexity)]
+    fn receiver_material() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        use rcgen::{CertificateParams, KeyPair};
+
+        let key = KeyPair::generate().unwrap();
+        let cert = CertificateParams::default().self_signed(&key).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+        let ca_path = dir.path().join("client-ca.crt");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        std::fs::write(&ca_path, cert.pem()).unwrap();
+        (dir, cert_path, key_path, ca_path)
+    }
+
+    /// Round-2 review of #401 (daemon-wiring regression test): the wiring
+    /// must keep calling `ensure_migration_half_configured` — deleting
+    /// that call would let an enabled-but-empty `[migration]` section
+    /// start the daemon with migrations off in both directions while the
+    /// operator believes migration is on.
+    #[test]
+    fn enabled_with_neither_half_is_a_startup_error() {
+        let config = StordMigrationConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            load_migration_materials(&config).is_err(),
+            "enabled = true with neither half configured must be a startup error"
+        );
+    }
+
+    /// The shape issue #401 makes expressible, exercised at the daemon
+    /// wiring seam: `enabled = true` + receiver half only → no client
+    /// identity, receiver material present.
+    #[test]
+    fn destination_only_config_loads() {
+        let (_keep, cert, key, ca) = receiver_material();
+        let config = StordMigrationConfig {
+            enabled: true,
+            listen_addr: Some("127.0.0.1:50052".to_string()),
+            server_cert_path: Some(cert),
+            server_key_path: Some(key),
+            client_ca_path: Some(ca),
+            ..Default::default()
+        };
+        let (client, server) =
+            load_migration_materials(&config).expect("destination-only config must load");
+        assert!(
+            client.is_none(),
+            "destination-only stord carries no client identity"
+        );
+        assert!(server.is_some(), "receiver half must be configured");
+    }
+
+    /// The wiring must keep passing the config's client fields to the
+    /// client loader: a stray field under `enabled = false` is the #395
+    /// contradiction, not a silently ignored key.
+    #[test]
+    fn disabled_with_stray_client_field_is_a_startup_error() {
+        let config = StordMigrationConfig {
+            enabled: false,
+            dest_server_name: Some("stord-peer".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            load_migration_materials(&config).is_err(),
+            "enabled = false with a stray client field must be a startup error"
+        );
+    }
 }

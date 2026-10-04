@@ -32,7 +32,8 @@ device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 # dest_server_name = "stord-peer.internal"             # expected destination identity (DNS SAN)
 #
 # Destination-only stord (receiver only — no client identity to mint or
-# maintain; outbound migration actions simply fail as unavailable):
+# maintain; outbound migration actions simply fail with a failed_precondition
+# error):
 #
 # [migration]
 # enabled = true

@@ -243,11 +243,12 @@ Fail-closed gating rules (issues #390, #395, #401):
 - `enabled = false` with **any** receiver field set → startup error (an
   operator who believes migration is off must not get an inbound TCP listener)
 - `enabled = true` with **no** client fields → destination-only stord: no
-  client identity, outbound migration actions fail as unavailable (issue
-  #401). The client half is all-or-nothing *when any client field is set*.
-  The receiver half is all-or-nothing *when any receiver field is set*;
-  `enabled = true` with **no** receiver fields is a legitimate source-only
-  stord (no listener, logged at startup)
+  client identity, outbound migration actions fail with a
+  `failed_precondition` error (issue #401). The client half is
+  all-or-nothing *when any client field is set*. The receiver half is
+  all-or-nothing *when any receiver field is set*; `enabled = true` with
+  **no** receiver fields is a legitimate source-only stord (no listener,
+  logged at startup)
 - `enabled = true` with **neither** half configured → startup error (an
   enabled migration section that configures nothing is a misconfiguration)
 - Receiver files unreadable, keypair mismatch, empty/invalid CA bundle, or an

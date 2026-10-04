@@ -364,7 +364,7 @@ Fail-closed gating rules (issues #390, #395, #401):
 
 - `enabled = false` with **any** client identity field set → startup error
 - `enabled = false` with **any** receiver field set → startup error (an operator who believes migration is off must not get an inbound TCP listener)
-- `enabled = true` with **no** client fields → destination-only stord: no client identity, outbound migration actions fail as unavailable (issue #401). The client half is all-or-nothing *when any client field is set*. The receiver half is all-or-nothing *when any receiver field is set*; `enabled = true` with **no** receiver fields is a legitimate source-only stord (no listener, logged at startup)
+- `enabled = true` with **no** client fields → destination-only stord: no client identity, outbound migration actions fail with a `failed_precondition` error (issue #401). The client half is all-or-nothing *when any client field is set*. The receiver half is all-or-nothing *when any receiver field is set*; `enabled = true` with **no** receiver fields is a legitimate source-only stord (no listener, logged at startup)
 - `enabled = true` with **neither** half configured → startup error (an enabled migration section that configures nothing is a misconfiguration)
 - Receiver files unreadable, keypair mismatch, empty/invalid CA bundle, or an unparseable `listen_addr` → startup error
 
@@ -435,11 +435,16 @@ not under `[migration]`): the destination endpoint host of every
    stord's own `write_block` (its only product caller is the migration
    receiver), and the sender performs no post-pause final sweep.
 
-2. **Destination-only stord is not expressible**: `migration.enabled = true`
-   gates *both* halves, so the client identity is mandatory even on a stord
-   that only ever receives migrations (`crates/chv-stord-core/src/migration/tls_config.rs`);
-   only source-only is expressible. Recorded as a config-model finding in the
-   M4.6 evidence doc (§4.2).
+2. **Destination-only stord was not expressible (RESOLVED — issue #401)**:
+   `migration.enabled = true` used to gate *both* halves, making the client
+   identity mandatory even on a stord that only ever receives migrations, so
+   only source-only was expressible. Recorded as a config-model finding in
+   the M4.6 evidence doc (§4.2). Resolved in #401: under `enabled = true`
+   the two halves are now independently optional (each all-or-nothing within
+   itself; **neither** half configured is a startup error — see the config
+   table and gating rules above), so destination-only is expressible by
+   configuring the receiver half alone
+   (`crates/chv-stord-core/src/migration/tls_config.rs`).
 
 3. **mTLS rejection observability**: identity rejections surface at the
    client as opaque, race-dependent transport-level errors, and the

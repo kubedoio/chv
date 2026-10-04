@@ -20,8 +20,9 @@
 //!   symmetric with the receiver half, issue #395).
 //! - `enabled = true` → the client half is all-or-nothing: with **no**
 //!   client fields set it is simply absent → `Ok(None)` (destination-only
-//!   stord, issue #401: this stord never initiates migrations, and outbound
-//!   migration actions fail as *unavailable* in the sender); with **any**
+//!   stord, issue #401: this stord never initiates migrations, and
+//!   outbound migration actions fail with the sender's
+//!   `failed_precondition` error); with **any**
 //!   client field set, all four identity inputs are required, files must be
 //!   readable, the certificate/key pair must match, and the CA bundle must
 //!   parse. Any problem is a **startup error** (fail-closed).
@@ -53,8 +54,11 @@ use std::path::Path;
 pub enum MigrationTlsLoadError {
     /// A required identity field is missing while migration is enabled.
     Missing(String),
-    /// A configured identity file could not be read.
+    /// A configured identity file could not be read. `field` is the config
+    /// key the path came from (e.g. `migration.client_cert_path`), so an
+    /// operator who set a key to `""` can see which key it was.
     Unreadable {
+        field: &'static str,
         path: std::path::PathBuf,
         source: std::io::Error,
     },
@@ -67,12 +71,29 @@ impl fmt::Display for MigrationTlsLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MigrationTlsLoadError::Missing(msg) => write!(f, "migration TLS config missing: {msg}"),
-            MigrationTlsLoadError::Unreadable { path, source } => {
-                write!(
-                    f,
-                    "cannot read migration TLS file {}: {source}",
-                    path.display()
-                )
+            MigrationTlsLoadError::Unreadable {
+                field,
+                path,
+                source,
+            } => {
+                // An empty path renders as nothing at all ("cannot read
+                // migration TLS file  : No such file or directory"),
+                // hiding which config key was set to "". Name the key and
+                // say the path is empty so the operator sees both.
+                if path.as_os_str().is_empty() {
+                    write!(
+                        f,
+                        "cannot read migration TLS file for {field}: the configured path \
+                         is empty — an empty string counts as set but names no file; \
+                         remove the key or set a real path"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "cannot read migration TLS file for {field} at {}: {source}",
+                        path.display()
+                    )
+                }
             }
             MigrationTlsLoadError::Invalid(msg) => {
                 write!(f, "invalid migration TLS material: {msg}")
@@ -104,8 +125,8 @@ impl std::error::Error for MigrationTlsLoadError {
 ///
 /// - with **no** client field set → `Ok(None)`: this stord is
 ///   destination-only — it never initiates migrations, and outbound
-///   migration actions fail as *unavailable* in the sender (no plaintext
-///   fallback, exactly as when migration is disabled);
+///   migration actions fail with the sender's `failed_precondition` error
+///   (no plaintext fallback, exactly as when migration is disabled);
 /// - with **any** client field set → all four inputs are required, files
 ///   must be readable, the certificate/key pair must match, and the CA
 ///   bundle must parse, returning a fully validated
@@ -142,7 +163,8 @@ pub fn load_migration_tls(
     // Client half absent under `enabled = true` (issue #401): a stord may be
     // destination-only. `Ok(None)` means "this stord never initiates
     // migrations" — the sender refuses to run without `MigrationTlsConfig`,
-    // so outbound migration actions fail as unavailable, never as plaintext.
+    // so outbound migration actions fail with a `failed_precondition`
+    // error, never as plaintext.
     let any_client_set = client_cert_path.is_some()
         || client_key_path.is_some()
         || ca_cert_path.is_some()
@@ -186,9 +208,9 @@ pub fn load_migration_tls(
             )
         })?;
 
-    let cert_pem = read_identity_file(cert_path, "client certificate")?;
-    let key_pem = read_identity_file(key_path, "client key")?;
-    let ca_pem = read_identity_file(ca_path, "CA bundle")?;
+    let cert_pem = read_identity_file(cert_path, "migration.client_cert_path")?;
+    let key_pem = read_identity_file(key_path, "migration.client_key_path")?;
+    let ca_pem = read_identity_file(ca_path, "migration.ca_cert_path")?;
 
     validate_keypair(&cert_pem, &key_pem)?;
     validate_ca_bundle(&ca_pem)?;
@@ -299,9 +321,9 @@ pub fn load_migration_server_tls(
         ))
     })?;
 
-    let cert_pem = read_identity_file(cert_path, "server certificate")?;
-    let key_pem = read_identity_file(key_path, "server key")?;
-    let client_ca_pem = read_identity_file(ca_path, "client CA bundle")?;
+    let cert_pem = read_identity_file(cert_path, "migration.server_cert_path")?;
+    let key_pem = read_identity_file(key_path, "migration.server_key_path")?;
+    let client_ca_pem = read_identity_file(ca_path, "migration.client_ca_path")?;
 
     validate_keypair(&cert_pem, &key_pem)?;
     validate_ca_bundle(&client_ca_pem)?;
@@ -346,15 +368,19 @@ pub fn ensure_migration_half_configured(
 }
 
 /// Read a PEM identity file. Errors are surfaced without file contents.
-fn read_identity_file(path: &Path, what: &str) -> Result<Vec<u8>, MigrationTlsLoadError> {
+/// `field` is the config key the path came from; it is carried in the
+/// error so the message can name the key (see
+/// [`MigrationTlsLoadError::Unreadable`]).
+fn read_identity_file(path: &Path, field: &'static str) -> Result<Vec<u8>, MigrationTlsLoadError> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
         Err(source) => {
             let err = MigrationTlsLoadError::Unreadable {
+                field,
                 path: path.to_path_buf(),
                 source,
             };
-            tracing::error!(path = %path.display(), %what, "cannot read migration TLS file");
+            tracing::error!(field, path = %path.display(), "cannot read migration TLS file");
             Err(err)
         }
     }
@@ -433,6 +459,75 @@ fn trim_ascii_whitespace(mut b: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `tracing` subscriber that records the message text of
+    /// INFO- and WARN-level events, so tests can assert which startup log
+    /// line the loaders emitted (round-2 review of #401). Installed
+    /// per-thread with `tracing::subscriber::set_default` — the same
+    /// convention as `chv-controlplane-store`'s credential key-source log
+    /// capture (#336).
+    mod log_capture {
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing::field::Visit;
+        use tracing::span::{Attributes, Id};
+        use tracing::{Event, Level, Metadata};
+
+        #[derive(Clone, Default)]
+        pub struct LogCollector {
+            events: Arc<StdMutex<Vec<(Level, String)>>>,
+        }
+
+        impl LogCollector {
+            pub fn messages_at(&self, level: Level) -> Vec<String> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(l, _)| *l == level)
+                    .map(|(_, m)| m.clone())
+                    .collect()
+            }
+        }
+
+        struct MessageVisitor(Option<String>);
+
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{:?}", value));
+                }
+            }
+        }
+
+        impl tracing::Subscriber for LogCollector {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                matches!(*metadata.level(), Level::INFO | Level::WARN)
+            }
+
+            fn new_span(&self, _span: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let mut visitor = MessageVisitor(None);
+                event.record(&mut visitor);
+                if let Some(message) = visitor.0 {
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push((*event.metadata().level(), message));
+                }
+            }
+
+            fn enter(&self, _span: &Id) {}
+
+            fn exit(&self, _span: &Id) {}
+        }
+    }
 
     /// Generate a self-signed leaf cert for `cn` plus its key, as a matching pair.
     fn matching_pair(cn: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -641,6 +736,233 @@ mod tests {
             Ok(_) => panic!("partial client half must not load"),
             Err(other) => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Empty-string fields (round-2 review of #401): an empty value is NOT
+    // the same as an absent key. `Some("")` counts as "set" everywhere
+    // (absent ≠ empty is existing, intentional semantics — changing it
+    // would be a behavior change beyond this PR's scope), so these tests
+    // pin what each "" row does today.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn disabled_with_empty_string_client_field_is_an_error() {
+        // (a) `enabled = false` + any field = "": the field counts as set,
+        // so the #395 contradiction fires — "" does not silently disable.
+        match load_migration_tls(false, Some(Path::new("")), None, None, None) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = false"),
+                    "empty string must count as set: {msg}"
+                );
+            }
+            Ok(_) => panic!("disabled migration with an empty-string field must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+        // Same for a non-path field.
+        match load_migration_tls(false, None, None, None, Some("")) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("migration.enabled = false"),
+                    "empty dest_server_name must count as set: {msg}"
+                );
+            }
+            Ok(_) => panic!("disabled migration with an empty dest_server_name must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_empty_client_cert_path_fails_naming_the_field() {
+        // (b) `enabled = true` with the other three client fields valid and
+        // `client_cert_path = ""`: the loader reaches the file read and
+        // fails on the empty path. The diagnostic must name the config key
+        // and say the path is empty — a bare "cannot read migration TLS
+        // file  : No such file or directory" renders the empty path
+        // invisibly and hides which key was set to "".
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (_, kp, ap)) = write_all(&c, &k, &a);
+        match load_migration_tls(
+            true,
+            Some(Path::new("")),
+            Some(&kp),
+            Some(&ap),
+            Some("stord-peer"),
+        ) {
+            Err(
+                ref err @ MigrationTlsLoadError::Unreadable {
+                    field, ref path, ..
+                },
+            ) => {
+                assert_eq!(
+                    field, "migration.client_cert_path",
+                    "error must name the config key the empty path came from"
+                );
+                assert!(path.as_os_str().is_empty());
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("migration.client_cert_path"),
+                    "message must name the config key: {msg}"
+                );
+                assert!(
+                    msg.contains("path is empty"),
+                    "message must say the path is empty: {msg}"
+                );
+            }
+            Ok(_) => panic!("an empty client_cert_path must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_empty_dest_server_name_alone_fails_missing_client_cert() {
+        // (c) `enabled = true` + `dest_server_name = ""` alone: the field
+        // counts as set, so the client half is partial and the
+        // all-or-nothing rule demands the other three.
+        match load_migration_tls(true, None, None, None, Some("")) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("an empty dest_server_name alone must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn destination_only_with_stray_empty_dest_server_name_errors() {
+        // (d) The "cleared a field by emptying it" trap: a destination-only
+        // stord (valid receiver half) whose operator emptied
+        // `dest_server_name` instead of deleting the line. The empty string
+        // counts as a set client field, so the client half is partial and
+        // the daemon fails at startup with Missing(client_cert_path) — it
+        // does NOT silently become destination-only. Pin the message so
+        // the operator can find the stray key.
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        let receiver = load_server(Some("127.0.0.1:50052"), Some(&cp), Some(&kp), Some(&ap))
+            .expect("valid receiver half must load");
+        assert!(receiver.is_some(), "the receiver half by itself is valid");
+        match load_migration_tls(true, None, None, None, Some("")) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("client_cert_path"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("a stray empty dest_server_name must not be ignored"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_with_empty_dest_server_name_and_valid_others_fails() {
+        // (e) `enabled = true` + `dest_server_name = ""` with the other
+        // three client fields valid: the empty value is filtered out and
+        // then reported missing (existing filtered-empty behavior, pinned
+        // here so a future semantics change is a deliberate act).
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_migration_tls(true, Some(&cp), Some(&kp), Some(&ap), Some("")) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("dest_server_name"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("an empty dest_server_name must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_with_empty_listen_addr_fails() {
+        // (f) Receiver side, `enabled = true` + `listen_addr = ""`: with
+        // the other receiver fields valid the empty address fails to parse
+        // (the message renders the empty value explicitly); alone, it
+        // counts as a set field and the all-or-nothing rule demands the
+        // rest.
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        match load_server(Some(""), Some(&cp), Some(&kp), Some(&ap)) {
+            Err(MigrationTlsLoadError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("listen_addr") && msg.contains("not a valid socket address"),
+                    "unexpected message: {msg}"
+                );
+                assert!(
+                    msg.contains("\"\""),
+                    "message must render the empty address explicitly: {msg}"
+                );
+            }
+            Ok(_) => panic!("an empty listen_addr must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+        match load_server(Some(""), None, None, None) {
+            Err(MigrationTlsLoadError::Missing(msg)) => {
+                assert!(
+                    msg.contains("server_cert_path"),
+                    "unexpected message: {msg}"
+                );
+            }
+            Ok(_) => panic!("an empty listen_addr alone must not load"),
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Startup log lines (round-2 review of #401): the destination-only
+    // path must emit its info! line, and the non-destination-only paths
+    // must not emit it.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn destination_only_path_logs_client_identity_absent() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let result = load_migration_tls(true, None, None, None, None).expect("must load");
+        assert!(result.is_none());
+        assert!(
+            logs.messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("client identity not configured")),
+            "destination-only startup must log the absent-client-identity info line"
+        );
+    }
+
+    #[test]
+    fn source_only_path_does_not_log_destination_only_line() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let (c, k, a) = matching_pair("node-a");
+        let ((_c, _k, _a), (cp, kp, ap)) = write_all(&c, &k, &a);
+        let result = load_migration_tls(true, Some(&cp), Some(&kp), Some(&ap), Some("stord-peer"))
+            .expect("valid client identity must load");
+        assert!(result.is_some());
+        assert!(
+            !logs
+                .messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("client identity not configured")),
+            "source-only startup must not log the destination-only info line"
+        );
+    }
+
+    #[test]
+    fn disabled_path_does_not_log_destination_only_line() {
+        let logs = log_capture::LogCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        load_migration_tls(false, None, None, None, None).expect("must load");
+        assert!(
+            !logs
+                .messages_at(tracing::Level::INFO)
+                .iter()
+                .any(|m| m.contains("client identity not configured")),
+            "disabled startup must not log the destination-only info line"
+        );
     }
 
     #[test]
