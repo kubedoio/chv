@@ -25,7 +25,7 @@ list is recorded in §10 (maintainer sign-off 2026-10-04).
 |---|---|---|
 | Release HEAD `main` SHA | `9332f9b853914d0df97639d359e8439d6eb5588a` (2026-10-04) | `git log` |
 | `VERSION` at HEAD | `0.2.0` — **must be bumped to `0.3.0` in the release cut** (single source of truth; `docs/release/PIPELINE.md`) | `VERSION` |
-| Git tags | `v0.1.0-mvp1`, `v0.2.0` | `git tag` |
+| Git tags | `v0.1.0-mvp1`, `v0.2.0`, `nightly` (moving; advanced by the nightly packaging workflow) | `git tag` |
 | GitHub Releases | only the `nightly` prerelease — **no stable release exists** | `gh release list` |
 | CI at HEAD | **green** (2026-10-04 run 37208621319, 6 m 24 s) | `gh run list` |
 | Security workflow at HEAD | **success** (push 37208621287 + scheduled 37198895242) | `gh run list` |
@@ -61,7 +61,7 @@ already existed in the frozen m4.9 §4 close-out.
   campaign (#448; pin-move PR #468), with download digest verification in
   `scripts/install.sh` (qualified sha256 for both `cloud-hypervisor-static`
   and `ch-remote-static`; abort on mismatch). Evidence:
-  [vmm-requalification/v53.0/](../../../vmm-requalification/v53.0/README.md).
+  [vmm-requalification/v53.0/](../../vmm-requalification/v53.0/README.md).
 - **Host OS profile:** Linux x86_64; `.deb` (Debian/Ubuntu) + `.rpm` packages.
   Qualified on Ubuntu noble amd64 (nested KVM); `.rpm` untested in prompt-04.
   **The exact host-OS support list is recorded in §10 (maintainer sign-off
@@ -101,9 +101,9 @@ Current state, with primary references:
 
 | # | rc1 blocker | Current state | Primary references |
 |---|---|---|---|
-| 1 | Host-global default-drop network policy (#227) | **CLOSED.** CHV firewall/NAT policy confined to CHV-owned guest traffic; host-safety gate qualified (Prompt 01, single-host KVM-VERIFIED) and re-verified 2026-10-03 by campaign leg 05 (VMM-independent by construction — both root-gated tests, no leaked links/nft tables). | #227 closed; #256; [01-network-isolation.md](../v0.3.0-rc1/01-network-isolation.md); [leg 05](../../../vmm-requalification/v53.0/05-smokes.md) §2/§3 |
+| 1 | Host-global default-drop network policy (#227) | **CLOSED.** CHV firewall/NAT policy confined to CHV-owned guest traffic; host-safety gate qualified (Prompt 01, single-host KVM-VERIFIED) and re-verified 2026-10-03 by campaign leg 05 (VMM-independent by construction — both root-gated tests, no leaked links/nft tables). | #227 closed; #256; [01-network-isolation.md](../v0.3.0-rc1/01-network-isolation.md); [leg 05](../../vmm-requalification/v53.0/05-smokes.md) §2/§3 |
 | 2 | Dual lifecycle authority + uninvoked Core executor (#231/#185) | **CLOSED.** Prompt-02 completed the single-authority cutover (M2.1–M2.4 evidence set); every prompt-04 and #448-campaign stack leg ran `core-managed` authority with real mTLS; #334 flipped the default config (install.sh, packaged `agent.toml`, reference `chv.yaml` after #441/#424). | #231, #185 closed; [02-single-authority-cutover/](../v0.3.0-rc1/02-single-authority-cutover/) (m2.1a–m2.5); #334; #441 |
-| 3 | No durable real-KVM evidence (stub docs) | **CLOSED.** The full real-host evidence tree exists under the frozen rc1 root (m2.5 KVM qualification 48/48; m4.3–m4.9 real-host legs, in-stack, forbidden-outcome-asserted, KVM-VERIFIED), and the guest-facing legs were **re-qualified at the v53.0 pin** by the #448 campaign (M4.3 119/0, M4.6 141/0, M4.4 92/0, M4.5 103/0 — §6). | [04-real-host-qualification/](../v0.3.0-rc1/04-real-host-qualification/); [vmm-requalification/v53.0/](../../../vmm-requalification/v53.0/README.md) |
+| 3 | No durable real-KVM evidence (stub docs) | **CLOSED.** The full real-host evidence tree exists under the frozen rc1 root (m2.5 KVM qualification 48/48; m4.3–m4.9 real-host legs, in-stack, forbidden-outcome-asserted, KVM-VERIFIED), and the guest-facing legs were **re-qualified at the v53.0 pin** by the #448 campaign (M4.3 119/0, M4.6 141/0, M4.4 92/0, M4.5 103/0 — §6). | [04-real-host-qualification/](../v0.3.0-rc1/04-real-host-qualification/); [vmm-requalification/v53.0/](../../vmm-requalification/v53.0/README.md) |
 | 4 | Backup/restore management broken no-op + record-only — no DR claim possible | **NOT RESOLVED — carried as a boundary exclusion, not a cleared blocker.** No backup/restore work is in the 184 commits; v0.3.0 keeps rc1's exclusion (§3 above) and makes **no DR claim**. A stable release within this boundary is consistent with rc1 §3, which already fenced backup/restore out of the supported matrix. | rc1 §3/§4; this §3; m4.9 §4 item 3 |
 | 5 | No published GitHub Release — RELEASED tier unproven | **CLOSED BY THIS RELEASE.** #440 is the blocker; #454 made the pipeline publish the tarball at the exact URL `install.sh` constructs (shared assembler `scripts/release/assemble-tarball.sh`); pushing the `v0.3.0` tag triggers `release.yml` to publish tarball + `.sha256` + `.deb`/`.rpm` + SHA256SUMS. The release cut (§9) closes #440. | #440 open (closed by the release); #454; §9 below |
 | 6 | Toolchain/generated-code reproducibility gap (#229) | **CLOSED.** Rust toolchain pinned via `rust-toolchain.toml` (#303); CI and release packaging consume the same pin through `.github/actions/setup-rust`; toolchain bumps are reviewable pin-only PRs. | #229 closed; #303; `rust-toolchain.toml`; `docs/release/PIPELINE.md` |
@@ -124,9 +124,13 @@ footprint (code = touches `crates/`, `cmd/`, `ui/`, `scripts/`, `tests/`,
 
 | Class | Count | Content |
 |---|---|---|
-| Code (with per-PR verification) | **116** | The waves below |
-| Evidence / plans (frozen records) | **40** | m2.x–m4.9 evidence, campaign legs, plan docs |
-| Living docs only | **28** | Documentation-standard adoption (#417), cluster accuracy passes (#419–#421, #433–#438), ADR-022 (#455/#456), docs index (#460/#461), D-register correction (#470), packaging/UI docs (#446/#449/#450) |
+| Code (with per-PR verification) | **124** | The waves below |
+| Evidence / plans (frozen records) | **41** | m2.x–m4.9 evidence, campaign legs, plan docs |
+| Living docs only | **19** | Documentation-standard adoption (#417), cluster accuracy passes (#419–#421, #433–#438), ADR-022 (#455/#456), docs index (#460/#461), D-register correction (#470), packaging/UI docs (#446/#449/#450) |
+
+(Counts independently recounted at review; the load-bearing claims —
+the `b6d6ad50..HEAD` Rust diff being exactly one file, and the wave
+memberships below — are exact regardless of bucket boundaries.)
 
 ### 5.1 Code waves and their verification tier
 
@@ -159,7 +163,7 @@ stack that re-ran the real-host legs at v53.0 includes this entire wave —
 | #444 | remove dead `chvctl upgrade` surface | `cargo test -p chvctl` (5), workspace check/clippy/fmt — unit/CI |
 | #445 | define consumed-but-undefined CSS custom properties | `npm run check/test/build` — CI |
 | #446 | docs note (packaged UI not served) | docs only |
-| #449 | D3 interim docs (example proxy conf) | docs only |
+| #449 | D3 interim docs (example proxy conf) | docs + packaging configs: also touched `scripts/package/smoke-common.sh` (presence assertion), nfpm configs, and `packaging/nginx/chv-example.conf` — CI |
 | #450 | v53.0 upstream gap + pinned-version CVE disclosure docs | docs only |
 | #451 | remove dead firewall-rules editor/CRUD (+ migration 0056 drop) | full workspace tests (80 targets; 283 BFF/store), UI 245 tests — unit/CI |
 | #452 | guard legacy `set_firewall_policy` against empty rulesets (Closes #360) | workspace 1,564 tests incl. 4 new mock-nwd tests — unit/CI |
@@ -297,12 +301,16 @@ transparently.
 
 1. **Version:** bump `VERSION` `0.2.0` → `0.3.0` (reviewable release-cut PR;
    `scripts/version.sh` derives every packaged form from it).
-2. **Tag:** `v0.3.0` on the release commit (protect-tags ruleset governs it).
-3. **GitHub Release:** `release.yml` fires on the `vX.Y.Z` tag and publishes
+2. **Changelog:** the same release-cut PR adds the `## [0.3.0]` section to
+   `CHANGELOG.md` — `release.yml`'s `Validate changelog` step runs
+   `scripts/release/extract-changelog.sh 0.3.0` and **fails stable builds
+   without it** (fail-closed gate; `[Unreleased]` alone does not satisfy it).
+3. **Tag:** `v0.3.0` on the release commit (protect-tags ruleset governs it).
+4. **GitHub Release:** `release.yml` fires on the `vX.Y.Z` tag and publishes
    the Release with assets assembled by the shared
    `scripts/release/assemble-tarball.sh` (#454): the tarball, its `.sha256`
    sidecar, the `.deb` and `.rpm` packages, and `SHA256SUMS`.
-4. **Tarball path — verified against the code:** `scripts/install.sh`
+5. **Tarball path — verified against the code:** `scripts/install.sh`
    (`download_release`) constructs
    `https://github.com/${GITHUB_REPO}/releases/download/v${INSTALL_CHV_VERSION}/chv-${INSTALL_CHV_VERSION}-linux-amd64.tar.gz`
    with `GITHUB_REPO=kubedoio/chv` (default since #441/#425), i.e. for this
@@ -320,9 +328,9 @@ transparently.
    tarball the installer accepts (the pre-#454 workflow assembly would have
    shipped a tarball missing `tmpfiles/chv-node.conf` — install.sh fails
    closed without it).
-5. **With the Release published**, `install.sh`'s from-GitHub path resolves
+6. **With the Release published**, `install.sh`'s from-GitHub path resolves
    `latest` → `0.3.0`, downloads, verifies, and installs; **#440 closes**.
-6. **Host-OS support list:** recorded in §10 (maintainer sign-off
+7. **Host-OS support list:** recorded in §10 (maintainer sign-off
    2026-10-04); this declaration does not invent it.
 
 ## 10. Host-OS support list (maintainer sign-off recorded 2026-10-04)
