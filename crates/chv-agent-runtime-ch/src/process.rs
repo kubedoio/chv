@@ -469,7 +469,7 @@ struct VmProcess {
     /// Which transport `console_io` speaks; drives respawn semantics.
     serial_transport: SerialTransport,
     pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
+    pty_scrollback: Arc<std::sync::RwLock<Vec<u8>>>,
     broadcaster_alive: Arc<AtomicBool>,
     /// Console-capture byte offset at which the CURRENT VMM generation's
     /// boot begins. Bytes before it belong to earlier VMM generations
@@ -1724,7 +1724,7 @@ async fn run_genisoimage(
 /// by the serial abandonment paths to preserve drained guest output.
 type ConsoleFanout<'a> = (
     &'a tokio::sync::broadcast::Sender<Vec<u8>>,
-    &'a Arc<tokio::sync::RwLock<Vec<u8>>>,
+    &'a Arc<std::sync::RwLock<Vec<u8>>>,
 );
 
 impl ProcessCloudHypervisorAdapter {
@@ -2069,6 +2069,69 @@ impl ProcessCloudHypervisorAdapter {
         drained
     }
 
+    /// Appends drained console bytes to the shared scrollback buffer,
+    /// enforcing the [`CONSOLE_SCROLLBACK_BYTES`] cap. The single place
+    /// the cap policy lives: the broadcaster's drain loop, the
+    /// abandoned-connection drain and the shutdown drain all push through
+    /// here, so the WS scrollback contract (last 256 KiB, exact,
+    /// in-order) is identical on every path.
+    fn push_console_scrollback(scrollback: &std::sync::RwLock<Vec<u8>>, data: &[u8]) {
+        let mut sb = scrollback.write().expect("scrollback lock poisoned");
+        sb.extend_from_slice(data);
+        if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+            let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+            sb.drain(0..excess);
+        }
+    }
+
+    /// The per-connection console drain loop (issue #469): a tight
+    /// BLOCKING read loop with no awaits between reads.
+    ///
+    /// Why it must drain continuously — cloud-hypervisor v53.0's
+    /// pre-connect serial buffering (#8322 upstream) is defective (pin
+    /// re-qualification leg 02, §4.3): the backlog flush writes ONE byte
+    /// per `write()` syscall to the non-blocking client socket, breaks
+    /// silently on the first EAGAIN (~one socket-fill, ~278–330 one-byte
+    /// skbs of AF_UNIX truesize accounting), and has NO retry path — the
+    /// serial-manager epoll never watches EPOLLOUT. Backlog delivery
+    /// resumes only when the guest's own output re-triggers the
+    /// device-path flush, and each retried session only gets as far as
+    /// the socket's free space allows. A reader with inter-read gaps
+    /// therefore truncates every flush session: a quiet guest stalls at
+    /// ~278 B and a trickling guest crawls at ~0.6–1.3 KB/s, while a
+    /// reader that keeps the socket empty lets the first vCPU-triggered
+    /// session push the whole backlog in one pass (E3f: ~72.7 KB in
+    /// 0.4 s). This loop provides that property by construction: plain
+    /// blocking `read()` (returns as soon as any data is readable), the
+    /// fan-out between reads is a bounded memcpy under a sync lock plus
+    /// a non-blocking broadcast send, and nothing else — no sleeps, no
+    /// poll intervals, no awaits that could park the connection with
+    /// unread data pending.
+    ///
+    /// Endpoint-loss contract (unchanged from the async read loop this
+    /// replaces): `Ok(0)` (EOF — the #284 reboot rotation's `SHUT_RD`
+    /// lands here, as does a VMM-side close) or any read error ends the
+    /// cycle; the caller's self-heal reconnect then takes over. The
+    /// descriptor is consumed and closed on return, ending the cycle's
+    /// dup exactly as before.
+    fn drain_console_endpoint(
+        cycle_fd: OwnedFd,
+        pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+        pty_scrollback: &std::sync::RwLock<Vec<u8>>,
+    ) {
+        let mut buf = [0u8; 4096];
+        loop {
+            match nix::unistd::read(&cycle_fd, &mut buf) {
+                Ok(0) | Err(_) => return, // endpoint lost
+                Ok(n) => {
+                    let data = &buf[..n];
+                    Self::push_console_scrollback(pty_scrollback, data);
+                    let _ = pty_tx.send(data.to_vec());
+                }
+            }
+        }
+    }
+
     /// Cleanly abandons a live serial-console connection the agent has
     /// decided not to keep (heal superseded by a map replacement, failed
     /// dup, VM leaving the map). Consumes and closes the descriptor.
@@ -2120,13 +2183,7 @@ impl ProcessCloudHypervisorAdapter {
             return;
         }
         if let Some((tx, scrollback)) = fanout {
-            let mut sb = scrollback.write().await;
-            sb.extend_from_slice(&drained);
-            if sb.len() > CONSOLE_SCROLLBACK_BYTES {
-                let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
-                sb.drain(0..excess);
-            }
-            drop(sb);
+            Self::push_console_scrollback(scrollback, &drained);
             let _ = tx.send(drained.clone());
         }
         info!(
@@ -2214,13 +2271,7 @@ impl ProcessCloudHypervisorAdapter {
                 if drained.is_empty() {
                     continue;
                 }
-                let mut sb = proc.pty_scrollback.write().await;
-                sb.extend_from_slice(&drained);
-                if sb.len() > CONSOLE_SCROLLBACK_BYTES {
-                    let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
-                    sb.drain(0..excess);
-                }
-                drop(sb);
+                Self::push_console_scrollback(&proc.pty_scrollback, &drained);
                 let _ = proc.pty_tx.send(drained.clone());
                 info!(
                     vm_id = %vm_id,
@@ -2270,7 +2321,7 @@ impl ProcessCloudHypervisorAdapter {
         vm_id: &str,
         serial_transport: &SerialTransport,
         pty_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: &Arc<tokio::sync::RwLock<Vec<u8>>>,
+        pty_scrollback: &Arc<std::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: &Arc<AtomicBool>,
     ) {
         if broadcaster_alive.load(Ordering::SeqCst) {
@@ -2539,6 +2590,16 @@ impl ProcessCloudHypervisorAdapter {
     /// allocates a NEW pty at a different path; re-attachment is a
     /// recorded follow-up) and revival is left to the next `start_vm`
     /// respawn.
+    ///
+    /// Each connection cycle's reads run on a dedicated blocking-pool
+    /// thread ([`Self::drain_console_endpoint`], issue #469): the drain
+    /// loop issues back-to-back blocking reads with no inter-read
+    /// awaits, which is what lets a v53.0 flush session push the whole
+    /// pre-connect backlog in one pass instead of stalling after ~one
+    /// socket-fill (the #8322 defect — see that fn's doc comment). The
+    /// async task below owns the connection lifecycle only: it parks on
+    /// the drain's completion and runs the reconnect/heal bookkeeping
+    /// between cycles, exactly as before.
     #[allow(clippy::too_many_arguments)]
     fn spawn_pty_broadcaster(
         vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
@@ -2546,7 +2607,7 @@ impl ProcessCloudHypervisorAdapter {
         pty_fd: OwnedFd,
         transport: SerialTransport,
         pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
+        pty_scrollback: Arc<std::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: Arc<AtomicBool>,
         console_draining: Arc<AtomicBool>,
     ) {
@@ -2563,25 +2624,20 @@ impl ProcessCloudHypervisorAdapter {
                     Ok(d) => d,
                     Err(_) => break,
                 };
-                let std_file = std::fs::File::from(cycle_fd);
-                let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) | Err(_) => break, // endpoint lost
-                        Ok(n) => {
-                            let data = buf[..n].to_vec();
-                            {
-                                let mut sb = pty_scrollback.write().await;
-                                sb.extend_from_slice(&data);
-                                if sb.len() > CONSOLE_SCROLLBACK_BYTES {
-                                    let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
-                                    sb.drain(0..excess);
-                                }
-                            }
-                            let _ = pty_tx.send(data);
-                        }
-                    }
+                // Drain the cycle on a dedicated blocking-pool thread:
+                // the loop inside never awaits, so the socket is re-read
+                // the instant data lands (see `drain_console_endpoint`).
+                // A panic inside the drain loop ends the broadcaster —
+                // the same end state the old in-task read loop panicking
+                // produced (AliveGuard drops; the next start_vm respawns).
+                let drain_tx = pty_tx.clone();
+                let drain_scrollback = pty_scrollback.clone();
+                let drained = tokio::task::spawn_blocking(move || {
+                    Self::drain_console_endpoint(cycle_fd, &drain_tx, &drain_scrollback)
+                })
+                .await;
+                if drained.is_err() {
+                    break;
                 }
                 // Endpoint lost. Socket transport: re-establish the
                 // connection (bounded retry — the VMM re-binds the
@@ -2813,7 +2869,7 @@ impl ProcessCloudHypervisorAdapter {
         };
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_fd = Self::dup_cloexec(&console_io).ok();
         // Claim capture alive only when a broadcaster will actually run.
         let broadcaster_alive = Arc::new(AtomicBool::new(broadcaster_fd.is_some()));
@@ -3439,7 +3495,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         };
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let serial_transport = if serial_mode == chv_common::hypervisor::DEFAULT_SERIAL_MODE {
             SerialTransport::Socket(serial_socket_path.clone())
         } else {
@@ -3662,10 +3718,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             };
             let log_path = if let Some(proc) = removed {
                 // Clear in-memory scrollback before dropping the process.
-                {
-                    let mut sb = proc.pty_scrollback.write().await;
-                    sb.clear();
-                }
+                proc.pty_scrollback
+                    .write()
+                    .expect("scrollback lock poisoned")
+                    .clear();
                 let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                 // INVARIANT — kill and reap the VMM BEFORE `proc` (and its
                 // console_io descriptor, plus any dup the broadcaster still
@@ -3754,10 +3810,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     map.remove(vm_id)
                 };
                 let log_path = if let Some(proc) = removed {
-                    {
-                        let mut sb = proc.pty_scrollback.write().await;
-                        sb.clear();
-                    }
+                    proc.pty_scrollback
+                        .write()
+                        .expect("scrollback lock poisoned")
+                        .clear();
                     let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                     // #351: same contract as the force branch above —
                     // the timeout's SIGKILL can be refused or
@@ -3817,8 +3873,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 )
             };
             if let Some(sb) = pty_scrollback {
-                let mut buf = sb.write().await;
-                buf.clear();
+                sb.write().expect("scrollback lock poisoned").clear();
             }
             if let Some(path) = log_path {
                 match tokio::fs::OpenOptions::new()
@@ -4575,7 +4630,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
         let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        let sb = proc.pty_scrollback.read().await;
+        // A sync lock is deliberate (issue #469): the broadcaster's drain
+        // loop appends from its blocking-pool thread and must never await;
+        // this critical section is a bounded clone with no awaits inside.
+        let sb = proc
+            .pty_scrollback
+            .read()
+            .expect("scrollback lock poisoned");
         Some(sb.clone())
     }
 }
@@ -4804,7 +4865,7 @@ impl ProcessCloudHypervisorAdapter {
         };
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         // Take the broadcaster's endpoint BEFORE the entry consumes
         // console_io (mirrors adoption); capture is only claimed alive
         // when the dup (and with it the broadcaster spawn) happens.
@@ -5130,7 +5191,7 @@ impl ProcessCloudHypervisorAdapter {
             };
 
             let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-            let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+            let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
             // Take the broadcaster's endpoint BEFORE the entry consumes
             // console_io, so the map never needs to be re-read on the
             // just-inserted entry. Capture is only claimed alive when the
@@ -5453,7 +5514,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5532,7 +5593,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5634,7 +5695,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5720,6 +5781,253 @@ mod tests {
         server.join().expect("server thread");
     }
 
+    /// Issue #469, leg-02 §4.3 (E3/E3f): pins the drain-continuously
+    /// property of the console reader against a stand-in that reproduces
+    /// cloud-hypervisor v53.0's #8322 flush behavior — the backlog is
+    /// written ONE byte per `write()` syscall on a NON-BLOCKING socket,
+    /// and a `WouldBlock` (EAGAIN, ~one socket-fill of one-byte skbs)
+    /// ends the flush session: delivery only resumes on the next
+    /// "guest output" trigger. A reader with inter-read gaps truncates
+    /// every session (quiet guest: ~278 B hard stop; trickling guest:
+    /// ~0.6–1.3 KB/s crawl — the measured crawl regime); a reader that
+    /// drains continuously keeps the socket empty and the FIRST session
+    /// pushes the whole backlog in one pass (E3f: ~72.7 KB in 0.4 s).
+    /// The stand-in grants only a few re-trigger rounds, so a reader
+    /// that parks between reads cannot recover a 96 KiB backlog (a
+    /// parked reader moves ~one socket-fill, ~278 B, per round).
+    #[tokio::test]
+    async fn broadcaster_recovers_the_full_backlog_from_ch_flush_sessions() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-flush");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        // The backlog: 96 KiB of patterned "console" bytes — far past one
+        // socket-fill, in the E3f regime (a ~74 KiB boot's worth).
+        let backlog: Vec<u8> = (0..96 * 1024).map(|i| (i % 251) as u8).collect();
+        let breaks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Stand-in for cloud-hypervisor v53.0's serial-manager flush
+        // sessions (see the test doc): accept, then push the backlog one
+        // byte per write; a WouldBlock ENDS the session (CH has no
+        // EPOLLOUT retry — the defect), and the next "guest output"
+        // trigger starts a new one 100 ms later.
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let standin_breaks = breaks.clone();
+        let standin_backlog = backlog.clone();
+        let standin = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            conn.set_nonblocking(true).expect("set nonblocking");
+            let mut written = 0usize;
+            while written < standin_backlog.len() {
+                match conn.write(&standin_backlog[written..written + 1]) {
+                    Ok(_) => written += 1,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Flush session broke on EAGAIN — exactly CH's
+                        // silent `flush()` break. Wait for the next guest
+                        // output trigger before retrying.
+                        standin_breaks.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(e) => panic!("stand-in write failed: {e}"),
+                }
+            }
+            // Hold the connection open while the test asserts (a close
+            // would rotate the broadcaster into a reconnect).
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            conn
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        let dead_console_io: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-flush".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io: dead_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        // Reattach the reader — the same path adoption and the
+        // broadcaster heal use.
+        adapter
+            .respawn_broadcaster_if_dead(
+                "vm-flush",
+                &SerialTransport::Socket(sock_path),
+                &pty_tx,
+                &pty_scrollback,
+                &broadcaster_alive,
+            )
+            .await;
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive after respawn"
+        );
+
+        // The whole backlog must land in the scrollback, byte-exact, well
+        // inside the deadline — the E3f one-pass behavior.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let received = pty_scrollback
+                .read()
+                .expect("scrollback lock poisoned")
+                .clone();
+            if received == backlog {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the drain-continuously reader must recover the full backlog; \
+                 got {}/{} bytes",
+                received.len(),
+                backlog.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        // The fan-out channel is fed as well: the drain loop broadcasts
+        // every chunk. (The scrollback check above pins byte-exactness;
+        // existing tests — e.g. `respawn_broadcaster_reconnects_and_
+        // swaps_dead_socket` — pin the channel path, and a receiver that
+        // falls behind a 96 KiB single-pass backlog legitimately Lags —
+        // the broadcast contract, same as the console.log writer.)
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "the broadcaster must still be alive after the full-backlog pass"
+        );
+
+        // The whole backlog landed without the stand-in ever seeing its
+        // flush sessions truncated by a full socket: a continuously
+        // draining reader needs ~zero re-trigger rounds, while a reader
+        // that parks between reads needs one round per ~278 B socket-fill
+        // (96 KiB would need ~350). The bound leaves generous scheduling
+        // slack while still discriminating decisively.
+        assert!(
+            breaks.load(Ordering::SeqCst) <= 16,
+            "flush sessions kept breaking on backpressure ({} breaks) — \
+             the reader is not draining continuously",
+            breaks.load(Ordering::SeqCst)
+        );
+
+        drop(standin.join().expect("stand-in thread"));
+    }
+
+    /// Issue #469, v43-era family (leg 02 §4.2): a serial manager whose
+    /// client socket writes BLOCK (v43's shape) stalls the VMM vCPU when
+    /// the client stops draining — each UART byte is a separate 1-byte
+    /// skb filling `sk_sndbuf`. The agent reader must therefore keep
+    /// draining a continuous stream even when the peer's send buffer is
+    /// tiny: this stand-in writes 128 KiB one byte at a time on a
+    /// BLOCKING socket with a minimal `SO_SNDBUF`; a reader that parks
+    /// blocks the stand-in forever (the write side fills) and the test
+    /// times out, while a continuously draining reader lets the whole
+    /// stream through.
+    #[tokio::test]
+    async fn broadcaster_keeps_draining_a_blocking_serial_stream() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-blocking");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let sock_path = dir.path().join("serial.sock");
+
+        let stream: Vec<u8> = (0..128 * 1024).map(|i| (i % 249) as u8).collect();
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let standin_stream = stream.clone();
+        let standin = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            nix::sys::socket::setsockopt(&conn, nix::sys::socket::sockopt::SndBuf, &4096usize)
+                .expect("shrink SO_SNDBUF");
+            for byte in &standin_stream {
+                conn.write_all(std::slice::from_ref(byte))
+                    .expect("stand-in write must not stall on a draining reader");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            conn
+        });
+
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        let dead_console_io: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+
+        {
+            let mut map = adapter.vms.write().await;
+            map.insert(
+                "vm-blocking".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child: VmmChild::Owned(child),
+                    console_io: dead_console_io,
+                    serial_transport: SerialTransport::Socket(sock_path.clone()),
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: broadcaster_alive.clone(),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                    boot_watermark: AtomicU64::new(0),
+                },
+            );
+        }
+
+        adapter
+            .respawn_broadcaster_if_dead(
+                "vm-blocking",
+                &SerialTransport::Socket(sock_path),
+                &pty_tx,
+                &pty_scrollback,
+                &broadcaster_alive,
+            )
+            .await;
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "broadcaster must be alive after respawn"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let received = pty_scrollback
+                .read()
+                .expect("scrollback lock poisoned")
+                .clone();
+            if received == stream {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reader must keep draining a continuous blocking stream; \
+                 got {}/{} bytes",
+                received.len(),
+                stream.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        drop(standin.join().expect("stand-in thread"));
+    }
+
     /// Pins the exact AF_UNIX kernel semantics the clean-disconnect
     /// machinery relies on. Root cause of the M2.5 guest freeze: an
     /// agent-side close with unread receive-queue data RESETS the
@@ -5797,7 +6105,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -5838,7 +6146,10 @@ mod tests {
             .expect("drained output must reach the console fan-out")
             .expect("channel must be live");
         assert_eq!(got, b"late guest output".to_vec());
-        assert!(pty_scrollback.read().await.ends_with(b"late guest output"));
+        assert!(pty_scrollback
+            .read()
+            .expect("scrollback lock poisoned")
+            .ends_with(b"late guest output"));
 
         // The serial manager observes a clean EOF — never a reset.
         let mut conn = server.join().expect("server thread");
@@ -5872,7 +6183,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(false));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6015,7 +6326,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6124,7 +6435,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
@@ -6325,7 +6636,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(bin.clone());
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
         {
             let mut map = adapter.vms.write().await;
@@ -6467,7 +6778,7 @@ mod tests {
                     console_io: OwnedFd::from(live_agent_end),
                     serial_transport: SerialTransport::Socket(vm_live_dir.join("serial.sock")),
                     pty_tx: live_tx,
-                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6482,7 +6793,7 @@ mod tests {
                     console_io: OwnedFd::from(owned_agent_end),
                     serial_transport: SerialTransport::Socket(vm_owned_dir.join("serial.sock")),
                     pty_tx: owned_tx,
-                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -6827,7 +7138,7 @@ mod tests {
                     console_io: std::fs::File::open("/dev/null").unwrap().into(),
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     pty_tx,
-                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -7273,7 +7584,7 @@ mod tests {
                 console_io: OwnedFd::from(console_agent_end),
                 serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                 pty_tx,
-                pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(watermark),
                 last_cpu_seconds: 0.0,
@@ -7507,6 +7818,124 @@ mod tests {
             "a progressing boot must not be rebooted"
         );
         teardown_watchdog_vm(&adapter, "vm-wd-slow").await;
+    }
+
+    /// Issue #469 (leg 02 §4.3, the v53.0 #8322 crawl regime): after a
+    /// late attach the console can deliver its backlog at a crawl
+    /// (~0.6–1.3 KB/s measured with a gap-prone reader) — a boot marker
+    /// that already exists in the stream sits up to minutes behind the
+    /// head of the backlog. The watchdog's stall window is PROGRESS-based
+    /// (any arriving console byte resets it), so a crawling-but-alive
+    /// stream must never time out no matter how far past a "full-rate"
+    /// boot's timeline the crawl stretches — while a stream that goes
+    /// genuinely silent must still fire. This test drives both sides of
+    /// that contract: repeated crawling deltas each followed by a
+    /// near-the-edge stall check (no fire), then a truly dead window
+    /// (fire, exactly once).
+    #[tokio::test]
+    async fn boot_watchdog_extends_the_stall_window_while_console_bytes_arrive() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-crawl");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let mock = MockChApiHandle::spawn(&vm_dir.join("vm.sock"), 16);
+        let log = vm_console_log(&vm_dir);
+        let mut console = String::from("Linux version 6.8.0\n[    0.000000] booting\n");
+        let _console_peer = insert_watchdog_vm(&adapter, "vm-wd-crawl", &vm_dir, &console, 0).await;
+
+        // First pass initializes the observation state.
+        adapter.boot_watchdog_tick().await;
+
+        // The crawl: six rounds, each delivering a small marker-less
+        // delta (backlog bytes arriving slowly) and then a stall check
+        // just inside the window. A wait that assumed full-rate delivery
+        // (marker ~15 s behind the backlog head) would have fired in the
+        // first round; the progress-based window must keep extending.
+        for round in 0..6u32 {
+            console.push_str(&format!("[  {round:>4}.5] crawling kernel log line\n"));
+            std::fs::write(&log, &console).unwrap();
+            adapter.boot_watchdog_tick().await; // growth: the clock resets
+                                                // Simulate the next pass arriving near the end of the stall
+                                                // window — the crawl is slower than the window, but alive.
+            backdate_watchdog_stall(&adapter, "vm-wd-crawl", 59);
+            adapter.boot_watchdog_tick().await;
+            assert_eq!(
+                mock.reboot_requests(),
+                0,
+                "a crawling-but-alive console must never time out (round {round})"
+            );
+        }
+
+        // The stream goes genuinely dead: no further bytes, the window
+        // elapses — the frozen signature. The watchdog must still fire.
+        backdate_watchdog_stall(&adapter, "vm-wd-crawl", 120);
+        adapter.boot_watchdog_tick().await;
+        assert_eq!(
+            mock.reboot_requests(),
+            1,
+            "a genuinely dead stream must still time out after the crawl ends"
+        );
+        teardown_watchdog_vm(&adapter, "vm-wd-crawl").await;
+    }
+
+    /// Issue #469, the marker side of the crawl regime: the boot-complete
+    /// marker arrives at the TAIL of a crawling backlog — long after a
+    /// full-rate boot would have shown it. The watchdog must wait the
+    /// crawl out (no reboot, no pre-fire gates consumed) and accept the
+    /// marker when it finally lands; once marker-healthy, however quiet
+    /// the console goes, it stays silent.
+    #[tokio::test]
+    async fn boot_watchdog_waits_out_a_crawling_backlog_until_the_marker_arrives() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-wd-crawl-marker");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        adapter.configure_boot_watchdog(test_watchdog_config());
+        let mock = MockChApiHandle::spawn(&vm_dir.join("vm.sock"), 16);
+        let log = vm_console_log(&vm_dir);
+        let mut console = String::from("Linux version 6.8.0\n[    0.000000] booting\n");
+        let _console_peer =
+            insert_watchdog_vm(&adapter, "vm-wd-crawl-marker", &vm_dir, &console, 0).await;
+
+        adapter.boot_watchdog_tick().await;
+
+        // Crawl without the marker, each round pushed to the stall edge.
+        for round in 0..5u32 {
+            console.push_str(&format!("[  {round:>4}.5] crawling kernel log line\n"));
+            std::fs::write(&log, &console).unwrap();
+            adapter.boot_watchdog_tick().await;
+            backdate_watchdog_stall(&adapter, "vm-wd-crawl-marker", 59);
+            adapter.boot_watchdog_tick().await;
+            assert_eq!(
+                mock.reboot_requests(),
+                0,
+                "the marker wait must extend across the crawl (round {round})"
+            );
+        }
+
+        // The marker finally lands at the tail of the backlog.
+        console.push_str("systemd-logind started\n");
+        std::fs::write(&log, &console).unwrap();
+        adapter.boot_watchdog_tick().await;
+        assert!(
+            watchdog_boot_complete(&adapter, "vm-wd-crawl-marker"),
+            "the marker arriving at the tail of the crawl must complete the boot"
+        );
+
+        // Marker-healthy: even an hour of console silence must not fire,
+        // and the pre-fire gates are never reached.
+        backdate_watchdog_stall(&adapter, "vm-wd-crawl-marker", 3600);
+        adapter.boot_watchdog_tick().await;
+        assert_eq!(
+            mock.reboot_requests(),
+            0,
+            "a marker-healthy VM must never be rebooted, however quiet"
+        );
+        assert_eq!(
+            mock.vm_info_requests(),
+            0,
+            "a healthy VM never reaches the pre-fire gates"
+        );
+        teardown_watchdog_vm(&adapter, "vm-wd-crawl-marker").await;
     }
 
     #[tokio::test]
@@ -8011,7 +8440,7 @@ mod tests {
                 console_io: OwnedFd::from(console_agent_end),
                 serial_transport: SerialTransport::Pty,
                 pty_tx,
-                pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(0),
                 last_cpu_seconds: 0.0,
@@ -8274,7 +8703,7 @@ mod tests {
                     console_io: std::fs::File::open("/dev/null").unwrap().into(),
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     pty_tx,
-                    pty_scrollback: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                    pty_scrollback: Arc::new(std::sync::RwLock::new(Vec::new())),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
                     last_cpu_seconds: 0.0,
                     last_cpu_at: None,
@@ -8515,7 +8944,7 @@ mod tests {
         // Create a fake VmProcess directly in the adapter's map.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::from(b"scrollback data")));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         {
@@ -8582,7 +9011,7 @@ mod tests {
         // We test this by manually exercising the internal logic via the adapter.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::from(b"scrollback data")));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately so the graceful shutdown loop
@@ -8653,7 +9082,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately and DO NOT wait for it:
@@ -8728,7 +9157,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // A child that will NOT exit on its own: the loop below ends on
@@ -8802,7 +9231,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // `sh -c "sleep 30; true"` never execs (compound command), so
@@ -8904,7 +9333,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // `sh -c "sleep 30; true"` keeps its argv (including the
@@ -9019,7 +9448,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         // A process that already exited: cloud-hypervisor v43 exits
@@ -9078,7 +9507,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         {
@@ -9128,7 +9557,7 @@ mod tests {
 
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pty_scrollback = Arc::new(std::sync::RwLock::new(Vec::new()));
         let console_io = std::fs::File::open("/dev/null").unwrap().into();
 
         let mut stand_in = tokio::process::Command::new("sh")
