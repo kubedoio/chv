@@ -2069,6 +2069,28 @@ impl ProcessCloudHypervisorAdapter {
         drained
     }
 
+    /// Lock the scrollback for writing, recovering from a poisoned lock:
+    /// the buffer is an append-only log with no cross-field invariants,
+    /// so a panic that poisoned the lock cannot leave it unsafe to use —
+    /// and re-panicking here would take the drain thread (or a WS
+    /// session) down over a stale console buffer.
+    fn lock_scrollback_write(
+        scrollback: &std::sync::RwLock<Vec<u8>>,
+    ) -> std::sync::RwLockWriteGuard<'_, Vec<u8>> {
+        scrollback
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Read-side counterpart of [`Self::lock_scrollback_write`].
+    fn lock_scrollback_read(
+        scrollback: &std::sync::RwLock<Vec<u8>>,
+    ) -> std::sync::RwLockReadGuard<'_, Vec<u8>> {
+        scrollback
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Appends drained console bytes to the shared scrollback buffer,
     /// enforcing the [`CONSOLE_SCROLLBACK_BYTES`] cap. The single place
     /// the cap policy lives: the broadcaster's drain loop, the
@@ -2076,7 +2098,7 @@ impl ProcessCloudHypervisorAdapter {
     /// here, so the WS scrollback contract (last 256 KiB, exact,
     /// in-order) is identical on every path.
     fn push_console_scrollback(scrollback: &std::sync::RwLock<Vec<u8>>, data: &[u8]) {
-        let mut sb = scrollback.write().expect("scrollback lock poisoned");
+        let mut sb = Self::lock_scrollback_write(scrollback);
         sb.extend_from_slice(data);
         if sb.len() > CONSOLE_SCROLLBACK_BYTES {
             let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
@@ -3718,10 +3740,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             };
             let log_path = if let Some(proc) = removed {
                 // Clear in-memory scrollback before dropping the process.
-                proc.pty_scrollback
-                    .write()
-                    .expect("scrollback lock poisoned")
-                    .clear();
+                Self::lock_scrollback_write(&proc.pty_scrollback).clear();
                 let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                 // INVARIANT — kill and reap the VMM BEFORE `proc` (and its
                 // console_io descriptor, plus any dup the broadcaster still
@@ -3810,10 +3829,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     map.remove(vm_id)
                 };
                 let log_path = if let Some(proc) = removed {
-                    proc.pty_scrollback
-                        .write()
-                        .expect("scrollback lock poisoned")
-                        .clear();
+                    Self::lock_scrollback_write(&proc.pty_scrollback).clear();
                     let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
                     // #351: same contract as the force branch above —
                     // the timeout's SIGKILL can be refused or
@@ -3873,7 +3889,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 )
             };
             if let Some(sb) = pty_scrollback {
-                sb.write().expect("scrollback lock poisoned").clear();
+                Self::lock_scrollback_write(&sb).clear();
             }
             if let Some(path) = log_path {
                 match tokio::fs::OpenOptions::new()
@@ -4633,10 +4649,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // A sync lock is deliberate (issue #469): the broadcaster's drain
         // loop appends from its blocking-pool thread and must never await;
         // this critical section is a bounded clone with no awaits inside.
-        let sb = proc
-            .pty_scrollback
-            .read()
-            .expect("scrollback lock poisoned");
+        // Poison recovery matches the write side: the scrollback is an
+        // append-only log, so a poisoned lock is still safe to read.
+        let sb = Self::lock_scrollback_read(&proc.pty_scrollback);
         Some(sb.clone())
     }
 }
