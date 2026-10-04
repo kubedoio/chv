@@ -164,10 +164,18 @@ impl<B: StorageBackend> MigrationSender<B> {
                     status
                 })?
         } else {
+            // Destination-only and disabled stords both land here: the
+            // node has no migration client identity and does not initiate
+            // migrations. The four client keys are optional since #401,
+            // so they are mentioned only as the conditional ("set them
+            // only if this node should send migrations"), never as an
+            // unconditional instruction.
             return Err(tonic::Status::failed_precondition(
-                "mTLS is required for storage migration — tls_config must be provided. \
-                 Set migration.client_cert_path, migration.client_key_path, \
-                 migration.ca_cert_path, and migration.dest_server_name in stord config.",
+                "this node has no migration client identity configured — it does not \
+                 initiate migrations (mTLS is required for storage migration). Set \
+                 migration.client_cert_path, migration.client_key_path, \
+                 migration.ca_cert_path, and migration.dest_server_name only if this \
+                 node should send migrations.",
             ));
         };
 
@@ -1016,13 +1024,27 @@ mod tests {
             status.code()
         );
         assert!(
-            status.message().contains("mTLS is required"),
-            "error message should mention mTLS requirement: {}",
+            status.message().contains("no migration client identity"),
+            "error message must say the node has no client identity: {}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("does not initiate migrations"),
+            "error message must say the node does not initiate migrations: {}",
             status.message()
         );
         // The message must cite the real config keys (issue #391): the
         // [migration] section fields, not the nonexistent [migration.tls]
-        // subsection it previously pointed operators at.
+        // subsection it previously pointed operators at. Since #401 the
+        // four client keys are optional, so they may appear only as the
+        // conditional — not as an unconditional instruction to set them.
+        assert!(
+            status
+                .message()
+                .contains("only if this node should send migrations"),
+            "error message must frame the client keys conditionally: {}",
+            status.message()
+        );
         for key in [
             "migration.client_cert_path",
             "migration.client_key_path",

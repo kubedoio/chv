@@ -259,9 +259,11 @@ pub struct StordConfig {
     #[serde(default)]
     pub lvm_volume_group: Option<String>,
     /// Storage migration configuration. `migration.enabled = true` requires
-    /// mTLS identity material and validates it at startup (fail-closed).
-    /// Disabled (default) means migration actions are unavailable rather than
-    /// downgraded. See `docs/specs` migration ADR and issue #232.
+    /// at least one of the two halves — client identity fields and/or
+    /// receiver fields — each all-or-nothing, validated at startup
+    /// (fail-closed). Disabled (default) means migration actions are
+    /// unavailable rather than downgraded. See `docs/specs` migration ADR
+    /// and issues #232, #401.
     #[serde(default)]
     pub migration: StordMigrationConfig,
 }
@@ -273,22 +275,33 @@ pub struct StordConfig {
 /// broken" (missing/invalid TLS material is a startup error).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StordMigrationConfig {
-    /// Master switch. When `true`, all identity fields below are required and
-    /// validated at startup. When `false`, the daemon starts without migration
-    /// credentials.
+    /// Master switch. When `true`, at least one half below must be
+    /// configured: the client identity fields (source half) and/or the
+    /// receiver fields (destination half) — each half is all-or-nothing and
+    /// validated at startup; neither half configured is a startup error
+    /// (issue #401). When `false`, the daemon starts without migration
+    /// credentials and any field set anywhere in this section is a startup
+    /// error.
     #[serde(default)]
     pub enabled: bool,
-    /// PEM client/node certificate path (issued by the CHV CA).
+    /// PEM client/node certificate path (issued by the CHV CA). Source
+    /// (outbound-migration) half: the four client fields are all-or-nothing
+    /// among themselves and independently optional as a set — omitting all
+    /// four under `enabled = true` configures a destination-only stord that
+    /// never initiates migrations (issue #401).
     #[serde(default)]
     pub client_cert_path: Option<PathBuf>,
-    /// PEM client private key path.
+    /// PEM client private key path (all-or-nothing with the other client
+    /// fields).
     #[serde(default)]
     pub client_key_path: Option<PathBuf>,
-    /// PEM CA bundle used to validate the migration destination.
+    /// PEM CA bundle used to validate the migration destination
+    /// (all-or-nothing with the other client fields).
     #[serde(default)]
     pub ca_cert_path: Option<PathBuf>,
     /// Expected destination server name used for certificate validation.
-    /// Must match the destination certificate's DNS SAN / identity.
+    /// Must match the destination certificate's DNS SAN / identity
+    /// (all-or-nothing with the other client fields).
     #[serde(default)]
     pub dest_server_name: Option<String>,
     /// TCP address for the migration receiver mTLS listener (server half,

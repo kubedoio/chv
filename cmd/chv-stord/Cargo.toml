@@ -17,3 +17,9 @@ chv-stord-backends = { path = "../../crates/chv-stord-backends" }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Test material for the migration-wiring tests (self-signed cert/key pair);
+# same version/features as `chv-stord-core`'s test-support usage.
+rcgen = { version = "0.14", features = ["pem"] }
