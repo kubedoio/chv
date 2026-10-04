@@ -90,7 +90,40 @@ cat /etc/chv/controlplane.toml
 # Ensure listen addresses match the new host's IPs
 # Ensure database path is correct
 # Ensure JWT secret is set (or CHV_JWT_SECRET env var)
+
+# Ensure the dedicated credential encryption key is present
+sudo cat /etc/chv/encryption.env   # CHV_ENCRYPTION_KEY=<64 hex chars>
+sudo stat -c '%a' /etc/chv/encryption.env   # must be 600
 ```
+
+**Credential encryption key.** S3 backup credentials are encrypted at rest
+(AES-256-GCM) with the dedicated `CHV_ENCRYPTION_KEY` in
+`/etc/chv/encryption.env`, loaded by `chv-controlplane.service` via
+`EnvironmentFile`. Both install surfaces (`install.sh` and the package
+postinst) mint it automatically, so it exists on any host installed after
+that wiring; on a replacement host it is **not** part of the DB restore —
+copy it from the old host (or your secret backup) together with the
+database, because a restored DB without the matching key has unreadable S3
+credentials. If the file is lost, mint a fresh one:
+
+```bash
+sudo sh -c 'umask 077; printf "CHV_ENCRYPTION_KEY=%s\n" "$(openssl rand -hex 32)" > /etc/chv/encryption.env'
+sudo chmod 0600 /etc/chv/encryption.env
+```
+
+**Legacy fallback hazard.** If `/etc/chv/encryption.env` is absent and
+`CHV_JWT_SECRET` is set (pre-fallback-wiring installs, or env-driven
+deployments), the control plane falls back to encrypting S3 credentials
+under the **JWT signing secret** and logs a startup warning saying so.
+On such a host, rotating `CHV_JWT_SECRET` — a routine, sanctioned action —
+invalidates every stored S3 credential: decryption fails closed
+(`AuthFailed`) and the credentials must be re-entered in the backup
+schedule settings. To migrate to a dedicated key without re-entry, copy the
+current `CHV_JWT_SECRET` value into `/etc/chv/encryption.env` (same
+derivation, so existing ciphertexts stay readable), restart
+`chv-controlplane`, and rotate `CHV_JWT_SECRET` freely afterwards — the
+encryption key no longer follows it. Alternatively, mint a fresh key as
+above and re-enter the S3 credentials once.
 
 ### 2e. Start Control Plane
 
@@ -244,6 +277,7 @@ curl -s "http://localhost:8080/v1/operations?status=Failed" \
 | VMs show `Unknown` state | Agent hasn't heartbeated yet | Wait 30s; check agent connectivity |
 | Backup schedules missing | Restored from old DB | Recreate schedules via API or UI |
 | `chvctl` returns `connection refused` | Control plane not listening | Check `controlplane.toml` bind addresses; check firewall |
+| S3 backups fail with auth errors after a DB restore | Restored credentials don't match the encryption key: the DB was encrypted with a different `CHV_ENCRYPTION_KEY`, or on the old host with the legacy `CHV_JWT_SECRET` fallback (check the old host's startup log for the fallback warning) | Restore the matching `/etc/chv/encryption.env` and restart `chv-controlplane`; if the original key is unrecoverable, re-enter the S3 credentials in the backup schedule settings (fail-closed `AuthFailed`, never silently corrupted) |
 | SQLite `database is locked` | Another process holds the lock | `fuser /var/lib/chv/controlplane.db`; kill stale processes |
 
 ## What Happens Under the Hood
