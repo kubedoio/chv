@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "chv-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "cellhv-core-runtime-owner",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "chv-agent-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "chv-agent-runtime-ch"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "cellhv-core-executor",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "chv-architecture-reconcile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "chv-architecture-validate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "chv-common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hex",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "chv-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "rand 0.10.3",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "chv-controlplane"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "chv-common",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "chv-controlplane-seed"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chv-architecture-validate",
  "chv-controlplane-store",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "chv-controlplane-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "chv-controlplane-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "chv-controlplane-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "chv-errors"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror 2.0.21",
  "tonic",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "chv-hypervisor-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chv-common",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "chv-nwd"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chv-config",
  "chv-nwd-core",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "chv-nwd-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "tonic",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "chv-nwd-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chv-common",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "chv-observability"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "chv-stord"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chv-config",
  "chv-observability",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "chv-stord-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "tonic",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "chv-stord-backends"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chv-common",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "chv-stord-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chv-common",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "chv-webui-bff"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "chv-webui-bff-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "tonic",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "chvctl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "dirs",
@@ -1265,7 +1265,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "control-plane-node-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "tonic",
