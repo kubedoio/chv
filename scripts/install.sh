@@ -2,7 +2,7 @@
 # CHV All-in-One Installer
 # Usage:
 #   curl -sfL https://get.cellhv.com/ | sh -
-#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.2.0 sh -
+#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.3.0 sh -
 #   ./scripts/install.sh --wipe    # Full teardown before clean install
 #   ./scripts/install.sh --fresh   # Alias for --wipe
 #
@@ -275,7 +275,7 @@ resolve_version() {
     # default the failed-'latest' fallback uses, which only names the
     # extracted top-level directory (EXTRACT_DIR) in download_release().
     if [ -n "$INSTALL_CHV_TARBALL_PATH" ] && [ "$INSTALL_CHV_VERSION" = "latest" ]; then
-        INSTALL_CHV_VERSION="0.2.0"
+        INSTALL_CHV_VERSION="0.3.0"
     fi
     if [ "$INSTALL_CHV_VERSION" = "latest" ]; then
         if cmd_exists curl; then
@@ -301,11 +301,11 @@ resolve_version() {
                 print_github_install_alternatives
                 fatal "Cannot resolve 'latest' CHV version — no stable release published yet."
             else
-                warn "Could not determine latest version from GitHub API (HTTP ${http_code}), falling back to 0.2.0"
-                INSTALL_CHV_VERSION="0.2.0"
+                warn "Could not determine latest version from GitHub API (HTTP ${http_code}), falling back to 0.3.0"
+                INSTALL_CHV_VERSION="0.3.0"
             fi
         else
-            INSTALL_CHV_VERSION="0.2.0"
+            INSTALL_CHV_VERSION="0.3.0"
         fi
     fi
     info "Installing CHV version: $INSTALL_CHV_VERSION"

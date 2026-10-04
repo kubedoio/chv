@@ -2,7 +2,7 @@
 
 This guide deploys CHV on a single Linux host. The host runs the **control plane** (orchestration, API, Web UI) and Cloud Hypervisor (the VMM) as the VM runtime.
 
-> **Version:** 0.2.0  
+> **Version:** 0.3.0  
 > **Target:** Ubuntu 22.04/24.04 LTS or equivalent Linux with KVM support  
 > **Database:** SQLite (no external database service required)
 

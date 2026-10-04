@@ -34,7 +34,7 @@ CHV is a Linux-first, cloud-image-first virtualization platform for sovereign pr
 
 ## Current Phase
 
-**Version:** `0.2.0`  
+**Version:** `0.3.0`  
 **Phase:** Early-to-MVP transitioning to stability  
 
 The project has a solid Phase 1 foundation (Rust control plane, SQLite store, certificate enrollment, gRPC services) and a functional SvelteKit Web UI. Active work is tracked in the [Phased Implementation Plan](./PHASED_IMPLEMENTATION_PLAN.md) covering stability hardening, feature completion, and production readiness.
@@ -212,7 +212,7 @@ See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ## Version
 
-Current version: `0.2.0` (see [`VERSION`](./VERSION))
+Current version: `0.3.0` (see [`VERSION`](./VERSION))
 
 ## Direction
 
