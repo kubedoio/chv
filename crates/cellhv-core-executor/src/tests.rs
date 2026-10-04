@@ -1521,3 +1521,63 @@ async fn resolution_releases_failure_quarantine_and_readmits_dropped_work() {
     );
     stop(f).await;
 }
+
+#[tokio::test]
+async fn tombstone_fence_refuses_a_create_without_executing_or_quarantining() {
+    // #368 C1 claim-time fence: a claimable create whose VM row a
+    // concurrent delete tombstoned at accept must never reach a runtime.
+    // The store terminally persists it as Failed (VM_TOMBSTONED) inside
+    // the claim; the executor learns the outcome through the Refused
+    // disposition — no execution, no finish, no quarantine.
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority
+        .submit(SubmitMutation {
+            operation_id: OperationId::new("delete").unwrap(),
+            idempotency_scope: "test".into(),
+            idempotency_key: IdempotencyKey::new("delete").unwrap(),
+            expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
+            command: MutationCommand::DeleteVm {
+                vm_id: VmId::new("a").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let runtime = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 2, 4).unwrap();
+    executor.scan_ready().await.unwrap();
+    assert!(executor.drain_failure_events().is_empty());
+    let report = executor.shutdown().await.unwrap();
+    assert_eq!(report.claim_refusals, 1);
+    assert!(report.failures.is_empty());
+    // Only the delete ran; the fenced create never reached the runtime.
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(report.completed, 1);
+    let create = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        create.operation.status,
+        cellhv_core_types::OperationStatus::Failed
+    );
+    assert_eq!(
+        create
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("VM_TOMBSTONED")
+    );
+    stop(f).await;
+}

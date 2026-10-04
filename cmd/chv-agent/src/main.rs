@@ -11,7 +11,7 @@ use chv_agent_core::{
     inventory::InventoryReporter,
     metrics_server::{metrics_router, MetricsState},
     projection::ProjectingCoreRuntime,
-    reconcile::Reconciler,
+    reconcile::{apply_core_create_states, Reconciler},
     state_machine::NodeState,
     supervisor::DaemonSupervisor,
     telemetry::TelemetryReporter,
@@ -1315,16 +1315,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
-        for vm in reconciler.reported_vms().await {
+        let mut reported = reconciler.reported_vms().await;
+        // #368 P1: in core-managed mode, merge the journal's latest-create
+        // states into the report set BEFORE emitting — a terminally failed
+        // create must report Failed with its public-safe code (never the
+        // desired-state phantom), an incomplete create must report Pending,
+        // and a failed create with no cache fragment (the projection only
+        // follows Succeeded outcomes) must still be reported at all.
+        if let Some(owner) = &core_owner {
+            match owner.authority().latest_create_states().await {
+                Ok(latest) => {
+                    reported = apply_core_create_states(reported, latest);
+                }
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "failed to read latest create states from the Core authority; \
+                         emitting fragment-derived VM states only"
+                    );
+                }
+            }
+        }
+        for vm in reported {
             let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
                 runtime_status: vm.runtime_status.clone(),
                 observed_generation: vm.observed_generation.clone(),
                 // Core-managed telemetry reports the Core projection
-                // (desired state) as runtime_status — a documented residual
-                // — so observed health is genuinely not known here, and a
-                // stuck (inspect-required) VM must not be reported Healthy.
+                // (desired state) as runtime_status — a documented
+                // residual, narrowed but not closed by the #368 P1 merge
+                // at the call site above (a terminally failed or in-flight
+                // create reports Failed/Pending with its public-safe code;
+                // converged VMs still report their desired state) — so
+                // observed health is genuinely not known here, and a stuck
+                // (inspect-required) VM must not be reported Healthy.
                 // Legacy reports keep their historical value.
                 health_status: if core_owner.is_some() {
                     "Unknown"

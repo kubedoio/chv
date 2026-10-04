@@ -118,6 +118,11 @@ pub struct ExecutorFatality {
 pub struct ExecutionReport {
     pub acquired: usize,
     pub claim_replays: usize,
+    /// Claims terminally refused by a claim-time fence (#368 C1
+    /// create-vs-tombstone): the operation was already terminal-failed by
+    /// the store when claimed, so no runtime effect ran. Counted for
+    /// visibility; never a failure and never quarantine-worthy.
+    pub claim_refusals: usize,
     pub completed: usize,
     pub failures: Vec<ExecutionFailure>,
 }
@@ -770,12 +775,14 @@ async fn run_scheduler(
 enum WorkOutcome {
     AcquiredCompleted,
     ClaimReplay,
+    ClaimRefused,
     Failure(ExecutionFailure),
 }
 impl WorkOutcome {
     /// Whether this outcome must failure-quarantine the VM. A claim replay
     /// is the idempotent-success path (another sender already holds this
-    /// claim) and must not poison the VM.
+    /// claim) and a claim refusal is a DECIDED terminal outcome (the store
+    /// fence already persisted Failed) — neither poisons the VM.
     fn quarantines(&self) -> bool {
         matches!(self, Self::Failure(_))
     }
@@ -802,6 +809,12 @@ async fn execute_one(
     let entry = match claimed {
         ClaimResult::Acquired(entry) => entry,
         ClaimResult::Replay(_) => return WorkOutcome::ClaimReplay,
+        // Claim-time fence (#368 C1): the store already terminally
+        // persisted the operation as Failed (VM_TOMBSTONED) in the claim
+        // transaction. There is nothing to execute and nothing to finish —
+        // calling finish would conflict with the terminal state. Not
+        // ambiguous, not quarantine-worthy.
+        ClaimResult::Refused(_) => return WorkOutcome::ClaimRefused,
     };
     let terminal = match runtime.execute(entry).await {
         Ok(result) if valid_result(&result) => TerminalOutcome::Succeeded(result),
@@ -840,6 +853,12 @@ fn merge_outcome(report: &mut ExecutionReport, outcome: WorkOutcome) {
             // Idempotent no-op success: the claim is already held. Counted,
             // never reported as a failure, never quarantine-worthy.
             report.claim_replays += 1;
+        }
+        WorkOutcome::ClaimRefused => {
+            // Decided terminal refusal (store fence persisted the failure):
+            // counted for visibility, never a failure, never
+            // quarantine-worthy.
+            report.claim_refusals += 1;
         }
         WorkOutcome::Failure(failure) => report.failures.push(failure),
     }

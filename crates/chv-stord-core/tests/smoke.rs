@@ -639,3 +639,115 @@ async fn sqlite_persistence_roundtrip() {
     let sessions = store3.list().await.unwrap();
     assert!(sessions.is_empty());
 }
+
+/// #368 residue-idempotency pin (local backend): a re-driven create
+/// re-executes the SAME stord calls against the residue of a
+/// terminally-failed create — a provisioned volume file on disk whose
+/// session the create unwind closed. Against the real
+/// `LocalFileBackend`:
+///
+/// - a re-open carrying the original provisioning hints (size + seed)
+///   must NOT re-provision: `LocalFileBackend::open` skips seeding and
+///   resizing when the path already exists, so the residue volume's
+///   content and size survive the re-drive;
+/// - re-attach is path-based and idempotent (no AlreadyExists).
+///
+/// This pin is LOCAL-backend only. ceph/iscsi/lvm have no equivalent
+/// test (unpinned — see the #368 design doc's residual-risk note: an
+/// explicit attach-idempotency pin for non-local backends is follow-up
+/// scope before enabling re-drives against them).
+#[tokio::test]
+async fn create_redrive_residue_is_idempotent_against_the_local_backend() {
+    let (dir, _socket, mut client) = setup_server().await;
+
+    // The seed image the original create provisioned from.
+    let seed = dir.path().join("seed.img");
+    let mut seed_file = std::fs::File::create(&seed).unwrap();
+    seed_file.write_all(&[0xAA; 4096]).unwrap();
+    drop(seed_file);
+
+    // 1. The original create's open: provisions the volume from the seed
+    //    (copies 4096 bytes, then expands to the requested size).
+    let mut options = std::collections::HashMap::new();
+    options.insert("size_bytes".to_string(), "8192".to_string());
+    options.insert("seed_from".to_string(), seed.to_string_lossy().to_string());
+    let open_req = OpenVolumeRequest {
+        meta: None,
+        volume_id: "vol-redrive".to_string(),
+        backend: Some(BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "vol-redrive.img".to_string(),
+            options,
+        }),
+        policy: None,
+    };
+    let open_resp = client
+        .open_volume(open_req.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(open_resp.result.as_ref().unwrap().status, "OK");
+    let handle = open_resp.attachment_handle;
+
+    // 2. The failed create's unwind closes the session — the volume file
+    //    is the residue left on disk.
+    let close_resp = client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-redrive".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(close_resp.status, "OK");
+
+    // Residue state: data written into the provisioned volume after
+    // seeding — anything a re-drive must never clobber.
+    let volume_path = dir.path().join("vol-redrive.img");
+    let mut volume = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&volume_path)
+        .unwrap();
+    volume
+        .write_all(b"RESIDUE-THAT-MUST-SURVIVE-THE-RE-DRIVE")
+        .unwrap();
+    volume.flush().unwrap();
+    drop(volume);
+
+    // 3. The re-driven create re-opens with the SAME provisioning hints.
+    let reopen_resp = client.open_volume(open_req).await.unwrap().into_inner();
+    assert_eq!(
+        reopen_resp.result.as_ref().unwrap().status,
+        "OK",
+        "re-open of the residue volume must succeed"
+    );
+    let rehandle = reopen_resp.attachment_handle;
+
+    // The residue content survived: re-open did not re-seed or resize.
+    let content = std::fs::read(&volume_path).unwrap();
+    assert!(
+        content.starts_with(b"RESIDUE-THAT-MUST-SURVIVE-THE-RE-DRIVE"),
+        "re-open must not re-seed an already-provisioned volume"
+    );
+    assert_eq!(content.len(), 8192, "re-open must not resize the volume");
+
+    // 4. Re-attach is idempotent (path-based local attach).
+    for attempt in 1..=2 {
+        let attach_resp = client
+            .attach_volume_to_vm(AttachVolumeToVmRequest {
+                meta: None,
+                volume_id: "vol-redrive".to_string(),
+                vm_id: "vm-redrive".to_string(),
+                attachment_handle: rehandle.clone(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            attach_resp.result.as_ref().unwrap().status,
+            "OK",
+            "attach (attempt {attempt}) of the residue volume must succeed"
+        );
+    }
+}

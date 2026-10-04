@@ -67,11 +67,14 @@ import Button from '$lib/components/primitives/Button.svelte';
 	];
 
 	function mapPowerTone(state: string): string {
-		switch (state) {
+		// Case-insensitive, mirroring the detail view's normalizeTone: the
+		// BFF reports capitalized power states ('Running', 'Failed', ...).
+		switch (state.toLowerCase()) {
 			case 'running': return 'healthy';
 			case 'stopped': return 'neutral';
 			case 'paused': return 'warning';
-			case 'crashed': return 'failed';
+			case 'crashed':
+			case 'failed': return 'failed';
 			default: return 'neutral';
 		}
 	}

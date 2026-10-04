@@ -111,6 +111,40 @@ pub struct AcceptOperation<'a> {
     pub expected_vm_version: ResourceVersion,
 }
 
+/// #368 C1 requeue submission: re-drive the create of a VM whose latest
+/// journaled create operation terminally failed.
+///
+/// Unlike [`AcceptOperation`] this carries NO desired state: the definition
+/// is re-derived from the live `vms` row inside the store transaction (the
+/// strongest form of the "definition re-derived from the journal" rule — no
+/// TOCTOU between reading the spec and the CAS), and the `vms` row itself is
+/// never rewritten (the requeue reserves no new desired state and bumps no
+/// resource version).
+#[derive(Debug)]
+pub struct RequeueCreateRequest<'a> {
+    pub vm_id: &'a VmId,
+    /// CAS: must equal the live row's current resource version. Any spec or
+    /// generation change bumps the version, so this is the spec-generation
+    /// check — a requeue can never silently re-drive a superseded spec.
+    pub expected_vm_version: ResourceVersion,
+    pub operation_id: &'a OperationId,
+    pub max_attempts: u32,
+    pub metadata: &'a OperationRequestMetadata,
+    pub idempotency_scope: &'a str,
+    pub idempotency_key: &'a IdempotencyKey,
+}
+
+/// Journal-derived state of one VM's latest CreateVm operation, used by the
+/// agent dispatch shim (create-vs-redrive routing) and the telemetry loop
+/// (P1 failed-create reporting). `error_code` is the public-safe code from
+/// the terminally failed operation's `error_json` (e.g. `RUNTIME_UNAVAILABLE`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestCreateState {
+    pub operation_id: OperationId,
+    pub status: OperationStatus,
+    pub error_code: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct OperationJournalEntry {
     pub operation: Operation,
@@ -132,6 +166,12 @@ pub struct OperationJournalEntry {
 pub enum ClaimDisposition {
     Acquired,
     Replay,
+    /// The claim was acquired and then terminally refused by a claim-time
+    /// fence: the operation is already terminal (Failed) when this is
+    /// returned and MUST NOT be executed against any provider. Today the
+    /// only fence is the create-vs-tombstone guard (#368 C1): a CreateVm
+    /// operation whose VM row is tombstoned (or missing) never runs.
+    Refused,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -943,6 +983,205 @@ impl CoreStore {
         read_operation_entry(&self.conn, id.as_str())
     }
 
+    /// Latest CreateVm operation state for one VM (`None` when the VM has no
+    /// journaled create). Read-only; used by the agent's create-vs-redrive
+    /// dispatch routing and P1 telemetry derivation.
+    pub fn latest_create_state(&self, vm_id: &VmId) -> Result<Option<LatestCreateState>> {
+        read_latest_create_state(&self.conn, vm_id)
+    }
+
+    /// Latest CreateVm operation state for every LIVE VM, ordered by vm id.
+    /// One store call (no per-VM actor round trips); the P1 telemetry loop
+    /// calls this each report cycle.
+    pub fn latest_create_states(&self) -> Result<Vec<(VmId, Option<LatestCreateState>)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT vm_id FROM vms WHERE deleted_at IS NULL ORDER BY vm_id")?;
+        let vm_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        vm_ids
+            .iter()
+            .map(|id| {
+                let vm_id = vm_id_type(id.clone())?;
+                let state = read_latest_create_state(&self.conn, &vm_id)?;
+                Ok((vm_id, state))
+            })
+            .collect()
+    }
+
+    /// #368 C1 requeue primitive: insert a NEW CreateVm-kind operation (in
+    /// `accepted` state) that re-drives a terminally failed create.
+    ///
+    /// All checks run in one Immediate transaction against the live journal:
+    ///
+    /// - scoped idempotency replay (a duplicate submission of the same
+    ///   requeue converges on the one requeued operation — no unbounded
+    ///   requeue from dispatcher retries);
+    /// - the `vms` row must exist and be live (a tombstoned VM is refused —
+    ///   ids are never reused, no resurrection);
+    /// - the caller's `expected_vm_version` must CAS-match the live row (a
+    ///   superseded spec can never be re-driven);
+    /// - the VM must have a journaled create whose LATEST outcome is
+    ///   terminally `failed`, and no incomplete create may exist (an
+    ///   accepted/running create — including an InspectRequired one —
+    ///   refuses the requeue);
+    /// - the requeued operation's request envelope is derived inside the
+    ///   transaction from the live row's definition, so the existing create
+    ///   effector re-executes it residue-idempotently.
+    ///
+    /// The failed original stays terminal: requeue inserts a NEW operation
+    /// and never mutates the old one.
+    pub fn requeue_failed_create(
+        &mut self,
+        request: &RequeueCreateRequest<'_>,
+    ) -> Result<AcceptedOperation> {
+        if request.idempotency_scope.trim().is_empty() {
+            return Err(StoreError::InvalidDomain(
+                "idempotency scope must not be empty".to_owned(),
+            ));
+        }
+        request
+            .metadata
+            .validate()
+            .map_err(StoreError::InvalidDomain)?;
+        if request
+            .operation_id
+            .as_str()
+            .starts_with(LEGACY_OPERATION_ID_PREFIX)
+            && request.metadata.legacy_generation.is_none()
+        {
+            return Err(StoreError::InvalidDomain(
+                "legacy-provenance operation requires a legacy generation".to_owned(),
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Idempotency first: an exact replay of a prior requeue must resolve
+        // even after later mutation or tombstoning (mirrors accept_operation).
+        if let Some((fingerprint, operation_id, accepted_version)) = tx
+            .query_row(
+                "SELECT request_fingerprint,operation_id,accepted_resource_version FROM idempotency_keys WHERE scope=?1 AND idempotency_key=?2",
+                params![request.idempotency_scope, request.idempotency_key.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()?
+        {
+            let existing = read_operation_entry(&tx, &operation_id)?;
+            if existing.operation.request_fingerprint != fingerprint {
+                return Err(StoreError::IdempotencyConflict {
+                    scope: request.idempotency_scope.to_owned(),
+                    key: request.idempotency_key.to_string(),
+                });
+            }
+            tx.commit()?;
+            return Ok(AcceptedOperation {
+                disposition: Acceptance::Replay,
+                operation: existing.operation,
+                accepted_resource_version: resource_version(accepted_version)?,
+            });
+        }
+        // Live-row CAS. A tombstoned VM refuses the requeue outright: the id
+        // is permanently occupied and must never be resurrected.
+        let row: Option<(String, i64, Option<String>)> = tx
+            .query_row(
+                "SELECT definition_json,resource_version,deleted_at FROM vms WHERE vm_id=?1",
+                [request.vm_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (definition_json, live_version, deleted_at) =
+            row.ok_or_else(|| StoreError::NotFound {
+                kind: "vm",
+                id: request.vm_id.to_string(),
+            })?;
+        if deleted_at.is_some() {
+            return Err(StoreError::NotFound {
+                kind: "vm",
+                id: request.vm_id.to_string(),
+            });
+        }
+        let live_version = resource_version(live_version)?;
+        if live_version != request.expected_vm_version {
+            return Err(vm_version_error(
+                &tx,
+                request.vm_id,
+                request.expected_vm_version,
+            )?);
+        }
+        // No incomplete create may exist (this also covers an InspectRequired
+        // requeued create: `running` refuses until the operator resolves it).
+        if let Some((incomplete_id, _)) = latest_create_columns(&tx, request.vm_id, true)? {
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: incomplete_id,
+            });
+        }
+        // The latest create must be terminally failed. A succeeded create
+        // (duplicate dispatch) or an unsupported one refuses the requeue.
+        let Some((latest_id, latest_status)) = latest_create_columns(&tx, request.vm_id, false)?
+        else {
+            return Err(StoreError::InvalidDomain(
+                "VM has no journaled create operation to re-drive".to_owned(),
+            ));
+        };
+        if latest_status != "failed" {
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: latest_id,
+            });
+        }
+        // Derive the new create request from the live row: a fresh-create
+        // shape (observed power state unknown — observed state is journal
+        // bookkeeping, never an effector input) at the CAS'd version.
+        let mut definition: VmDefinition = serde_json::from_str(&definition_json)?;
+        definition.observed_power_state = ObservedPowerState::Unknown;
+        validate_definition(&definition)?;
+        let command = create_vm_command_shape(&definition);
+        let request_value = serde_json::json!({
+            "command": command,
+            "expected_vm_version": live_version.get(),
+        });
+        let request_json = canonical_json(&request_value)?;
+        let fingerprint = cellhv_core_types::canonical_request_fingerprint(&request_value)?;
+        let operation = Operation {
+            id: request.operation_id.clone(),
+            kind: OperationKind::CreateVm,
+            vm_id: request.vm_id.clone(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: fingerprint,
+            attempt_count: 0,
+            max_attempts: request.max_attempts,
+        };
+        validate_operation_for_acceptance(&operation)?;
+        tx.execute(
+            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,requested_by,external_operation_id,request_unix_ms,legacy_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![operation.id.as_str(), operation_kind_text(operation.kind), operation.vm_id.as_str(), operation.request_fingerprint, request_json, operation_status_text(operation.status), i64::from(operation.attempt_count), i64::from(operation.max_attempts), request.metadata.requested_by, request.metadata.external_operation_id, request.metadata.request_unix_ms, legacy_generation_i64(request.metadata.legacy_generation)?],
+        ).map_err(|error| map_constraint(error, "operation", operation.id.as_str()))?;
+        tx.execute(
+            "INSERT INTO idempotency_keys (scope,idempotency_key,request_fingerprint,operation_id,accepted_resource_version) VALUES (?1,?2,?3,?4,?5)",
+            params![request.idempotency_scope, request.idempotency_key.as_str(), operation.request_fingerprint, operation.id.as_str(), version_i64(live_version)?],
+        )?;
+        tx.execute(
+            "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,'operation.accepted',?4)",
+            params![format!("{}:accepted", operation.id.as_str()), operation.id.as_str(), operation.vm_id.as_str(), canonical_json(&serde_json::json!({"requeued_from": latest_id}))?],
+        )?;
+        let accepted = read_operation(&tx, operation.id.as_str())?;
+        tx.commit()?;
+        Ok(AcceptedOperation {
+            disposition: Acceptance::Accepted,
+            operation: accepted,
+            accepted_resource_version: live_version,
+        })
+    }
+
     /// Returns operations whose durable outcome must be classified after a
     /// process restart. Ordering is stable to make recovery planning repeatable.
     pub fn list_incomplete_operations(&self) -> Result<Vec<OperationJournalEntry>> {
@@ -1529,6 +1768,56 @@ impl CoreStore {
             "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,'operation.running',?4)",
             params![format!("{}:running:{attempt}", id.as_str()), id.as_str(), current.vm_id.as_str(), canonical_json(&serde_json::json!({"attempt":attempt}))?],
         )?;
+        // #368 C1 claim-time fence: a CreateVm operation must never execute
+        // against a tombstoned (or missing) VM row. A concurrent DeleteVm
+        // tombstones at accept, so a claimable create for a tombstoned VM is
+        // reachable whenever a create can be pending behind a delete — which
+        // the requeue primitive makes routine. Refuse fail-closed: the claim
+        // succeeds (the operation is ours to decide) and is terminally
+        // persisted as Failed with `VM_TOMBSTONED` in the SAME transaction,
+        // so no provider side effect can ever run and the executor learns the
+        // outcome through the `Refused` disposition instead of a quarantine.
+        if current.kind == OperationKind::CreateVm {
+            let vm_row: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT deleted_at FROM vms WHERE vm_id=?1",
+                    [current.vm_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match vm_row {
+                // Live row: the create may run.
+                Some(None) => {}
+                // Tombstoned (or missing — fail closed either way, an
+                // accepted create always inserted its row): terminal-refuse.
+                Some(Some(_)) | None => {
+                    let error = canonical_json(&serde_json::json!({
+                        "code": "VM_TOMBSTONED",
+                        "reason": "create claimed for a tombstoned VM"
+                    }))?;
+                    let changed = tx.execute(
+                        "UPDATE operations SET status='failed',error_json=?1,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),active_attempt_token=NULL,completed_attempt_token=?2 WHERE operation_id=?3 AND status='running' AND active_attempt_token=?2 AND completed_attempt_token IS NULL",
+                        params![error, attempt_token, id.as_str()],
+                    )?;
+                    if changed != 1 {
+                        return Err(StoreError::Conflict {
+                            kind: "operation",
+                            id: id.to_string(),
+                        });
+                    }
+                    tx.execute(
+                        "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json) VALUES (?1,(SELECT coalesce(max(sequence),0)+1 FROM events),?2,?3,?4,?5)",
+                        params![format!("{}:terminal", id.as_str()), id.as_str(), current.vm_id.as_str(), "operation.failed", canonical_json(&serde_json::json!({"status":"failed"}))?],
+                    )?;
+                    let entry = read_operation_entry(&tx, id.as_str())?;
+                    tx.commit()?;
+                    return Ok(ClaimedOperation {
+                        disposition: ClaimDisposition::Refused,
+                        entry,
+                    });
+                }
+            }
+        }
         let entry = read_operation_entry(&tx, id.as_str())?;
         tx.commit()?;
         Ok(ClaimedOperation {
@@ -3220,6 +3509,76 @@ fn vm_version_error(conn: &Connection, id: &VmId, expected: ResourceVersion) -> 
         }),
         Err(error) => Err(error),
     }
+}
+
+/// Latest create-operation columns for one VM: `(operation_id, status)`.
+/// `incomplete_only` restricts the search to `accepted`/`running` creates —
+/// an incomplete create (including an InspectRequired one) must refuse a
+/// requeue. "Latest" is insertion order (`rowid`): operations are only ever
+/// inserted inside acceptance transactions, so rowid order is acceptance
+/// order.
+fn latest_create_columns(
+    conn: &Connection,
+    vm_id: &VmId,
+    incomplete_only: bool,
+) -> Result<Option<(String, String)>> {
+    let filter = if incomplete_only {
+        " AND status IN ('accepted','running')"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT operation_id,status FROM operations WHERE vm_id=?1 AND kind='create_vm'{filter} ORDER BY rowid DESC LIMIT 1"
+    );
+    Ok(conn
+        .query_row(&sql, [vm_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?)
+}
+
+/// Read-side form of [`latest_create_columns`] for the agent-facing
+/// surfaces (create-vs-redrive dispatch routing and P1 telemetry): adds the
+/// public-safe `code` from the latest create's `error_json` when the latest
+/// create is terminally failed.
+fn read_latest_create_state(conn: &Connection, vm_id: &VmId) -> Result<Option<LatestCreateState>> {
+    let raw: Option<(String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT operation_id,status,error_json FROM operations WHERE vm_id=?1 AND kind='create_vm' ORDER BY rowid DESC LIMIT 1",
+            [vm_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, status, error_json)) = raw else {
+        return Ok(None);
+    };
+    let error_code = error_json
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|error| {
+            error
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    Ok(Some(LatestCreateState {
+        operation_id: operation_id(id)?,
+        status: parse_operation_status(&status)?,
+        error_code,
+    }))
+}
+
+/// The `MutationCommand::CreateVm` serialized shape from the canonical
+/// journal envelope (`cellhv-core-operations`). `MutationCommand` is
+/// internally tagged (`tag = "command"`, `rename_all = "snake_case"`), so
+/// the variant serializes as `{"command":"create_vm","definition":{...}}`
+/// and the envelope nests it under `"command"`. Duplicated locally because
+/// the store must not depend on the operations crate (architecture guard);
+/// the shape is cross-pinned by the `cellhv-core-operations` requeue tests,
+/// which round-trip a requeued operation's request through
+/// `CanonicalRequest::try_from_value`.
+fn create_vm_command_shape(definition: &VmDefinition) -> serde_json::Value {
+    serde_json::json!({"command": "create_vm", "definition": definition})
 }
 
 fn map_constraint(error: rusqlite::Error, kind: &'static str, id: &str) -> StoreError {
@@ -5658,5 +6017,445 @@ mod tests {
             vec!["op-b", "op-c"]
         );
         assert_eq!(store.list_operations(1_000).unwrap().len(), 3);
+    }
+
+    // --- #368 C1: journaled-create requeue + claim-time tombstone fence ---
+
+    fn create_request(definition: &VmDefinition) -> serde_json::Value {
+        serde_json::json!({
+            "command": {"create_vm": {"definition": definition}},
+            "expected_vm_version": definition.resource_version.get(),
+        })
+    }
+
+    fn create_operation_for(vm_id: &str, definition: &VmDefinition, id: &str) -> Operation {
+        let request = create_request(definition);
+        Operation {
+            id: OperationId::new(id).unwrap(),
+            kind: OperationKind::CreateVm,
+            vm_id: VmId::new(vm_id).unwrap(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: canonical_request_fingerprint(&request).unwrap(),
+            attempt_count: 0,
+            max_attempts: 3,
+        }
+    }
+
+    fn accept_create(store: &mut CoreStore, vm_id: &str, definition: &VmDefinition, id: &str) {
+        let operation = create_operation_for(vm_id, definition, id);
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &operation,
+                request: &create_request(definition),
+                desired_vm: Some(definition),
+                metadata: &test_metadata(),
+                idempotency_scope: "requeue-tests",
+                idempotency_key: &IdempotencyKey::new(id).unwrap(),
+                expected_vm_version: definition.resource_version,
+            })
+            .unwrap();
+    }
+
+    /// Real #368 shape: accept (inserts the live `vms` row), claim, then a
+    /// terminal effector failure with a public-safe code.
+    fn failed_create(store: &mut CoreStore, vm_id: &str, operation_id: &str) {
+        accept_create(store, vm_id, &vm(vm_id, 1), operation_id);
+        let id = OperationId::new(operation_id).unwrap();
+        store.claim_operation(&id, "attempt-requeue-1").unwrap();
+        store
+            .persist_terminal_operation(
+                &id,
+                "attempt-requeue-1",
+                OperationStatus::Failed,
+                None,
+                Some(&serde_json::json!({"code": "RUNTIME_UNAVAILABLE"})),
+            )
+            .unwrap();
+    }
+
+    fn requeue_request<'a>(
+        vm_id: &'a VmId,
+        expected_vm_version: u64,
+        operation_id: &'a OperationId,
+        key: &'a IdempotencyKey,
+        metadata: &'a OperationRequestMetadata,
+    ) -> RequeueCreateRequest<'a> {
+        RequeueCreateRequest {
+            vm_id,
+            expected_vm_version: version(expected_vm_version),
+            operation_id,
+            max_attempts: 3,
+            metadata,
+            idempotency_scope: "requeue-tests",
+            idempotency_key: key,
+        }
+    }
+
+    #[test]
+    fn requeue_re_drives_a_terminally_failed_create() {
+        let (_directory, path, mut store) = new_store();
+        failed_create(&mut store, "vm-1", "create-1");
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        let accepted = store
+            .requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            ))
+            .unwrap();
+        assert_eq!(accepted.disposition, Acceptance::Accepted);
+        assert_eq!(accepted.accepted_resource_version, version(1));
+        assert_eq!(accepted.operation.kind, OperationKind::CreateVm);
+        assert_eq!(accepted.operation.status, OperationStatus::Accepted);
+        assert_eq!(accepted.operation.attempt_count, 0);
+        // The failed original stays terminal: requeue inserts a NEW
+        // operation and never mutates (resurrects) the old one.
+        let original = store
+            .operation_entry(&OperationId::new("create-1").unwrap())
+            .unwrap();
+        assert_eq!(original.operation.status, OperationStatus::Failed);
+        assert_eq!(
+            original.error.as_ref().and_then(|error| error.get("code")),
+            Some(&serde_json::json!("RUNTIME_UNAVAILABLE"))
+        );
+        // The requeued request is the canonical create envelope derived
+        // from the live row (observed state reset to unknown — journal
+        // bookkeeping is never an effector input).
+        let entry = store.operation_entry(&requeued_id).unwrap();
+        assert_eq!(
+            entry.request,
+            serde_json::json!({
+                "command": {"command": "create_vm", "definition": vm("vm-1", 1)},
+                "expected_vm_version": 1,
+            })
+        );
+        assert!(entry.request_metadata.is_some());
+        // The requeued create is claimable and completes normally, and the
+        // journal-derived latest-create state follows it.
+        let claimed = store
+            .claim_operation(&requeued_id, "attempt-requeue-2")
+            .unwrap();
+        assert_eq!(claimed.disposition, ClaimDisposition::Acquired);
+        store
+            .persist_terminal_operation(
+                &requeued_id,
+                "attempt-requeue-2",
+                OperationStatus::Succeeded,
+                Some(&serde_json::json!({"runtime": "created"})),
+                None,
+            )
+            .unwrap();
+        let latest = store.latest_create_state(&vm_id).unwrap().unwrap();
+        assert_eq!(latest.status, OperationStatus::Succeeded);
+        assert_eq!(latest.operation_id, requeued_id);
+        // The requeue-inserted rows survive open-time journal validation.
+        drop(store);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        assert_eq!(
+            reopened
+                .latest_create_state(&vm_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Succeeded
+        );
+        let states = reopened.latest_create_states().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].0, vm_id);
+        assert_eq!(
+            states[0].1.as_ref().unwrap().status,
+            OperationStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn requeue_envelope_resets_observed_state_to_unknown() {
+        let (_directory, _path, mut store) = new_store();
+        failed_create(&mut store, "vm-1", "create-1");
+        let vm_id = VmId::new("vm-1").unwrap();
+        // Observed state may have drifted (telemetry) — it must never leak
+        // into the re-derived create envelope.
+        store
+            .persist_observed_vm_state(&vm_id, ObservedPowerState::Failed)
+            .unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        store
+            .requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            ))
+            .unwrap();
+        let entry = store.operation_entry(&requeued_id).unwrap();
+        assert_eq!(
+            entry.request,
+            serde_json::json!({
+                "command": {"command": "create_vm", "definition": vm("vm-1", 1)},
+                "expected_vm_version": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn requeue_duplicate_submission_converges_on_one_operation() {
+        let (_directory, _path, mut store) = new_store();
+        failed_create(&mut store, "vm-1", "create-1");
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let first_id = OperationId::new("requeue-1").unwrap();
+        let first = store
+            .requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &first_id,
+                &IdempotencyKey::new("requeue-key").unwrap(),
+                &metadata,
+            ))
+            .unwrap();
+        // A dispatcher retry re-submits under the SAME idempotency key but
+        // a fresh operation id: it must converge on the one requeued op.
+        let second_id = OperationId::new("requeue-2").unwrap();
+        let second = store
+            .requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &second_id,
+                &IdempotencyKey::new("requeue-key").unwrap(),
+                &metadata,
+            ))
+            .unwrap();
+        assert_eq!(first.disposition, Acceptance::Accepted);
+        assert_eq!(second.disposition, Acceptance::Replay);
+        assert_eq!(second.operation.id, first.operation.id);
+        assert_eq!(store.list_operations(1_000).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn requeue_refuses_a_succeeded_create() {
+        let (_directory, _path, mut store) = new_store();
+        accept_create(&mut store, "vm-1", &vm("vm-1", 1), "create-1");
+        let id = OperationId::new("create-1").unwrap();
+        store.claim_operation(&id, "attempt-requeue-1").unwrap();
+        store
+            .persist_terminal_operation(
+                &id,
+                "attempt-requeue-1",
+                OperationStatus::Succeeded,
+                Some(&serde_json::json!({"runtime": "created"})),
+                None,
+            )
+            .unwrap();
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::Conflict {
+                kind: "operation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn requeue_refuses_a_tombstoned_vm() {
+        let (_directory, _path, mut store) = new_store();
+        failed_create(&mut store, "vm-1", "create-1");
+        // A concurrent delete tombstones at accept: the id is permanently
+        // occupied and must never be resurrected.
+        let delete_request = serde_json::json!({
+            "command": {"delete_vm": {"vm_id": "vm-1"}},
+            "expected_vm_version": 1,
+        });
+        let delete = Operation {
+            id: OperationId::new("delete-1").unwrap(),
+            kind: OperationKind::DeleteVm,
+            vm_id: VmId::new("vm-1").unwrap(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: canonical_request_fingerprint(&delete_request).unwrap(),
+            attempt_count: 0,
+            max_attempts: 3,
+        };
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &delete,
+                request: &delete_request,
+                desired_vm: None,
+                metadata: &test_metadata(),
+                idempotency_scope: "requeue-tests",
+                idempotency_key: &IdempotencyKey::new("delete-1").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                2,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::NotFound { kind: "vm", .. })
+        ));
+    }
+
+    #[test]
+    fn requeue_refuses_an_incomplete_create() {
+        let (_directory, _path, mut store) = new_store();
+        // Accepted-but-unclaimed create: an in-flight create refuses the
+        // requeue.
+        accept_create(&mut store, "vm-1", &vm("vm-1", 1), "create-1");
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::Conflict {
+                kind: "operation",
+                ..
+            })
+        ));
+        // Running create (the InspectRequired crash shape): also refuses —
+        // the operator must resolve the ambiguity first.
+        let id = OperationId::new("create-1").unwrap();
+        store.claim_operation(&id, "attempt-requeue-1").unwrap();
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-2").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::Conflict {
+                kind: "operation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn requeue_refuses_a_superseded_spec_version() {
+        let (_directory, _path, mut store) = new_store();
+        failed_create(&mut store, "vm-1", "create-1");
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        // Any spec or generation change bumps the resource version: a
+        // requeue can never silently re-drive a superseded spec.
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                2,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::StaleVersion { kind: "vm", .. })
+        ));
+    }
+
+    #[test]
+    fn requeue_refuses_a_vm_without_a_journaled_create() {
+        let (_directory, _path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let vm_id = VmId::new("vm-1").unwrap();
+        let metadata = test_metadata();
+        let requeued_id = OperationId::new("requeue-1").unwrap();
+        assert!(matches!(
+            store.requeue_failed_create(&requeue_request(
+                &vm_id,
+                1,
+                &requeued_id,
+                &IdempotencyKey::new("requeue-1").unwrap(),
+                &metadata,
+            )),
+            Err(StoreError::InvalidDomain(_))
+        ));
+    }
+
+    #[test]
+    fn claim_fence_refuses_a_create_for_a_tombstoned_vm() {
+        let (_directory, path, mut store) = new_store();
+        // A claimable create for a tombstoned VM is exactly the window the
+        // requeue primitive opens: the create is accepted (row live at
+        // version 1), then a concurrent delete tombstones at accept.
+        accept_create(&mut store, "vm-1", &vm("vm-1", 1), "create-1");
+        let delete_request = serde_json::json!({
+            "command": {"delete_vm": {"vm_id": "vm-1"}},
+            "expected_vm_version": 1,
+        });
+        let delete = Operation {
+            id: OperationId::new("delete-1").unwrap(),
+            kind: OperationKind::DeleteVm,
+            vm_id: VmId::new("vm-1").unwrap(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: canonical_request_fingerprint(&delete_request).unwrap(),
+            attempt_count: 0,
+            max_attempts: 3,
+        };
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &delete,
+                request: &delete_request,
+                desired_vm: None,
+                metadata: &test_metadata(),
+                idempotency_scope: "requeue-tests",
+                idempotency_key: &IdempotencyKey::new("delete-1").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        // The claim is terminally REFUSED: no provider side effect can run.
+        let id = OperationId::new("create-1").unwrap();
+        let claimed = store.claim_operation(&id, "attempt-fence-1").unwrap();
+        assert_eq!(claimed.disposition, ClaimDisposition::Refused);
+        assert_eq!(claimed.entry.operation.status, OperationStatus::Failed);
+        assert_eq!(
+            claimed
+                .entry
+                .error
+                .as_ref()
+                .and_then(|error| error.get("code")),
+            Some(&serde_json::json!("VM_TOMBSTONED"))
+        );
+        // The refusal is terminal and durable: a second claim conflicts,
+        // and the fenced row survives open-time journal validation.
+        assert!(matches!(
+            store.claim_operation(&id, "attempt-fence-2"),
+            Err(StoreError::Conflict {
+                kind: "operation",
+                ..
+            })
+        ));
+        drop(store);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        let entry = reopened.operation_entry(&id).unwrap();
+        assert_eq!(entry.operation.status, OperationStatus::Failed);
+        assert_eq!(
+            entry.error.as_ref().and_then(|error| error.get("code")),
+            Some(&serde_json::json!("VM_TOMBSTONED"))
+        );
     }
 }

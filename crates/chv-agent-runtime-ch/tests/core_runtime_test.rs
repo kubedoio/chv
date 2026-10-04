@@ -546,6 +546,81 @@ async fn create_vm_failure_midway_unwinds() {
     );
 }
 
+/// #368 residue-idempotency (mock tier): the requeued create a re-drive
+/// executes is a FRESH CreateVm operation over the same definition — its
+/// effector re-runs the full side-effect set (open/attach per volume,
+/// ensure/attach_nic per network, adapter create, vm dir) against the
+/// residue a terminally-failed create can leave behind (the M4.7 F3
+/// shape: storage that stayed attached because the failing provider was
+/// also the one the unwind talks to). The re-execution must converge,
+/// not fail on pre-attached storage.
+///
+/// The local-backend residue semantics (re-open does not re-seed or
+/// resize an already-provisioned volume) are pinned separately against
+/// a real `LocalFileBackend` in chv-stord-core; ceph/iscsi/lvm have no
+/// equivalent pin (unpinned, see the #368 design doc residual risk).
+#[tokio::test]
+async fn create_reexecution_over_attached_residue_converges() {
+    let h = harness(None);
+    let vm_id = "vm-redrive";
+    let command = MutationCommand::CreateVm {
+        definition: definition(vm_id, 2, 1),
+    };
+
+    // The original execution: full side effects land (storage attached,
+    // topology ensured, VM created).
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-original",
+            envelope(command.clone()),
+        ))
+        .await
+        .expect("original create must succeed");
+    let first_run_log = calls(&h.controller);
+    assert!(is_subsequence(
+        &first_run_log,
+        &["open:vol-0", "attach:vol-0", "open:vol-1", "attach:vol-1"]
+    ));
+
+    // The requeued re-drive: a NEW operation id carrying the same
+    // definition (exactly what `requeue_failed_create` journals — the
+    // envelope is re-derived from the live row). It re-executes the full
+    // side-effect set against the already-attached residue and must
+    // converge.
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-requeued",
+            envelope(command),
+        ))
+        .await
+        .expect("re-executed create over residue must succeed");
+
+    // The re-drive actually re-ran the side-effect set (it did not skip
+    // because "already done") — one full open/attach pass per execution.
+    let log = calls(&h.controller);
+    let opens: Vec<&str> = log.iter().filter_map(|c| c.strip_prefix("open:")).collect();
+    assert_eq!(
+        opens,
+        vec!["vol-0", "vol-1", "vol-0", "vol-1"],
+        "each execution must open every volume: {log:?}"
+    );
+    let attaches: Vec<&str> = log
+        .iter()
+        .filter_map(|c| c.strip_prefix("attach:"))
+        .collect();
+    assert_eq!(
+        attaches,
+        vec!["vol-0", "vol-1", "vol-0", "vol-1"],
+        "each execution must attach every volume: {log:?}"
+    );
+    // The VM runtime dir is create_dir_all — re-execution keeps it.
+    assert!(vm_dir_path(&h, vm_id).exists());
+}
+
 #[tokio::test]
 async fn delete_vm_drains_side_effects() {
     let h = harness(None);

@@ -220,7 +220,12 @@ impl Reconciler {
     ///
     /// Residual: the observe-only report carries the fragment's *desired*
     /// state as `runtime_status`; observed power state for core-managed VMs
-    /// is not projected and remains a documented gap.
+    /// is not projected and remains a documented gap. #368 P1 narrows this
+    /// at the call site: the telemetry loop merges the Core journal's
+    /// latest-create states over this report (`apply_core_create_states`)
+    /// before emitting, so a terminally failed or in-flight create reports
+    /// Failed/Pending with its public-safe code instead of the desired
+    /// state — converged VMs still report their desired state.
     pub async fn reported_vms(&self) -> Vec<crate::vm_runtime::VmRecord> {
         if self.mutation.is_some() {
             return self.vm_runtime.list().await;
@@ -2112,6 +2117,90 @@ pub(crate) async fn cleanup_vm_resources(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// #368 P1: merge the Core journal's latest-create states into the
+/// telemetry report set (see `Reconciler::reported_vms` for why the
+/// fragment projection alone reports a terminally-failed create as its
+/// DESIRED state — or not at all).
+///
+/// - a VM whose latest create is terminally `failed` (or `unsupported`)
+///   reports `runtime_status = "Failed"` with the journal's public-safe
+///   failure code as `last_error` — the phantom becomes visible, and the
+///   control plane's re-drive pass keys on exactly this signal;
+/// - a VM whose latest create is incomplete (`accepted`/`running`, the
+///   in-flight and inspect-required shapes) reports `runtime_status =
+///   "Pending"` instead of the desired-state phantom, so the control
+///   plane gates further re-drives on the in-flight create;
+/// - a terminally-failed create for a VM with NO fragment (the common
+///   case: the projection only follows Succeeded outcomes) is APPENDED as
+///   a synthetic record — observed generation "0" (nothing converged).
+///
+/// VMs whose latest create succeeded (or that have no journaled create)
+/// keep the fragment-derived report unchanged.
+pub fn apply_core_create_states(
+    reported: Vec<crate::vm_runtime::VmRecord>,
+    latest: Vec<(
+        cellhv_core_types::VmId,
+        Option<cellhv_core_operations::LatestCreateState>,
+    )>,
+) -> Vec<crate::vm_runtime::VmRecord> {
+    use cellhv_core_types::OperationStatus;
+    use std::collections::HashMap;
+
+    let latest: HashMap<String, cellhv_core_operations::LatestCreateState> = latest
+        .into_iter()
+        .filter_map(|(vm_id, state)| state.map(|state| (vm_id.as_str().to_owned(), state)))
+        .collect();
+    let mut merged = Vec::with_capacity(reported.len() + latest.len());
+    let mut seen = std::collections::HashSet::new();
+    for mut record in reported {
+        seen.insert(record.vm_id.clone());
+        if let Some(state) = latest.get(&record.vm_id) {
+            match state.status {
+                OperationStatus::Failed | OperationStatus::Unsupported => {
+                    record.runtime_status = "Failed".to_owned();
+                    record.last_error = Some(
+                        state
+                            .error_code
+                            .clone()
+                            .unwrap_or_else(|| "CREATE_FAILED".to_owned()),
+                    );
+                }
+                OperationStatus::Accepted | OperationStatus::Running => {
+                    record.runtime_status = "Pending".to_owned();
+                }
+                OperationStatus::Succeeded => {}
+            }
+        }
+        merged.push(record);
+    }
+    for (vm_id, state) in latest {
+        if seen.contains(&vm_id) {
+            continue;
+        }
+        if !matches!(
+            state.status,
+            OperationStatus::Failed | OperationStatus::Unsupported
+        ) {
+            continue;
+        }
+        merged.push(crate::vm_runtime::VmRecord {
+            vm_id,
+            observed_generation: "0".to_owned(),
+            runtime_status: "Failed".to_owned(),
+            last_error: Some(
+                state
+                    .error_code
+                    .clone()
+                    .unwrap_or_else(|| "CREATE_FAILED".to_owned()),
+            ),
+            consecutive_failures: 0,
+            cpus: 0,
+            memory_bytes: 0,
+        });
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -4132,5 +4221,152 @@ mod tests {
             registry.is_empty(),
             "drain may complete when registry is empty"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Core create-state merge (pure unit tests, no I/O)
+    // ------------------------------------------------------------------
+
+    fn fragment_report(vm_id: &str) -> crate::vm_runtime::VmRecord {
+        // The shape `Reconciler::reported_vms` produces in observe-only
+        // (core-managed) mode: the desired-state phantom for a fragment.
+        crate::vm_runtime::VmRecord {
+            vm_id: vm_id.to_owned(),
+            observed_generation: "1".to_owned(),
+            runtime_status: "Running".to_owned(),
+            last_error: None,
+            consecutive_failures: 0,
+            cpus: 1,
+            memory_bytes: 1024,
+        }
+    }
+
+    fn latest_create(
+        vm_id: &str,
+        status: cellhv_core_types::OperationStatus,
+        error_code: Option<&str>,
+    ) -> (
+        cellhv_core_types::VmId,
+        Option<cellhv_core_operations::LatestCreateState>,
+    ) {
+        (
+            cellhv_core_types::VmId::new(vm_id).unwrap(),
+            Some(cellhv_core_operations::LatestCreateState {
+                operation_id: cellhv_core_types::OperationId::new("op-latest").unwrap(),
+                status,
+                error_code: error_code.map(str::to_owned),
+            }),
+        )
+    }
+
+    // A terminally-failed create must surface as runtime_status="Failed"
+    // with the journal's public-safe failure code as last_error. This is
+    // exactly the signal the control plane's #368 re-drive pass keys on:
+    // a regression here makes the phantom VM invisible again and silently
+    // kills re-drive.
+    #[test]
+    fn apply_core_create_states_marks_failed_create_failed_with_error_code() {
+        let merged = apply_core_create_states(
+            vec![fragment_report("vm-failed")],
+            vec![latest_create(
+                "vm-failed",
+                cellhv_core_types::OperationStatus::Failed,
+                Some("RUNTIME_UNAVAILABLE"),
+            )],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].vm_id, "vm-failed");
+        assert_eq!(merged[0].runtime_status, "Failed");
+        assert_eq!(merged[0].last_error.as_deref(), Some("RUNTIME_UNAVAILABLE"));
+    }
+
+    // Unsupported is the other terminal-failure shape and reports the same
+    // Failed render; a missing error_code falls back to CREATE_FAILED so
+    // the re-drive loop always has a reason to key on.
+    #[test]
+    fn apply_core_create_states_unsupported_without_code_falls_back_to_create_failed() {
+        let merged = apply_core_create_states(
+            vec![fragment_report("vm-unsup")],
+            vec![latest_create(
+                "vm-unsup",
+                cellhv_core_types::OperationStatus::Unsupported,
+                None,
+            )],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].runtime_status, "Failed");
+        assert_eq!(merged[0].last_error.as_deref(), Some("CREATE_FAILED"));
+    }
+
+    // Accepted/Running (in flight, or inspect-required after a crash) must
+    // report Pending, never Failed — the control plane gates further
+    // re-drives on the create being terminally failed, and a false
+    // "Failed" here would re-drive under a live create.
+    #[test]
+    fn apply_core_create_states_inflight_creates_report_pending_not_failed() {
+        for status in [
+            cellhv_core_types::OperationStatus::Accepted,
+            cellhv_core_types::OperationStatus::Running,
+        ] {
+            let merged = apply_core_create_states(
+                vec![fragment_report("vm-inflight")],
+                vec![latest_create("vm-inflight", status, None)],
+            );
+            assert_eq!(merged.len(), 1, "for {status:?}");
+            assert_eq!(merged[0].runtime_status, "Pending", "for {status:?}");
+            assert!(merged[0].last_error.is_none(), "for {status:?}");
+        }
+    }
+
+    // The common failed-create shape: NO fragment (the Core projection
+    // only follows Succeeded outcomes), so the merge must APPEND a
+    // synthetic observed-state row — observed generation "0" (nothing
+    // converged), Failed, with the journal's failure code. Without the
+    // append the phantom stays invisible to the CP re-drive loop.
+    #[test]
+    fn apply_core_create_states_appends_synthetic_row_for_fragmentless_failed_create() {
+        let merged = apply_core_create_states(
+            vec![],
+            vec![latest_create(
+                "vm-phantom",
+                cellhv_core_types::OperationStatus::Failed,
+                Some("STORD_UNAVAILABLE"),
+            )],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].vm_id, "vm-phantom");
+        assert_eq!(merged[0].observed_generation, "0");
+        assert_eq!(merged[0].runtime_status, "Failed");
+        assert_eq!(merged[0].last_error.as_deref(), Some("STORD_UNAVAILABLE"));
+    }
+
+    // Healthy paths must not be marked Failed (no false positives the
+    // re-drive loop would act on): a Succeeded create keeps the
+    // fragment-derived report byte-identical, a VM with no journaled
+    // create (None) is untouched, and a non-terminal fragment-less create
+    // is NOT appended as a synthetic row.
+    #[test]
+    fn apply_core_create_states_succeeded_creates_do_not_report_failed() {
+        let merged = apply_core_create_states(
+            vec![fragment_report("vm-ok"), fragment_report("vm-nojournal")],
+            vec![
+                latest_create("vm-ok", cellhv_core_types::OperationStatus::Succeeded, None),
+                (cellhv_core_types::VmId::new("vm-nojournal").unwrap(), None),
+                latest_create(
+                    "vm-phantom-ok",
+                    cellhv_core_types::OperationStatus::Accepted,
+                    None,
+                ),
+            ],
+        );
+        assert_eq!(
+            merged.len(),
+            2,
+            "no synthetic row for a non-terminal create"
+        );
+        for record in &merged {
+            assert_eq!(record.runtime_status, "Running");
+            assert!(record.last_error.is_none());
+        }
     }
 }

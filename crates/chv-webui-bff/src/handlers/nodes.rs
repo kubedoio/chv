@@ -194,7 +194,16 @@ pub async fn get_node(
                 SELECT
                     v.vm_id,
                     v.display_name AS name,
-                    COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
+                    -- #368 P3: same Failed-wins precedence as the VM list
+                    -- and detail views (vms.rs) — an agent-reported Failed
+                    -- state always wins over the desired power state, so a
+                    -- terminally-failed create never shows as the phantom
+                    -- desired state on the node's hosted-VM list.
+                    CASE
+                        WHEN vos.runtime_status = 'Failed' THEN vos.runtime_status
+                        ELSE COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown')
+                    END AS power_state,
+                    COALESCE(vos.last_error, '') AS last_error,
                     COALESCE(vos.health_status, 'unknown') AS health,
                     COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
                     CASE WHEN vds.memory_bytes IS NULL THEN ''
@@ -221,6 +230,7 @@ pub async fn get_node(
                         "vm_id": vm.vm_id,
                         "name": vm.name,
                         "power_state": vm.power_state,
+                        "last_error": vm.last_error,
                         "health": vm.health,
                         "cpu": vm.cpu,
                         "memory": vm.memory,
@@ -411,6 +421,7 @@ struct HostedVmRow {
     vm_id: String,
     name: String,
     power_state: String,
+    last_error: Option<String>,
     health: String,
     cpu: String,
     memory: String,

@@ -4,10 +4,12 @@ use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
-    HypervisorSettingsRepository, HypervisorSettingsRow, OperationRepository,
+    HypervisorSettingsRepository, HypervisorSettingsRow, OperationCreateInput, OperationRepository,
     OperationStatusUpdateInput, StorePool,
 };
-use chv_controlplane_types::domain::{OperationId, OperationStatus};
+use chv_controlplane_types::domain::{
+    Generation, OperationId, OperationStatus, ResourceId, ResourceKind,
+};
 use chv_errors::ChvError;
 use chv_observability::{CHV_NODES_READY, CHV_OPERATION_DURATION_SECONDS, CHV_VMS_TOTAL};
 use std::time::Duration;
@@ -79,7 +81,7 @@ impl Orchestrator {
         }
     }
 
-    async fn tick(&self) -> Result<(), ChvError> {
+    pub(crate) async fn tick(&self) -> Result<(), ChvError> {
         let tick_start = std::time::Instant::now();
 
         // Record tick start in convergence metrics
@@ -362,6 +364,9 @@ impl Orchestrator {
             cm.emit_prometheus();
         }
 
+        // #368 P2: re-drive terminally-failed creates (bounded).
+        self.redrive_failed_creates().await?;
+
         Ok(())
     }
 
@@ -435,6 +440,251 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// #368 P2: bounded re-drive of terminally-failed VM creates.
+    ///
+    /// A create whose Core effect terminally failed on the agent (the
+    /// #368 class: a transient backend failure) leaves the VM
+    /// desired-but-never-created — the dispatch already acked ok, so the
+    /// dispatch loop never converges it. The agent's #368 P1 telemetry
+    /// reports that shape as `runtime_status = 'Failed'` with the Core
+    /// failure code; this pass keys on exactly that signal and re-issues
+    /// the create as a NEW `RecreateVm` operation at the original
+    /// create's generation. The agent's dispatch shim routes it through
+    /// the Core requeue primitive (C1): a new journaled CreateVm whose
+    /// effector re-executes residue-idempotently. On success the agent's
+    /// projection reports the VM again and this pass stops selecting it.
+    ///
+    /// Gates — every refusal arm just stops the loop for that VM
+    /// (nothing is guessed; the agent-side requeue refuses independently):
+    /// - the desired state still demands the VM (a `vm_desired_state`
+    ///   row that is not deleted — an operator delete stops the loop);
+    /// - no incomplete create-family operation is in flight (this is
+    ///   also the concurrent-delete and crash-during-re-drive safety: an
+    ///   in-flight delete dispatch or an inspect-required re-drive holds
+    ///   the gate closed);
+    /// - the bound is not exhausted: at most `MAX_DISPATCH_RETRIES`
+    ///   re-drive operations per VM, spaced by the dispatch-retry backoff
+    ///   curve (10s, 20s, 40s). No new config knobs.
+    ///
+    /// On exhaustion the pass marks a terminal Failed `RecreateVm`
+    /// operation carrying the reported failure code — the VM is visibly
+    /// Failed-with-reason, never a silent zombie.
+    ///
+    /// `pub(crate)` so the crate's integration tests can drive the pass
+    /// (and `tick`) without a wall-clock interval, the same seam
+    /// `dispatch_update_overlay` already provides.
+    pub(crate) async fn redrive_failed_creates(&self) -> Result<(), ChvError> {
+        let rows = sqlx::query_as::<_, FailedCreateRedriveRow>(
+            r#"
+            SELECT
+                vds.vm_id,
+                vds.target_node_id,
+                (SELECT o.desired_generation FROM operations o
+                 WHERE o.resource_kind = 'vm' AND o.resource_id = vds.vm_id
+                   AND o.operation_type IN ('create', 'CreateVm')
+                 ORDER BY o.requested_at ASC LIMIT 1) AS create_generation,
+                (SELECT COUNT(*) FROM operations rd
+                 WHERE rd.resource_kind = 'vm' AND rd.resource_id = vds.vm_id
+                   AND rd.operation_type = 'RecreateVm') AS redrive_count,
+                (SELECT rd.updated_at FROM operations rd
+                 WHERE rd.resource_kind = 'vm' AND rd.resource_id = vds.vm_id
+                   AND rd.operation_type = 'RecreateVm'
+                 ORDER BY rd.updated_at DESC LIMIT 1) AS last_redrive_at,
+                vos.last_error AS reported_error
+            FROM vm_desired_state vds
+            JOIN vm_observed_state vos ON vds.vm_id = vos.vm_id
+            WHERE vos.runtime_status = 'Failed'
+              AND COALESCE(vds.desired_power_state, '') != 'Deleted'
+              AND vds.target_node_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM operations o
+                  WHERE o.resource_kind = 'vm' AND o.resource_id = vds.vm_id
+                    AND o.operation_type IN ('create', 'CreateVm', 'RecreateVm')
+                    AND o.status IN ('Accepted', 'RetryPending', 'Running')
+              )
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to select failed creates for re-drive: {e}"),
+        })?;
+
+        for row in rows {
+            let Some(create_generation) = row.create_generation.filter(|gen| *gen > 0) else {
+                warn!(
+                    vm_id = %row.vm_id,
+                    "failed create has no journaled create operation to derive a generation from; not re-driving"
+                );
+                continue;
+            };
+
+            if row.redrive_count >= i64::from(MAX_DISPATCH_RETRIES) {
+                // Exhausted: mark a terminal Failed re-drive operation
+                // carrying the reported failure code, once (the fixed
+                // idempotency key converges repeat ticks on the one row).
+                let marker_key = format!("recreate:{}:{}:exhausted", row.vm_id, create_generation);
+                let reported = row
+                    .reported_error
+                    .clone()
+                    .unwrap_or_else(|| "CREATE_FAILED".to_owned());
+                match self
+                    .mark_redrive_exhausted(&row.vm_id, &marker_key, &reported)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            vm_id = %row.vm_id,
+                            attempts = MAX_DISPATCH_RETRIES,
+                            failure_code = %reported,
+                            "create re-drives exhausted; VM marked Failed"
+                        );
+                        metrics::counter!("orchestrator_create_redrive_exhausted_total")
+                            .increment(1);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(
+                            vm_id = %row.vm_id,
+                            error = %e,
+                            "failed to mark create re-drive exhaustion"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Re-drive spacing: the dispatch-retry backoff curve
+            // (10s * 2^(attempt-1)) measured from the previous re-drive's
+            // last update.
+            if let Some(last_redrive_at) = row.last_redrive_at.as_deref() {
+                let attempt = row.redrive_count.max(1) as u32;
+                let backoff_secs = 10i64 * (1 << (attempt - 1));
+                match chrono::DateTime::parse_from_rfc3339(last_redrive_at) {
+                    Ok(last)
+                        if chrono::Utc::now() < last + chrono::Duration::seconds(backoff_secs) =>
+                    {
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            vm_id = %row.vm_id,
+                            last_redrive_at,
+                            error = %e,
+                            "failed to parse last re-drive timestamp; not re-driving"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let attempt = row.redrive_count + 1;
+            let operation_id =
+                OperationId::new(format!("RecreateVm-{}", chv_common::gen_short_id())).map_err(
+                    |e| ChvError::Internal {
+                        reason: format!("invalid operation_id: {e}"),
+                    },
+                )?;
+            let vm_id = ResourceId::new(row.vm_id.clone()).map_err(|e| ChvError::Internal {
+                reason: format!("invalid resource_id: {e}"),
+            })?;
+            // Deterministic per (vm, generation, attempt): a racing tick
+            // converges on the one operation row instead of double-issuing.
+            let idempotency_key =
+                format!("recreate:{}:{}:{}", row.vm_id, create_generation, attempt);
+            self.operation_repo
+                .create_or_get(&OperationCreateInput {
+                    operation_id,
+                    idempotency_key,
+                    resource_kind: ResourceKind::Vm,
+                    resource_id: Some(vm_id),
+                    operation_type: "RecreateVm".into(),
+                    status: OperationStatus::Accepted,
+                    requested_by: Some("orchestrator".into()),
+                    updated_by: Some("orchestrator".into()),
+                    desired_generation: Some(Generation::new(create_generation as u64)),
+                    observed_generation: None,
+                    correlation_id: Some(format!("redrive-attempt={}", attempt)),
+                    requested_unix_ms: now_unix_ms(),
+                })
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to create re-drive operation: {e}"),
+                })?;
+            info!(
+                vm_id = %row.vm_id,
+                node_id = %row.target_node_id,
+                attempt = attempt,
+                generation = create_generation,
+                "issuing create re-drive"
+            );
+            metrics::counter!("orchestrator_create_redrives_total").increment(1);
+        }
+        Ok(())
+    }
+
+    /// Marks the re-drive exhaustion for one VM: a terminal Failed
+    /// `RecreateVm` operation with the reported failure code. Returns
+    /// `true` when this call created the marker (the fixed idempotency
+    /// key converges repeat invocations on the existing row).
+    async fn mark_redrive_exhausted(
+        &self,
+        vm_id: &str,
+        idempotency_key: &str,
+        reported_failure: &str,
+    ) -> Result<bool, ChvError> {
+        let resource_id = ResourceId::new(vm_id.to_owned()).map_err(|e| ChvError::Internal {
+            reason: format!("invalid resource_id: {e}"),
+        })?;
+        let operation_id = OperationId::new(format!("RecreateVm-{}", chv_common::gen_short_id()))
+            .map_err(|e| ChvError::Internal {
+            reason: format!("invalid operation_id: {e}"),
+        })?;
+        let receipt = self
+            .operation_repo
+            .create_or_get(&OperationCreateInput {
+                operation_id,
+                idempotency_key: idempotency_key.to_owned(),
+                resource_kind: ResourceKind::Vm,
+                resource_id: Some(resource_id),
+                operation_type: "RecreateVm".into(),
+                status: OperationStatus::Pending,
+                requested_by: Some("orchestrator".into()),
+                updated_by: Some("orchestrator".into()),
+                desired_generation: None,
+                observed_generation: None,
+                correlation_id: Some("redrive-exhausted".into()),
+                requested_unix_ms: now_unix_ms(),
+            })
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to create re-drive exhaustion marker: {e}"),
+            })?;
+        if receipt.status.is_terminal() {
+            // Already marked by a previous tick.
+            return Ok(false);
+        }
+        self.operation_repo
+            .update_status(&OperationStatusUpdateInput {
+                operation_id: receipt.operation_id,
+                status: OperationStatus::Failed,
+                error_code: Some("CREATE_REDRIVE_EXHAUSTED".into()),
+                error_message: Some(format!(
+                    "create re-drives exhausted after {} attempts; last reported failure: {}",
+                    MAX_DISPATCH_RETRIES, reported_failure
+                )),
+                observed_generation: None,
+                updated_by: Some("orchestrator".into()),
+                updated_unix_ms: now_unix_ms(),
+            })
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to mark re-drive exhaustion terminal: {e}"),
+            })?;
+        Ok(true)
+    }
+
     async fn dispatch_operation(&self, row: &AcceptedOperationRow) -> Result<(), ChvError> {
         // UpdateOverlay fans out to EVERY participating node of the network
         // (ADR-021 bounded flood list), not just the claim-resolved anchor
@@ -489,7 +739,12 @@ impl Orchestrator {
         // Status already set to Running by the atomic claim in tick()
 
         let ack = match row.operation_type.as_str() {
-            "create" | "CreateVm" | "ResizeVm" => {
+            // "RecreateVm" is the #368 P2 re-drive: dispatched exactly like
+            // a create (same desired-state path, the original create's
+            // generation) — the agent's shim routes it through the Core
+            // requeue primitive when the journal holds a terminally failed
+            // create, and acks idempotently when it has converged.
+            "create" | "CreateVm" | "ResizeVm" | "RecreateVm" => {
                 // Desired-state path: build full agent spec and dispatch ApplyVmDesiredState
                 let vm_spec_json = self.build_agent_vm_spec(&row.resource_id).await?;
                 client
@@ -1475,6 +1730,24 @@ struct AcceptedOperationRow {
     correlation_id: Option<String>,
 }
 
+/// #368 P2 selection: one VM whose desired state still demands it, whose
+/// agent-reported state says the create terminally failed, and that has
+/// no incomplete create-family operation in flight.
+#[derive(sqlx::FromRow)]
+struct FailedCreateRedriveRow {
+    vm_id: String,
+    target_node_id: String,
+    /// The generation the ORIGINAL create operation dispatched at (the
+    /// re-drive must re-issue the same generation-1 task shape).
+    create_generation: Option<i64>,
+    /// How many `RecreateVm` operations this VM has already been issued.
+    redrive_count: i64,
+    /// `updated_at` of the most recent re-drive (backoff anchor).
+    last_redrive_at: Option<String>,
+    /// The agent-reported Core failure code (#368 P1).
+    reported_error: Option<String>,
+}
+
 #[derive(sqlx::FromRow)]
 struct VmDesiredStateRow {
     display_name: Option<String>,
@@ -1574,6 +1847,7 @@ fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
     use chv_controlplane_store::test_util::create_test_pool;
+    use control_plane_node_api::control_plane_node_api as proto;
 
     /// SQL used by `tick()` to claim Accepted operations and resolve `node_id`
     /// in a single round trip via correlated subqueries in RETURNING.
@@ -1887,6 +2161,659 @@ mod tests {
         assert!(
             second.is_empty(),
             "second tick must not reclaim already-Running rows"
+        );
+    }
+
+    // ============================================================
+    // #368 P2 — bounded re-drive of terminally-failed creates
+    // (design §7 CP rows; see docs/design/issue-368-journaled-create-redrive.md)
+    // ============================================================
+
+    /// Seed the #368 zombie shape's observed half: the agent-reported
+    /// state says the create terminally failed with a Core failure code
+    /// (#368 P1 telemetry), while the desired state still demands the VM.
+    async fn seed_failed_observed_state(
+        pool: &StorePool,
+        vm_id: &str,
+        node_id: &str,
+        failure_code: &str,
+    ) {
+        seed_vm(pool, vm_id, node_id).await;
+        sqlx::query(
+            "INSERT INTO vm_observed_state \
+             (vm_id, observed_generation, runtime_status, node_id, last_error) \
+             VALUES (?, 0, 'Failed', ?, ?)",
+        )
+        .bind(vm_id)
+        .bind(node_id)
+        .bind(failure_code)
+        .execute(pool)
+        .await
+        .expect("insert vm_observed_state");
+    }
+
+    /// Seed the journaled ORIGINAL create operation for a VM (the row
+    /// the re-drive derives its generation from), in the given status.
+    async fn seed_journaled_create(
+        pool: &StorePool,
+        vm_id: &str,
+        create_generation: i64,
+        status: &str,
+        error_code: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, error_code, requested_at, updated_at) \
+             VALUES (?, ?, 'vm', ?, 'create', ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(format!("op-create-{vm_id}"))
+        .bind(format!("idem-create-{vm_id}"))
+        .bind(vm_id)
+        .bind(status)
+        .bind(create_generation)
+        .bind(error_code)
+        .execute(pool)
+        .await
+        .expect("insert original create operation");
+    }
+
+    /// Seed one already-issued `RecreateVm` operation (a prior re-drive
+    /// attempt) in the given status with the given `updated_at` (the
+    /// backoff anchor).
+    async fn seed_recreate_op(
+        pool: &StorePool,
+        vm_id: &str,
+        create_generation: i64,
+        attempt: i64,
+        status: &str,
+        updated_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, requested_at, updated_at) \
+             VALUES (?, ?, 'vm', ?, 'RecreateVm', ?, ?, '2026-01-01T00:00:00Z', ?)",
+        )
+        .bind(format!("op-recreate-{vm_id}-{attempt}"))
+        .bind(format!("recreate:{vm_id}:{create_generation}:{attempt}"))
+        .bind(vm_id)
+        .bind(status)
+        .bind(create_generation)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .expect("insert prior re-drive operation");
+    }
+
+    /// All `RecreateVm` operation rows for a VM, as
+    /// (idempotency_key, status, error_code, correlation_id,
+    /// desired_generation).
+    async fn recreate_op_rows(
+        pool: &StorePool,
+        vm_id: &str,
+    ) -> Vec<(String, String, Option<String>, Option<String>, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT idempotency_key, status, error_code, correlation_id, desired_generation \
+             FROM operations \
+             WHERE resource_kind = 'vm' AND resource_id = ? AND operation_type = 'RecreateVm'",
+        )
+        .bind(vm_id)
+        .fetch_all(pool)
+        .await
+        .expect("select RecreateVm operations")
+    }
+
+    fn test_orchestrator(pool: &StorePool, socket_pattern: &str) -> Orchestrator {
+        Orchestrator::new(
+            pool.clone(),
+            OperationRepository::new(pool.clone()),
+            socket_pattern.to_string(),
+            "/kernel".to_string(),
+            String::new(),
+            NodeClientPool::new(),
+            crate::convergence_metrics::new_shared(),
+        )
+    }
+
+    /// §7 CP row "re-drive happy path": the #368 zombie shape (desired
+    /// state still demands the VM, observed state reports the create
+    /// terminally failed, the original create is journaled terminal)
+    /// is selected and re-issued as a NEW `RecreateVm` operation at the
+    /// ORIGINAL create's generation — never a resurrection of the
+    /// failed op. A VM that never hit a terminally-failed create is not
+    /// touched.
+    #[tokio::test]
+    async fn redrive_failed_create_issues_new_recreate_operation() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_failed_observed_state(&pool, "vm-zombie", "node-a", "BACKEND_IO_ERROR").await;
+        seed_journaled_create(&pool, "vm-zombie", 3, "Failed", "BACKEND_IO_ERROR").await;
+        // Control: a healthy VM must not be re-driven.
+        seed_vm(&pool, "vm-healthy", "node-a").await;
+        sqlx::query(
+            "INSERT INTO vm_observed_state \
+             (vm_id, observed_generation, runtime_status, node_id) \
+             VALUES ('vm-healthy', 3, 'Running', 'node-a')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert healthy observed state");
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass");
+
+        let rows = recreate_op_rows(&pool, "vm-zombie").await;
+        assert_eq!(rows.len(), 1, "exactly one re-drive operation: {rows:?}");
+        assert_eq!(rows[0].0, "recreate:vm-zombie:3:1");
+        assert_eq!(rows[0].1, "Accepted");
+        assert_eq!(
+            rows[0].4,
+            Some(3),
+            "the re-drive re-issues the ORIGINAL create's generation"
+        );
+        assert_eq!(rows[0].3.as_deref(), Some("redrive-attempt=1"));
+
+        assert!(
+            recreate_op_rows(&pool, "vm-healthy").await.is_empty(),
+            "VMs that never hit a terminally-failed create are not re-driven"
+        );
+        // The failed op stays terminal: the original create was not
+        // resurrected or mutated.
+        let original: (String,) = sqlx::query_as(
+            "SELECT status FROM operations WHERE idempotency_key = 'idem-create-vm-zombie'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("original create op");
+        assert_eq!(original.0, "Failed", "failed ops stay terminal");
+    }
+
+    /// §7 CP row "operator delete during re-drive stops the loop": a
+    /// `Deleted` desired power state (the operator-delete intent,
+    /// persisted before any delete dispatch) means the desired state no
+    /// longer demands the VM — nothing is re-driven.
+    #[tokio::test]
+    async fn redrive_refuses_operator_deleted_vm() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_failed_observed_state(&pool, "vm-deleted", "node-a", "BACKEND_IO_ERROR").await;
+        seed_journaled_create(&pool, "vm-deleted", 1, "Failed", "BACKEND_IO_ERROR").await;
+        sqlx::query("UPDATE vm_desired_state SET desired_power_state = 'Deleted' WHERE vm_id = ?")
+            .bind("vm-deleted")
+            .execute(&pool)
+            .await
+            .expect("mark desired state Deleted");
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass");
+
+        assert!(
+            recreate_op_rows(&pool, "vm-deleted").await.is_empty(),
+            "an operator-deleted VM must not be re-driven"
+        );
+    }
+
+    /// §7 CP row "in-flight create-family gate": any incomplete
+    /// create-family operation (`create`/`CreateVm`/`RecreateVm` in
+    /// Accepted/RetryPending/Running) holds the gate closed. This is
+    /// also the CP half of crash-during-re-drive safety: a re-drive
+    /// crashed mid-dispatch is left Running and stops the loop until the
+    /// CP-side op resolves — `reap_stuck_operations` re-queues the stuck
+    /// Running row back to Accepted and the dispatch-retry path drives it
+    /// to a terminal status (the agent-side requeued create is recovered
+    /// separately, by the operator's inspect-required resolve RPC).
+    #[tokio::test]
+    async fn redrive_refuses_incomplete_create_family_in_flight() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        let cases = [
+            ("create", "Accepted"),
+            ("CreateVm", "RetryPending"),
+            ("RecreateVm", "Running"),
+            ("RecreateVm", "RetryPending"),
+        ];
+        for (idx, (op_type, status)) in cases.iter().enumerate() {
+            let vm_id = format!("vm-inflight-{idx}");
+            seed_failed_observed_state(&pool, &vm_id, "node-a", "BACKEND_IO_ERROR").await;
+            sqlx::query(
+                "INSERT INTO operations \
+                 (operation_id, idempotency_key, resource_kind, resource_id, operation_type, \
+                  status, desired_generation, requested_at, updated_at) \
+                 VALUES (?, ?, 'vm', ?, ?, ?, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(format!("op-inflight-{idx}"))
+            .bind(format!("idem-inflight-{idx}"))
+            .bind(&vm_id)
+            .bind(op_type)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("insert in-flight operation");
+        }
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass");
+
+        for (idx, (op_type, _)) in cases.iter().enumerate() {
+            let vm_id = format!("vm-inflight-{idx}");
+            let expected = if *op_type == "RecreateVm" { 1 } else { 0 };
+            assert_eq!(
+                recreate_op_rows(&pool, &vm_id).await.len(),
+                expected,
+                "an incomplete create-family op in flight must hold the gate closed for {vm_id}"
+            );
+        }
+    }
+
+    /// §7 CP row "bounded backoff": re-drives are spaced by the
+    /// dispatch-retry backoff curve (10s * 2^(attempt-1)) measured from
+    /// the previous re-drive's last update. A fresh prior re-drive is
+    /// skipped; once its backoff window has elapsed the next attempt is
+    /// issued.
+    #[tokio::test]
+    async fn redrive_backoff_spaces_attempts() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_failed_observed_state(&pool, "vm-backoff", "node-a", "BACKEND_IO_ERROR").await;
+        seed_journaled_create(&pool, "vm-backoff", 1, "Failed", "BACKEND_IO_ERROR").await;
+        // A prior re-drive updated "now" — inside the 10s window.
+        seed_recreate_op(
+            &pool,
+            "vm-backoff",
+            1,
+            1,
+            "Failed",
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await;
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass (backoff)");
+        assert_eq!(
+            recreate_op_rows(&pool, "vm-backoff").await.len(),
+            1,
+            "a re-drive inside its backoff window must not be re-issued"
+        );
+
+        // Elapse the window: backdate the prior re-drive's update.
+        sqlx::query(
+            "UPDATE operations SET updated_at = '2026-01-01T00:00:00Z' \
+                     WHERE idempotency_key = 'recreate:vm-backoff:1:1'",
+        )
+        .execute(&pool)
+        .await
+        .expect("backdate prior re-drive");
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass (due)");
+        let rows = recreate_op_rows(&pool, "vm-backoff").await;
+        assert_eq!(
+            rows.len(),
+            2,
+            "the next attempt is issued once due: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.0 == "recreate:vm-backoff:1:2"),
+            "attempt numbering advances: {rows:?}"
+        );
+    }
+
+    /// §7 CP row "exhaustion → Failed with reason": once
+    /// `MAX_DISPATCH_RETRIES` re-drives have been issued, the pass
+    /// marks the VM visibly Failed via a terminal `RecreateVm`
+    /// operation carrying `CREATE_REDRIVE_EXHAUSTED` and the reported
+    /// Core failure code — never a silent zombie. The fixed marker key
+    /// converges repeat passes on the one row.
+    #[tokio::test]
+    async fn redrive_exhaustion_marks_vm_failed_with_reason() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_failed_observed_state(&pool, "vm-exhausted", "node-a", "STORD_ATTACH_FAILED").await;
+        seed_journaled_create(&pool, "vm-exhausted", 2, "Failed", "STORD_ATTACH_FAILED").await;
+        for attempt in 1..=i64::from(MAX_DISPATCH_RETRIES) {
+            seed_recreate_op(
+                &pool,
+                "vm-exhausted",
+                2,
+                attempt,
+                "Failed",
+                "2026-01-01T00:00:00Z",
+            )
+            .await;
+        }
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass (exhausted)");
+
+        let rows = recreate_op_rows(&pool, "vm-exhausted").await;
+        let marker = rows
+            .iter()
+            .find(|r| r.0 == "recreate:vm-exhausted:2:exhausted")
+            .unwrap_or_else(|| panic!("exhaustion marker must exist: {rows:?}"));
+        assert_eq!(marker.1, "Failed", "the marker is terminal Failed");
+        assert_eq!(
+            marker.2.as_deref(),
+            Some("CREATE_REDRIVE_EXHAUSTED"),
+            "the marker carries the exhaustion code"
+        );
+        assert!(
+            rows.iter().all(|r| r.0 != "recreate:vm-exhausted:2:4"),
+            "no attempt beyond the bound is issued"
+        );
+        let marker_message: String = sqlx::query_scalar(
+            "SELECT error_message FROM operations \
+             WHERE idempotency_key = 'recreate:vm-exhausted:2:exhausted'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("marker error_message");
+        assert!(
+            marker_message.contains("STORD_ATTACH_FAILED"),
+            "the marker reports the agent's failure code: {marker_message}"
+        );
+
+        // A repeat pass converges on the one marker row (no duplication,
+        // no re-marking).
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("repeat re-drive pass");
+        assert_eq!(
+            recreate_op_rows(&pool, "vm-exhausted").await.len(),
+            rows.len(),
+            "repeat passes must not duplicate the exhaustion marker"
+        );
+    }
+
+    /// §7 CP refusal arm: a failed VM with no journaled create
+    /// operation has no generation to re-issue at — the pass refuses
+    /// rather than guessing.
+    #[tokio::test]
+    async fn redrive_skips_failed_vm_without_journaled_create() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_failed_observed_state(&pool, "vm-nojournal", "node-a", "BACKEND_IO_ERROR").await;
+
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass");
+
+        assert!(
+            recreate_op_rows(&pool, "vm-nojournal").await.is_empty(),
+            "no journaled create to derive a generation from — must not re-drive"
+        );
+    }
+
+    /// #368 review round 2 — joins the resolve→report→re-drive path across
+    /// the CP seam. The agent half is pinned in chv-agent-core
+    /// (`resolve_inspect_required_as_failed_reports_failed_state_for_redrive`):
+    /// after the operator resolves a crash-interrupted re-drive as Failed,
+    /// P1 reports the VM as `runtime_status="Failed"` with
+    /// `last_error="OPERATOR_RESOLUTION"` and `observed_generation="0"`.
+    /// This test feeds that EXACT reported state through the REAL
+    /// telemetry ingestion (`TelemetryServiceImplementation::report_vm_state`
+    /// — the same `vm_observed_state` upsert the gRPC server performs) and
+    /// asserts `redrive_failed_creates` re-arms: while the crashed re-drive
+    /// is unresolved the agent reports `Pending` (selection closed), and
+    /// the Failed report issues the next attempt.
+    #[tokio::test]
+    async fn redrive_rearms_after_operator_resolves_inspect_required() {
+        use crate::telemetry::{TelemetryService, TelemetryServiceImplementation};
+        use chv_controlplane_store::{
+            AlertRepository, EventRepository, NodeRepository, ObservedStateRepository,
+        };
+
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_vm(&pool, "vm-crash", "node-a").await;
+        seed_journaled_create(&pool, "vm-crash", 1, "Failed", "RUNTIME_UNAVAILABLE").await;
+        // The first re-drive was dispatched and acked ok at submit level
+        // (the CP's view of the re-drive the agent later crashed on); it
+        // is terminal here, so the incomplete-create-family gate is open.
+        seed_recreate_op(&pool, "vm-crash", 1, 1, "Succeeded", "2026-01-01T00:00:00Z").await;
+
+        // The real telemetry ingestion path — the same upsert the CP's
+        // gRPC server performs for the agent's VmStateReport.
+        let telemetry = TelemetryServiceImplementation::new(
+            NodeRepository::new(pool.clone()),
+            ObservedStateRepository::new(pool.clone()),
+            EventRepository::new(pool.clone()),
+            AlertRepository::new(pool.clone()),
+        );
+        let report =
+            |runtime_status: &'static str, last_error: &'static str| proto::VmStateReport {
+                node_id: "node-a".to_string(),
+                vm_id: "vm-crash".to_string(),
+                runtime_status: runtime_status.to_string(),
+                observed_generation: "0".to_string(),
+                health_status: "Unknown".to_string(),
+                last_error: last_error.to_string(),
+                reported_unix_ms: 1_759_000_000_000,
+                ..Default::default()
+            };
+
+        // Crash window: the agent's re-drive is inspect-required, so P1
+        // reports Pending (never the desired-state phantom) — the
+        // re-drive pass must not select the VM.
+        telemetry
+            .report_vm_state(report("Pending", ""))
+            .await
+            .expect("telemetry report (inspect-required window)");
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass (crash window)");
+        assert_eq!(
+            recreate_op_rows(&pool, "vm-crash").await.len(),
+            1,
+            "an inspect-required (Pending-reported) VM must not be re-driven"
+        );
+
+        // The operator resolves the inspect-required re-drive as Failed →
+        // P1 reports Failed with the resolution code (the exact shape the
+        // agent-tier counterpart test produces).
+        telemetry
+            .report_vm_state(report("Failed", "OPERATOR_RESOLUTION"))
+            .await
+            .expect("telemetry report (post-resolution)");
+
+        // The ingestion path itself is pinned: the reported state is what
+        // the selection keys on.
+        let (observed_status, observed_error): (String, Option<String>) = sqlx::query_as(
+            "SELECT runtime_status, last_error FROM vm_observed_state WHERE vm_id = 'vm-crash'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("observed state row");
+        assert_eq!(observed_status, "Failed");
+        assert_eq!(observed_error.as_deref(), Some("OPERATOR_RESOLUTION"));
+
+        // Re-armed: the next attempt issues (attempt+1).
+        test_orchestrator(&pool, "")
+            .redrive_failed_creates()
+            .await
+            .expect("re-drive pass (re-armed)");
+        let rows = recreate_op_rows(&pool, "vm-crash").await;
+        assert_eq!(rows.len(), 2, "the re-drive must re-arm: {rows:?}");
+        let attempt2 = rows
+            .iter()
+            .find(|r| r.0 == "recreate:vm-crash:1:2")
+            .unwrap_or_else(|| panic!("attempt 2 must be issued: {rows:?}"));
+        assert_eq!(attempt2.1, "Accepted");
+        assert_eq!(attempt2.3.as_deref(), Some("redrive-attempt=2"));
+        assert_eq!(
+            attempt2.4,
+            Some(1),
+            "the re-issued attempt fences on the original create's generation"
+        );
+    }
+
+    /// Mock ReconcileService agent for the #368 end-to-end dispatch
+    /// test: records every ApplyVmDesiredState it receives and acks ok.
+    #[derive(Clone, Default)]
+    struct MockReconcileAgent {
+        vm_applies: std::sync::Arc<std::sync::Mutex<Vec<proto::ApplyVmDesiredStateRequest>>>,
+    }
+
+    fn mock_ok_ack(operation_id: &str) -> proto::AckResponse {
+        proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: operation_id.to_string(),
+                status: "ok".into(),
+                node_observed_generation: String::new(),
+                error_code: String::new(),
+                human_summary: String::new(),
+            }),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl proto::reconcile_service_server::ReconcileService for MockReconcileAgent {
+        async fn apply_node_desired_state(
+            &self,
+            _request: tonic::Request<proto::ApplyNodeDesiredStateRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Ok(tonic::Response::new(mock_ok_ack("")))
+        }
+
+        async fn apply_vm_desired_state(
+            &self,
+            request: tonic::Request<proto::ApplyVmDesiredStateRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            let inner = request.into_inner();
+            let operation_id = inner
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.vm_applies.lock().unwrap().push(inner);
+            Ok(tonic::Response::new(mock_ok_ack(&operation_id)))
+        }
+
+        async fn apply_volume_desired_state(
+            &self,
+            _request: tonic::Request<proto::ApplyVolumeDesiredStateRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Ok(tonic::Response::new(mock_ok_ack("")))
+        }
+
+        async fn apply_network_desired_state(
+            &self,
+            _request: tonic::Request<proto::ApplyNetworkDesiredStateRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Ok(tonic::Response::new(mock_ok_ack("")))
+        }
+
+        async fn acknowledge_desired_state_version(
+            &self,
+            _request: tonic::Request<proto::AcknowledgeDesiredStateVersionRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Ok(tonic::Response::new(mock_ok_ack("")))
+        }
+    }
+
+    /// §7 CP row "re-drive end-to-end at mock tier": a failed create is
+    /// re-driven through `tick()` and the re-drive dispatches to the
+    /// agent as ApplyVmDesiredState — the same desired-state path a
+    /// fresh create takes — fenced on the ORIGINAL create's generation.
+    /// The agent's ok ack converges the re-drive operation.
+    #[tokio::test]
+    async fn recreate_vm_dispatches_via_apply_vm_desired_state() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-redrive").await;
+        seed_failed_observed_state(&pool, "vm-e2e", "node-redrive", "BACKEND_IO_ERROR").await;
+        seed_journaled_create(&pool, "vm-e2e", 3, "Failed", "BACKEND_IO_ERROR").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockReconcileAgent::default();
+        {
+            let socket = pattern.replace("{node_id}", "node-redrive");
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service =
+                proto::reconcile_service_server::ReconcileServiceServer::new(agent.clone());
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // Tick 1: nothing Accepted to dispatch yet; the tail pass issues
+        // the re-drive.
+        orchestrator.tick().await.expect("tick 1");
+        let rows = recreate_op_rows(&pool, "vm-e2e").await;
+        assert_eq!(rows.len(), 1, "one re-drive issued: {rows:?}");
+        assert_eq!(rows[0].1, "Accepted");
+        let redrive_op_id: String = sqlx::query_scalar(
+            "SELECT operation_id FROM operations WHERE idempotency_key = 'recreate:vm-e2e:3:1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("re-drive operation id");
+
+        // Tick 2: claims the RecreateVm op and dispatches it to the agent
+        // through the create arm.
+        orchestrator.tick().await.expect("tick 2");
+
+        let applies = agent.vm_applies.lock().unwrap().clone();
+        assert_eq!(applies.len(), 1, "exactly one agent dispatch: {applies:?}");
+        let apply = &applies[0];
+        assert_eq!(apply.vm_id, "vm-e2e");
+        assert_eq!(apply.node_id, "node-redrive");
+        let meta = apply.meta.as_ref().expect("request meta");
+        assert_eq!(meta.operation_id, redrive_op_id);
+        assert_eq!(
+            meta.desired_state_version, "3",
+            "the re-drive fences on the ORIGINAL create's generation"
+        );
+        let fragment = apply.fragment.as_ref().expect("desired-state fragment");
+        assert_eq!(fragment.kind, "vm");
+        assert_eq!(fragment.generation, "3");
+        let spec: serde_json::Value =
+            serde_json::from_slice(&fragment.spec_json).expect("agent vm spec json");
+        assert_eq!(
+            spec["name"].as_str(),
+            Some("VM vm-e2e"),
+            "the re-drive carries the full agent spec: {spec}"
+        );
+
+        // The ok ack converged the re-drive operation, and the tail pass
+        // did not double-issue (backoff).
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                .bind(&redrive_op_id)
+                .fetch_one(&pool)
+                .await
+                .expect("re-drive status");
+        assert_eq!(status, "Succeeded");
+        assert_eq!(
+            recreate_op_rows(&pool, "vm-e2e").await.len(),
+            1,
+            "no second re-drive inside the backoff window"
         );
     }
 }
