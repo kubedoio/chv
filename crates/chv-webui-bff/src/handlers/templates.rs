@@ -419,13 +419,14 @@ pub async fn clone_vm_template(
     // Insert volume
     sqlx::query(
         r#"
-        INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, updated_at)
-        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, updated_at)
+        VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&volume_id)
     .bind(&node_id)
     .bind(format!("{}-disk", display_name))
+    .bind(&claims.sub)
     .bind(volume_size_bytes)
     .execute(&mut *tx)
     .await
