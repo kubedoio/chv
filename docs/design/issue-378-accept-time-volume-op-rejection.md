@@ -572,7 +572,11 @@ with one surface completed by #498's follow-up PR. As built:
   10/20/40 s retry curve. The follow-up closes both gaps: (a) when EVERY
   per-node failure is an `Unimplemented` refusal, `send_fabric_update`
   returns one `Unimplemented` carrying the deterministic per-node roll-up
-  (fan-out order) instead of `Internal`; (b) `dispatch_update_overlay`
+  (fan-out order — deterministic because the planner walks the peer list
+  returned by `get_fabric_peers_for_network`, which the store orders
+  `BY node_id`; the roll-up text reads "refused by all N failing
+  node(s)" since the partial-success shape means the failing nodes, not
+  all participants, refused) instead of `Internal`; (b) `dispatch_update_overlay`
   gained the terminal-write arm mirroring the single-node path (`Failed` /
   `UNSUPPORTED_BY_AGENT` before propagating, same flatten-on-write-failure
   convention), so the tick's existing bypass lands the operation terminal.
