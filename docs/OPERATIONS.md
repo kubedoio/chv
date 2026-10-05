@@ -320,6 +320,35 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 | Config syntax | `cat /etc/chv/stord.toml` / `cat /etc/chv/nwd.toml` |
 | Daemon logs | `journalctl -u chv-stord -f` / `journalctl -u chv-nwd -f` |
 
+If the node runs `chv-agent` with `stord_config_path` set in `/etc/chv/agent.toml`
+(#385 respawn config fidelity), the agent's supervisor respawns a dead stord with
+the operator's `stord.toml` verbatim — every operator key survives the respawn.
+An agent log line `stord_config_path unusable for respawn; falling back to the
+supervisor-generated config` means the file was unreadable, malformed, or its
+`socket_path` did not match the agent's `stord_socket`: the respawned daemon
+then runs the minimal generated config (allowlist per
+`stord_path_allowlist`, `runtime_dir` under the agent's data dir) and any
+operator keys — `backend_type`, `device_allowlist`, `[migration]`, a custom
+`runtime_dir` — are NOT in effect until the file is fixed. The agent user must
+be able to read the file (the standard install grants this via `chv-stord` group
+membership); hand-managed deployments should set `stord_config_path` to their
+`stord.toml` to get the pass-through behavior.
+
+A `stord.toml` that passes that check can still fail at daemon *startup*: a
+missing or unwritable `runtime_dir` parent (stord aborts when it cannot create
+its session store), a backend constructor with bad material (e.g. an LVM volume
+group that does not exist), or migration TLS files that stord validates when
+the listener comes up rather than at parse time. In that case the respawned
+stord exits immediately and the supervisor re-validates the file (it still
+parses and the socket still matches) and re-execs the operator path on its
+normal restart throttle (~5 s): it does **not** fall back to the generated
+config, because the fallback covers validation failures only. This mirrors
+systemd `Restart=on-failure` restarting `ExecStart=chv-stord /etc/chv/stord.toml`
+with the same broken file — the remedy is the same in both cases: fix the
+operator config (create/widen the `runtime_dir`, repair the backend or TLS
+material). The health check is never wedged: the agent keeps reporting stord
+unhealthy and keeps retrying under the throttle while the file is broken.
+
 ### Upgrade Failures
 
 The automated upgrade orchestrator was removed in PR #213, and the `chvctl upgrade` subcommands were removed in #427 — they targeted `/v1/upgrades` BFF routes that were never registered. There is no automated upgrade surface to troubleshoot; upgrades are performed manually (see "Upgrade Procedure (Manual)" below). If a manual binary swap leaves a node drained, force it back to a healthy state:

@@ -368,6 +368,12 @@ tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "/etc/chv/certs/ca.crt"
 
+# Stord respawn config fidelity (#385): point the supervisor at the
+# operator's stord.toml so a respawned stord keeps every operator key
+# (runtime_dir, backend_type, device_allowlist, [migration]) instead of
+# a minimal generated config. Omitted = historical generated respawn.
+stord_config_path = "/etc/chv/stord.toml"
+
 # Guest-liveness (boot) watchdog — OPT-IN, disabled when omitted.
 # Detects a guest frozen mid-boot (the cloud-hypervisor serial-manager
 # defect, present at both the former v43.0 pin and the current v53.0 pin
