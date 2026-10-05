@@ -152,6 +152,11 @@ impl VtepRepository {
     /// missing public key / endpoint / fabric IP are returned as-is (with
     /// `None` fields) so the plan compiler can fail closed naming the node
     /// instead of silently shrinking the flood list.
+    ///
+    /// The result is ordered by `node_id` (the store's house ordering for
+    /// node lists): the fabric-plan compile order — and therefore the
+    /// per-node roll-up order of the all-refusals `Unimplemented` error
+    /// from the overlay fan-out — is deterministic only if this query is.
     pub async fn get_fabric_peers_for_network(
         &self,
         network_id: &str,
@@ -162,7 +167,8 @@ impl VtepRepository {
                FROM vtep_registry vr
                INNER JOIN vm_desired_state vds ON vds.target_node_id = vr.node_id
                INNER JOIN vm_nic_desired_state vnds ON vnds.vm_id = vds.vm_id
-               WHERE vnds.network_id = ?"#,
+               WHERE vnds.network_id = ?
+               ORDER BY vr.node_id"#,
         )
         .bind(network_id)
         .fetch_all(&self.pool)

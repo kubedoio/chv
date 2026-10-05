@@ -13,9 +13,16 @@ use tracing::{info, warn};
 
 /// Manages fabric plan fan-out across cluster nodes.
 ///
-/// The overlay is eventually consistent: individual node failures are
-/// logged but do not fail the overall operation. Nodes that miss an update
-/// are corrected by the next plan dispatch.
+/// The overlay is eventually consistent for recoverable failures: a
+/// fan-out with mixed per-node failures (or non-refusal failures only)
+/// aggregates into one `Internal` error and the operation stays on the
+/// shared retry curve — nodes that miss an update are corrected by the
+/// next plan dispatch. The exception is the all-refusals shape (#378 §7
+/// fast-fail): when EVERY failure in the fan-out is an `Unimplemented`
+/// refusal — including the partial-success shape where some nodes applied
+/// their plan and only the failing nodes refused — the refusal identity is
+/// preserved and the operation fails terminally (`Failed` /
+/// `UNSUPPORTED_BY_AGENT`) on the first dispatch, with no re-dispatch.
 #[derive(Clone)]
 pub struct OverlayManager {
     node_pool: NodeClientPool,
@@ -99,16 +106,17 @@ impl OverlayManager {
             // operation terminal (`Failed` / `UNSUPPORTED_BY_AGENT`, no
             // retry) exactly like the single-node dispatch path. The
             // reason is the per-node roll-up in fan-out order (the plans
-            // arrive in a deterministic compile order), so the operation
-            // record still shows which agents refused. Mixed failures
-            // (some refusals, some other classes) deliberately keep the
-            // Internal aggregation below: a partial refusal is not
-            // terminal-class for the operation — the non-refusing nodes
-            // may still fail transiently and succeed on retry — so the
-            // shared retry curve must stay in charge.
+            // arrive in a deterministic compile order: the planner walks
+            // the peer list, which the store returns `ORDER BY node_id`),
+            // so the operation record still shows which agents refused.
+            // Mixed failures (some refusals, some other classes)
+            // deliberately keep the Internal aggregation below: a partial
+            // refusal is not terminal-class for the operation — the
+            // non-refusing nodes may still fail transiently and succeed
+            // on retry — so the shared retry curve must stay in charge.
             Err(ChvError::Unimplemented {
                 reason: format!(
-                    "fabric update for network {network_id} refused by all {} node(s): {}",
+                    "fabric update for network {network_id} refused by all {} failing node(s): {}",
                     failures.len(),
                     failures.join("; ")
                 ),

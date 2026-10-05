@@ -761,3 +761,77 @@ async fn second_registration_does_not_overwrite_stored_underlay_endpoint() {
         "a NULL endpoint is populated by the first registration carrying one"
     );
 }
+
+// --- ADR-021 fabric peer ordering (second-pass review of #500) ---
+
+/// `get_fabric_peers_for_network` must return the flood list ordered by
+/// `node_id`: the fabric-plan compile order — and therefore the per-node
+/// roll-up order of the all-refusals `Unimplemented` error from the
+/// overlay fan-out — is deterministic only if this query is. Seed four
+/// peers in non-sorted registration order and assert the result comes
+/// back sorted (without an ORDER BY, SQLite returns the rows in
+/// insertion order and the roll-up would follow registration order
+/// instead).
+#[tokio::test]
+async fn get_fabric_peers_for_network_returns_peers_in_node_id_order() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = VtepRepository::new(pool.clone());
+
+    // Registration order deliberately differs from node_id order.
+    let nodes = ["node-ord-m", "node-ord-z", "node-ord-a", "node-ord-b"];
+    for node_id in nodes {
+        seed_fabric_node_row(&pool, node_id).await;
+        repo.register_fabric_identity(node_id, &format!("pub-{node_id}"), 1500, None)
+            .await
+            .expect("fabric identity registration must succeed");
+    }
+
+    // One network, one VM placement per node: every node joins the flood
+    // list through the vm_nic_desired_state join.
+    sqlx::query(
+        "INSERT INTO networks (network_id, node_id, display_name, overlay_type) \
+         VALUES ('net-ord', 'node-ord-m', 'net-ord', 'vxlan')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert network");
+    for (idx, node_id) in nodes.iter().enumerate() {
+        let vm_id = format!("vm-ord-{idx}");
+        sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES (?, ?)")
+            .bind(&vm_id)
+            .bind(format!("VM {vm_id}"))
+            .execute(&pool)
+            .await
+            .expect("insert vm");
+        sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, target_node_id) VALUES (?, 1, ?)")
+            .bind(&vm_id)
+            .bind(node_id)
+            .execute(&pool)
+            .await
+            .expect("insert vm desired state");
+        sqlx::query(
+            "INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id) VALUES (?, ?, 'net-ord')",
+        )
+        .bind(format!("nic-{vm_id}"))
+        .bind(&vm_id)
+        .execute(&pool)
+        .await
+        .expect("insert vm nic desired state");
+    }
+
+    let peers = repo
+        .get_fabric_peers_for_network("net-ord")
+        .await
+        .expect("peer query must succeed");
+
+    let ids: Vec<&str> = peers.iter().map(|p| p.node_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["node-ord-a", "node-ord-b", "node-ord-m", "node-ord-z"],
+        "the flood list must come back in node_id order regardless of \
+         registration order, got {ids:?}"
+    );
+    // Sanity: the join picked up every participant exactly once.
+    assert_eq!(peers.len(), nodes.len());
+}
