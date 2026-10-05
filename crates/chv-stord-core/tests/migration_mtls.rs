@@ -24,7 +24,11 @@
 //!   `error_message` — previously all three collapsed to "transport error";
 //! * receiver-side, a peer rejected at the TLS handshake must produce a
 //!   warn-level log line (peer address + alert/reason, content-free) on the
-//!   destination stord — previously nothing was logged at all.
+//!   destination stord — previously nothing was logged at all. This covers
+//!   both directions of the rejection: server-initiated (no client
+//!   certificate, untrusted client CA) and sender-initiated (the sender
+//!   aborts mid-handshake with a fatal alert when its root store does not
+//!   trust the server certificate).
 
 use chv_stord_api::chv_stord_api::storage_migration_service_client::StorageMigrationServiceClient;
 use chv_stord_api::chv_stord_api::MigrationMessage;
@@ -646,6 +650,69 @@ async fn wait_for_capture(
     }
 }
 
+/// The log lines (whole lines) containing `needle` in the captured slice
+/// (the same line-bound helper `migration_accept_loop.rs` uses).
+fn captured_lines_containing<'a>(captured: &'a str, needle: &str) -> Vec<&'a str> {
+    captured.lines().filter(|l| l.contains(needle)).collect()
+}
+
+/// Drive a raw rustls client whose root store does NOT trust the server's
+/// certificate (while presenting an otherwise valid client identity): the
+/// client aborts the handshake with a fatal `UnknownCA` alert as soon as it
+/// receives the server's certificate flight. This is the sender-initiated
+/// mirror of the receiver's own rejections — the documented case where the
+/// *sender* aborts mid-handshake (e.g. its `ca_cert_path` does not match
+/// the destination's CA), which surfaces receiver-side as `received fatal
+/// alert: UnknownCA` through the same warn path. A raw connector (rather
+/// than the tonic `probe`) is used because the failure happens client-side
+/// before any gRPC machinery runs.
+///
+/// Returns the client's local port so the caller can pin the receiver-side
+/// log line to exactly this connection.
+async fn probe_with_untrusting_root(
+    addr: SocketAddr,
+    untrusted_root_pem: &[u8],
+    client_cert: &[u8],
+    client_key: &[u8],
+) -> u16 {
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    let mut cursor = std::io::Cursor::new(untrusted_root_pem.to_vec());
+    for cert in rustls_pemfile::certs(&mut cursor) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let mut cert_cursor = std::io::Cursor::new(client_cert.to_vec());
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_cursor)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut key_cursor = std::io::Cursor::new(client_key.to_vec());
+    let key = rustls_pemfile::private_key(&mut key_cursor)
+        .unwrap()
+        .unwrap();
+
+    let config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .unwrap();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let local_port = tcp.local_addr().unwrap().port();
+    let server_name =
+        tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap();
+    let err = connector
+        .connect(server_name, tcp)
+        .await
+        .expect_err("a client with an untrusting root store must abort the handshake");
+    // Sanity: the client aborted because it rejected the *server*
+    // certificate (its own validation), not for an unrelated reason.
+    let chain = error_chain(&err);
+    assert!(
+        chain.contains("UnknownIssuer") || chain.contains("invalid peer certificate"),
+        "client must fail validating the server certificate, got: {chain}"
+    );
+    local_port
+}
+
 #[tokio::test]
 async fn migration_tls_listener_logs_rejected_handshakes() {
     install_crypto_provider();
@@ -733,5 +800,74 @@ async fn migration_tls_listener_logs_rejected_handshakes() {
     assert!(
         !rogue.contains("BEGIN CERTIFICATE") && !rogue.contains("BEGIN PRIVATE"),
         "rejected-handshake log must not contain PEM material:\n{rogue}"
+    );
+
+    // (d) A client whose root store does not trust the SERVER certificate:
+    // the *sender* aborts mid-handshake with a fatal `UnknownCA` alert
+    // (e.g. its `ca_cert_path` names a CA the destination does not use).
+    // The receiver surfaces the peer-sent alert through the same warn path
+    // as its own rejections — this pins the exact rustls 0.23 alert
+    // rendering the #402 changelog documents (`received fatal alert:
+    // UnknownCA`), which was previously asserted nowhere.
+    let baseline = buf.lock().unwrap().len();
+    let peer_port = probe_with_untrusting_root(
+        addr,
+        &test_ca("chv-migration-logtest-unrelated-ca").cert_pem,
+        &client_cert,
+        &client_key,
+    )
+    .await;
+    let alert = wait_for_capture(
+        &buf,
+        baseline,
+        &[
+            "rejected migration TLS handshake",
+            // Pin the line to exactly this connection (the sender-side
+            // test drives the same class of client concurrently and its
+            // receiver's warn lines land in the same process-global
+            // buffer).
+            format!("127.0.0.1:{peer_port}").as_str(),
+            "WARN",
+            // rustls 0.23 renders a peer-sent fatal UnknownCA alert on the
+            // receiving side exactly like this.
+            "received fatal alert: UnknownCA",
+        ],
+    )
+    .await;
+    // Line-bound: `wait_for_capture` needles match against the whole
+    // captured slice, so in an adverse schedule a concurrent sender-test
+    // line of the same class (same alert, different peer) could satisfy
+    // the content needle on its own. Bind the alert content to the SAME
+    // line that carries the pinned peer port — the style
+    // `migration_accept_loop.rs` pins its timeout line with.
+    let pinned = format!("127.0.0.1:{peer_port}");
+    let lines = captured_lines_containing(&alert, &pinned);
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one rejected-handshake line expected for peer {pinned}:\n{alert}"
+    );
+    let line = lines[0];
+    assert!(
+        line.contains("rejected migration TLS handshake") && line.contains("WARN"),
+        "the pinned line must be the rejection warn line:\n{line}"
+    );
+    assert!(
+        line.contains("received fatal alert: UnknownCA"),
+        "the pinned peer's rejection must carry the sender-abort UnknownCA alert:\n{line}"
+    );
+    // Distinguishability: the sender-abort rejection carries none of the
+    // receiver-initiated reasons.
+    assert!(
+        !alert.contains("peer sent no certificates"),
+        "sender-abort rejection must not carry the no-certificate reason:\n{alert}"
+    );
+    assert!(
+        !alert.contains("UnknownIssuer"),
+        "sender-abort rejection must not carry the untrusted-client-CA reason:\n{alert}"
+    );
+    assert!(
+        !alert.contains("BEGIN CERTIFICATE") && !alert.contains("BEGIN PRIVATE"),
+        "rejected-handshake log must not contain PEM material:\n{alert}"
     );
 }
