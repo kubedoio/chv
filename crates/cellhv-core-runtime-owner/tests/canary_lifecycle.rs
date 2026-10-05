@@ -61,6 +61,7 @@ fn create_submission(vm_id: &str, op_id: &str) -> SubmitMutation {
             read_only: false,
             size_bytes: None,
             seed_from: None,
+            backend_class: None,
         }],
         networks: vec![],
         requested_power_state: RequestedPowerState::Stopped,

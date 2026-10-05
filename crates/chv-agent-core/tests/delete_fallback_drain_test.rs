@@ -40,6 +40,7 @@ fn definition(vm_id: &str) -> VmDefinition {
                 read_only: false,
                 size_bytes: None,
                 seed_from: None,
+                backend_class: None,
             },
             StorageAttachmentRef {
                 attachment_id: format!("{vm_id}-vol-1"),
@@ -47,6 +48,7 @@ fn definition(vm_id: &str) -> VmDefinition {
                 read_only: false,
                 size_bytes: None,
                 seed_from: None,
+                backend_class: None,
             },
         ],
         networks: vec![NetworkAttachmentRef {

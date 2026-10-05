@@ -193,7 +193,8 @@ impl Orchestrator {
                     (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
                     (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
-                ) AS node_id
+                ) AS node_id,
+                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
             "#,
         )
         .fetch_all(&self.pool)
@@ -226,7 +227,8 @@ impl Orchestrator {
                     (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
                     (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
-                ) AS node_id
+                ) AS node_id,
+                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
             "#,
         )
         .fetch_all(&self.pool)
@@ -888,6 +890,10 @@ impl Orchestrator {
                         &generation,
                         &row.operation_id,
                         None,
+                        // #379 PR 2 (A8): the volume's class rides the
+                        // attach dispatch (resolved in the claim query);
+                        // NULL keeps the empty spec_json byte-exact.
+                        row.volume_storage_class.as_deref(),
                     )
                     .await
             }
@@ -1529,7 +1535,8 @@ impl Orchestrator {
             SELECT
                 vds.volume_id,
                 vds.read_only,
-                v.capacity_bytes
+                v.capacity_bytes,
+                v.storage_class
             FROM volume_desired_state vds
             JOIN volumes v ON v.volume_id = vds.volume_id
             WHERE vds.attached_vm_id = ?
@@ -1580,6 +1587,11 @@ impl Orchestrator {
                             None
                         }
                     }),
+                    // #379 PR 2 (A5): the volume's stord backend class
+                    // leaves the store — NULL stays absent on the wire
+                    // (the agent's "local" default, PR 1's A6 seam);
+                    // "local" is never materialized into the spec.
+                    backend_class: v.storage_class,
                 })
                 .collect();
 
@@ -1817,6 +1829,11 @@ struct AcceptedOperationRow {
     desired_generation: Option<i64>,
     node_id: Option<String>,
     correlation_id: Option<String>,
+    /// #379 PR 2 (A8): the volume's storage class, resolved in the same
+    /// claim statement for Volume-kind rows (NULL for other kinds and for
+    /// class-less volumes) so the AttachVolume dispatch can carry it in
+    /// `volume_spec_json` without a follow-up query.
+    volume_storage_class: Option<String>,
 }
 
 /// #368 P2 selection: one VM whose desired state still demands it, whose
@@ -1868,6 +1885,8 @@ struct VolumeDesiredStateRow {
     volume_id: String,
     read_only: Option<bool>,
     capacity_bytes: Option<i64>,
+    /// #379 PR 2 (A5): the volume's storage class (NULL = local).
+    storage_class: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1910,6 +1929,13 @@ struct AgentDiskSpec {
     read_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     size_bytes: Option<u64>,
+    /// #379 PR 2 (A5): the volume's stord backend class, from
+    /// `volumes.storage_class` — serialized under the key the agent's
+    /// `DiskSpec` parser reads (`backend_class`, PR 1's A6 field) and
+    /// OMITTED when NULL so the agent's `"local"` default applies
+    /// (NULL = local end-to-end; the string is never materialized).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_class: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1961,7 +1987,8 @@ mod tests {
                 (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
                 (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                 (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
-            ) AS node_id
+            ) AS node_id,
+            (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
     "#;
 
     async fn seed_node(pool: &StorePool, node_id: &str) {
@@ -2251,6 +2278,332 @@ mod tests {
             second.is_empty(),
             "second tick must not reclaim already-Running rows"
         );
+    }
+
+    // ============================================================
+    // #379 PR 2 — CP class carry (A5 spec, A8 attach dispatch)
+    // ============================================================
+
+    /// #379 PR 2 (A5): `build_agent_vm_spec` embeds each volume's
+    /// storage class under the key the agent's `DiskSpec` parser reads —
+    /// a NULL class OMITS the key (the agent's "local" default applies;
+    /// the string is never materialized), a set class rides verbatim.
+    #[tokio::test]
+    async fn build_agent_vm_spec_embeds_volume_backend_class() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_vm(&pool, "vm-spec-cls", "node-a").await;
+        for (volume_id, class) in [("vol-cls-lvm", Some("lvm")), ("vol-cls-null", None)] {
+            sqlx::query(
+                "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+                 VALUES (?, 'node-a', ?, 1024, ?)",
+            )
+            .bind(volume_id)
+            .bind(format!("Vol {volume_id}"))
+            .bind(class)
+            .execute(&pool)
+            .await
+            .expect("seed volume");
+            sqlx::query(
+                "INSERT INTO volume_desired_state \
+                 (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+                 VALUES (?, 1, 'Pending', 'vm-spec-cls', 0)",
+            )
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed volume desired state");
+        }
+
+        let orchestrator = Orchestrator::new(
+            pool.clone(),
+            OperationRepository::new(pool.clone()),
+            String::new(),
+            "/kernel".to_string(),
+            String::new(),
+            NodeClientPool::new(),
+            crate::convergence_metrics::new_shared(),
+        );
+        let spec_json = orchestrator
+            .build_agent_vm_spec("vm-spec-cls")
+            .await
+            .expect("build agent vm spec");
+        let spec: serde_json::Value = serde_json::from_str(&spec_json).expect("spec json");
+        let disks = spec["disks"].as_array().expect("disks array");
+        assert_eq!(disks.len(), 2, "both disks must ride the spec: {spec}");
+
+        let by_volume = |id: &str| {
+            disks
+                .iter()
+                .find(|d| d["volume_id"] == id)
+                .unwrap_or_else(|| panic!("disk for {id} missing: {spec}"))
+                .clone()
+        };
+        assert_eq!(
+            by_volume("vol-cls-lvm")["backend_class"].as_str(),
+            Some("lvm"),
+            "a set class must ride the spec verbatim: {spec}"
+        );
+        assert!(
+            by_volume("vol-cls-null").get("backend_class").is_none(),
+            "a NULL class must OMIT the key (never materialize 'local'): {spec}"
+        );
+    }
+
+    /// #379 PR 2 (A5 wire hardening): byte-level pin — a classless
+    /// `AgentDiskSpec` serializes to EXACTLY the pre-PR2 bytes (the
+    /// new field is `skip_serializing_if`-omitted), so an old agent's
+    /// serde-tolerant `DiskSpec` receives an unchanged spec. The JSON
+    /// assertions above check semantics; this pins the raw bytes.
+    #[test]
+    fn agent_disk_spec_classless_serialization_is_byte_identical_to_pre_pr2() {
+        let spec = AgentDiskSpec {
+            volume_id: "vol-1".to_string(),
+            read_only: false,
+            size_bytes: Some(1024),
+            backend_class: None,
+        };
+        assert_eq!(
+            serde_json::to_vec(&spec).unwrap(),
+            br#"{"volume_id":"vol-1","read_only":false,"size_bytes":1024}"#.to_vec(),
+            "a NULL class must not change the wire bytes an old agent receives"
+        );
+    }
+
+    /// #379 PR 2 (A8): the claim query resolves the volume's storage
+    /// class in the same statement — Some for a class-carrying volume,
+    /// NULL for a class-less volume and for non-volume ops.
+    #[tokio::test]
+    async fn claim_returning_resolves_volume_storage_class() {
+        let pool = create_test_pool().await;
+
+        seed_node(&pool, "node-a").await;
+        seed_node(&pool, "node-b").await;
+        seed_vm(&pool, "vm-1", "node-a").await;
+        seed_volume(&pool, "vol-bare", "node-b").await;
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+             VALUES ('vol-lvm', 'node-b', 'Vol vol-lvm', 1024, 'lvm')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed class-carrying volume");
+
+        seed_accepted_op(
+            &pool,
+            "op-vol-lvm",
+            "Volume",
+            "vol-lvm",
+            "AttachVolume",
+            "2026-01-01T00:00:01Z",
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-vol-bare",
+            "Volume",
+            "vol-bare",
+            "AttachVolume",
+            "2026-01-01T00:00:02Z",
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-vm",
+            "Vm",
+            "vm-1",
+            "StartVm",
+            "2026-01-01T00:00:03Z",
+        )
+        .await;
+
+        let rows = sqlx::query_as::<_, AcceptedOperationRow>(CLAIM_ACCEPTED_SQL)
+            .fetch_all(&pool)
+            .await
+            .expect("claim query must succeed");
+
+        let by_id: std::collections::HashMap<&str, &AcceptedOperationRow> =
+            rows.iter().map(|r| (r.operation_id.as_str(), r)).collect();
+        assert_eq!(
+            by_id["op-vol-lvm"].volume_storage_class.as_deref(),
+            Some("lvm"),
+            "a class-carrying volume resolves its class in the claim"
+        );
+        assert_eq!(
+            by_id["op-vol-bare"].volume_storage_class, None,
+            "a class-less volume resolves NULL (the local default)"
+        );
+        assert_eq!(
+            by_id["op-vm"].volume_storage_class, None,
+            "a non-volume op resolves NULL"
+        );
+    }
+
+    /// #379 PR 2 (A8) + the clone carry: the AttachVolume dispatch
+    /// populates `volume_spec_json` from the volume's class —
+    /// `{"backend_class":"lvm"}` for a class-carrying volume, EMPTY
+    /// bytes for a NULL-class volume (byte-exact with the pre-#379
+    /// dispatch). The class-carrying volume is a #501 CLONE TARGET
+    /// (the clone copies `storage_class` from the source), pinning that
+    /// a clone of a class-carrying volume dispatches with the class.
+    #[tokio::test]
+    async fn attach_volume_dispatch_carries_the_volume_class() {
+        use crate::lifecycle::LifecycleService as _;
+        use chv_controlplane_store::{DesiredStateRepository, EventRepository, NodeRepository};
+        use chv_controlplane_types::domain::{Generation, NodeId, ResourceId};
+
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-att").await;
+
+        // A class-carrying source volume, cloned through the real #501
+        // transaction so the target row is exactly what production
+        // materializes (storage_class copied from the source).
+        let clone_service = crate::lifecycle::LifecycleServiceImplementation::new(
+            NodeRepository::new(pool.clone()),
+            OperationRepository::new(pool.clone()),
+            EventRepository::new(pool.clone()),
+            DesiredStateRepository::new(pool.clone()),
+        );
+        DesiredStateRepository::new(pool.clone())
+            .upsert_volume(&chv_controlplane_store::VolumeDesiredStateInput {
+                volume_id: ResourceId::new("vol-clone-src").unwrap(),
+                node_id: Some(NodeId::new("node-att").unwrap()),
+                display_name: "vol-clone-src".into(),
+                capacity_bytes: 1024,
+                volume_kind: Some("disk".into()),
+                storage_class: Some("lvm".into()),
+                owner_id: Some("user-att".into()),
+                desired_generation: Generation::new(1),
+                desired_status: None,
+                requested_by: Some("test-user".into()),
+                updated_by: None,
+                attached_vm_id: None,
+                attachment_mode: None,
+                device_name: None,
+                read_only: false,
+                resize_to_bytes: None,
+                snapshot_op: None,
+                snapshot_name: None,
+                clone_source_volume_id: None,
+                requested_unix_ms: 1000,
+            })
+            .await
+            .unwrap();
+        let ack = clone_service
+            .clone_volume(proto::CloneVolumeRequest {
+                meta: Some(proto::RequestMeta {
+                    operation_id: "op-clone-src".into(),
+                    requested_by: "test-user".into(),
+                    target_node_id: "node-att".into(),
+                    desired_state_version: "1".into(),
+                    request_unix_ms: 1000,
+                }),
+                node_id: "node-att".into(),
+                source_volume_id: "vol-clone-src".into(),
+                target_volume_id: "vol-clone-dst".into(),
+            })
+            .await
+            .expect("clone must be accepted");
+        assert_eq!(
+            ack.result.expect("ack result").status,
+            "OK",
+            "clone must be accepted"
+        );
+        let cloned_class: Option<String> = sqlx::query_scalar(
+            "SELECT storage_class FROM volumes WHERE volume_id = 'vol-clone-dst'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("clone target row");
+        assert_eq!(
+            cloned_class.as_deref(),
+            Some("lvm"),
+            "the #501 clone must copy the source's class (#384/#501 pin, restated for #379)"
+        );
+
+        // A NULL-class volume for the byte-exact empty-spec_json leg.
+        seed_volume(&pool, "vol-bare", "node-att").await;
+        sqlx::query(
+            "INSERT INTO volume_desired_state \
+             (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+             VALUES ('vol-bare', 1, 'Pending', NULL, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed volume desired state");
+
+        for (op_id, volume_id) in [("op-att-cls", "vol-clone-dst"), ("op-att-bare", "vol-bare")] {
+            sqlx::query(
+                "INSERT INTO operations \
+                 (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+                  desired_generation, correlation_id, requested_at, updated_at) \
+                 VALUES (?, ?, 'Volume', ?, 'AttachVolume', 'Accepted', 1, 'vm=vm-att', \
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(op_id)
+            .bind(format!("idem-{op_id}"))
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed attach op");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-att", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let calls = agent.attach_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "both attach ops dispatched: {calls:?}");
+        let spec_json_for = |volume_id: &str| {
+            calls
+                .iter()
+                .find(|c| c.volume.as_ref().map(|v| v.volume_id.as_str()) == Some(volume_id))
+                .unwrap_or_else(|| panic!("no attach dispatch for {volume_id}: {calls:?}"))
+                .volume
+                .clone()
+                .unwrap()
+                .volume_spec_json
+        };
+        assert_eq!(
+            spec_json_for("vol-clone-dst"),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "a class-carrying volume's attach must carry exactly the class key"
+        );
+        assert_eq!(
+            spec_json_for("vol-bare").len(),
+            0,
+            "a NULL-class volume's attach must keep the empty spec_json (byte-exact)"
+        );
+
+        // Both ops converged on the OK ack.
+        for op_id in ["op-att-cls", "op-att-bare"] {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                    .bind(op_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("op status");
+            assert_eq!(status, "Succeeded", "{op_id} must converge");
+        }
     }
 
     // ============================================================
@@ -2929,6 +3282,10 @@ mod tests {
         overlay_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::UpdateOverlayRequest>>>,
         overlay_status_by_node:
             std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, tonic::Status>>>,
+        /// #379 PR 2 (A8): every AttachVolume request, answered with the
+        /// OK ack so the dispatch converges; tests assert the
+        /// `volume_spec_json` the CP threaded.
+        attach_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::AttachVolumeRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -3009,9 +3366,24 @@ mod tests {
 
         async fn attach_volume(
             &self,
-            _request: tonic::Request<proto::AttachVolumeRequest>,
+            request: tonic::Request<proto::AttachVolumeRequest>,
         ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented(""))
+            let inner = request.into_inner();
+            let op_id = inner
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.attach_calls.lock().unwrap().push(inner);
+            Ok(tonic::Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: op_id,
+                    status: "ok".to_string(),
+                    node_observed_generation: "1".to_string(),
+                    error_code: "".to_string(),
+                    human_summary: "volume attached".to_string(),
+                }),
+            }))
         }
 
         async fn detach_volume(
@@ -3318,6 +3690,7 @@ mod tests {
             overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3408,6 +3781,7 @@ mod tests {
             overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3490,6 +3864,7 @@ mod tests {
             overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3738,6 +4113,7 @@ mod tests {
             overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
                 overlay_status_by_node,
             )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());
@@ -3837,6 +4213,7 @@ mod tests {
             overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
                 overlay_status_by_node,
             )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());

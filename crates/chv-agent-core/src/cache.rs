@@ -722,11 +722,23 @@ impl NodeCache {
             "kernel_path": def.boot.kernel.clone(),
             "firmware_path": def.boot.firmware.clone(),
             "disk_seed_path": def.boot.initial_disk.clone(),
-            "disks": def.storage.iter().map(|storage| serde_json::json!({
-                "volume_id": storage.storage_ref.clone(),
-                "read_only": storage.read_only,
-                "size_bytes": storage.size_bytes,
-            })).collect::<Vec<_>>(),
+            "disks": def.storage.iter().map(|storage| {
+                let mut disk = serde_json::json!({
+                    "volume_id": storage.storage_ref.clone(),
+                    "read_only": storage.read_only,
+                    "size_bytes": storage.size_bytes,
+                });
+                // #379 PR 2 (A7): the per-disk backend class projects back
+                // onto the legacy axis — keyed only when present, the same
+                // absent-means-local shape the CP's AgentDiskSpec emits —
+                // so a core-managed node's re-attach loop (A2's class
+                // source) and the migration importer keep seeing the class
+                // after a rebuild.
+                if let Some(backend_class) = &storage.backend_class {
+                    disk["backend_class"] = serde_json::Value::String(backend_class.clone());
+                }
+                disk
+            }).collect::<Vec<_>>(),
             "nics": def.networks.iter().map(|network| {
                 let addressing = network.addressing.as_ref();
                 serde_json::json!({
@@ -886,6 +898,7 @@ mod tests {
                 read_only: false,
                 size_bytes: None,
                 seed_from: None,
+                backend_class: None,
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_string(),
@@ -1004,6 +1017,7 @@ mod tests {
             read_only: false,
             size_bytes: Some(10_737_418_240),
             seed_from: Some("/var/lib/chv/images/ubuntu.img".to_string()),
+            backend_class: Some("lvm".to_string()),
         }];
         def.networks = vec![cellhv_core_types::NetworkAttachmentRef {
             attachment_id: "vm-a-net-0".to_string(),
@@ -1036,6 +1050,10 @@ mod tests {
             Some("/var/lib/chv/images/ubuntu.img")
         );
         assert_eq!(spec.disks[0].size_bytes, Some(10_737_418_240));
+        // #379 PR 2 (A7 projection): the class projects back onto the
+        // legacy axis, so a core-managed node's re-attach loop and the
+        // migration importer keep seeing it after a rebuild.
+        assert_eq!(spec.disks[0].backend_class.as_deref(), Some("lvm"));
         assert_eq!(spec.nics[0].ip_address, "10.200.0.47");
         assert_eq!(spec.nics[0].cidr, "10.200.0.0/24");
         assert_eq!(spec.nics[0].gateway, "10.200.0.1");
@@ -1059,6 +1077,11 @@ mod tests {
         assert_eq!(
             definition.storage[0].seed_from.as_deref(),
             Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(
+            definition.storage[0].backend_class.as_deref(),
+            Some("lvm"),
+            "the class must survive the rebuild → re-import round trip"
         );
         let addressing = definition.networks[0].addressing.as_ref().unwrap();
         assert_eq!(addressing.ip_address, "10.200.0.47");

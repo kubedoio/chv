@@ -17,6 +17,12 @@ chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-architecture-reconcile = { path = "../chv-architecture-reconcile" }
 chv-common = { path = "../chv-common" }
+# #379 DP3: the single frozen backend-class vocabulary
+# (BACKEND_CLASSES / is_known_backend_class) used for accept-time
+# validation of the VM-create payload's storage class — the same list
+# PR 1's DEFAULT_BACKEND_CLASS lives next to, so the BFF never hardcodes
+# a second copy.
+chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }

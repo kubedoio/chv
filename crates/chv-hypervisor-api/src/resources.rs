@@ -30,6 +30,28 @@ use std::path::{Path, PathBuf};
 /// reference without depending on each other.
 pub const DEFAULT_BACKEND_CLASS: &str = "local";
 
+/// The stord `backend_type` vocabulary the volume-model class field
+/// accepts (#379 DP3): `local` (the canonical default,
+/// [`DEFAULT_BACKEND_CLASS`]), `iscsi`, `ceph`, and `lvm`.
+///
+/// This is the single frozen list every accept-time validation of a
+/// storage class references (the BFF's VM-create payload in PR 2; the
+/// node capability check in PR 3) — the local aliases
+/// (`local-file`/`localdisk`) stay accepted at the stord boundary only,
+/// and `block` remains an `lvm` alias for the device-allowlist branch,
+/// so neither appears here. DP6/#372 will pin chvctl and the BFF to
+/// this same list so the surfaces never diverge again.
+pub const BACKEND_CLASSES: &[&str] = &["local", "iscsi", "ceph", "lvm"];
+
+/// Whether `class` is one of the stord `backend_type` values (#379
+/// DP3) — the accept-time vocabulary check for a volume-model storage
+/// class. Unknown strings are rejected by callers (HTTP 400 at the
+/// BFF); an absent value never reaches this check and means
+/// [`DEFAULT_BACKEND_CLASS`].
+pub fn is_known_backend_class(class: &str) -> bool {
+    BACKEND_CLASSES.contains(&class)
+}
+
 /// Returns the per-VM runtime directory for the given VM.
 /// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
 ///
@@ -406,6 +428,28 @@ impl ObservedAttachmentSource for NoObservedAttachments {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_class_vocabulary_is_the_stord_backend_type_set() {
+        // #379 DP3 pin: the frozen accept-time vocabulary is exactly the
+        // stord `backend_type` values with "local" canonical — the local
+        // aliases and the device-allowlist "block" alias are NOT accepted
+        // here (they stay stord-boundary-only), and typos reject.
+        for class in ["local", "iscsi", "ceph", "lvm"] {
+            assert!(
+                is_known_backend_class(class),
+                "{class} must be accepted (stord backend_type vocabulary)"
+            );
+        }
+        for rejected in ["local-file", "localdisk", "block", "lvv", "Local", ""] {
+            assert!(
+                !is_known_backend_class(rejected),
+                "{rejected} must be rejected (aliases stay at the stord boundary; typos fail closed)"
+            );
+        }
+        assert_eq!(DEFAULT_BACKEND_CLASS, "local");
+        assert!(BACKEND_CLASSES.contains(&DEFAULT_BACKEND_CLASS));
+    }
 
     #[tokio::test]
     async fn rotate_console_log_keeps_exactly_one_generation() {

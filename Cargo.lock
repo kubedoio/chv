@@ -1100,6 +1100,7 @@ dependencies = [
  "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
+ "chv-hypervisor-api",
  "chv-webui-bff-api",
  "hex",
  "jsonwebtoken",
