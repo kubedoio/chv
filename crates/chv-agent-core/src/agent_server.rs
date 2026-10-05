@@ -1094,7 +1094,10 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 let (_, handle, export_path) = stord
                     .open_volume(
                         &disk.volume_id,
-                        "local",
+                        // #379 PR 1 (A10): the class value from the disk
+                        // spec instead of the inline "local" literal
+                        // (absent → local).
+                        disk.backend_class_or_local(),
                         &format!("{}.img", disk.volume_id),
                         Some(op_id),
                     )
@@ -3319,7 +3322,19 @@ mod tests {
         assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
 
-    struct MockStord;
+    /// Shared log of the `open_volume` RPCs the mock stord received:
+    /// `(volume_id, backend_class)` per call, in call order — so tests can
+    /// pin the backend class the agent threads into its opens (#379 PR 1).
+    #[derive(Clone, Default)]
+    struct StordOpenLog {
+        opens: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[derive(Default)]
+    struct MockStord {
+        opens: StordOpenLog,
+    }
+
     #[tonic::async_trait]
     impl chv_stord_api::chv_stord_api::storage_service_server::StorageService for MockStord {
         async fn list_volume_sessions(
@@ -3336,6 +3351,17 @@ mod tests {
             &self,
             req: Request<chv_stord_api::chv_stord_api::OpenVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
+            let inner = req.into_inner();
+            // #379 PR 1: record the backend class the agent threaded into
+            // this open so the class-plumbing tests can pin it.
+            self.opens.opens.lock().unwrap().push((
+                inner.volume_id.clone(),
+                inner
+                    .backend
+                    .as_ref()
+                    .map(|b| b.backend_class.clone())
+                    .unwrap_or_default(),
+            ));
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::OpenVolumeResponse {
                     result: Some(chv_stord_api::chv_stord_api::Result {
@@ -3343,7 +3369,7 @@ mod tests {
                         error_code: "".to_string(),
                         human_summary: "".to_string(),
                     }),
-                    volume_id: req.into_inner().volume_id,
+                    volume_id: inner.volume_id,
                     attachment_handle: "handle-1".to_string(),
                     export_kind: "".to_string(),
                     export_path: "".to_string(),
@@ -3928,7 +3954,7 @@ mod tests {
             tonic::transport::Server::builder()
                 .add_service(
                     chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
-                        MockStord,
+                        MockStord::default(),
                     ),
                 )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -3980,6 +4006,171 @@ mod tests {
         assert_eq!(
             cache.volume_handles.get("vol-1"),
             Some(&"handle-1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_volume_desired_state_threads_backend_class_to_stord_open() {
+        // #379 PR 1 pin (A4/B5 — the parser/default seam): the attach
+        // handler's `open_and_attach_volume` threads the spec_json's
+        // `backend_class` into the stord open and defaults to "local"
+        // when the key is absent. (The handler already parsed the field;
+        // this pins that the parsed value actually reaches stord, which
+        // no pre-#379 test observed.)
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+        let opens = StordOpenLog::default();
+
+        {
+            let opens = opens.clone();
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockStord { opens },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            socket,
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let req = proto::ApplyVolumeDesiredStateRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            volume_id: "vol-cls-a".to_string(),
+            fragment: Some(proto::DesiredStateFragment {
+                id: "vol-cls-a".to_string(),
+                kind: "volume".to_string(),
+                generation: "1".to_string(),
+                spec_json: r#"{"vm_id":"vm-1","backend_class":"lvm","locator":"vol-cls-a.img"}"#
+                    .as_bytes()
+                    .to_vec(),
+                policy_json: vec![],
+                updated_at: "".to_string(),
+                updated_by: "".to_string(),
+            }),
+        };
+        let resp = proto::reconcile_service_server::ReconcileService::apply_volume_desired_state(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        let req = proto::ApplyVolumeDesiredStateRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            volume_id: "vol-cls-b".to_string(),
+            fragment: Some(proto::DesiredStateFragment {
+                id: "vol-cls-b".to_string(),
+                kind: "volume".to_string(),
+                generation: "1".to_string(),
+                // No backend_class key: the B5 absent-field default.
+                spec_json: r#"{"vm_id":"vm-1"}"#.as_bytes().to_vec(),
+                policy_json: vec![],
+                updated_at: "".to_string(),
+                updated_by: "".to_string(),
+            }),
+        };
+        let resp = proto::reconcile_service_server::ReconcileService::apply_volume_desired_state(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                ("vol-cls-a".to_string(), "lvm".to_string()),
+                ("vol-cls-b".to_string(), "local".to_string()),
+            ],
+            "A4 must thread the spec_json backend_class, defaulting to local when absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_vm_legacy_branch_threads_disk_backend_class_to_stord() {
+        // #379 PR 1 pin (A10): the legacy create_vm RPC branch opens every
+        // disk with the class from the disk spec instead of the "local"
+        // literal — vol-cls-1's spec value must arrive at stord verbatim,
+        // and vol-cls-2 (no field) must get the historical "local"
+        // default. Red/green: reverting the A10 site to the literal fails
+        // the vol-cls-1 assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+        let opens = StordOpenLog::default();
+
+        {
+            let opens = opens.clone();
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockStord { opens },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            socket,
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let spec_json = r#"{"name":"vm-cls","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-cls-1","backend_class":"lvm"},{"volume_id":"vol-cls-2"}],"nics":[]}"#;
+        let req = proto::CreateVmRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            vm: Some(proto::VmMutationSpec {
+                vm_id: "vm-cls".to_string(),
+                vm_spec_json: spec_json.as_bytes().to_vec(),
+            }),
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::create_vm(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok(), "create_vm must succeed: {:?}", resp.err());
+
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                ("vol-cls-1".to_string(), "lvm".to_string()),
+                ("vol-cls-2".to_string(), "local".to_string()),
+            ],
+            "A10 must thread the disk spec's backend_class, defaulting to local when absent"
         );
     }
 

@@ -8,8 +8,9 @@ use crate::adapter::{
     AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
 };
 
-/// Options passed to one `open_volume` call (volume id + the option map).
-pub type RecordedOpenOptions = (String, HashMap<String, String>);
+/// Options passed to one `open_volume` call: the volume id, the backend
+/// class the runtime threaded into the open, and the option map.
+pub type RecordedOpenOptions = (String, String, HashMap<String, String>);
 
 /// Deterministic host-resource controller for tests.
 ///
@@ -34,7 +35,8 @@ pub struct MockHostResourceController {
     /// `Some("step:ordinal")` fails exactly one upcoming step then clears.
     pub fail_next: Arc<Mutex<Option<String>>>,
     /// Options passed to each `open_volume` call, in call order, so tests
-    /// can assert provisioning hints (size/seed) reached the storage layer.
+    /// can assert provisioning hints (size/seed) and the threaded backend
+    /// class reached the storage layer.
     pub open_options: Arc<Mutex<Vec<RecordedOpenOptions>>>,
 }
 
@@ -80,17 +82,18 @@ impl HostResourceController for MockHostResourceController {
     async fn open_volume(
         &self,
         volume_id: &str,
-        _backend_class: &str,
+        backend_class: &str,
         _locator: &str,
         options: HashMap<String, String>,
         _operation_id: Option<&str>,
     ) -> Result<(String, String, String), ChvError> {
         self.begin_step("open")?;
         self.record("open", volume_id);
-        self.open_options
-            .lock()
-            .unwrap()
-            .push((volume_id.to_string(), options));
+        self.open_options.lock().unwrap().push((
+            volume_id.to_string(),
+            backend_class.to_string(),
+            options,
+        ));
         Ok((
             volume_id.to_string(),
             format!("handle-{volume_id}"),
