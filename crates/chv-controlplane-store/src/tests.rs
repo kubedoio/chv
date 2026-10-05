@@ -456,6 +456,351 @@ async fn test_upsert_vm_accepts_same_generation_idempotent() {
     repo.upsert_vm(&input).await.unwrap();
 }
 
+// ── #384: transactional clone target materialization ──────────────────────
+//
+// `materialize_clone_target` is the clone path's store core: ONE
+// `BEGIN IMMEDIATE` transaction that reads the source row (under the
+// write lock, so a racing resize cannot split the read from the target
+// write), strictly inserts the target's physical row (ON CONFLICT DO
+// NOTHING — a concurrent same-target materialization fails closed with
+// StoreError::Conflict instead of last-writer-wins), and writes the
+// generation-guarded VDS intent row in the same transaction.
+
+/// Seed a source `volumes` row the way the fragment reconcile would.
+async fn seed_clone_source_volume(pool: &StorePool, volume_id: &str, capacity_bytes: i64) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO nodes (node_id, hostname, display_name) \
+         VALUES ('node-clone-a', 'host', 'host')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind, storage_class, owner_id, updated_at) \
+         VALUES ($1, 'node-clone-a', $2, $3, 'disk', 'local', 'user-a', '2026-01-01T00:00:00Z')",
+    )
+    .bind(volume_id)
+    .bind(format!("{volume_id}-name"))
+    .bind(capacity_bytes)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn clone_target_spec(target: &str) -> CloneTargetSpec {
+    CloneTargetSpec {
+        target_volume_id: ResourceId::new(target).unwrap(),
+        placement_node_id: Some(NodeId::new("node-clone-a").unwrap()),
+        display_name: target.to_string(),
+        desired_generation: Generation::new(7),
+        requested_by: Some("test-user".to_string()),
+        requested_unix_ms: 1000,
+    }
+}
+
+#[tokio::test]
+async fn test_materialize_clone_target_inserts_rows_in_one_tx() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 10_737_418_240).await;
+
+    let outcome = repo
+        .materialize_clone_target(
+            &ResourceId::new("vol-ct-src").unwrap(),
+            &clone_target_spec("vol-ct-dst"),
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.created, "fresh target must be created");
+    assert_eq!(outcome.source.capacity_bytes, 10_737_418_240);
+
+    // Physical row carries the source's shape, including the inherited
+    // owner (#381: an ownerless volumes row is admin-only in the BFF).
+    let row = sqlx::query(
+        "SELECT node_id, capacity_bytes, owner_id FROM volumes WHERE volume_id = 'vol-ct-dst'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let node: String = sqlx::Row::get(&row, "node_id");
+    let capacity: i64 = sqlx::Row::get(&row, "capacity_bytes");
+    let owner: Option<String> = sqlx::Row::get(&row, "owner_id");
+    assert_eq!(node, "node-clone-a");
+    assert_eq!(capacity, 10_737_418_240);
+    assert_eq!(owner.as_deref(), Some("user-a"));
+
+    // The VDS intent row landed in the same transaction, recording the
+    // clone source and the generation.
+    let (gen, clone_source): (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, clone_source_volume_id FROM volume_desired_state WHERE volume_id = 'vol-ct-dst'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gen, 7);
+    assert_eq!(clone_source.as_deref(), Some("vol-ct-src"));
+}
+
+#[tokio::test]
+async fn test_materialize_clone_target_fails_closed_on_existing_target() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 1024).await;
+    // A foreign row already sits on the target id.
+    seed_clone_source_volume(&pool, "vol-ct-dst", 4096).await;
+
+    match repo
+        .materialize_clone_target(
+            &ResourceId::new("vol-ct-src").unwrap(),
+            &clone_target_spec("vol-ct-dst"),
+            false,
+        )
+        .await
+    {
+        Err(StoreError::Conflict { entity, id, .. }) => {
+            assert_eq!(entity, "volume");
+            assert_eq!(id, "vol-ct-dst");
+        }
+        other => panic!("expected Conflict, got {:?}", other.map(|_| ())),
+    }
+
+    // Fail closed: the existing row keeps its own shape.
+    let capacity: i64 =
+        sqlx::query_scalar("SELECT capacity_bytes FROM volumes WHERE volume_id = 'vol-ct-dst'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(capacity, 4096, "conflict must not overwrite the target");
+}
+
+#[tokio::test]
+async fn test_materialize_clone_target_replay_is_idempotent() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 2048).await;
+
+    let first = repo
+        .materialize_clone_target(
+            &ResourceId::new("vol-ct-src").unwrap(),
+            &clone_target_spec("vol-ct-dst"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(first.created);
+
+    let (updated_at, vds_requested_at): (String, String) = sqlx::query_as(
+        "SELECT v.updated_at, vds.requested_at FROM volumes v \
+         JOIN volume_desired_state vds ON v.volume_id = vds.volume_id \
+         WHERE v.volume_id = 'vol-ct-dst'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // The same operation re-running its intent persist (a replayed
+    // meta.operation_id) must be an idempotent success, not a Conflict
+    // against its own earlier materialization.
+    let replay = repo
+        .materialize_clone_target(
+            &ResourceId::new("vol-ct-src").unwrap(),
+            &clone_target_spec("vol-ct-dst"),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(!replay.created, "replay must not report a fresh creation");
+
+    // Nothing was written the second time.
+    let (updated_at_2, vds_requested_at_2): (String, String) = sqlx::query_as(
+        "SELECT v.updated_at, vds.requested_at FROM volumes v \
+         JOIN volume_desired_state vds ON v.volume_id = vds.volume_id \
+         WHERE v.volume_id = 'vol-ct-dst'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(updated_at, updated_at_2, "replay must not rewrite volumes");
+    assert_eq!(
+        vds_requested_at, vds_requested_at_2,
+        "replay must not rewrite the VDS intent row"
+    );
+}
+
+#[tokio::test]
+async fn test_materialize_clone_target_replay_with_reshaped_target_fails_closed() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 2048).await;
+
+    repo.materialize_clone_target(
+        &ResourceId::new("vol-ct-src").unwrap(),
+        &clone_target_spec("vol-ct-dst"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // The target row no longer matches this operation's shape (e.g. it
+    // was resized, or a foreign request owns the id): the replay must
+    // fail closed rather than silently claim idempotent success.
+    sqlx::query("UPDATE volumes SET capacity_bytes = 999 WHERE volume_id = 'vol-ct-dst'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    match repo
+        .materialize_clone_target(
+            &ResourceId::new("vol-ct-src").unwrap(),
+            &clone_target_spec("vol-ct-dst"),
+            true,
+        )
+        .await
+    {
+        Err(StoreError::Conflict { .. }) => {}
+        other => panic!("expected Conflict, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// Build a temp-file SQLite pool with the same pragma profile as prod
+/// (WAL, busy_timeout) — the same shape as the BFF quota-race suite.
+/// The in-memory `TestDb` pool cannot express the cross-connection write
+/// locking these tests pin (an in-memory database has no WAL mode, and a
+/// second connection's access during an open write transaction blocks
+/// without a busy handler). The returned `TempDir` owns the database
+/// files — bind it for the test's duration (`_dir`); it is returned
+/// FIRST so it drops LAST, after the pool's connections close, and
+/// cleans up on scope exit — no pid-suffixed temp dirs accumulate
+/// under /tmp.
+async fn clone_race_test_pool() -> (tempfile::TempDir, StorePool) {
+    use std::str::FromStr as _;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("test.db").display());
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+        .unwrap()
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(opts)
+        .await
+        .unwrap();
+    run_migrations(&pool, None).await.unwrap();
+    (dir, pool)
+}
+
+/// The #384 race, pinned at the store tier: two concurrent
+/// materializations of the SAME target id — exactly one wins, the loser
+/// fails closed with Conflict (red/green: with the old DO UPDATE upsert
+/// both would succeed and the last writer would silently reshape the
+/// row).
+#[tokio::test]
+async fn test_concurrent_materialize_clone_target_exactly_one_wins() {
+    let (_dir, pool) = clone_race_test_pool().await;
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 1024).await;
+
+    let a = {
+        let repo = repo.clone();
+        let source = ResourceId::new("vol-ct-src").unwrap();
+        let spec = clone_target_spec("vol-ct-dst");
+        tokio::spawn(async move { repo.materialize_clone_target(&source, &spec, false).await })
+    };
+    let b = {
+        let repo = repo.clone();
+        let source = ResourceId::new("vol-ct-src").unwrap();
+        let spec = clone_target_spec("vol-ct-dst");
+        tokio::spawn(async move { repo.materialize_clone_target(&source, &spec, false).await })
+    };
+
+    let results = vec![a.await.unwrap(), b.await.unwrap()];
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(winners, 1, "exactly one materialization must win");
+    for result in &results {
+        match result {
+            Ok(outcome) => assert!(outcome.created),
+            Err(StoreError::Conflict { id, .. }) => assert_eq!(id, "vol-ct-dst"),
+            other => panic!(
+                "race loser must be a Conflict, got {:?}",
+                other.as_ref().map(|_| ())
+            ),
+        }
+    }
+
+    // Exactly one target row exists, carrying the winner's (only) shape.
+    let (count, capacity): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(capacity_bytes) FROM volumes WHERE volume_id = 'vol-ct-dst'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(capacity, 1024);
+}
+
+/// Source-read freshness (#384 premise (c)): the source row is read
+/// INSIDE the `BEGIN IMMEDIATE` transaction, under the same RESERVED
+/// lock that guards the target insert. A resize (the resize executor's
+/// direct `UPDATE volumes SET capacity_bytes`) that commits while the
+/// clone's transaction is starting must be visible to the in-tx read —
+/// the target can no longer be shaped from a stale capacity.
+#[tokio::test]
+async fn test_materialize_clone_target_reads_source_under_write_lock() {
+    let (_dir, pool) = clone_race_test_pool().await;
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_clone_source_volume(&pool, "vol-ct-src", 1024).await;
+
+    // Hold a write transaction that resizes the source, uncommitted.
+    let mut resize_tx = pool.begin_with("BEGIN IMMEDIATE;").await.unwrap();
+    sqlx::query("UPDATE volumes SET capacity_bytes = 8192 WHERE volume_id = 'vol-ct-src'")
+        .execute(&mut *resize_tx)
+        .await
+        .unwrap();
+
+    // The clone's BEGIN IMMEDIATE cannot start while the resize holds
+    // the RESERVED lock; it must wait and then read the committed
+    // (post-resize) source. With the old read-outside-the-transaction
+    // shape, this read would return the pre-resize snapshot (1024) and
+    // the target would silently carry the stale size. The capacity
+    // assert below is the actual discriminator — the clone's
+    // not-finished outcome holds either way (the old shape's write
+    // still blocked on the RESERVED lock); only the capacity value
+    // distinguishes stale-snapshot from locked-fresh read.
+    let clone = {
+        let repo = repo.clone();
+        let source = ResourceId::new("vol-ct-src").unwrap();
+        let spec = clone_target_spec("vol-ct-dst");
+        tokio::spawn(async move { repo.materialize_clone_target(&source, &spec, false).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !clone.is_finished(),
+        "the clone must block on the write lock, not read a stale snapshot"
+    );
+
+    resize_tx.commit().await.unwrap();
+    clone.await.unwrap().unwrap();
+
+    let capacity: i64 =
+        sqlx::query_scalar("SELECT capacity_bytes FROM volumes WHERE volume_id = 'vol-ct-dst'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        capacity, 8192,
+        "the target must be shaped from the post-resize source capacity"
+    );
+}
+
 #[tokio::test]
 async fn test_set_vm_resources_stale_vs_not_found() {
     let test_db = TestDb::new().await;

@@ -57,6 +57,14 @@ impl From<chv_controlplane_store::StoreError> for ControlPlaneServiceError {
             chv_controlplane_store::StoreError::NotFound { entity, id } => {
                 Self::NotFound(format!("{} with id {} not found", entity, id))
             }
+            // #384: the clone target materialization's strict insert maps
+            // a lost race to the Conflict class (gRPC ALREADY_EXISTS /
+            // HTTP 409 through the BFF's map_ack) instead of a generic
+            // store error — the race loser's request was well-formed and
+            // the target genuinely existed at persist time.
+            chv_controlplane_store::StoreError::Conflict { entity, id, reason } => {
+                Self::Conflict(format!("{} '{}': {}", entity, id, reason))
+            }
             chv_controlplane_store::StoreError::StaleGeneration {
                 entity,
                 id,
@@ -124,5 +132,28 @@ mod tests {
         ));
         assert_eq!(status.code(), tonic::Code::Unimplemented);
         assert!(status.message().contains("node-scoped"));
+    }
+
+    /// #384: the clone target materialization's strict insert loses a
+    /// same-target race as `StoreError::Conflict`; the service error
+    /// mapping must surface it as the Conflict class (gRPC
+    /// `ALREADY_EXISTS`, HTTP 409 through the BFF), not flatten it to a
+    /// generic store/internal error.
+    #[test]
+    fn store_conflict_maps_to_conflict_class() {
+        let err: ControlPlaneServiceError = chv_controlplane_store::StoreError::Conflict {
+            entity: "volume",
+            id: "vol-dst".into(),
+            reason: "target volume id already materialized by a concurrent request",
+        }
+        .into();
+        match &err {
+            ControlPlaneServiceError::Conflict(msg) => {
+                assert!(msg.contains("vol-dst"), "got: {msg}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        let status = tonic::Status::from(err);
+        assert_eq!(status.code(), tonic::Code::AlreadyExists);
     }
 }

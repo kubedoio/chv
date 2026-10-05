@@ -8,6 +8,9 @@ publish = false
 [features]
 test-util = []
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [dependencies]
 chv-common = { path = "../chv-common" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }

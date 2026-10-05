@@ -109,6 +109,35 @@ ON CONFLICT (volume_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+/// Strict insert for the clone target's physical row (#384): unlike
+/// `UPSERT_VOLUME_SQL`, there is no DO UPDATE — the clone target must NOT
+/// exist, so a concurrent same-target materialization fails closed here
+/// (rows_affected == 0) instead of last-writer-wins overwriting the
+/// winner's shape.
+const INSERT_VOLUME_FOR_CLONE_SQL: &str = r#"
+INSERT INTO volumes (
+    volume_id,
+    node_id,
+    display_name,
+    capacity_bytes,
+    volume_kind,
+    storage_class,
+    owner_id,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
+)
+ON CONFLICT (volume_id) DO NOTHING
+"#;
+
 const UPSERT_VOLUME_DESIRED_STATE_SQL: &str = r#"
 INSERT INTO volume_desired_state (
     volume_id,
@@ -419,6 +448,37 @@ pub struct VolumeSummaryRow {
     pub volume_kind: Option<String>,
     pub storage_class: Option<String>,
     pub owner_id: Option<String>,
+}
+
+/// What the clone path knows BEFORE the write transaction opens (#384).
+/// The source-derived shape fields (`capacity_bytes`, `volume_kind`,
+/// `storage_class`, `owner_id`) are deliberately absent: they are read
+/// from the source row INSIDE the transaction, under the same
+/// `BEGIN IMMEDIATE` lock that guards the target insert, so a racing
+/// resize of the source cannot split the read from the target write.
+#[derive(Clone)]
+pub struct CloneTargetSpec {
+    pub target_volume_id: ResourceId,
+    /// The node the target materializes on (the source's node; the
+    /// operation record journals this same node — #381 placement).
+    pub placement_node_id: Option<NodeId>,
+    pub display_name: String,
+    pub desired_generation: Generation,
+    pub requested_by: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+/// Outcome of [`DesiredStateRepository::materialize_clone_target`].
+#[derive(Clone, Debug)]
+pub struct CloneTargetMaterialization {
+    /// The source row as read inside the write transaction — the shape
+    /// the target was materialized from (or, on an idempotent replay,
+    /// the source's current shape).
+    pub source: VolumeSummaryRow,
+    /// `false` when the target row already existed and was accepted as
+    /// this operation's own earlier materialization (idempotent replay:
+    /// nothing was written).
+    pub created: bool,
 }
 
 #[derive(Clone)]
@@ -733,6 +793,149 @@ impl DesiredStateRepository {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    /// Materialize a clone's target volume row and its desired-state
+    /// intent row in ONE `BEGIN IMMEDIATE` transaction (#384).
+    ///
+    /// This closes the clone path's check-then-upsert TOCTOU and its
+    /// source-read/write skew in one place:
+    ///
+    /// - the source row is read INSIDE the write transaction, so a
+    ///   resize of the source committing between the lifecycle's
+    ///   pre-check read and this call cannot shape the target from a
+    ///   stale capacity (the read and the target write serialize under
+    ///   the same RESERVED lock — the resize executor's
+    ///   `UPDATE volumes SET capacity_bytes` is the only unguarded
+    ///   direct writer this closes);
+    /// - the target insert is STRICT (`ON CONFLICT DO NOTHING` +
+    ///   rows_affected), so a concurrent same-target materialization
+    ///   fails closed with [`StoreError::Conflict`] instead of
+    ///   last-writer-wins overwriting the winner's shape;
+    /// - an idempotent replay of the same `meta.operation_id`
+    ///   (`own_replay = true`) whose conflicting row is exactly the
+    ///   shape this operation materialized earlier is an idempotent
+    ///   success (`created = false`, nothing written) — anything else
+    ///   that collides is a racing different request and fails closed.
+    ///
+    /// The general [`Self::upsert_volume`] path (agent fragment
+    /// reconcile) is deliberately untouched: clone is the only writer
+    /// that must not see a pre-existing target row.
+    pub async fn materialize_clone_target(
+        &self,
+        source_volume_id: &ResourceId,
+        spec: &CloneTargetSpec,
+        own_replay: bool,
+    ) -> Result<CloneTargetMaterialization, StoreError> {
+        // BEGIN IMMEDIATE: acquire SQLite's RESERVED lock at transaction
+        // start, serializing concurrent writers from the get-go (repo
+        // standard for check-then-write pairs — the BFF's VM-create quota
+        // transaction and network delete use the same shape). Without
+        // IMMEDIATE, two racing clones could both pass the strict insert
+        // inside their DEFERRED transactions and deadlock/overwrite.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE;").await?;
+        let generation = generation_to_i64(spec.desired_generation)?;
+
+        // Source read under the write lock: the shape below is the
+        // source's committed state as of this transaction, not as of the
+        // lifecycle's earlier pre-check read.
+        let source = sqlx::query_as::<_, VolumeSummaryRow>(GET_VOLUME_SUMMARY_SQL)
+            .bind(source_volume_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "volume",
+                id: source_volume_id.to_string(),
+            })?;
+
+        let insert = sqlx::query(INSERT_VOLUME_FOR_CLONE_SQL)
+            .bind(spec.target_volume_id.as_str())
+            .bind(spec.placement_node_id.as_ref().map(NodeId::as_str))
+            .bind(&spec.display_name)
+            .bind(source.capacity_bytes)
+            .bind(&source.volume_kind)
+            .bind(&source.storage_class)
+            .bind(&source.owner_id)
+            .bind(spec.requested_unix_ms)
+            .execute(&mut *tx)
+            .await?;
+
+        if insert.rows_affected() == 0 {
+            // The target row exists. Two ways to get here:
+            //
+            // 1. a racing different request materialized it first —
+            //    fail closed with Conflict (the request was well-formed
+            //    and the target genuinely existed at persist time);
+            // 2. THIS operation already materialized it on an earlier
+            //    attempt (an idempotent replay of meta.operation_id) —
+            //    accept it, but only if the existing row matches this
+            //    operation's shape on the fields compared below
+            //    (placement node, capacity, kind, storage class, owner);
+            //    display_name is deliberately excluded — a cloned row
+            //    always carries the target id as its name, so it cannot
+            //    distinguish this operation's write from a foreign one.
+            //    Anything else is a foreign row that happens to sit on
+            //    the target id and must fail closed too.
+            if own_replay {
+                let existing = sqlx::query_as::<_, VolumeSummaryRow>(GET_VOLUME_SUMMARY_SQL)
+                    .bind(spec.target_volume_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                let matches = existing.is_some_and(|row| {
+                    row.node_id.as_deref() == spec.placement_node_id.as_ref().map(NodeId::as_str)
+                        && row.capacity_bytes == source.capacity_bytes
+                        && row.volume_kind == source.volume_kind
+                        && row.storage_class == source.storage_class
+                        && row.owner_id == source.owner_id
+                });
+                if matches {
+                    return Ok(CloneTargetMaterialization {
+                        source,
+                        created: false,
+                    });
+                }
+            }
+            return Err(StoreError::Conflict {
+                entity: "volume",
+                id: spec.target_volume_id.to_string(),
+                reason: "target volume id already materialized by a concurrent request",
+            });
+        }
+
+        // The desired-state intent row, generation-guarded, in the same
+        // transaction — same shape as `upsert_volume`'s second statement.
+        // A stale generation rolls the physical insert back with it.
+        let result = sqlx::query(UPSERT_VOLUME_DESIRED_STATE_SQL)
+            .bind(spec.target_volume_id.as_str())
+            .bind(generation)
+            .bind(None::<String>) // desired_status
+            .bind(&spec.requested_by)
+            .bind(None::<String>) // updated_by
+            .bind(None::<&str>) // attached_vm_id
+            .bind(None::<String>) // attachment_mode
+            .bind(None::<String>) // device_name
+            .bind(false) // read_only
+            .bind(None::<i64>) // resize_to_bytes
+            .bind(None::<String>) // snapshot_op
+            .bind(None::<String>) // snapshot_name
+            .bind(source_volume_id.as_str()) // clone_source_volume_id
+            .bind(spec.requested_unix_ms)
+            .execute(&mut *tx)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: spec.target_volume_id.to_string(),
+                incoming: generation,
+            });
+        }
+
+        tx.commit().await?;
+        Ok(CloneTargetMaterialization {
+            source,
+            created: true,
+        })
     }
 
     pub async fn upsert_network(&self, input: &NetworkDesiredStateInput) -> Result<(), StoreError> {

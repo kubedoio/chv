@@ -3980,6 +3980,241 @@ async fn clone_volume_rejects_missing_source() {
     assert_eq!(count, 0, "rejected clone must not journal an operation");
 }
 
+/// Build a temp-file SQLite pool with the same pragma profile as prod
+/// (WAL, busy_timeout) — the BFF quota-race suite's shape. The in-memory
+/// `TestDb` pool cannot express the cross-connection write locking the
+/// #384 race test pins (an in-memory database has no WAL mode). The
+/// returned `TempDir` owns the database files; it is returned FIRST so
+/// it drops LAST, after the pool's connections close, and cleans up on
+/// scope exit — no pid-suffixed-dir accumulation under /tmp.
+async fn clone_race_test_service() -> (
+    tempfile::TempDir,
+    crate::lifecycle::LifecycleServiceImplementation,
+    StorePool,
+) {
+    use std::str::FromStr as _;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("test.db").display());
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+        .unwrap()
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(opts)
+        .await
+        .unwrap();
+    chv_controlplane_store::run_migrations(&pool, None)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-clone-1', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let service = crate::lifecycle::LifecycleServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        DesiredStateRepository::new(pool.clone()),
+    );
+    (dir, service, pool)
+}
+
+/// Seed the clone source the way the volume-fragment reconcile would.
+async fn seed_clone_source(pool: &StorePool, volume_id: &str, capacity_bytes: i64) {
+    DesiredStateRepository::new(pool.clone())
+        .upsert_volume(&VolumeDesiredStateInput {
+            volume_id: ResourceId::new(volume_id).unwrap(),
+            node_id: Some(NodeId::new("node-clone-1").unwrap()),
+            display_name: volume_id.into(),
+            capacity_bytes,
+            volume_kind: Some("disk".into()),
+            storage_class: Some("local".into()),
+            owner_id: Some("user-clone-owner".into()),
+            desired_generation: Generation::new(1),
+            desired_status: None,
+            requested_by: Some("test-user".into()),
+            updated_by: None,
+            attached_vm_id: None,
+            attachment_mode: None,
+            device_name: None,
+            read_only: false,
+            resize_to_bytes: None,
+            snapshot_op: None,
+            snapshot_name: None,
+            clone_source_volume_id: None,
+            requested_unix_ms: 1000,
+        })
+        .await
+        .unwrap();
+}
+
+/// The #384 clone race, pinned at the lifecycle tier: two concurrent
+/// `clone_volume` calls with the SAME caller-supplied target id (the BFF
+/// shape: empty `operation_id`, fresh generations — distinct idempotency
+/// keys, so both journal operations). Both pass the accept-time
+/// pre-check before either commits; the strict insert inside the store's
+/// `BEGIN IMMEDIATE` transaction must fail the loser closed with
+/// `Conflict` (gRPC ALREADY_EXISTS / HTTP 409 through the BFF's
+/// `map_ack`) instead of last-writer-wins overwriting the winner's row
+/// and leaving two live conflicting operations on one target.
+#[tokio::test]
+async fn clone_volume_concurrent_same_target_yields_conflict_for_loser() {
+    let (_dir, service, pool) = clone_race_test_service().await;
+    seed_clone_source(&pool, "vol-src-1", 10_737_418_240).await;
+
+    // Deterministic gate: hold the RESERVED lock so BOTH clones pass
+    // their accept-time pre-checks (WAL readers never block) and
+    // suspend at their first write — the operation journal INSERT —
+    // inside the #384 race window, before either can materialize the
+    // target. Releasing the gate lets both proceed; the strict insert
+    // must then fail exactly one of them closed.
+    let mut gate = pool.begin_with("BEGIN IMMEDIATE;").await.unwrap();
+    sqlx::query("UPDATE nodes SET display_name = display_name WHERE node_id = 'node-clone-1'")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    // Distinct desired_state_version => distinct idempotency keys, the
+    // same shape two concurrent BFF requests produce.
+    let a = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service
+                .clone_volume(clone_request("node-clone-1", "vol-src-1", "vol-dst-1"))
+                .await
+        })
+    };
+    let mut loser_request = clone_request("node-clone-1", "vol-src-1", "vol-dst-1");
+    if let Some(meta) = loser_request.meta.as_mut() {
+        meta.desired_state_version = "2".into();
+    }
+    let b = {
+        let service = service.clone();
+        tokio::spawn(async move { service.clone_volume(loser_request).await })
+    };
+
+    // Both pre-checks have now passed (both tasks are parked on the
+    // journal write); open the window.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    gate.commit().await.unwrap();
+
+    let results = vec![a.await.unwrap(), b.await.unwrap()];
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(winners, 1, "exactly one clone must be accepted");
+    for result in &results {
+        match result {
+            Ok(_) => {}
+            // The race loser: NOT the pre-check's InvalidArgument (400) —
+            // its request was well-formed and passed the pre-check; the
+            // target appeared at persist time. Conflict is the honest
+            // class (409 at the BFF tier).
+            Err(ControlPlaneServiceError::Conflict(msg)) => {
+                assert!(msg.contains("vol-dst-1"), "got: {msg}");
+            }
+            other => panic!("race loser must be a Conflict, got {other:?}"),
+        }
+    }
+
+    // Exactly one target row, carrying the winner's (the source's) shape.
+    let (count, capacity): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(capacity_bytes) FROM volumes WHERE volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "no duplicate target row");
+    assert_eq!(capacity, 10_737_418_240);
+
+    // Both operations journaled (both passed the pre-check), but the
+    // loser is Failed — no second live operation on the target.
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status, COALESCE(error_code, '') FROM operations WHERE operation_type = 'CloneVolume'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(statuses.len(), 2, "both racing clones journal operations");
+    assert!(
+        statuses.iter().any(|(s, _)| s == "Accepted"),
+        "the winner must be Accepted: {statuses:?}"
+    );
+    assert!(
+        statuses
+            .iter()
+            .any(|(s, code)| s == "Failed" && code == "INTENT_PERSISTENCE_FAILED"),
+        "the loser must be Failed with the intent-persist error: {statuses:?}"
+    );
+}
+
+/// #384 idempotent replay: a direct gRPC caller repeating
+/// `meta.operation_id` re-runs the intent persist. The strict insert
+/// must treat its own earlier materialization as an idempotent success
+/// (same operation id, no Conflict, no duplicate row, no second write) —
+/// only a racing DIFFERENT request gets the Conflict.
+#[tokio::test]
+async fn clone_volume_replayed_operation_id_is_idempotent() {
+    let (service, pool) = clone_test_service().await;
+    seed_clone_source(&pool, "vol-src-1", 10_737_418_240).await;
+
+    let mut request = clone_request("node-clone-1", "vol-src-1", "vol-dst-1");
+    if let Some(meta) = request.meta.as_mut() {
+        meta.operation_id = "replay-op-384".into();
+    }
+
+    let first = service.clone_volume(request.clone()).await.unwrap();
+    let first_result = first.result.expect("ack must carry result meta");
+    assert_eq!(first_result.status, "OK");
+
+    let (updated_at, requested_at): (String, String) = sqlx::query_as(
+        "SELECT v.updated_at, vds.requested_at FROM volumes v \
+         JOIN volume_desired_state vds ON v.volume_id = vds.volume_id \
+         WHERE v.volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // The replay: same meta.operation_id, byte-for-byte.
+    let second = service.clone_volume(request).await.unwrap();
+    let second_result = second.result.expect("ack must carry result meta");
+    assert_eq!(second_result.status, "OK", "replay must not Conflict");
+    assert_eq!(
+        second_result.operation_id, first_result.operation_id,
+        "the replay must ack the SAME operation"
+    );
+
+    // One operation, one target row, nothing rewritten.
+    let op_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE operation_type = 'CloneVolume'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(op_count, 1, "replay must not journal a second operation");
+
+    let (row_count, updated_at_2, requested_at_2): (i64, String, String) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(v.updated_at), MAX(vds.requested_at) FROM volumes v \
+         JOIN volume_desired_state vds ON v.volume_id = vds.volume_id \
+         WHERE v.volume_id = 'vol-dst-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row_count, 1, "replay must not duplicate the target row");
+    assert_eq!(updated_at, updated_at_2, "replay must not rewrite volumes");
+    assert_eq!(
+        requested_at, requested_at_2,
+        "replay must not rewrite the VDS intent row"
+    );
+}
+
 // ── #378: accept-time rejection of the volume snapshot family on
 //    core-managed nodes ─────────────────────────────────────────────────
 //

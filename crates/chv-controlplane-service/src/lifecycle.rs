@@ -425,7 +425,7 @@ impl LifecycleServiceImplementation {
         resource_id: Option<ResourceId>,
         meta: &proto::RequestMeta,
         idempotency_discriminator: Option<String>,
-    ) -> Result<(OperationId, Generation), ControlPlaneServiceError> {
+    ) -> Result<(OperationId, Generation, bool), ControlPlaneServiceError> {
         self.require_node_exists(&node_id).await?;
         let now = Self::now_ms();
         let desired_generation = Self::desired_generation_from_meta(meta)?;
@@ -497,7 +497,7 @@ impl LifecycleServiceImplementation {
             })
             .await?;
 
-        Ok((receipt.operation_id, desired_generation))
+        Ok((receipt.operation_id, desired_generation, receipt.created))
     }
 
     async fn accept_operation(
@@ -614,7 +614,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             })?
         };
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "CreateVm",
                 node_id.clone(),
@@ -660,7 +660,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "StartVm",
                 node_id.clone(),
@@ -703,7 +703,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         } else {
             "StopVm"
         };
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 operation_type,
                 node_id.clone(),
@@ -741,7 +741,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "RebootVm",
                 node_id.clone(),
@@ -792,7 +792,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "DeleteVm",
                 node_id.clone(),
@@ -830,7 +830,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "ResizeVm",
                 node_id.clone(),
@@ -874,7 +874,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let volume_id = Self::parse_volume_id(volume.volume_id)?;
         let vm_id = Self::parse_vm_id(volume.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "AttachVolume",
                 node_id.clone(),
@@ -912,7 +912,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let attached_vm_id = Self::parse_vm_id(request.vm_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "DetachVolume",
                 node_id.clone(),
@@ -949,7 +949,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "ResizeVolume",
                 node_id.clone(),
@@ -993,7 +993,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.ensure_volume_snapshot_family_supported(&volume_id, "snapshot")
             .await?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "SnapshotVolume",
                 node_id.clone(),
@@ -1036,7 +1036,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.ensure_volume_snapshot_family_supported(&volume_id, "restore")
             .await?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "RestoreVolume",
                 node_id.clone(),
@@ -1079,7 +1079,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.ensure_volume_snapshot_family_supported(&volume_id, "snapshot deletion")
             .await?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "DeleteVolumeSnapshot",
                 node_id.clone(),
@@ -1124,9 +1124,10 @@ impl LifecycleService for LifecycleServiceImplementation {
         // #380: the clone intent used to PATCH a `volume_desired_state`
         // row for the target volume that nothing ever created — the FK
         // violation surfaced as a bare `volume with id {target} not
-        // found`. Validate up front and materialize the target below via
-        // the same upsert the volume-fragment reconcile uses (one tx:
-        // `volumes` row with the source's shape + the VDS intent row).
+        // found`. Validate up front and materialize the target below in
+        // one store transaction (`volumes` row with the source's shape +
+        // the VDS intent row; #384 made that transaction strict and
+        // self-contained — see `materialize_clone_target`).
         let source = self
             .desired_state_repo
             .get_volume_summary(&source_volume_id)
@@ -1137,11 +1138,24 @@ impl LifecycleService for LifecycleServiceImplementation {
                     source_volume_id
                 ))
             })?;
-        if self
-            .desired_state_repo
-            .get_volume_summary(&target_volume_id)
-            .await?
-            .is_some()
+        // #384: the target-absence pre-check runs only for requests
+        // WITHOUT a caller-supplied `meta.operation_id` (the BFF and
+        // chvctl shape — every existing client). A caller-supplied
+        // operation_id opts into idempotent-replay semantics: on replay
+        // the target legitimately exists (this operation materialized
+        // it earlier), so the pre-check must not reject the request —
+        // the transactional core in the store decides (own earlier
+        // materialization → idempotent success; anything else on the
+        // target id → Conflict). The source pre-check always runs:
+        // volume rows are never deleted, so a replay's source is as
+        // present as it was the first time.
+        let replay_eligible = !meta.operation_id.trim().is_empty();
+        if !replay_eligible
+            && self
+                .desired_state_repo
+                .get_volume_summary(&target_volume_id)
+                .await?
+                .is_some()
         {
             return Err(ControlPlaneServiceError::InvalidArgument(format!(
                 "target volume id already exists: {}",
@@ -1171,7 +1185,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.ensure_node_not_core_managed(&placement_node_id, "clone")
             .await?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, operation_created) = self
             .create_operation_and_emit(
                 "CloneVolume",
                 placement_node_id.clone(),
@@ -1182,35 +1196,52 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        self.persist_intent_and_accept(&operation_id, || async {
-            self.desired_state_repo
-                .upsert_volume(&chv_controlplane_store::VolumeDesiredStateInput {
-                    volume_id: target_volume_id.clone(),
-                    node_id: Some(placement_node_id.clone()),
-                    display_name: target_volume_id.as_str().to_string(),
-                    capacity_bytes: source.capacity_bytes,
-                    volume_kind: source.volume_kind.clone(),
-                    storage_class: source.storage_class.clone(),
-                    // #381 review: the target inherits the source's owner —
-                    // an ownerless volumes row is admin-only in the BFF
-                    // (require_volume_owner), which would lock a non-admin
-                    // cloner out of the clone they just created.
-                    owner_id: source.owner_id.clone(),
-                    desired_generation,
-                    desired_status: None,
-                    requested_by: Self::normalize_requested_by(&meta),
-                    updated_by: None,
-                    attached_vm_id: None,
-                    attachment_mode: None,
-                    device_name: None,
-                    read_only: false,
-                    resize_to_bytes: None,
-                    snapshot_op: None,
-                    snapshot_name: None,
-                    clone_source_volume_id: Some(source_volume_id.clone()),
-                    requested_unix_ms: Self::now_ms(),
-                })
-                .await
+        // #384: the target materialization is one BEGIN IMMEDIATE
+        // transaction in the store (strict insert + in-tx source read +
+        // the generation-guarded VDS intent row). Two things this fixes
+        // that the old pre-check-then-`upsert_volume` shape could not:
+        //
+        // - a racing clone onto the SAME caller-supplied target id used
+        //   to pass the pre-check above and then last-writer-wins
+        //   overwrite the winner's row (two live conflicting operations
+        //   on one target); the strict insert now fails the loser closed
+        //   with `Conflict` BEFORE its intent persists — the loser's
+        //   operation is journaled Failed, no second dispatch shape is
+        //   written, and the volumes row keeps exactly the winner's
+        //   shape;
+        // - a resize of the SOURCE committing between the pre-check read
+        //   above and the write used to shape the target from the stale
+        //   capacity; the source row is now re-read inside the same
+        //   transaction that inserts the target (under the RESERVED
+        //   lock), so the read and the write cannot split.
+        //
+        // `own_replay` distinguishes the two ways the strict insert can
+        // find the target row already present: a replayed
+        // `meta.operation_id` (the operation receipt came back
+        // not-created — this request ran before and already
+        // materialized the target) is an idempotent success when the
+        // existing row matches this operation's shape; anything else is
+        // a racing different request and fails closed with Conflict.
+        let requested_by = Self::normalize_requested_by(&meta);
+        self.persist_intent_and_accept(&operation_id, || {
+            let spec = chv_controlplane_store::CloneTargetSpec {
+                target_volume_id: target_volume_id.clone(),
+                placement_node_id: Some(placement_node_id.clone()),
+                display_name: target_volume_id.as_str().to_string(),
+                desired_generation,
+                requested_by: requested_by.clone(),
+                requested_unix_ms: Self::now_ms(),
+            };
+            async move {
+                self.desired_state_repo
+                    .materialize_clone_target(
+                        &source_volume_id,
+                        &spec,
+                        /* own_replay: */ !operation_created,
+                    )
+                    .await
+                    .map(|_| ())
+            }
         })
         .await?;
 
@@ -1225,7 +1256,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "PauseNodeScheduling",
                 node_id.clone(),
@@ -1264,7 +1295,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "ResumeNodeScheduling",
                 node_id.clone(),
@@ -1303,7 +1334,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "DrainNode",
                 node_id.clone(),
@@ -1342,7 +1373,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "EnterMaintenance",
                 node_id.clone(),
@@ -1379,7 +1410,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "ExitMaintenance",
                 node_id.clone(),
@@ -1416,7 +1447,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "PauseVm",
                 node_id.clone(),
@@ -1454,7 +1485,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "ResumeVm",
                 node_id.clone(),
@@ -1492,7 +1523,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "PowerButtonVm",
                 node_id.clone(),
@@ -1530,7 +1561,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "AddDisk",
                 node_id.clone(),
@@ -1554,7 +1585,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "RemoveDevice",
                 node_id.clone(),
@@ -1578,7 +1609,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "AddNet",
                 node_id.clone(),
@@ -1602,7 +1633,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "ResizeDisk",
                 node_id.clone(),
@@ -1629,7 +1660,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "SnapshotVm",
                 node_id.clone(),
@@ -1669,7 +1700,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "RestoreSnapshot",
                 node_id.clone(),
@@ -1709,7 +1740,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "CoredumpVm",
                 node_id.clone(),
@@ -1733,7 +1764,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let network_id = Self::parse_network_id(request.network_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "StartNetwork",
                 node_id.clone(),
@@ -1774,7 +1805,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         } else {
             "StopNetwork"
         };
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 operation_type,
                 node_id.clone(),
@@ -1810,7 +1841,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let network_id = Self::parse_network_id(request.network_id)?;
 
-        let (operation_id, desired_generation) = self
+        let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
                 "RestartNetwork",
                 node_id.clone(),
@@ -1857,7 +1888,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             }
         }
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "MigrateVm",
                 node_id.clone(),
@@ -1883,7 +1914,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "UpdateOverlay",
                 node_id.clone(),
@@ -1908,7 +1939,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let (operation_id, _) = self
+        let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "SendGratuitousArp",
                 node_id.clone(),

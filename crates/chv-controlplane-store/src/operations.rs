@@ -80,7 +80,7 @@ impl OperationRepository {
         &self,
         input: &OperationCreateInput,
     ) -> Result<OperationReceipt, StoreError> {
-        sqlx::query(INSERT_OPERATION_SQL)
+        let insert = sqlx::query(INSERT_OPERATION_SQL)
             .bind(input.operation_id.as_str())
             .bind(&input.idempotency_key)
             .bind(input.resource_kind.as_str())
@@ -106,6 +106,13 @@ impl OperationRepository {
             .execute(&self.pool)
             .await?;
 
+        // ON CONFLICT DO NOTHING: rows_affected == 0 means the idempotency
+        // key already existed — this call is a REPLAY of an earlier
+        // request, not a fresh journal entry (#384: the clone target
+        // materialization needs this distinction to tell its own earlier
+        // target row apart from a racing different request's row).
+        let created = insert.rows_affected() > 0;
+
         let row = sqlx::query_as::<_, (String, String)>(SELECT_OPERATION_SQL)
             .bind(&input.idempotency_key)
             .fetch_one(&self.pool)
@@ -123,6 +130,7 @@ impl OperationRepository {
                 .map_err(|e: _| StoreError::InvalidConfiguration {
                     reason: format!("invalid operation status in database: {e}"),
                 })?,
+            created,
         })
     }
 
@@ -208,6 +216,13 @@ pub struct OperationStatusUpdateInput {
 pub struct OperationReceipt {
     pub operation_id: OperationId,
     pub status: OperationStatus,
+    /// `true` when this call journaled a NEW operation; `false` when the
+    /// idempotency key already existed and the receipt describes the
+    /// earlier request's operation (an idempotent replay). Callers that
+    /// re-run intent persistence on replay use this to distinguish their
+    /// own earlier materialization from a racing different request
+    /// (#384 clone target materialization).
+    pub created: bool,
 }
 
 fn generation_to_i64(generation: Generation) -> Result<i64, StoreError> {
