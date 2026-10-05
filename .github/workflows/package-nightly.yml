@@ -277,6 +277,117 @@ jobs:
           PKG_VERSION_RPM: ${{ needs.build-and-package.outputs.pkg_version_rpm }}
           GIT_SHA: ${{ needs.build-and-package.outputs.git_sha }}
 
+      - name: Prune old nightly release assets
+        # The rolling 'nightly' release accumulates ~6 assets per push to main
+        # and GitHub caps a release at 1000 assets — at the observed merge rate
+        # (166 build-groups in 8 days when the cap was hit on 2026-10-05) the
+        # cap is reached in about a week, after which every publish fails
+        # (issue #508). Retention: keep the 14 most recent BUILD GROUPS, not
+        # calendar nights — every asset of one run shares the
+        # nightly.YYYYMMDD.g<sha> pre-release identifier in its filename, so
+        # assets are grouped on that identifier, groups are ranked by their
+        # newest asset's created_at, and everything outside the newest 14
+        # groups is deleted — including undated stragglers (generic-named
+        # per-run artifacts like SHA256SUMS or old-version packages), which
+        # the upload below re-creates each run anyway. This step runs BEFORE
+        # the upload, so the same run's assets are never pruned and a same-run
+        # re-upload is unaffected. Fail-soft by decision: a prune hiccup warns
+        # and the publish proceeds (retention housekeeping must not block
+        # artifact publishing); the next run prunes again, and the summary
+        # line plus any ::warning surface the result in the job log.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRUNE_KEEP_GROUPS: '14'
+        run: |
+          set -euo pipefail
+
+          keep_groups="${PRUNE_KEEP_GROUPS}"
+          repo="${GITHUB_REPOSITORY}"
+          tag="nightly"
+
+          # Resolve the rolling release by tag. It may not exist yet (a fresh
+          # repository — the upload step below creates it); then there is
+          # nothing to prune.
+          if ! release_id="$(gh api "repos/${repo}/releases/tags/${tag}" --jq '.id')"; then
+            echo "::warning::could not look up the '${tag}' release; skipping asset prune (the upload step below creates/updates the release)"
+            exit 0
+          fi
+
+          # List every asset with id, name, and created_at (REST field name;
+          # NOT createdAt). --paginate emits one JSON array per page;
+          # 'jq -s add' merges the pages into a single list.
+          assets_file="$(mktemp)"
+          plan_file="$(mktemp)"
+          trap 'rm -f "${assets_file}" "${plan_file}"' EXIT
+          if ! gh api --paginate "repos/${repo}/releases/${release_id}/assets?per_page=100" > "${assets_file}"; then
+            echo "::warning::could not list assets of the '${tag}' release; skipping asset prune"
+            exit 0
+          fi
+
+          # Build the prune plan: the N build groups with the newest asset
+          # timestamps are kept; every asset outside them, and every asset
+          # whose name carries no nightly identifier (undated stragglers),
+          # is deleted.
+          if ! jq -s --argjson keep "${keep_groups}" '
+            (add // [])
+            | map({
+                id: .id,
+                name: .name,
+                created_at: .created_at,
+                group: ((.name | [scan("nightly\\.[0-9]{8}\\.g[0-9a-f]+")] | .[0]) // "")
+              })
+            | . as $assets
+            | ([ $assets[] | select(.group != "") | .group ] | unique) as $groups
+            | ([ $groups[] as $g
+                 | { group: $g,
+                     latest: ([$assets[] | select(.group == $g) | .created_at] | max) } ]
+               | sort_by(.latest) | reverse
+               | .[0:$keep]
+               | map(.group)) as $keep
+            | {
+                assets: ($assets | length),
+                groups: ($groups | length),
+                keep: $keep,
+                deletes: [ $assets[]
+                           | select((.group == "") or (.group as $g | $keep | index($g) | not))
+                           | [.id, .name] ]
+              }
+          ' "${assets_file}" > "${plan_file}"; then
+            echo "::warning::could not compute the asset prune plan (unexpected API payload); skipping asset prune"
+            exit 0
+          fi
+
+          # Guarded read-backs: a failure here must not abort the step
+          # (set -e) and block the publish below — the fail-soft posture
+          # applies to the counters too.
+          if ! total_assets="$(jq -r '.assets' "${plan_file}")" \
+            || ! total_groups="$(jq -r '.groups' "${plan_file}")" \
+            || ! kept_count="$(jq -r '.keep | length' "${plan_file}")"; then
+            echo "::warning::could not read the asset prune counters; skipping asset prune"
+            exit 0
+          fi
+
+          # Delete everything the plan marks. Individual failures warn and
+          # continue: a stuck asset must not block the publish below, and the
+          # next run prunes it again.
+          deleted=0
+          failed=0
+          while IFS=$'\t' read -r asset_id asset_name; do
+            [ -n "${asset_id}" ] || continue
+            if gh api --method DELETE "repos/${repo}/releases/assets/${asset_id}"; then
+              deleted=$((deleted + 1))
+              echo "  pruned ${asset_name}"
+            else
+              failed=$((failed + 1))
+              echo "::warning::failed to delete release asset ${asset_name} (id ${asset_id})"
+            fi
+          done < <(jq -r '.deletes[] | @tsv' "${plan_file}")
+
+          echo "Nightly asset prune: ${total_groups} build group(s) found, kept the ${kept_count} newest (retention ${keep_groups}), pruned $((total_groups - kept_count)) group(s); assets: ${total_assets} before, ${deleted} deleted (per-asset DELETEs across the pruned groups and any strays), $((total_assets - deleted)) remaining; ${failed} delete failure(s)."
+          if [ "${failed}" -gt 0 ]; then
+            echo "::warning::${failed} release asset deletion(s) failed; continuing so publishing is not blocked (the next run prunes again)"
+          fi
+
       - name: Update nightly GitHub release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3 (pinned 2026-09-30)
         with:
