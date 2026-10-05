@@ -1293,9 +1293,15 @@ impl Orchestrator {
     ///
     /// On success the operation is marked `Succeeded` here (the generic
     /// single-node ack handling in `dispatch_operation` does not apply to a
-    /// fan-out). On failure the error propagates to `tick()`, whose retry
-    /// machinery records the per-node failure detail from the aggregated
-    /// overlay-manager error.
+    /// fan-out). On failure the error propagates to `tick()` — except the
+    /// #378 §7 fast-fail shape: when every per-node failure was an
+    /// `Unimplemented` refusal, the overlay manager preserves the refusal
+    /// identity, and this arm mirrors the single-node dispatch path by
+    /// writing the terminal `Failed` / `UNSUPPORTED_BY_AGENT` row BEFORE the
+    /// error propagates (the tick's Unimplemented bypass skips
+    /// `mark_for_retry`, so without this write the row would be stranded in
+    /// `Running`). Every other error class propagates with no terminal
+    /// write, keeping the shared retry machinery byte-for-byte.
     ///
     /// `pub(crate)` so integration tests can invoke the dispatch directly
     /// (driving the full orchestrator tick loop requires live agent
@@ -1321,9 +1327,48 @@ impl Orchestrator {
                 reason: format!("failed to compile fabric plan for network {network_id}: {e}"),
             })?;
 
-        overlay_manager
+        if let Err(e) = overlay_manager
             .send_fabric_update(network_id, &plans, operation_id)
-            .await?;
+            .await
+        {
+            // #378 §7 fast-fail, UpdateOverlay leg: an all-refusals
+            // fan-out arrives here as `ChvError::Unimplemented` (the
+            // overlay manager preserves the identity exactly when every
+            // per-node failure was a refusal). Mirror the single-node
+            // dispatch arm: write the terminal Failed row with the
+            // cause-naming UNSUPPORTED_BY_AGENT code carrying the agents'
+            // refusal detail BEFORE propagating, because the tick's
+            // Unimplemented bypass never reaches mark_for_retry — without
+            // this write the row would sit in Running forever. Any other
+            // error class (mixed failures included) propagates unchanged
+            // with no terminal write, so the shared retry curve keeps
+            // today's semantics.
+            if matches!(e, ChvError::Unimplemented { .. }) {
+                self.operation_repo
+                    .update_status(&OperationStatusUpdateInput {
+                        operation_id: OperationId::new(operation_id.to_string()).map_err(|e| {
+                            ChvError::Internal {
+                                reason: format!("invalid operation_id: {e}"),
+                            }
+                        })?,
+                        status: OperationStatus::Failed,
+                        error_code: Some(UNSUPPORTED_BY_AGENT_ERROR_CODE.into()),
+                        error_message: Some(e.to_string()),
+                        observed_generation: None,
+                        updated_by: Some("orchestrator".into()),
+                        updated_unix_ms: now_unix_ms(),
+                    })
+                    .await
+                    // Same convention as the single-node arm: if the
+                    // terminal write itself fails, the Unimplemented
+                    // identity is flattened to Internal — the row stays
+                    // retryable and a re-dispatch re-derives it.
+                    .map_err(|e2| ChvError::Internal {
+                        reason: format!("overlay fan-out refused and status update failed: {e2}"),
+                    })?;
+            }
+            return Err(e);
+        }
 
         let nodes: Vec<&str> = plans.iter().map(|p| p.node_id.as_str()).collect();
         info!(
@@ -2867,18 +2912,23 @@ mod tests {
     // ============================================================
 
     /// Mock agent-side LifecycleService served over a real UDS socket:
-    /// records every `SnapshotVolume` / `SnapshotVm` request and answers
-    /// it with the configured tonic status; every other RPC fails
-    /// closed. Driving the real tonic client against this socket means
-    /// the tests pin the full identity-preservation path: server
-    /// status → `with_timeout` mapping → `ChvError` variant →
-    /// orchestrator classification.
+    /// records every `SnapshotVolume` / `SnapshotVm` / `UpdateOverlay`
+    /// request and answers it with the configured tonic status; every
+    /// other RPC fails closed. Driving the real tonic client against this
+    /// socket means the tests pin the full identity-preservation path:
+    /// server status → `with_timeout` mapping → `ChvError` variant →
+    /// orchestrator classification. `UpdateOverlay` is answered per node
+    /// (`overlay_status_by_node`); a node with no entry gets the OK ack,
+    /// so the same mock serves the fabric fan-out legs.
     #[derive(Clone)]
     struct MockLifecycleAgent {
         snapshot_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::SnapshotVolumeRequest>>>,
         snapshot_status: tonic::Status,
         snapshot_vm_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::SnapshotVmRequest>>>,
         snapshot_vm_status: tonic::Status,
+        overlay_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::UpdateOverlayRequest>>>,
+        overlay_status_by_node:
+            std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, tonic::Status>>>,
     }
 
     #[tonic::async_trait]
@@ -3124,9 +3174,28 @@ mod tests {
 
         async fn update_overlay(
             &self,
-            _request: tonic::Request<proto::UpdateOverlayRequest>,
+            request: tonic::Request<proto::UpdateOverlayRequest>,
         ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented(""))
+            let inner = request.into_inner();
+            let status = self
+                .overlay_status_by_node
+                .lock()
+                .unwrap()
+                .get(&inner.node_id)
+                .cloned();
+            self.overlay_calls.lock().unwrap().push(inner);
+            match status {
+                Some(status) => Err(status),
+                None => Ok(tonic::Response::new(proto::AckResponse {
+                    result: Some(proto::ResultMeta {
+                        operation_id: String::new(),
+                        status: "OK".into(),
+                        node_observed_generation: String::new(),
+                        error_code: String::new(),
+                        human_summary: "fabric plan applied".into(),
+                    }),
+                })),
+            }
         }
 
         async fn send_gratuitous_arp(
@@ -3245,6 +3314,10 @@ mod tests {
             ),
             snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3331,6 +3404,10 @@ mod tests {
             snapshot_vm_status: tonic::Status::unimplemented(
                 "snapshot_vm is unsupported in core-managed mode",
             ),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3409,6 +3486,10 @@ mod tests {
             snapshot_status: tonic::Status::unavailable("agent restarting"),
             snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             snapshot_vm_status: tonic::Status::unavailable("agent restarting"),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3513,6 +3594,325 @@ mod tests {
                 .unwrap_or_default()
                 .contains("agent"),
             "the retry row carries the failure text: {error_message:?}"
+        );
+    }
+
+    /// Seed the two-node fabric cluster an `UpdateOverlay` dispatch fans
+    /// out to: a vxlan network at desired generation 1, one VM placement
+    /// per participating node (the bounded flood list), and full fabric
+    /// identities (the compile is fail-closed without them) — plus the
+    /// Accepted `UpdateOverlay` operation itself.
+    async fn seed_update_overlay_op(pool: &StorePool, network_id: &str, op_id: &str) {
+        let nodes = ["node-ovl-a", "node-ovl-b"];
+        for node_id in nodes {
+            seed_node(pool, node_id).await;
+        }
+        sqlx::query(
+            "INSERT INTO networks (network_id, node_id, display_name, overlay_type) \
+             VALUES (?, ?, ?, 'vxlan')",
+        )
+        .bind(network_id)
+        .bind("node-ovl-a")
+        .bind(format!("Net {network_id}"))
+        .execute(pool)
+        .await
+        .expect("insert network");
+        sqlx::query(
+            "INSERT INTO network_desired_state (network_id, desired_generation) VALUES (?, 1)",
+        )
+        .bind(network_id)
+        .execute(pool)
+        .await
+        .expect("insert network desired state");
+        for (idx, node_id) in nodes.iter().enumerate() {
+            let vm_id = format!("vm-ovl-{idx}");
+            sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES (?, ?)")
+                .bind(&vm_id)
+                .bind(format!("VM {vm_id}"))
+                .execute(pool)
+                .await
+                .expect("insert vm");
+            sqlx::query(
+                "INSERT INTO vm_desired_state (vm_id, desired_generation, target_node_id) \
+                 VALUES (?, 1, ?)",
+            )
+            .bind(&vm_id)
+            .bind(node_id)
+            .execute(pool)
+            .await
+            .expect("insert vm desired state");
+            sqlx::query(
+                "INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id) VALUES (?, ?, ?)",
+            )
+            .bind(format!("nic-{vm_id}"))
+            .bind(&vm_id)
+            .bind(network_id)
+            .execute(pool)
+            .await
+            .expect("insert vm nic desired state");
+        }
+        let vtep_repo = chv_controlplane_store::VtepRepository::new(pool.clone());
+        for (node_id, public_key, endpoint) in [
+            (
+                "node-ovl-a",
+                "pub-aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "10.0.0.1:65001",
+            ),
+            (
+                "node-ovl-b",
+                "pub-bBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                "10.0.0.2:65001",
+            ),
+        ] {
+            vtep_repo
+                .register_fabric_identity(node_id, public_key, 0, None)
+                .await
+                .expect("register fabric identity");
+            sqlx::query("UPDATE vtep_registry SET underlay_endpoint = ? WHERE node_id = ?")
+                .bind(endpoint)
+                .bind(node_id)
+                .execute(pool)
+                .await
+                .expect("set underlay endpoint");
+        }
+        seed_accepted_op(
+            pool,
+            op_id,
+            "Network",
+            network_id,
+            "UpdateOverlay",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+    }
+
+    /// `test_orchestrator` with the overlay manager wired (the
+    /// `UpdateOverlay` dispatch arm fails closed without it), sharing the
+    /// node client pool the way the service wiring does.
+    fn test_orchestrator_with_overlay(pool: &StorePool, socket_pattern: &str) -> Orchestrator {
+        let node_pool = NodeClientPool::new();
+        Orchestrator::new(
+            pool.clone(),
+            OperationRepository::new(pool.clone()),
+            socket_pattern.to_string(),
+            "/kernel".to_string(),
+            String::new(),
+            node_pool.clone(),
+            crate::convergence_metrics::new_shared(),
+        )
+        .with_overlay_manager(OverlayManager::new(node_pool, socket_pattern.to_string()))
+    }
+
+    /// §7 fast-fail, the `UpdateOverlay` fan-out leg: when EVERY
+    /// participating node refuses the fabric-plan dispatch with gRPC
+    /// `Unimplemented` (the all-core-managed cluster shape), the fan-out
+    /// preserves the refusal identity instead of flattening it into a
+    /// fresh Internal — the operation goes terminal on the FIRST dispatch
+    /// with `Failed` / `UNSUPPORTED_BY_AGENT` carrying the agents'
+    /// refusal text, zero retries, no `mark_for_retry` resurrection of
+    /// the terminal row, and exactly one `UpdateOverlay` request per
+    /// participating node across all ticks.
+    #[tokio::test]
+    async fn update_overlay_fan_out_all_unimplemented_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_update_overlay_op(&pool, "net-ovl", "op-ovl-1").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let refusal =
+            || tonic::Status::unimplemented("update_overlay is unsupported in core-managed mode");
+        let mut overlay_status_by_node = std::collections::HashMap::new();
+        overlay_status_by_node.insert("node-ovl-a".to_string(), refusal());
+        overlay_status_by_node.insert("node-ovl-b".to_string(), refusal());
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                overlay_status_by_node,
+            )),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());
+
+        let orchestrator = test_orchestrator_with_overlay(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ovl-1").await;
+        assert_eq!(
+            status, "Failed",
+            "an all-refusals fan-out is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("update_overlay is unsupported in core-managed mode"),
+            "the agents' refusal text must ride the error message: {error_message:?}"
+        );
+        assert_eq!(
+            retry_count, 0,
+            "no retry may be scheduled for a terminal-class error"
+        );
+        assert_eq!(
+            next_retry_at, None,
+            "mark_for_retry must never run: no next_retry_at may be written"
+        );
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            2,
+            "the fan-out still attempts every participating node exactly once"
+        );
+
+        // Further ticks must not resurrect the terminal row (the
+        // mark_for_retry UPDATE has no status guard — the tick's
+        // Unimplemented bypass is what prevents the Failed → RetryPending
+        // flip) and must not re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            2,
+            "exactly one dispatch per node across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ovl-1").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// Control for the fan-out fast-fail: a MIXED fan-out failure (one
+    /// node refuses with `Unimplemented`, one fails with a non-refusal
+    /// error) keeps today's aggregation semantics byte-for-byte — the
+    /// fan-out error stays Internal, no terminal row is written at
+    /// dispatch time, and the tick's shared retry arm schedules the
+    /// 10/20/40 s backoff curve with exhaustion landing on `Failed` /
+    /// `DISPATCH_FAILED` after exactly MAX_DISPATCH_RETRIES retries.
+    #[tokio::test]
+    async fn update_overlay_fan_out_mixed_failure_keeps_retry_semantics() {
+        let pool = create_test_pool().await;
+        seed_update_overlay_op(&pool, "net-ovl", "op-ovl-2").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let mut overlay_status_by_node = std::collections::HashMap::new();
+        overlay_status_by_node.insert(
+            "node-ovl-a".to_string(),
+            tonic::Status::unimplemented("update_overlay is unsupported in core-managed mode"),
+        );
+        overlay_status_by_node.insert(
+            "node-ovl-b".to_string(),
+            tonic::Status::unavailable("agent restarting"),
+        );
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                overlay_status_by_node,
+            )),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());
+
+        let orchestrator = test_orchestrator_with_overlay(&pool, &pattern);
+
+        // Attempt 1: mixed fan-out failure → Internal aggregation, no
+        // terminal write at dispatch, resurrected to RetryPending (retry 1).
+        orchestrator.tick().await.expect("tick 1");
+        let (status, error_code, _, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ovl-2").await;
+        assert_eq!(
+            status, "RetryPending",
+            "mixed fan-out failures keep the retry semantics"
+        );
+        assert_eq!(retry_count, 1);
+        assert!(
+            next_retry_at.is_some(),
+            "the backoff schedule is written as before"
+        );
+        assert_eq!(
+            error_code, None,
+            "no terminal write happens for a mixed failure (as before)"
+        );
+        assert!(
+            completed_at.is_none(),
+            "the op is not terminal: it is queued for retry"
+        );
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            2,
+            "one fan-out attempt per node on the initial dispatch"
+        );
+
+        // Attempts 2 and 3: backdate the backoff anchor and re-tick.
+        for expected_retry in [2, 3] {
+            sqlx::query(
+                "UPDATE operations SET next_retry_at = '2026-01-01T00:00:00Z' \
+                 WHERE operation_id = 'op-ovl-2'",
+            )
+            .execute(&pool)
+            .await
+            .expect("backdate retry anchor");
+            orchestrator.tick().await.expect("retry tick");
+            let (status, _, _, retry_count, _, _) = op_row(&pool, "op-ovl-2").await;
+            assert_eq!(status, "RetryPending");
+            assert_eq!(retry_count, expected_retry);
+        }
+
+        // Attempt 4 exceeds MAX_DISPATCH_RETRIES: terminal
+        // Failed/DISPATCH_FAILED with the exhaustion message.
+        sqlx::query(
+            "UPDATE operations SET next_retry_at = '2026-01-01T00:00:00Z' \
+             WHERE operation_id = 'op-ovl-2'",
+        )
+        .execute(&pool)
+        .await
+        .expect("backdate retry anchor");
+        orchestrator.tick().await.expect("exhaustion tick");
+        let (status, error_code, error_message, _, _, _) = op_row(&pool, "op-ovl-2").await;
+        assert_eq!(status, "Failed");
+        assert_eq!(error_code.as_deref(), Some("DISPATCH_FAILED"));
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("permanently failed after 3 retries"),
+            "the exhaustion message shape is unchanged: {error_message:?}"
+        );
+
+        // The full curve dispatched the fan-out exactly 1 +
+        // MAX_DISPATCH_RETRIES times (per node).
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            8,
+            "initial attempt plus 3 retries per node — the retry curve is unchanged"
         );
     }
 }

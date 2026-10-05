@@ -282,7 +282,8 @@ dispatch already provides the real defense in depth.
 4. **`Unimplemented` fast-fail scope (§7)** — bundle with this fix or ship as
    a separate piece. **Recommend separate**: it changes retry semantics for
    every refused RPC (§2.5), deserves its own tests and its own risk
-   discussion.
+   discussion. *(Status: shipped separately as recommended — #498, with the
+   overlay fan-out leg completed by its follow-up PR; see §12.)*
 
 ### 6.1 Decision (maintainer, 2026-10-05)
 
@@ -296,7 +297,9 @@ All four recommendations adopted, as written:
 3. **Unknown-mode policy: fail-open** — the rejection fires only on a
    definite `core-managed` report; the agent dispatch stays the enforcement.
 4. **`Unimplemented` fast-fail: separate future PR** — out of scope here
-   (see §7, §11).
+   (see §7, §11). *(Status: shipped as #498; the `UpdateOverlay` fan-out
+   leg — the one surface whose dispatch aggregates per-node failures — was
+   completed by #498's follow-up PR; see §12.)*
 
 Error carrier: `InvalidArgument` → HTTP 400 via the existing `map_ack` arm;
 zero new plumbing.
@@ -316,7 +319,8 @@ classification anywhere in the orchestrator (the only special-casing is
 inherit this too (e.g. the dispatch shim's `generation != 1` → Unimplemented
 gate in `agent_server.rs`).
 
-A fast-fail design (sketch, not implemented):
+A fast-fail design (sketch at decision time — implemented since, by #498
+plus its overlay fan-out follow-up; the as-built record is §12):
 
 1. `with_timeout` preserves the tonic `Code` (e.g. a dedicated `ChvError`
    variant or a code field) instead of stringifying — the message text
@@ -534,3 +538,52 @@ writeup left open. None of them change the semantics the design pins.
   resolution), and nothing else; neutralizing the rejection entirely
   fails the four rejection tests plus the mismatched-reject pin
   (`snapshot_family_rejects_legacy_request_node_when_volume_on_core_managed_node`).
+
+### 12.1 The §7 `Unimplemented` fast-fail (as built, #498 + its overlay follow-up)
+
+The §7 piece was shipped separately as recommended (§6.1 item 4), in #498,
+with one surface completed by #498's follow-up PR. As built:
+
+- **Identity carrier**: a typed `ChvError::Unimplemented { reason }` variant
+  (chv-errors), populated by the node client's `with_timeout` for tonic
+  `Code::Unimplemented` — no status-text string-matching; every other tonic
+  code flattens to `Internal` exactly as before, and the message text is
+  byte-identical between the two arms so the agent's refusal explanation
+  still rides the error.
+- **Tick bypass**: the tick's error handler classifies `Unimplemented` as
+  terminal at dispatch and skips the shared retry arm entirely. This bypass
+  is load-bearing: `mark_for_retry`'s UPDATE has no status guard, so any
+  path that still called it would resurrect the terminal `Failed` row back
+  to `RetryPending`.
+- **Terminal row**: `dispatch_operation`'s single-node error arm writes
+  `Failed` with `error_code: UNSUPPORTED_BY_AGENT` (distinct from
+  `AGENT_REJECTED` and `DISPATCH_FAILED`) carrying the agent's own refusal
+  message, before the error propagates to the tick.
+- **Terminal-write-failure convention**: if that terminal write itself
+  fails, the `Unimplemented` identity is deliberately flattened to
+  `Internal` — the row stays retryable and a re-dispatch re-derives the
+  terminal outcome. Never a stranded un-retryable row.
+- **Overlay fan-out completion (follow-up PR)**: `UpdateOverlay` is the one
+  dispatch whose error is an aggregation over per-node failures
+  (`OverlayManager::send_fabric_update`). #498's single-node arm did not
+  cover it: the aggregation rebuilt a fresh `Internal`, erasing the
+  refusal identity, and `dispatch_update_overlay` had no error arm writing
+  terminal rows — so an all-core-managed network still ran the full
+  10/20/40 s retry curve. The follow-up closes both gaps: (a) when EVERY
+  per-node failure is an `Unimplemented` refusal, `send_fabric_update`
+  returns one `Unimplemented` carrying the deterministic per-node roll-up
+  (fan-out order) instead of `Internal`; (b) `dispatch_update_overlay`
+  gained the terminal-write arm mirroring the single-node path (`Failed` /
+  `UNSUPPORTED_BY_AGENT` before propagating, same flatten-on-write-failure
+  convention), so the tick's existing bypass lands the operation terminal.
+  Mixed fan-out failures (some refusals, some other classes) keep the
+  `Internal` aggregation and the retry curve unchanged — a partial refusal
+  is not terminal-class for the operation.
+- **Pinned by**: `unimplemented_dispatch_fails_fast_without_retry`,
+  `unimplemented_snapshot_vm_dispatch_fails_fast_without_retry`,
+  `unavailable_dispatch_retries_exactly_as_before`,
+  `transport_unavailable_dispatch_retries_as_before` (the controls), and
+  the overlay legs
+  `update_overlay_fan_out_all_unimplemented_fails_fast_without_retry` /
+  `update_overlay_fan_out_mixed_failure_keeps_retry_semantics`
+  (orchestrator tests).
