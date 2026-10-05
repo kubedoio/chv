@@ -352,3 +352,22 @@ impl From<chv_architecture_reconcile::apply::ApplyError> for BffError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #384: the clone race loser reaches the BFF as
+    /// `BffError::Conflict` and must render HTTP 409 — the honest code
+    /// for a well-formed request whose target was materialized by a
+    /// concurrent request (the accept-time pre-check keeps 400).
+    #[test]
+    fn conflict_renders_http_409() {
+        let response = BffError::Conflict(
+            "volume 'vol-dst': target volume id already materialized by a concurrent request"
+                .to_string(),
+        )
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
+}

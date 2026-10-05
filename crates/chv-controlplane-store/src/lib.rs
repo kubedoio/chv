@@ -34,9 +34,10 @@ pub use db::{
     StorePool,
 };
 pub use desired_state::{
-    DesiredStateRepository, NetworkDesiredStateInput, NetworkStatusPatchInput, VmDesiredStateInput,
-    VmPowerStatePatchInput, VmResourcesPatchInput, VolumeAttachmentPatchInput,
-    VolumeDesiredStateInput, VolumeResizePatchInput, VolumeSnapshotPatchInput, VolumeSummaryRow,
+    CloneTargetMaterialization, CloneTargetSpec, DesiredStateRepository, NetworkDesiredStateInput,
+    NetworkStatusPatchInput, VmDesiredStateInput, VmPowerStatePatchInput, VmResourcesPatchInput,
+    VolumeAttachmentPatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
+    VolumeSnapshotPatchInput, VolumeSummaryRow,
 };
 pub use events::{EventAppendInput, EventRepository};
 pub use hypervisor_settings::{HypervisorSettingsRepository, HypervisorSettingsRow};

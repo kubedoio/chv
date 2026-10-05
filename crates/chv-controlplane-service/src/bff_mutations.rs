@@ -76,7 +76,6 @@ impl ControlPlaneMutationService {
     }
 
     fn map_ack(
-        &self,
         ack: Result<proto::AckResponse, ControlPlaneServiceError>,
     ) -> Result<proto::AckResponse, BffError> {
         let ack = ack.map_err(|e| match e {
@@ -189,7 +188,7 @@ impl MutationService for ControlPlaneMutationService {
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -235,7 +234,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -273,7 +272,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -311,7 +310,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -378,7 +377,7 @@ impl MutationService for ControlPlaneMutationService {
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -462,7 +461,7 @@ impl MutationService for ControlPlaneMutationService {
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -509,7 +508,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -556,7 +555,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -603,7 +602,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -650,7 +649,7 @@ impl MutationService for ControlPlaneMutationService {
             })
             .await;
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -713,7 +712,7 @@ impl MutationService for ControlPlaneMutationService {
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 
-        let ack = self.map_ack(ack)?;
+        let ack = Self::map_ack(ack)?;
         let result = ack
             .result
             .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
@@ -724,5 +723,43 @@ impl MutationService for ControlPlaneMutationService {
             network_id,
             summary: result.human_summary,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #384: the clone race loser surfaces as `Conflict` at the BFF
+    /// tier. The control plane's Conflict class (gRPC `ALREADY_EXISTS`)
+    /// must map to `BffError::Conflict` — HTTP 409 — not to the generic
+    /// internal-error arm, and not to the pre-check's BadRequest (400).
+    #[test]
+    fn map_ack_conflict_maps_to_bff_conflict() {
+        let err = ControlPlaneServiceError::Conflict(
+            "volume 'vol-dst': target volume id already materialized by a concurrent request"
+                .into(),
+        );
+        match ControlPlaneMutationService::map_ack(Err(err)) {
+            Err(BffError::Conflict(msg)) => {
+                assert!(msg.contains("vol-dst"), "got: {msg}");
+            }
+            other => panic!("expected BffError::Conflict, got {other:?}"),
+        }
+    }
+
+    /// The pre-check's `InvalidArgument` keeps the 400 contract — the
+    /// two paths stay distinguishable.
+    #[test]
+    fn map_ack_invalid_argument_maps_to_bad_request() {
+        let err = ControlPlaneServiceError::InvalidArgument(
+            "target volume id already exists: vol-dst".into(),
+        );
+        match ControlPlaneMutationService::map_ack(Err(err)) {
+            Err(BffError::BadRequest(msg)) => {
+                assert!(msg.contains("already exists"), "got: {msg}");
+            }
+            other => panic!("expected BffError::BadRequest, got {other:?}"),
+        }
     }
 }
