@@ -458,14 +458,18 @@ disclosures added here):**
   the legacy empty-ruleset hazard at the two legacy `set_firewall_policy`
   call sites was fixed by #452. Pre-fix stored data caveats apply
   (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
-  (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
 - **#378 / #379** — snapshot/clone accepted then fails closed on
   core-managed nodes; LVM unreachable from the VM lifecycle.
 - **#384 / #385 / #386** — last-writer-wins physical upserts + clone TOCTOU;
   respawned stord drops operator config beyond the allowlist; ownerless
-  imported/template volumes.
-- **#401 / #402** — destination-only stord not expressible; mTLS rejection
-  observability.
+  imported/template volumes (fixed by #481 — pre-fix volumes remain
+  ownerless and admin-only).
+- **#401 / #402** — destination-only stord was not expressible and
+  migration mTLS rejections were unobservable on both ends; fixed by #483
+  (the two migration halves are independently optional under
+  `enabled = true`) and #479 (rejection causes surfaced at the sender,
+  rejected handshakes warn-logged on the destination). No pre-fix state
+  persists.
 - **#351 / #336 / #372** — delete-path kill-refusal tolerance;
   JWT-secret/encryption-key coupling; remaining chvctl↔BFF contract drift.
 

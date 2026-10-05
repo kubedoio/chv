@@ -156,7 +156,11 @@ pub fn load_migration_tls(
                     .into(),
             ));
         }
-        tracing::info!("storage migration is disabled: migration actions will be unavailable");
+        // No startup log here: the disabled-migration confirmation line is
+        // emitted by the daemon wiring (`load_migration_materials` in
+        // `cmd/chv-stord`), so it fires exactly once per startup. This
+        // loader used to emit its own copy, which duplicated the wiring's
+        // line before #483 removed the latter.
         return Ok(None);
     }
 
