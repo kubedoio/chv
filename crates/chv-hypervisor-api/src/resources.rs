@@ -16,6 +16,20 @@ use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// The canonical default stord backend class for volume opens (#379).
+///
+/// Every agent-side class-writing open site (the legacy reconcile create
+/// and re-attach loops, the Core executor, the legacy `CreateVm` RPC
+/// branch, and the attach handler's spec_json parser) resolves the class
+/// from the disk spec or runtime configuration; an absent value means
+/// this default — byte-identical to the historical hardcoded literal, so
+/// no producer setting the field means zero behavior change. It lives
+/// here because it is the default vocabulary of
+/// [`HostResourceController::open_volume`]'s `backend_class` parameter:
+/// the one seam both `chv-agent-core` and `chv-agent-runtime-ch`
+/// reference without depending on each other.
+pub const DEFAULT_BACKEND_CLASS: &str = "local";
+
 /// Returns the per-VM runtime directory for the given VM.
 /// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
 ///

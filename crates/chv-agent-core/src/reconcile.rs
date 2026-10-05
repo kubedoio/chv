@@ -917,12 +917,17 @@ impl Reconciler {
         // M2.3 fail-closed: never run on an observe-only (core-managed)
         // Reconciler — the Core runtime is the sole provider effector.
         self.require_mutation()?;
-        let (pairs, cached_handles, volume_fragments) = {
+        let (pairs, cached_handles, volume_fragments, backend_classes) = {
             let cache = self.cache.lock().await;
             let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
+            // #379 PR 1: the re-attach open resolves the backend class
+            // from the same desired-state spec the pairs came from
+            // (absent field = the historical "local" default — no
+            // producer sets it yet, so this is zero behavior change).
+            let backend_classes = cache.vm_volume_backend_classes();
             let cached_handles = cache.volume_handles.clone();
             let volume_fragments = cache.volume_fragments.clone();
-            (pairs, cached_handles, volume_fragments)
+            (pairs, cached_handles, volume_fragments, backend_classes)
         };
         let needs_stord = !pairs.is_empty() || !volume_fragments.is_empty();
         if !needs_stord {
@@ -945,8 +950,14 @@ impl Reconciler {
             }
             let locator = format!("{}.img", volume_id);
             let op_id = format!("reconcile-volume-attach-{}-{}", vm_id, volume_id);
+            // #379 PR 1 (A2): the class value from the disk's desired-state
+            // spec instead of the inline "local" literal (absent → local).
+            let backend_class = backend_classes
+                .get(&(vm_id.clone(), volume_id.clone()))
+                .map(String::as_str)
+                .unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS);
             match stord
-                .open_volume(&volume_id, "local", &locator, Some(&op_id))
+                .open_volume(&volume_id, backend_class, &locator, Some(&op_id))
                 .await
             {
                 Ok((_, handle, _)) => {
@@ -1146,7 +1157,9 @@ async fn prepare_vm_resources(
         let (_volume_id, handle, export_path) = stord
             .open_volume_with_options(
                 &disk.volume_id,
-                "local",
+                // #379 PR 1 (A1): the class value from the disk spec
+                // instead of the inline "local" literal (absent → local).
+                disk.backend_class_or_local(),
                 &disk_path.to_string_lossy(),
                 open_options,
                 Some(&open_op_id),
@@ -2238,6 +2251,31 @@ mod tests {
         }
     }
 
+    /// Like [`test_cache`] but vm-1 carries two disks — one with an
+    /// explicit `backend_class` (#379 PR 1) and one without — so the
+    /// class-threading tests can pin both the spec value and the
+    /// absent-field default in one drive.
+    fn class_test_cache() -> NodeCache {
+        use crate::cache::DesiredStateFragment;
+        NodeCache {
+            node_state: "TenantReady".to_string(),
+            vm_fragments: {
+                let mut m = HashMap::new();
+                m.insert("vm-1".to_string(), DesiredStateFragment {
+                    id: "vm-1".to_string(),
+                    kind: "vm".to_string(),
+                    generation: "1".to_string(),
+                    spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-1","backend_class":"lvm"},{"volume_id":"vol-2"}],"nics":[{"network_id":"net-1","mac_address":"00:00:00:00:00:01","ip_address":"10.0.0.2"}]}"#.to_vec(),
+                    policy_json: vec![],
+                    updated_at: "2024-01-01T00:00:00Z".to_string(),
+                    updated_by: "cp".to_string(),
+                });
+                m
+            },
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn reconciler_skips_when_not_tenant_ready() {
         let dir = tempfile::tempdir().unwrap();
@@ -2564,7 +2602,17 @@ mod tests {
         }
     }
 
-    struct MockStordOk;
+    /// Shared log of the `open_volume` RPCs the mock stord received:
+    /// `(volume_id, backend_class)` per call, in call order — so tests can
+    /// pin the backend class the agent threads into its opens (#379 PR 1).
+    #[derive(Clone, Default)]
+    struct StordOpenLog {
+        opens: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    struct MockStordOk {
+        opens: StordOpenLog,
+    }
     #[tonic::async_trait]
     impl StorageService for MockStordOk {
         async fn list_volume_sessions(
@@ -2582,6 +2630,16 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
             let inner = req.into_inner();
             stord_operation_id(inner.meta.clone())?;
+            // #379 PR 1: record the backend class the agent threaded into
+            // this open so the class-plumbing tests can pin it.
+            self.opens.opens.lock().unwrap().push((
+                inner.volume_id.clone(),
+                inner
+                    .backend
+                    .as_ref()
+                    .map(|b| b.backend_class.clone())
+                    .unwrap_or_default(),
+            ));
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::OpenVolumeResponse {
                     result: Some(chv_stord_api::chv_stord_api::Result {
@@ -3033,13 +3091,17 @@ mod tests {
         }
     }
 
-    async fn start_mock_stord(socket: &std::path::Path) {
+    async fn start_mock_stord(socket: &std::path::Path) -> StordOpenLog {
+        let opens = StordOpenLog::default();
         let uds = tokio::net::UnixListener::bind(socket).unwrap();
+        let mock = MockStordOk {
+            opens: opens.clone(),
+        };
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(
                     chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
-                        MockStordOk,
+                        mock,
                     ),
                 )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -3048,10 +3110,11 @@ mod tests {
         });
         for _ in 0..10 {
             if StordClient::connect(socket).await.is_ok() {
-                return;
+                return opens;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        opens
     }
 
     async fn start_mock_nwd(socket: &std::path::Path) -> NwdCallLog {
@@ -3106,6 +3169,90 @@ mod tests {
         let config = vms.get("vm-1").unwrap();
         assert_eq!(config.cpus, 1);
         assert_eq!(config.memory_bytes, 1024);
+    }
+
+    #[tokio::test]
+    async fn prepare_vm_threads_disk_backend_class_to_stord_open() {
+        // #379 PR 1 pin (A1): the legacy VM-create open in
+        // prepare_vm_resources resolves the backend class from the disk
+        // spec instead of the "local" literal — vol-1's spec value must
+        // arrive at stord verbatim, and vol-2 (no field) must get the
+        // historical "local" default. Red/green: reverting the A1 site to
+        // the literal fails the vol-1 assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        let opens = start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mut rec = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(class_test_cache())),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.reconcile_vms().await.unwrap();
+
+        let mut recorded = opens.opens.lock().unwrap().clone();
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![
+                ("vol-1".to_string(), "lvm".to_string()),
+                ("vol-2".to_string(), "local".to_string()),
+            ],
+            "A1 must thread the disk spec's backend_class, defaulting to local when absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_volumes_reattach_threads_backend_class_from_spec() {
+        // #379 PR 1 pin (A2): the re-attach loop's open resolves the class
+        // from the volume's desired-state spec instead of the "local"
+        // literal (absent → local). Both volumes carry cached handles, so
+        // the loop re-opens exactly them. Red/green: reverting the A2 site
+        // to the literal fails the vol-1 assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        let opens = start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mut cache = class_test_cache();
+        cache
+            .volume_handles
+            .insert("vol-1".to_string(), "handle-vol-1".to_string());
+        cache
+            .volume_handles
+            .insert("vol-2".to_string(), "handle-vol-2".to_string());
+        let mut rec = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.reconcile_volumes().await.unwrap();
+
+        let mut recorded = opens.opens.lock().unwrap().clone();
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![
+                ("vol-1".to_string(), "lvm".to_string()),
+                ("vol-2".to_string(), "local".to_string()),
+            ],
+            "A2 must thread the disk spec's backend_class, defaulting to local when absent"
+        );
     }
 
     fn network_fragment_cache(firewall_rules: &str) -> NodeCache {

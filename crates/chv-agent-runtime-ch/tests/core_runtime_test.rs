@@ -121,6 +121,27 @@ fn harness(fail_on: Option<&str>) -> Harness {
     }
 }
 
+/// Same as [`harness`] but with the runtime's node-level default backend
+/// class overridden (#379 PR 1), so tests can pin that the configured
+/// class value — not an inline literal — reaches the storage controller.
+fn harness_with_backend_class(backend_class: &str) -> Harness {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().join("runtime");
+    let adapter = Arc::new(MockCloudHypervisorAdapter::default());
+    let controller = Arc::new(MockHostResourceController::new());
+    let runtime = Arc::new(
+        CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir.clone())
+            .with_default_backend_class(backend_class),
+    );
+    Harness {
+        _dir: dir,
+        runtime_dir,
+        adapter,
+        controller,
+        runtime,
+    }
+}
+
 fn calls(controller: &MockHostResourceController) -> Vec<String> {
     controller.calls.lock().expect("calls lock").clone()
 }
@@ -207,8 +228,8 @@ async fn create_vm_performs_full_side_effects() {
     // No provisioning hints on the definition: both volumes open bare.
     let options = h.controller.open_options.lock().expect("options lock");
     assert_eq!(options.len(), 2, "two opens");
-    assert!(options[0].1.is_empty(), "no hints on vol-0: {options:?}");
-    assert!(options[1].1.is_empty(), "no hints on vol-1: {options:?}");
+    assert!(options[0].2.is_empty(), "no hints on vol-0: {options:?}");
+    assert!(options[1].2.is_empty(), "no hints on vol-1: {options:?}");
     drop(options);
 
     // VM runtime dir exists with mode 0o775.
@@ -219,6 +240,60 @@ async fn create_vm_performs_full_side_effects() {
         0o775,
         "vm dir must be 0o775"
     );
+}
+
+#[tokio::test]
+async fn create_vm_volume_opens_default_to_the_local_backend_class() {
+    // #379 PR 1 pin (A3): the Core executor's volume opens resolve the
+    // backend class from the runtime instead of an inline literal; a
+    // default-constructed runtime must keep sending exactly "local" (the
+    // historical literal) while no producer exists.
+    let h = harness(None);
+    let vm_id = "vm-cls-default";
+    let command = MutationCommand::CreateVm {
+        definition: definition(vm_id, 1, 1),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-cls-default",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    let opens = h.controller.open_options.lock().expect("options lock");
+    assert_eq!(opens.len(), 1, "one open: {opens:?}");
+    assert_eq!(
+        opens[0].1, "local",
+        "absent class must default to the historical local literal"
+    );
+}
+
+#[tokio::test]
+async fn create_vm_volume_opens_thread_the_configured_backend_class() {
+    // #379 PR 1 pin (A3), red/green: the node-level default backend class
+    // configured on the runtime must reach the storage controller's open
+    // call — reverting the A3 site to the "local" literal fails this test.
+    let h = harness_with_backend_class("lvm");
+    let vm_id = "vm-cls-lvm";
+    let command = MutationCommand::CreateVm {
+        definition: definition(vm_id, 1, 1),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-cls-lvm",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    let opens = h.controller.open_options.lock().expect("options lock");
+    assert_eq!(opens.len(), 1, "one open: {opens:?}");
+    assert_eq!(opens[0].1, "lvm", "the configured class must reach stord");
 }
 
 #[tokio::test]
@@ -263,15 +338,15 @@ async fn create_vm_carries_provisioning_hints_addressing_and_tuning() {
     assert_eq!(options.len(), 2, "two opens: {options:?}");
     assert_eq!(options[0].0, "vol-0");
     assert_eq!(
-        options[0].1.get("size_bytes").map(String::as_str),
+        options[0].2.get("size_bytes").map(String::as_str),
         Some("10737418240")
     );
     assert_eq!(
-        options[0].1.get("seed_from").map(String::as_str),
+        options[0].2.get("seed_from").map(String::as_str),
         Some("/var/lib/chv/images/ubuntu.img")
     );
     assert_eq!(options[1].0, "vol-1");
-    assert!(options[1].1.is_empty(), "no hints on vol-1: {options:?}");
+    assert!(options[1].2.is_empty(), "no hints on vol-1: {options:?}");
 
     // Addressing and tuning reach the hypervisor config verbatim.
     let vms = h.adapter.vms.lock().expect("vms lock");

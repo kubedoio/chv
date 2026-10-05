@@ -652,6 +652,38 @@ impl NodeCache {
         out
     }
 
+    /// Backend class per `(vm_id, volume_id)` disk in the desired-state VM
+    /// fragments (#379 PR 1): the spec's `backend_class` when set, else the
+    /// historical `"local"` default. The re-attach loop threads this into
+    /// its stord opens instead of the inline literal; no producer sets the
+    /// field yet (the CP carry is PR 2), so every value is `"local"`.
+    pub fn vm_volume_backend_classes(&self) -> HashMap<(String, String), String> {
+        let mut out = HashMap::new();
+        for (vm_id, frag) in &self.vm_fragments {
+            let raw = match std::str::from_utf8(&frag.spec_json) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(fragment_id = %frag.id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
+                    continue;
+                }
+            };
+            match crate::spec::VmSpec::from_json(raw) {
+                Ok(spec) => {
+                    for disk in &spec.disks {
+                        out.insert(
+                            (vm_id.clone(), disk.volume_id.clone()),
+                            disk.backend_class_or_local().to_string(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(fragment_id = %frag.id, error = %e, "failed to parse vm_fragment spec_json");
+                }
+            }
+        }
+        out
+    }
+
     /// Project a single Core `VmDefinition` into the legacy compatibility VM
     /// axis of the cache (fragment + generation + attachments + desired state).
     ///
@@ -1563,6 +1595,33 @@ mod tests {
                 ("vm-1".to_string(), "vol-1".to_string()),
                 ("vm-1".to_string(), "vol-2".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn vm_volume_backend_classes_default_to_local_when_absent() {
+        // #379 PR 1 pin (A2's class source): the per-disk class comes from
+        // the same desired-state spec the re-attach pairs come from — a
+        // set field passes through, an absent field (every producer today)
+        // resolves to the historical "local" default.
+        let mut cache = NodeCache::new("node-1");
+        cache.store_fragment("vm", "vm-1", DesiredStateFragment {
+            id: "vm-1".to_string(),
+            kind: "vm".to_string(),
+            generation: "1".to_string(),
+            spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-1","backend_class":"lvm"},{"volume_id":"vol-2"}],"nics":[]}"#.to_vec(),
+            policy_json: vec![],
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_by: "cp".to_string(),
+        });
+        let classes = cache.vm_volume_backend_classes();
+        assert_eq!(
+            classes.get(&("vm-1".to_string(), "vol-1".to_string())),
+            Some(&"lvm".to_string())
+        );
+        assert_eq!(
+            classes.get(&("vm-1".to_string(), "vol-2".to_string())),
+            Some(&"local".to_string())
         );
     }
 

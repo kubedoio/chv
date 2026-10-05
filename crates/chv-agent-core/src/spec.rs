@@ -35,6 +35,30 @@ pub struct DiskSpec {
     pub read_only: bool,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    /// Stord backend class for this disk's volume opens (#379 PR 1, the
+    /// A6 model field): absent means the historical `"local"` default
+    /// ([`DiskSpec::backend_class_or_local`]). The model is
+    /// serde-tolerant (no `deny_unknown_fields`), so the field is purely
+    /// additive — a pre-#379 spec JSON deserializes identically. No
+    /// producer sets it yet (the CP carry is PR 2); the name matches what
+    /// the attach handler's spec_json parser already reads
+    /// (`backend_class`, B5).
+    #[serde(default)]
+    pub backend_class: Option<String>,
+}
+
+impl DiskSpec {
+    /// The stord backend class to open this disk's volume with: the
+    /// spec's value when set, else the historical `"local"` default.
+    ///
+    /// #379 PR 1's single default seam for the agent-side open sites —
+    /// while no producer sets the field this returns exactly what the
+    /// old inline literal sent (zero behavior change).
+    pub fn backend_class_or_local(&self) -> &str {
+        self.backend_class
+            .as_deref()
+            .unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -209,6 +233,54 @@ mod tests {
         );
         let spec = VmSpec::from_json(&without_policy).unwrap();
         assert_eq!(spec.nics[0].firewall_policy_json, None);
+    }
+
+    #[test]
+    fn disk_spec_backend_class_is_additive_and_parse_stable() {
+        // #379 PR 1 back-compat pin (A6): the field is purely additive —
+        // a pre-#379 DiskSpec JSON (no backend_class key) deserializes
+        // identically (None), and a JSON carrying the field parses to the
+        // same value a hand-built struct holds (the shape PR 2's
+        // producers will emit). DiskSpec has no Serialize impl — this
+        // pins the deserialization contract, not a serialize round-trip.
+        let without = r#"{"volume_id":"vol-1","read_only":true,"size_bytes":1024}"#;
+        let parsed: DiskSpec = serde_json::from_str(without).unwrap();
+        assert_eq!(
+            parsed,
+            DiskSpec {
+                volume_id: "vol-1".to_string(),
+                read_only: true,
+                size_bytes: Some(1024),
+                backend_class: None,
+            }
+        );
+
+        let with = r#"{"volume_id":"vol-1","backend_class":"lvm"}"#;
+        let parsed: DiskSpec = serde_json::from_str(with).unwrap();
+        assert_eq!(
+            parsed,
+            DiskSpec {
+                volume_id: "vol-1".to_string(),
+                read_only: false,
+                size_bytes: None,
+                backend_class: Some("lvm".to_string()),
+            }
+        );
+        // Re-parsing the same JSON is deterministic (same value back).
+        let reparsed: DiskSpec = serde_json::from_str(with).unwrap();
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn disk_spec_backend_class_or_local_is_the_default_seam() {
+        // #379 PR 1 pin (B5 default): absent field resolves to exactly
+        // "local" — the historical literal — and a set field passes
+        // through verbatim.
+        let absent: DiskSpec = serde_json::from_str(r#"{"volume_id":"v"}"#).unwrap();
+        assert_eq!(absent.backend_class_or_local(), "local");
+        let set: DiskSpec =
+            serde_json::from_str(r#"{"volume_id":"v","backend_class":"lvm"}"#).unwrap();
+        assert_eq!(set.backend_class_or_local(), "lvm");
     }
 
     #[test]

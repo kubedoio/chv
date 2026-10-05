@@ -597,6 +597,7 @@ mod tests {
             volume_id: "volume-a".into(),
             read_only: false,
             size_bytes: Some(10_737_418_240),
+            backend_class: None,
         });
         spec.nics.push(NicSpec {
             network_id: "network-a".into(),
@@ -674,6 +675,7 @@ mod tests {
             volume_id: "volume-a".into(),
             read_only: false,
             size_bytes: None,
+            backend_class: None,
         });
         let result = adapt_legacy_vm_mutation(
             &create_meta,
@@ -830,6 +832,7 @@ mod tests {
             volume_id: "volume-a".into(),
             read_only: true,
             size_bytes: None,
+            backend_class: None,
         });
         spec.nics.push(NicSpec {
             network_id: "network-a".into(),
