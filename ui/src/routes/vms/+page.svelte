@@ -5,6 +5,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import CreateVMModal from '$lib/components/vms/CreateVMModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
+	import { mapPowerTone } from '$lib/shell/power-tone';
 	import { Plus, Activity, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
@@ -65,19 +66,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		{ key: 'memory', label: 'Memory', align: 'right' as const },
 		{ key: 'last_task', label: 'Recent Operation' }
 	];
-
-	function mapPowerTone(state: string): string {
-		// Case-insensitive, mirroring the detail view's normalizeTone: the
-		// BFF reports capitalized power states ('Running', 'Failed', ...).
-		switch (state.toLowerCase()) {
-			case 'running': return 'healthy';
-			case 'stopped': return 'neutral';
-			case 'paused': return 'warning';
-			case 'crashed':
-			case 'failed': return 'failed';
-			default: return 'neutral';
-		}
-	}
 
 	function mapHealthTone(health: string): string {
 		switch (health) {

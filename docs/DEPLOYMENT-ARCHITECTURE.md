@@ -440,8 +440,16 @@ disclosures added here):**
   No advisory affects v53.0 as of 2026-10-03.
 - **#394** — concurrent-write migration silently loses data; quiescent-source
   migration is the claimed mode.
-- **#368** — a transient effector failure terminally fails a journaled VM
-  create; nothing re-drives it. Disclosed, not gated.
+- **#368** — fixed by #484 — a transient effector failure terminally
+  failing a journaled VM create is now re-driven by a bounded orchestrator
+  pass (a new `RecreateVm` operation per attempt, spaced by the
+  dispatch-retry backoff curve 10 s / 20 s / 40 s, at most 3 attempts);
+  on exhaustion the VM is marked terminally Failed with
+  `CREATE_REDRIVE_EXHAUSTED` plus the reported failure code, and the BFF
+  renders a `Failed` runtime status as-is with `last_error` (Failed-wins
+  over the desired power state). No pre-fix state persists
+  (already-terminal creates stay terminal — a re-drive is always a new
+  operation, never a resurrection).
 - **#345 (Cloud Hypervisor side)** — the v43 control-loop hang after guest
   poweroff is contained, not cured; the CH v43 serial-console upstream defect
   gates above KVM-VERIFIED and requires re-verification at any Cloud
