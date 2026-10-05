@@ -13,7 +13,9 @@ check-then-upsert TOCTOU.
 The adopted fix (option 3, the targeted transactional clone path) is
 implemented; the general physical-row guard is deferred by decision with
 named reopen triggers (§6.1). Evidence cited `file:line` at main
-`b4fcb9e2`.
+`b4fcb9e2`; refs re-anchored at `728fcd5f` (the #501 merge) after that
+merge's own insertions shifted the store/service line numbers, with the
+clone-path rows updated to the as-built shape.
 
 ---
 
@@ -24,7 +26,7 @@ generation-guarded desired-state row, but the *physical* inventory rows
 (`volumes`, `networks`) are written unconditionally. The issue's own
 accuracy correction holds: `upsert_volume` runs the physical upsert and the
 generation-guarded `volume_desired_state` upsert **in one transaction**
-(`desired_state.rs:558-607`), failing closed atomically on a stale
+(`desired_state.rs:618-667`), failing closed atomically on a stale
 generation — so the agent fragment-reconcile path cannot silently regress a
 physical row today. What remains is:
 
@@ -45,25 +47,25 @@ physical-row guard (generation column, or a subquery guard on the existing
 desired-state row), a *targeted* transactional clone path, or both as
 separate PRs — or none of the above, on the evidence below?
 
-## 2. Ground truth at `b4fcb9e2`
+## 2. Ground truth (verified at `b4fcb9e2`; refs re-anchored at `728fcd5f`)
 
 ### 2.1 The unguarded upserts, verified
 
 - `UPSERT_VOLUME_SQL` (`desired_state.rs:76-110`): `ON CONFLICT (volume_id)
   DO UPDATE` at `:97-109` with **no WHERE guard** (contrast the VDS upsert's
-  guard at `:162`). Only guarded column: `owner_id` is COALESCE-preserved
+  guard at `:191`). Only guarded column: `owner_id` is COALESCE-preserved
   (`:108`, the #381 review fix).
-- `UPSERT_NETWORK_SQL` (`desired_state.rs:165-185`): `ON CONFLICT
-  (network_id) DO UPDATE` at `:180-184`, no guard (contrast NDS guard at
-  `:228`).
+- `UPSERT_NETWORK_SQL` (`desired_state.rs:194-214`): `ON CONFLICT
+  (network_id) DO UPDATE` at `:209-213`, no guard (contrast NDS guard at
+  `:257`).
 - Neither physical table has a generation column
   (`cmd/chv-controlplane/migrations/0001_initial.sql:122-131` volumes,
   `:166-173` networks).
 
 ### 2.2 Single-transaction fail-closed coupling, verified
 
-`upsert_volume` (`desired_state.rs:558-607`), `upsert_network`
-(`:738-781`), and `upsert_network_with_exposures` (`:783-854`) all follow
+`upsert_volume` (`desired_state.rs:618-667`), `upsert_network`
+(`:941-984`), and `upsert_network_with_exposures` (`:986-1057`) all follow
 the same shape: `begin()` → physical upsert → desired-state upsert →
 `rows_affected() == 0` ⇒ return `StoreError::StaleGeneration` **before
 `tx.commit()`** ⇒ the physical write is rolled back with the intent. A
@@ -72,10 +74,10 @@ these methods.
 
 ### 2.3 Line-reference corrections (issue → current main)
 
-| Issue said | Current main (`b4fcb9e2`) |
+| Issue said | Main at investigation (`b4fcb9e2`) |
 |---|---|
-| clone target-absence check `lifecycle.rs ~:1063` | `lifecycle.rs:1140-1150` (target `get_volume_summary` → `InvalidArgument("target volume id already exists")`) |
-| clone upsert `lifecycle.rs ~:1096` | `lifecycle.rs:1185-1215` (`upsert_volume` inside `persist_intent_and_accept`; the input built at `:1187-1212`) |
+| clone target-absence check `lifecycle.rs ~:1063` | `lifecycle.rs:1156-1161` (target `get_volume_summary` → `InvalidArgument("target volume id already exists")`) |
+| clone upsert `lifecycle.rs ~:1096` | pre-fix: `upsert_volume` inside `persist_intent_and_accept`; as built (#501): `materialize_clone_target` at `lifecycle.rs:1226-1244` → `desired_state.rs:824-939` |
 | resize executor `orchestrator.rs ~:925` | `orchestrator.rs:1209` (`UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?`), plus the unguarded VDS clear `UPDATE volume_desired_state SET resize_to_bytes = NULL` at `:1223-1227` |
 
 The drift is from #495 (accept-time rejection inserted ~75 lines of
@@ -87,8 +89,8 @@ dispatch handler in `orchestrator.rs`).
 
 | # | Writer | file:line | Shape | Generation-aware? |
 |---|---|---|---|---|
-| V1 | `UPSERT_VOLUME_SQL` via `DesiredStateRepository::upsert_volume` | SQL `desired_state.rs:76-110`; method `:558-607` | unconditional DO UPDATE, **in one tx with the guarded VDS upsert**; StaleGeneration rolls back both | yes (tx coupling) |
-| V1a | ← clone target materialization | `lifecycle.rs:1185-1215` | generation = caller-supplied `meta.desired_state_version`; the BFF mints a fresh ms-clock generation per request (`bff_mutations.rs:50-65` `fresh_generation`, `:67-76` `build_meta`) | caller-supplied, always fresh from the BFF |
+| V1 | `UPSERT_VOLUME_SQL` via `DesiredStateRepository::upsert_volume` | SQL `desired_state.rs:76-110`; method `:618-667` | unconditional DO UPDATE, **in one tx with the guarded VDS upsert**; StaleGeneration rolls back both | yes (tx coupling) |
+| V1a | ← clone target materialization | as built (#501): `lifecycle.rs:1226-1244` → `desired_state.rs:824-939` | generation = caller-supplied `meta.desired_state_version`; the BFF mints a fresh ms-clock generation per request (`bff_mutations.rs:50-65` `fresh_generation`, `:67-76` `build_meta`) | caller-supplied, always fresh from the BFF |
 | V1b | ← agent volume fragment (`ApplyVolumeDesiredState`) | `reconcile.rs:470-500` | generation = the fragment's, which the node client sets from the dispatched intent's `desired_state_version` (`agent_server.rs:4967-4971`; the VM-side twin enforces match at `:225-232`) | yes |
 | V2 | resize success persist | `orchestrator.rs:1209` | direct single-statement `UPDATE ... SET capacity_bytes`, autocommit, after successful agent dispatch | **no** — ordering by construction only |
 | V3 | BFF VM-create embedded volume | `chv-webui-bff/src/handlers/vms.rs:603-616` (id minted `:511`) | plain `INSERT` — PK collision aborts the whole create tx (fail-closed) | n/a (no conflict path) |
@@ -96,8 +98,8 @@ dispatch handler in `orchestrator.rs`).
 | V5 | BFF template instantiate | `chv-webui-bff/src/handlers/templates.rs:420-433` (id minted `:383`) | plain `INSERT`, fail-closed | n/a |
 | — | **delete** | none | there is **no `DELETE FROM volumes` anywhere in production code** — volume rows are never removed | — |
 
-Test-only writers excluded from the census (`orchestrator.rs:1950-1961`
-`seed_volume`, `:1963-1971` `seed_network`, `fabric_planner.rs:267-284`,
+Test-only writers excluded from the census (`orchestrator.rs:1995-2006`
+`seed_volume`, `:2008-2014` `seed_network`, `fabric_planner.rs:267-284`,
 store `networks.rs:86-100`, and the various test-suite seeds). No
 migration writes to either table (verified: no `INSERT`/`UPDATE` on
 `volumes`/`networks` under `cmd/chv-controlplane/migrations/`).
@@ -106,14 +108,14 @@ migration writes to either table (verified: no `INSERT`/`UPDATE` on
 
 | # | Writer | file:line | Shape | Generation-aware? |
 |---|---|---|---|---|
-| N1 | `UPSERT_NETWORK_SQL` via `upsert_network` / `upsert_network_with_exposures` | SQL `desired_state.rs:165-185`; methods `:738-781`, `:783-854` | unconditional DO UPDATE, one tx with the guarded NDS upsert | yes (tx coupling) |
+| N1 | `UPSERT_NETWORK_SQL` via `upsert_network` / `upsert_network_with_exposures` | SQL `desired_state.rs:194-214`; methods `:941-984`, `:986-1057` | unconditional DO UPDATE, one tx with the guarded NDS upsert | yes (tx coupling) |
 | N1a | ← agent network fragment | `reconcile.rs:646-671` | **the only production caller** of the physical networks upsert | yes |
 | N2 | BFF network create | `chv-webui-bff/src/handlers/networks.rs:301-312` (id minted `:293` via `gen_short_id()`) | plain `INSERT`, fail-closed | n/a |
 | N3 | BFF network delete | `networks.rs:483-487`, inside a `BEGIN IMMEDIATE` tx (`:384-388`, the #356 serialization) gated on zero live attachments | `DELETE FROM networks` (NDS cascades, `0001_initial.sql:176`) | no (tx + gate) |
 | N4 | BFF network rename | `networks.rs:578` | `UPDATE networks SET display_name` in a plain tx | no |
 | N5 | BFF VM-create implicit network | `vms.rs:718-729` (after check-then-resolve `:642-670`) | plain `INSERT` — check-then-insert TOCTOU but fail-closed on PK | n/a |
 | N6 | BFF template network ensure | `templates.rs:458-469` (check at `:450-455`) | plain `INSERT`, fail-closed | n/a |
-| N7 | VTEP VNI set / release | `chv-controlplane-store/src/vtep.rs:398-402`, `:421-424` | `UPDATE networks SET vni` — scoped to the `vni` column only | no |
+| N7 | VTEP VNI set / release | `chv-controlplane-store/src/vtep.rs:404-408`, `:427-430` | `UPDATE networks SET vni` — scoped to the `vni` column only | no |
 
 The networks census differs materially from volumes (see §3.6): there is no
 network clone, no resize executor, and the fragment upsert is the *only*
@@ -137,7 +139,7 @@ conflict-capable writer.
   `operation_id: ""` (`bff_mutations.rs:70`) with a *fresh* ms-clock
   generation per request (`:50-65`) — two concurrent identical clones get
   **different** idempotency keys and both journal operations
-  (`operations.rs:36-37` `ON CONFLICT (idempotency_key) DO NOTHING`,
+  (`operations.rs:37` `ON CONFLICT (idempotency_key) DO NOTHING`,
   key UNIQUE at `0001_initial.sql:204`). Only a direct gRPC caller that
   repeats `meta.operation_id` (`request:{id}`, `lifecycle.rs:450`) gets
   replay semantics.
@@ -155,7 +157,7 @@ conflict-capable writer.
 
 ### 3.1 clone ∥ clone, same target id — REACHABLE, the one real bug
 
-Both requests pass the target-absence check (`lifecycle.rs:1140-1150`)
+Both requests pass the target-absence check (`lifecycle.rs:1156-1161`)
 before either commits; both journal `CloneVolume` ops (distinct
 idempotency keys, §2.6). The upserts then serialize:
 
@@ -234,7 +236,7 @@ arrive late (the agent's deferred-report queue survives CP outages), a
 network fragment in flight when the operator deletes the network will
 **resurrect** it: the delete cascades away the NDS row, so the fragment's
 `upsert_network_with_exposures` takes the INSERT path — no conflict, no
-guard evaluated (`desired_state.rs:783-854`, delete at
+guard evaluated (`desired_state.rs:986-1057`, delete at
 `networks.rs:483-487`). Window is small (fragment queued pre-delete,
 delivered post-delete) and the resurrection is shape-complete (network +
 NDS + exposures re-created). Flagged as a **separate issue** — it is not a
@@ -256,7 +258,7 @@ writer.
   conflict (plain INSERT); the only unguarded writer (V2, resize) would
   *become* guardable — and that is its real merit: the executor has the
   intent generation available (the claim query returns
-  `desired_generation`, `orchestrator.rs:1913`), so the resize persist
+  `desired_generation`, `orchestrator.rs:190`), so the resize persist
   could become a compare-and-swap.
 - **Costs:** migration + backfill; every writer must maintain a second
   generation copy (8 writer sites across 3 crates); BFF plain-INSERTs need
@@ -283,7 +285,7 @@ WHERE COALESCE(
 ```
 
 - **Correctness:** the physical upsert runs *first* in the tx
-  (`desired_state.rs:562-572`), so the subquery sees the pre-tx desired
+  (`desired_state.rs:622-632`), so the subquery sees the pre-tx desired
   state — exactly the guard intended. No-VDS-row case (fresh volume, or
   orphan physical row) maps to 0 ⇒ update permitted, which is the current
   behavior for those shapes.
@@ -325,7 +327,7 @@ Close the TOCTOU and the read-write skew in one place:
    be shaped from a stale size.
 3. **Handle idempotent replay.** A direct gRPC caller repeating
    `meta.operation_id` gets the *existing* op from `create_or_get`
-   (`operations.rs:79-120`, `lifecycle.rs:465-500`) and the lifecycle
+   (`operations.rs:79-135`, `lifecycle.rs:465-500`) and the lifecycle
    proceeds to re-run the intent persist — with a strict insert, the
    replay would now collide with its own earlier materialization. The
    store method needs a way to distinguish "row exists because a *racing
@@ -344,8 +346,8 @@ Close the TOCTOU and the read-write skew in one place:
 - **Costs:** one new store method (+ its error mapping), the
   receipt-`created` plumbing, and clone's read/write restructure. No
   migration, no contract change (BFF `map_ack` already maps
-  `Conflict → BffError::Conflict`, `bff_mutations.rs:86`; the pre-check's
-  `InvalidArgument → 400` arm is unchanged, `:84`).
+  `Conflict → BffError::Conflict`, `bff_mutations.rs:85`; the pre-check's
+  `InvalidArgument → 400` arm is unchanged, `:83`).
 
 ### Decomposition (the framing the issue invites)
 
@@ -381,7 +383,7 @@ behavior. So the natural decomposition is:
 3. **Race-loser error contract** — reuse today's pre-check
    `InvalidArgument` ("target volume id already exists") for the
    race-detected path, vs `Conflict` (gRPC `ALREADY_EXISTS`,
-   `error.rs:81`; BFF `BffError::Conflict`, `bff_mutations.rs:86`). Both
+   `error.rs:89`; BFF `BffError::Conflict`, `bff_mutations.rs:85`). Both
    are zero-plumbing. **Recommend `Conflict` for the race-detected path,
    `InvalidArgument` kept for the pre-check**: the race loser's request
    was well-formed and the target genuinely existed at persist time — a
@@ -449,7 +451,7 @@ House patterns exist for both levels this needs:
   (`vms.rs:1738+`, N concurrent tasks against a shared on-disk WAL pool
   with prod pragmas, asserting exactly-N-success) and the store's
   concurrent fabric-IP registration test
-  (`tests.rs:598+`, `tokio::spawn` against a shared `TestDb` pool). The
+  (`tests.rs:943+`, `tokio::spawn` against a shared `TestDb` pool). The
   clone-collision test belongs in the CP lifecycle suite with a real
   `TestDb` (the #380/#381 clone suite shape,
   `chv-controlplane-service/src/tests.rs:3746+`): two concurrent
