@@ -330,8 +330,12 @@ then runs the minimal generated config (allowlist per
 `stord_path_allowlist`, `runtime_dir` under the agent's data dir) and any
 operator keys — `backend_type`, `device_allowlist`, `[migration]`, a custom
 `runtime_dir` — are NOT in effect until the file is fixed. The agent user must
-be able to read the file (the standard install grants this via `chv-stord` group
-membership); hand-managed deployments should set `stord_config_path` to their
+be able to read the file (both standard install surfaces grant this via
+`chv-stord` group membership: `install.sh` and the `.deb` postinst; note the
+timing on package upgrades — the postinst never restarts the agent, so the
+grant takes effect at the agent's next start; hardening `stord.toml` before
+that restart yields the warn + fallback above until then);
+hand-managed deployments should set `stord_config_path` to their
 `stord.toml` to get the pass-through behavior.
 
 A `stord.toml` that passes that check can still fail at daemon *startup*: a

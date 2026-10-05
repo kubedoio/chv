@@ -50,6 +50,6 @@ stord_path_allowlist = ["/var/lib/chv/storage", "/var/lib/chv/agent"]
 # stord.db stays where the operator put it. Omitted (default) keeps the
 # historical generated-config respawn; an unreadable/malformed file or
 # a socket mismatch falls back to it with a loud warning. The agent
-# user must be able to read the file (the standard install grants this
-# via the chv-stord group).
+# user must be able to read the file (both standard install surfaces
+# grant this via the chv-stord group: install.sh and the .deb postinst).
 stord_config_path = "/etc/chv/stord.toml"

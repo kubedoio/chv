@@ -151,7 +151,9 @@ assert_user() {
 }
 assert_group_member() {
     local group="$1" user="$2"
-    if grep -E "^${group}:" "$ROOT/etc/group" | grep -q ":${user}\$"; then
+    # Token-exact membership match: a trailing-member grep would false-fail
+    # if another member were ever appended after $user.
+    if awk -F: -v g="$group" -v u="$user" '$1 == g { n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) found = 1 } END { exit !found }' "$ROOT/etc/group"; then
         qual_pass "${user} is a member of ${group}"
     else
         qual_error "${user} is NOT a member of ${group}"
@@ -165,6 +167,11 @@ done
 qual_pass "groups present: chv, chv-stord"
 assert_group_member kvm chv
 assert_group_member disk chv-stord
+# #385 respawn pass-through parity: the agent user (chv) must be in
+# chv-stord so it can read a hardened root:chv-stord 0640 stord.toml
+# when the agent's supervisor respawns stord (same grant install.sh
+# makes; the postinst carries it for .deb installs).
+assert_group_member chv-stord chv
 # Intended-but-broken: postinst's `id -nG chv-stord | grep -qw chv` matches
 # the chv-stord group name itself (hyphen is a word boundary), so
 # `usermod -aG chv chv-stord` never runs. Fixed in the postinst with a
