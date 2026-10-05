@@ -21,7 +21,7 @@
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@testing-library/svelte": "^5.4.2",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^26.6.3",
+    "@types/node": "^26.6.4",
     "autoprefixer": "^10.6.1",
     "glob": "^13.0.6",
     "jsdom": "^30.1.1",
@@ -35,10 +35,10 @@
     "vitest": "^3.2.7"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-arm64-gnu": "4.63.5",
-    "@rollup/rollup-linux-arm64-musl": "4.63.5",
-    "@rollup/rollup-linux-x64-gnu": "4.63.5",
-    "@rollup/rollup-linux-x64-musl": "4.63.5"
+    "@rollup/rollup-linux-arm64-gnu": "4.63.6",
+    "@rollup/rollup-linux-arm64-musl": "4.63.6",
+    "@rollup/rollup-linux-x64-gnu": "4.63.6",
+    "@rollup/rollup-linux-x64-musl": "4.63.6"
   },
   "dependencies": {
     "@xyflow/svelte": "^1.7.0",
