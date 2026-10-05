@@ -15,10 +15,11 @@
 #                 on the next boot), a stord SIGKILL proves the running
 #                 VM survives the daemon's death and the supervisor's
 #                 replacement serves NEW provisioning, snapshot/clone
-#                 assert the #378 truth (accepted + journaled, then
-#                 FAIL-CLOSED dispatch on core-managed nodes — no side
-#                 effect behind the Core authority), and VM delete
-#                 closes the stord session.
+#                 assert the post-#495 #378 truth (REJECTED at accept
+#                 time on core-managed nodes — InvalidArgument → HTTP
+#                 400 BEFORE any journaling; the agent's fail-closed
+#                 dispatch remains the enforcement backstop), and VM
+#                 delete closes the stord session.
 #
 #   LVM         — the stord LAYER only (loopback PV → VG → LV): the
 #                 LVMBackend's real contract (open/export, block
@@ -598,14 +599,20 @@ save_evidence "leg-c recovered"
 
 # ---------------------------------------------------------------------------
 # Leg D — snapshot + clone of the (stopped) boot volume: the advertised
-# operator surface. TRUTH on core-managed nodes (#378): the BFF accepts
-# and the CP journals the intent, but the agent FAILS CLOSED by design
-# (M2.2b single-writer enforcement — the legacy stord snapshot side
-# effect must never run behind the Core authority; Core M1 does not
-# model volume ops). This leg asserts that boundary: accepted + journaled
-# + fail-closed dispatch + NO side effect on the host.
+# operator surface. TRUTH on core-managed nodes since #495 (#378): all
+# four volume-op surfaces are REJECTED AT ACCEPT TIME — the CP lifecycle
+# handler returns InvalidArgument (→ HTTP 400 through the BFF's map_ack;
+# chvctl prints the message) BEFORE create_operation_and_emit, so a
+# rejected request leaves no operations row, no volume_desired_state
+# intent and (clone) no target volume row. The node's mode comes from
+# the agent's inventory (authority_mode carrier, #495); the check fails
+# OPEN on an unknown mode, and the agent's fail-closed dispatch
+# (Unimplemented — M2.2b single-writer enforcement) remains the
+# enforcement backstop, now unreachable through this surface. This leg
+# asserts the new boundary: immediate 400 with the agreed message + no
+# journaled state + no dispatch + NO side effect on the host.
 # ---------------------------------------------------------------------------
-qual_info "--- Leg D: snapshot + clone — accepted, journaled, fail-closed on core-managed nodes (#378)"
+qual_info "--- Leg D: snapshot + clone — rejected at accept time on core-managed nodes (#378, fixed by #495)"
 
 # The would-be snapshot/clone destination is the LIVE stord's runtime_dir
 # (after Leg C's restart: the agent dir, #376) — used for the NO-side-
@@ -616,99 +623,128 @@ qual_info "live stord runtime_dir: ${STORD_LIVE_DIR}"
 qual_chvctl vm stop "$VM1_ID" >/dev/null || qual_error "vm stop failed for ${VM1_ID}"
 wait_vm_stopped "$VM1_ID" || qual_die "vm did not stop (Leg D)"
 
+# Snapshot: rejected at accept time — chvctl exits non-zero with the
+# CP's InvalidArgument message surfaced by the BFF's map_ack (the #495
+# contract text; the m4.4 DEL_OUT/RC pattern for asserted CLI failures).
 SNAP_NAME="m45snap"
-qual_chvctl volume snapshot "$VOL1_ID" --name "$SNAP_NAME" >/dev/null 2>&1 \
-    && qual_pass "chvctl volume snapshot accepted (${VOL1_ID} → ${SNAP_NAME})" \
-    || qual_die "chvctl volume snapshot failed (was the #372 CLI fix deployed?)"
+SNAP_OUT="$(qual_chvctl volume snapshot "$VOL1_ID" --name "$SNAP_NAME" 2>&1)" && RC=0 || RC=$?
+if [ "$RC" -ne 0 ] && printf '%s' "$SNAP_OUT" | grep -q "volume snapshot is not supported on core-managed nodes"; then
+    qual_pass "chvctl volume snapshot rejected at accept time (${VOL1_ID} → ${SNAP_NAME}): ${SNAP_OUT}"
+elif [ "$RC" -ne 0 ]; then
+    qual_error "chvctl volume snapshot failed with the WRONG error (expected the #495 core-managed rejection): ${SNAP_OUT}"
+else
+    qual_error "chvctl volume snapshot ACCEPTED on a core-managed node — the pre-#495 accept-then-fail-closed shape is back (architecture violation!)"
+fi
 
-# The CP journals the snapshot intent (the dispatch trail exists even
-# though the agent will refuse it).
-snapshot_intent_row() {
-    [ "$(sqlite_query "$QUAL_DB" \
-        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)" = "create" ]
-}
-wait_for "CP journaled the snapshot intent (volume_desired_state)" "$DISPATCH_TIMEOUT" \
-    snapshot_intent_row \
-    && qual_pass "snapshot intent journaled (snapshot_op=create, name=${SNAP_NAME})" \
-    || qual_error "no snapshot intent row for ${VOL1_ID} in volume_desired_state"
+# The rejection must be PRE-JOURNAL: no operations row and no
+# volume_desired_state snapshot intent for the attempt. The settle gives
+# a journal-then-reject regression time to show up before the absence
+# assertions run (an immediate check could false-pass against one).
+sleep 5
+SNAP_OPS="$(sqlite_query "$QUAL_DB" \
+    "SELECT COUNT(*) FROM operations WHERE resource_id='${VOL1_ID}' AND operation_type IN ('SnapshotVolume','DeleteVolumeSnapshot')" 2>/dev/null | head -1)"
+[ "${SNAP_OPS:-}" = "0" ] \
+    && qual_pass "no operations row for the rejected snapshot (SnapshotVolume/DeleteVolumeSnapshot count=0)" \
+    || qual_error "operations row(s) journaled for the rejected snapshot (count='${SNAP_OPS}') — the rejection was NOT pre-journal (#495 regression)"
+SNAP_OP_NOW="$(sqlite_query "$QUAL_DB" \
+    "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)"
+if [ -z "${SNAP_OP_NOW}" ]; then
+    qual_pass "no snapshot intent journaled (volume_desired_state.snapshot_op stays empty for ${VOL1_ID})"
+else
+    qual_error "snapshot intent journaled despite the rejection (snapshot_op='${SNAP_OP_NOW}') — the rejection was NOT pre-journal (#495 regression)"
+fi
 
-# The fail-closed proof: the orchestrator's dispatch to the agent is
-# refused with the single-writer enforcement error, and NO snapshot file
-# ever materializes (no side effect behind the Core authority).
+# No dispatch ever happens: the agent's fail-closed refusal line must
+# NOT appear in the CP log — nothing was journaled for the orchestrator
+# to claim and dispatch.
 cp_log_has() { grep -aq "$1" "${QUAL_LOGS_DIR}/controlplane.log"; }
-wait_for "agent refuses the snapshot dispatch (core-managed fail-closed)" "$DISPATCH_TIMEOUT" \
-    cp_log_has "snapshot_volume is unsupported in core-managed mode" \
-    && qual_pass "snapshot dispatch refused by the agent (single-writer enforcement holds)" \
-    || qual_error "no fail-closed dispatch refusal in the CP log — snapshot may have EXECUTED behind the Core authority (architecture violation!)"
+if cp_log_has "snapshot_volume is unsupported in core-managed mode"; then
+    qual_error "dispatch-refusal line in the CP log — a snapshot WAS dispatched to the agent (the pre-#495 accept-then-fail shape is back)"
+else
+    qual_pass "no snapshot dispatch-refusal in the CP log (nothing was dispatched)"
+fi
 
 SNAP_FILE="${STORD_LIVE_DIR}/${VOL1_ID}-${SNAP_NAME}.img"
 sleep 10
 [ ! -e "$SNAP_FILE" ] \
-    && qual_pass "no snapshot file materialized (fail-closed: no side effect on the host)" \
+    && qual_pass "no snapshot file materialized (rejected pre-dispatch: no side effect on the host)" \
     || qual_error "snapshot file MATERIALIZED on a core-managed node: ${SNAP_FILE} (architecture violation!)"
 
-# Clone: the target is a NEW volume id (the #372 contract). NOTE: the
-# CP's ResourceId caps ids at 16 BYTES (lifecycle.rs parse_volume_id) —
-# run-6 finding: a 19-char id is rejected before journaling with a bare
-# 500. Keep the id short.
+# Clone: the target is a NEW volume id (the #372 contract), rejected at
+# accept time against the SOURCE's placement node (#495: clone checks
+# the node the target would materialize on and the orchestrator would
+# dispatch to). NOTE: the CP's ResourceId caps ids at 16 BYTES
+# (lifecycle.rs parse_volume_id) — run-6 finding: keep the id short so
+# the ONLY rejection reason can be the core-managed mode check.
 CLONE_ID="clone$$"
-qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" >/dev/null 2>&1 \
-    && qual_pass "chvctl volume clone accepted (${VOL1_ID} → ${CLONE_ID})" \
-    || qual_die "chvctl volume clone failed (was the #372 CLI fix deployed?)"
-CLONE_DS="$(sqlite_query "$QUAL_DB" \
-    "SELECT clone_source_volume_id FROM volume_desired_state WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
-[ "$CLONE_DS" = "$VOL1_ID" ] \
-    && qual_pass "CP DB records the clone intent (${CLONE_ID} ← ${VOL1_ID})" \
-    || qual_warn "no clone intent row for ${CLONE_ID} in volume_desired_state (got: '${CLONE_DS}')"
-# Comprehensive-review follow-up (#387): the target must INHERIT the
-# source's owner — an ownerless volumes row is admin-only in the BFF
-# (require_volume_owner), which would lock a non-admin cloner out of the
-# clone they just created. MERGE-ORDER CONSTRAINT: this assertion
-# requires #387 (clone owner inheritance) to be merged and deployed
-# before this scenario runs green — against a pre-#387 build it fails
-# with owner mismatch (source set, clone empty).
-SOURCE_OWNER="$(sqlite_query "$QUAL_DB" \
-    "SELECT owner_id FROM volumes WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)"
-CLONE_OWNER="$(sqlite_query "$QUAL_DB" \
-    "SELECT owner_id FROM volumes WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
-if [ -n "${SOURCE_OWNER}" ] && [ "${CLONE_OWNER}" = "${SOURCE_OWNER}" ]; then
-    qual_pass "clone target inherits the source owner (${CLONE_OWNER}) — BFF ownership model holds"
+CLONE_OUT="$(qual_chvctl volume clone "$VOL1_ID" --name "$CLONE_ID" 2>&1)" && RC=0 || RC=$?
+if [ "$RC" -ne 0 ] && printf '%s' "$CLONE_OUT" | grep -q "volume clone is not supported on core-managed nodes"; then
+    qual_pass "chvctl volume clone rejected at accept time (${VOL1_ID} → ${CLONE_ID}): ${CLONE_OUT}"
+elif [ "$RC" -ne 0 ]; then
+    qual_error "chvctl volume clone failed with the WRONG error (expected the #495 core-managed rejection): ${CLONE_OUT}"
 else
-    qual_error "clone target owner mismatch (source='${SOURCE_OWNER}', clone='${CLONE_OWNER}') — a non-admin cloner could not mutate the clone"
+    qual_error "chvctl volume clone ACCEPTED on a core-managed node — the pre-#495 accept-then-fail-closed shape is back (architecture violation!)"
+fi
+
+# No residue for the rejected clone: no CloneVolume operation row (its
+# resource_id is the TARGET), no target volumes row, no
+# volume_desired_state intent for the target. (#387's owner-inheritance
+# contract is unreachable on a core-managed node — no target row is
+# ever created; that assertion belongs to a legacy-mode clone leg.)
+sleep 5
+CLONE_OPS="$(sqlite_query "$QUAL_DB" \
+    "SELECT COUNT(*) FROM operations WHERE resource_id='${CLONE_ID}' AND operation_type='CloneVolume'" 2>/dev/null | head -1)"
+[ "${CLONE_OPS:-}" = "0" ] \
+    && qual_pass "no CloneVolume operations row for the rejected clone" \
+    || qual_error "CloneVolume operations row journaled despite the rejection (count='${CLONE_OPS}') — the rejection was NOT pre-journal (#495 regression)"
+CLONE_VOL_ROW="$(sqlite_query "$QUAL_DB" \
+    "SELECT COUNT(*) FROM volumes WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
+CLONE_DS_ROW="$(sqlite_query "$QUAL_DB" \
+    "SELECT COUNT(*) FROM volume_desired_state WHERE volume_id='${CLONE_ID}'" 2>/dev/null | head -1)"
+if [ "${CLONE_VOL_ROW:-x}" = "0" ] && [ "${CLONE_DS_ROW:-x}" = "0" ]; then
+    qual_pass "no target volume row / desired-state row for the rejected clone (${CLONE_ID} never existed)"
+else
+    qual_error "clone target rows journaled despite the rejection (volumes='${CLONE_VOL_ROW}', volume_desired_state='${CLONE_DS_ROW}') — the rejection was NOT pre-journal (#495 regression)"
 fi
 sleep 10
 CLONE_FILE="$(find "$STORD_LIVE_DIR" -maxdepth 1 -name "*${CLONE_ID}*.img" -type f 2>/dev/null | head -1)"
 [ -z "$CLONE_FILE" ] \
-    && qual_pass "no clone file materialized (fail-closed: no side effect on the host)" \
+    && qual_pass "no clone file materialized (rejected pre-dispatch: no side effect on the host)" \
     || qual_error "clone file MATERIALIZED on a core-managed node: ${CLONE_FILE} (architecture violation!)"
 
 # Delete the snapshot through the BFF (chvctl has no delete-snapshot
-# command — recorded; the route exists). Same truth: accepted, then the
-# dispatch fails closed (the 600s retry window is #378's UX gap).
+# command — recorded; the route exists). Same truth: rejected at accept
+# time — HTTP 400 with the CP's message (#495 closed the old accepted-
+# then-~70s-dispatch-retry UX gap; the response body carries the
+# message, saved by bff_post_json).
 DELETE_BODY="$(mktemp "${QUAL_TEST_DIR}/m45-del-snap.XXXXXX")"
 echo "{\"volume_id\":\"${VOL1_ID}\",\"snapshot_name\":\"${SNAP_NAME}\"}" > "$DELETE_BODY"
 HTTP_CODE="$(bff_post_json "/v1/volumes/delete-snapshot" "$DELETE_BODY")"
-[ "$HTTP_CODE" = "200" ] \
-    && qual_pass "BFF delete-snapshot accepted (HTTP ${HTTP_CODE})" \
-    || qual_error "BFF delete-snapshot failed (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-delete-snapshot.json" 2>/dev/null)"
 rm -f "$DELETE_BODY"
-# Comprehensive-review follow-up: actually assert the delete INTENT was
-# journaled — snapshot_op flips create → delete in the CP's
-# delete_volume_snapshot accept path. Absence of the file is trivially
-# true (nothing was ever created), so this is the load-bearing check.
-snap_delete_journaled() {
-    [ "$(sqlite_query "$QUAL_DB" \
-        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)" = "delete" ]
-}
-wait_for "CP journaled the delete intent (snapshot_op=delete)" "$DISPATCH_TIMEOUT" \
-    snap_delete_journaled \
-    && qual_pass "delete intent journaled (snapshot_op create → delete)" \
-    || qual_error "snapshot_op never flipped to delete for ${VOL1_ID} — the delete intent was not journaled"
+if [ "$HTTP_CODE" = "400" ] && grep -q "volume snapshot deletion is not supported on core-managed nodes" \
+        "${EVIDENCE_DIR}/bff-delete-snapshot.json" 2>/dev/null; then
+    qual_pass "BFF delete-snapshot rejected at accept time (HTTP ${HTTP_CODE} + the #495 message)"
+else
+    qual_error "BFF delete-snapshot not rejected as contracted (HTTP ${HTTP_CODE}): $(cat "${EVIDENCE_DIR}/bff-delete-snapshot.json" 2>/dev/null)"
+fi
+# Comprehensive-review follow-up (carried): assert the DB trail, not
+# just the HTTP code — the rejected delete must leave snapshot_op EMPTY
+# (the pre-#495 leg asserted the create → delete flip; post-#495 BOTH
+# intents stay unjournaled). Absence of the file is trivially true
+# (nothing was ever created), so the DB row is the load-bearing check.
+sleep 5
+SNAP_OP_AFTER_DEL="$(sqlite_query "$QUAL_DB" \
+    "SELECT snapshot_op FROM volume_desired_state WHERE volume_id='${VOL1_ID}'" 2>/dev/null | head -1)"
+if [ -z "${SNAP_OP_AFTER_DEL}" ]; then
+    qual_pass "delete intent NOT journaled (snapshot_op stays empty for ${VOL1_ID})"
+else
+    qual_error "snapshot_op='${SNAP_OP_AFTER_DEL}' after the rejected delete-snapshot — the rejection was NOT pre-journal (#495 regression)"
+fi
 sleep 5
 [ ! -e "${SNAP_FILE}" ] \
-    && qual_pass "still no snapshot file after delete-snapshot (fail-closed holds)" \
+    && qual_pass "still no snapshot file after delete-snapshot (no side effect)" \
     || qual_error "snapshot file MATERIALIZED after delete-snapshot: ${SNAP_FILE}"
-save_evidence "leg-d snapshotted"
+save_evidence "leg-d volume-ops rejected"
 
 # ---------------------------------------------------------------------------
 # Leg E — cleanup: VM delete → stord session closed → residue assertions

@@ -466,8 +466,15 @@ disclosures added here):**
   the legacy empty-ruleset hazard at the two legacy `set_firewall_policy`
   call sites was fixed by #452. Pre-fix stored data caveats apply
   (pre-#365 NULL gateways, pre-#369 dialect rules; re-save repairs).
-- **#378 / #379** — snapshot/clone accepted then fails closed on
-  core-managed nodes; LVM unreachable from the VM lifecycle.
+- **#378 / #379** — #378 fixed by #495 — the volume snapshot family
+  (snapshot/clone/restore/delete-snapshot) is now rejected at accept
+  time on core-managed nodes: InvalidArgument surfaced as HTTP 400
+  BEFORE any journaling (no operations row, no volume_desired_state
+  intent, no clone target row), keyed on the node's authority mode as
+  carried by the agent's node inventory and failing OPEN on an unknown
+  mode; the agent-side Unimplemented fail-closed dispatch remains the
+  enforcement backstop. #379 stays open — LVM is still unreachable
+  from the VM lifecycle (stord layer only).
 - **#384 / #385 / #386** — last-writer-wins physical upserts + clone TOCTOU;
   respawned stord drops operator config beyond the allowlist; ownerless
   imported/template volumes (fixed by #481 — pre-fix volumes remain
