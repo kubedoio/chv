@@ -3739,6 +3739,7 @@ mod tests {
                 read_only: false,
                 size_bytes: None,
                 seed_from: None,
+                backend_class: None,
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_owned(),

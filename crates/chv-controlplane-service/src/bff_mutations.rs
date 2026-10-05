@@ -29,6 +29,9 @@ struct VolumeLookupRow {
     node_id: String,
     vm_id: Option<String>,
     size_bytes: i64,
+    /// #379 PR 2 (A9): the volume's storage class (NULL = local), riding
+    /// the attach mutation's `volume_spec_json`.
+    storage_class: Option<String>,
 }
 
 impl ControlPlaneMutationService {
@@ -405,7 +408,8 @@ impl MutationService for ControlPlaneMutationService {
             SELECT
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
-                v.capacity_bytes as size_bytes
+                v.capacity_bytes as size_bytes,
+                v.storage_class as storage_class
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -429,7 +433,16 @@ impl MutationService for ControlPlaneMutationService {
                         volume: Some(proto::VolumeMutationSpec {
                             volume_id: volume_id.clone(),
                             vm_id: target_vm_id,
-                            volume_spec_json: vec![],
+                            // #379 PR 2 (A9): the volume's class rides the
+                            // attach mutation — the same producer shape as
+                            // the orchestrator's A8 dispatch
+                            // (`volume_attach_spec_json`): empty for a
+                            // NULL-class volume (byte-exact with the
+                            // pre-#379 mutation), `{"backend_class": …}`
+                            // when the volume carries a class.
+                            volume_spec_json: crate::node_client::volume_attach_spec_json(
+                                row.storage_class.as_deref(),
+                            ),
                         }),
                     })
                     .await
@@ -485,7 +498,8 @@ impl MutationService for ControlPlaneMutationService {
             SELECT
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
-                v.capacity_bytes as size_bytes
+                v.capacity_bytes as size_bytes,
+                v.storage_class as storage_class
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -532,7 +546,8 @@ impl MutationService for ControlPlaneMutationService {
             SELECT
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
-                v.capacity_bytes as size_bytes
+                v.capacity_bytes as size_bytes,
+                v.storage_class as storage_class
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -579,7 +594,8 @@ impl MutationService for ControlPlaneMutationService {
             SELECT
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
-                v.capacity_bytes as size_bytes
+                v.capacity_bytes as size_bytes,
+                v.storage_class as storage_class
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -626,7 +642,8 @@ impl MutationService for ControlPlaneMutationService {
             SELECT
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
-                v.capacity_bytes as size_bytes
+                v.capacity_bytes as size_bytes,
+                v.storage_class as storage_class
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -729,6 +746,351 @@ impl MutationService for ControlPlaneMutationService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_client::volume_attach_spec_json;
+
+    /// #379 PR 2 (A8/A9 shared producer): the attach spec_json is
+    /// `{"backend_class": …}` — and ONLY that key — when the volume
+    /// carries a class, and EMPTY bytes when it does not (NULL = local,
+    /// byte-exact with the pre-#379 dispatch; the locator convention is
+    /// DP5 / PR 3).
+    #[test]
+    fn volume_attach_spec_json_carries_only_the_class() {
+        assert_eq!(
+            volume_attach_spec_json(Some("lvm")),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "a class-carrying volume produces exactly the backend_class key"
+        );
+        assert_eq!(
+            volume_attach_spec_json(None),
+            Vec::<u8>::new(),
+            "a NULL class keeps the empty payload (byte-exact pre-#379)"
+        );
+    }
+
+    /// Records every `AttachVolume` request and answers with the OK ack;
+    /// every other lifecycle RPC is unreachable in these tests. Drives
+    /// `ControlPlaneMutationService::mutate_volume` so the A9 leg is
+    /// pinned at the same trait boundary production uses.
+    struct RecordingLifecycle {
+        attach_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::AttachVolumeRequest>>>,
+    }
+
+    fn ok_ack(operation_id: String) -> proto::AckResponse {
+        proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "OK".to_string(),
+                node_observed_generation: "1".to_string(),
+                error_code: String::new(),
+                human_summary: "attach volume accepted".to_string(),
+            }),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::lifecycle::LifecycleService for RecordingLifecycle {
+        async fn create_vm(
+            &self,
+            _request: proto::CreateVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no create_vm in the A9 tests")
+        }
+        async fn start_vm(
+            &self,
+            _request: proto::StartVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no start_vm in the A9 tests")
+        }
+        async fn stop_vm(
+            &self,
+            _request: proto::StopVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no stop_vm in the A9 tests")
+        }
+        async fn reboot_vm(
+            &self,
+            _request: proto::RebootVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no reboot_vm in the A9 tests")
+        }
+        async fn delete_vm(
+            &self,
+            _request: proto::DeleteVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no delete_vm in the A9 tests")
+        }
+        async fn resize_vm(
+            &self,
+            _request: proto::ResizeVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resize_vm in the A9 tests")
+        }
+        async fn attach_volume(
+            &self,
+            request: proto::AttachVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            let operation_id = request
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.attach_calls.lock().unwrap().push(request);
+            Ok(ok_ack(operation_id))
+        }
+        async fn detach_volume(
+            &self,
+            _request: proto::DetachVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no detach_volume in the A9 tests")
+        }
+        async fn resize_volume(
+            &self,
+            _request: proto::ResizeVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resize_volume in the A9 tests")
+        }
+        async fn snapshot_volume(
+            &self,
+            _request: proto::SnapshotVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no snapshot_volume in the A9 tests")
+        }
+        async fn restore_volume(
+            &self,
+            _request: proto::RestoreVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no restore_volume in the A9 tests")
+        }
+        async fn delete_volume_snapshot(
+            &self,
+            _request: proto::DeleteVolumeSnapshotRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no delete_volume_snapshot in the A9 tests")
+        }
+        async fn clone_volume(
+            &self,
+            _request: proto::CloneVolumeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no clone_volume in the A9 tests")
+        }
+        async fn pause_node_scheduling(
+            &self,
+            _request: proto::PauseNodeSchedulingRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no pause_node_scheduling in the A9 tests")
+        }
+        async fn resume_node_scheduling(
+            &self,
+            _request: proto::ResumeNodeSchedulingRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resume_node_scheduling in the A9 tests")
+        }
+        async fn drain_node(
+            &self,
+            _request: proto::DrainNodeRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no drain_node in the A9 tests")
+        }
+        async fn enter_maintenance(
+            &self,
+            _request: proto::EnterMaintenanceRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no enter_maintenance in the A9 tests")
+        }
+        async fn exit_maintenance(
+            &self,
+            _request: proto::ExitMaintenanceRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no exit_maintenance in the A9 tests")
+        }
+        async fn pause_vm(
+            &self,
+            _request: proto::PauseVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no pause_vm in the A9 tests")
+        }
+        async fn resume_vm(
+            &self,
+            _request: proto::ResumeVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resume_vm in the A9 tests")
+        }
+        async fn power_button_vm(
+            &self,
+            _request: proto::PowerButtonVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no power_button_vm in the A9 tests")
+        }
+        async fn add_disk(
+            &self,
+            _request: proto::AddDiskRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no add_disk in the A9 tests")
+        }
+        async fn remove_device(
+            &self,
+            _request: proto::RemoveDeviceRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no remove_device in the A9 tests")
+        }
+        async fn add_net(
+            &self,
+            _request: proto::AddNetRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no add_net in the A9 tests")
+        }
+        async fn resize_disk(
+            &self,
+            _request: proto::ResizeDiskRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resize_disk in the A9 tests")
+        }
+        async fn snapshot_vm(
+            &self,
+            _request: proto::SnapshotVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no snapshot_vm in the A9 tests")
+        }
+        async fn restore_snapshot(
+            &self,
+            _request: proto::RestoreSnapshotRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no restore_snapshot in the A9 tests")
+        }
+        async fn coredump_vm(
+            &self,
+            _request: proto::CoredumpVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no coredump_vm in the A9 tests")
+        }
+        async fn start_network(
+            &self,
+            _request: proto::StartNetworkRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no start_network in the A9 tests")
+        }
+        async fn stop_network(
+            &self,
+            _request: proto::StopNetworkRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no stop_network in the A9 tests")
+        }
+        async fn restart_network(
+            &self,
+            _request: proto::RestartNetworkRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no restart_network in the A9 tests")
+        }
+        async fn migrate_vm(
+            &self,
+            _request: proto::MigrateVmRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no migrate_vm in the A9 tests")
+        }
+        async fn update_overlay(
+            &self,
+            _request: proto::UpdateOverlayRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no update_overlay in the A9 tests")
+        }
+        async fn send_gratuitous_arp(
+            &self,
+            _request: proto::SendGratuitousArpRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no send_gratuitous_arp in the A9 tests")
+        }
+        async fn resolve_inspect_required_operation(
+            &self,
+            _request: proto::ResolveInspectRequiredOperationRequest,
+        ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+            unreachable!("no resolve_inspect_required_operation in the A9 tests")
+        }
+    }
+
+    /// #379 PR 2 (A9): the BFF attach mutation populates
+    /// `volume_spec_json` with the volume's parsed class — the same
+    /// producer shape as the orchestrator's A8 dispatch — and keeps it
+    /// EMPTY for a NULL-class volume.
+    #[tokio::test]
+    async fn mutate_volume_attach_populates_spec_json_with_the_class() {
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        sqlx::query(
+            "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-a9', 'host', 'host')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ('vm-a9', 'vm-a9')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (volume_id, class) in [("vol-a9-lvm", Some("lvm")), ("vol-a9-null", None)] {
+            sqlx::query(
+                "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+                 VALUES (?, 'node-a9', ?, 1024, ?)",
+            )
+            .bind(volume_id)
+            .bind(volume_id)
+            .bind(class)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO volume_desired_state \
+                 (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+                 VALUES (?, 1, 'Pending', 'vm-a9', 0)",
+            )
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let attach_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = ControlPlaneMutationService::new(
+            pool,
+            std::sync::Arc::new(RecordingLifecycle {
+                attach_calls: attach_calls.clone(),
+            }),
+        );
+
+        for volume_id in ["vol-a9-lvm", "vol-a9-null"] {
+            service
+                .mutate_volume(
+                    volume_id.to_string(),
+                    "attach".to_string(),
+                    false,
+                    None,
+                    None,
+                    "test-user".to_string(),
+                )
+                .await
+                .expect("attach mutation must be accepted");
+        }
+
+        let calls = attach_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "both attach mutations relayed: {calls:?}");
+        let spec_json_for = |volume_id: &str| {
+            calls
+                .iter()
+                .find(|c| c.volume.as_ref().map(|v| v.volume_id.as_str()) == Some(volume_id))
+                .unwrap_or_else(|| panic!("no attach mutation for {volume_id}: {calls:?}"))
+                .volume
+                .clone()
+                .unwrap()
+                .volume_spec_json
+        };
+        assert_eq!(
+            spec_json_for("vol-a9-lvm"),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "the attach mutation must carry the parsed class (A9)"
+        );
+        assert_eq!(
+            spec_json_for("vol-a9-null").len(),
+            0,
+            "a NULL-class volume must keep the empty spec_json (byte-exact pre-#379)"
+        );
+    }
 
     /// #384: the clone race loser surfaces as `Conflict` at the BFF
     /// tier. The control plane's Conflict class (gRPC `ALREADY_EXISTS`)

@@ -530,6 +530,7 @@ mod tests {
                         read_only: false,
                         size_bytes: None,
                         seed_from: None,
+                        backend_class: None,
                     }];
                     def.networks = vec![cellhv_core_types::NetworkAttachmentRef {
                         attachment_id: "nic-0".to_string(),
@@ -605,6 +606,7 @@ mod tests {
                         read_only: false,
                         size_bytes: None,
                         seed_from: None,
+                        backend_class: None,
                     },
                 },
             ),

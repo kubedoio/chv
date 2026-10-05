@@ -646,6 +646,7 @@ impl NodeClient {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn attach_volume(
         &mut self,
         node_id: &str,
@@ -654,6 +655,7 @@ impl NodeClient {
         generation: &str,
         operation_id: &str,
         requested_by: Option<&str>,
+        backend_class: Option<&str>,
     ) -> Result<proto::AckResponse, ChvError> {
         let req = proto::AttachVolumeRequest {
             meta: Some(proto::RequestMeta {
@@ -667,7 +669,9 @@ impl NodeClient {
             volume: Some(proto::VolumeMutationSpec {
                 volume_id: volume_id.to_string(),
                 vm_id: vm_id.to_string(),
-                volume_spec_json: vec![],
+                // #379 PR 2 (A8): the volume's class rides the attach
+                // dispatch — see [`volume_attach_spec_json`].
+                volume_spec_json: volume_attach_spec_json(backend_class),
             }),
         };
         let method = "attach_volume";
@@ -1397,6 +1401,31 @@ fn with_operation_id_metadata<T>(req: T, operation_id: &str) -> tonic::Request<T
 
 fn now_unix_ms() -> i64 {
     chv_common::now_unix_ms()
+}
+
+/// Build the `AttachVolume` RPC's `volume_spec_json` payload (#379 PR 2,
+/// the A8/A9 shared producer).
+///
+/// The agent's attach handler (A4) parses `backend_class` and `locator`
+/// out of this JSON, defaulting both. PR 2 populates ONLY
+/// `{"backend_class": …}` and only when the volume carries a class:
+///
+/// - **NULL class → empty bytes** — byte-exact with the pre-#379
+///   dispatch (every existing volume), so the NULL = local contract
+///   holds end-to-end and the string `"local"` is never materialized
+///   into the payload (the agent's B5 default resolves it instead).
+/// - **class present → `{"backend_class": "<class>"}`** — no `locator`
+///   key, so A4's default locator (the bare volume id) applies; the
+///   class-dependent dm-path locator convention is DP5, deliberately
+///   scoped to PR 3.
+pub(crate) fn volume_attach_spec_json(storage_class: Option<&str>) -> Vec<u8> {
+    match storage_class {
+        Some(class) => serde_json::to_vec(&serde_json::json!({ "backend_class": class }))
+            // Infallible for a string-valued object; an empty fallback
+            // would merely mean the agent's default path.
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
 }
 
 fn now_iso() -> String {

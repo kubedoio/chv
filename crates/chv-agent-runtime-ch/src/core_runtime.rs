@@ -155,13 +155,15 @@ pub struct CloudHypervisorCoreRuntime {
     /// [`NoObservedAttachments`] (fail-open: the logged crash residual)
     /// until [`Self::with_observed_attachments`] wires a real source.
     observed_attachments: Arc<dyn ObservedAttachmentSource>,
-    /// Node-level default backend class for stord volume opens (#379
-    /// PR 1, Option C's core): what the volume open dispatches when the
-    /// disk carries no class of its own. Defaults to
+    /// Node-level default backend class for stord volume opens (#379):
+    /// what the volume open dispatches when the disk's
+    /// [`cellhv_core_types::StorageAttachmentRef`] carries no class of
+    /// its own. Defaults to
     /// [`chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS`] —
     /// byte-identical to the historical inline `"local"` literal, and no
-    /// production wiring sets it yet (the per-volume class field is PR
-    /// 2's A7), so behavior is unchanged.
+    /// production wiring sets it, so the per-volume class (PR 2's A7
+    /// field, threaded through the Core definition) is the only
+    /// class-changing input.
     default_backend_class: String,
 }
 
@@ -201,9 +203,10 @@ impl CloudHypervisorCoreRuntime {
     }
 
     /// Set the node-level default backend class for stord volume opens
-    /// (#379 PR 1). Defaults to `"local"` (the historical literal); the
+    /// (#379). Defaults to `"local"` (the historical literal); a
     /// per-volume class carried by the Core definition (PR 2's A7 field)
-    /// will layer on top of this as the absent-field fallback.
+    /// overrides this per attachment, with this value as the
+    /// absent-field fallback.
     pub fn with_default_backend_class(mut self, backend_class: impl Into<String>) -> Self {
         self.default_backend_class = backend_class.into();
         self
@@ -420,11 +423,15 @@ impl CloudHypervisorCoreRuntime {
             .resources
             .open_volume(
                 volume_id,
-                // #379 PR 1 (A3): the class value from the runtime's
-                // node-level default instead of the inline "local"
-                // literal — the per-volume class (PR 2's A7 field) will
-                // override this once StorageAttachmentRef carries it.
-                &self.default_backend_class,
+                // #379 PR 2 (A3): the per-attachment class from the Core
+                // definition (A7), falling back to the runtime's
+                // node-level default — absent stays absent here, so a
+                // definition without the field (every pre-#379 journal
+                // entry) opens exactly as before.
+                storage
+                    .backend_class
+                    .as_deref()
+                    .unwrap_or(&self.default_backend_class),
                 &locator.to_string_lossy(),
                 open_options,
                 Some(op_id),

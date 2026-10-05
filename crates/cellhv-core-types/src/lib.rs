@@ -362,6 +362,20 @@ pub struct StorageAttachmentRef {
     /// Provisioning hint: seed the volume's content from this image path on
     /// first open. Absent means no seeding.
     pub seed_from: Option<String>,
+    /// Stord backend class for this attachment's volume opens (#379 PR 2,
+    /// the A7 field): the per-volume dispatch class the executor threads
+    /// into `open_volume`, absent meaning the executor's node-level
+    /// default (historically `"local"`). `Option` +
+    /// `#[serde(default)]`/`skip_serializing_if` is REQUIRED here, not
+    /// merely belt-and-braces: the struct carries
+    /// `#[serde(deny_unknown_fields, try_from = "RawStorageAttachmentRef")]`,
+    /// so a bare additive field would make a mixed-version fleet reject
+    /// the whole Core definition — a definition WITHOUT the field (every
+    /// pre-#379 journal entry) must keep deserializing, and one WITH it
+    /// must too. Journal compatibility is therefore upgrade-only, the
+    /// same recorded posture as `firewall_policy_json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_class: Option<String>,
 }
 
 impl StorageAttachmentRef {
@@ -379,6 +393,9 @@ impl StorageAttachmentRef {
         if let Some(seed_from) = &self.seed_from {
             require_non_empty("storage.seed_from", seed_from)?;
         }
+        if let Some(backend_class) = &self.backend_class {
+            require_non_empty("storage.backend_class", backend_class)?;
+        }
         Ok(())
     }
 }
@@ -393,6 +410,13 @@ struct RawStorageAttachmentRef {
     size_bytes: Option<u64>,
     #[serde(default)]
     seed_from: Option<String>,
+    /// #379 PR 2 (A7): mirrored from [`StorageAttachmentRef`] — the
+    /// `try_from` deserialization path goes through this raw struct, so
+    /// the field must be `#[serde(default)]` here for a pre-#379
+    /// definition (no `backend_class` key) to keep parsing under
+    /// `deny_unknown_fields`.
+    #[serde(default)]
+    backend_class: Option<String>,
 }
 
 impl TryFrom<RawStorageAttachmentRef> for StorageAttachmentRef {
@@ -405,6 +429,7 @@ impl TryFrom<RawStorageAttachmentRef> for StorageAttachmentRef {
             read_only: raw.read_only,
             size_bytes: raw.size_bytes,
             seed_from: raw.seed_from,
+            backend_class: raw.backend_class,
         };
         value.validate()?;
         Ok(value)
@@ -1055,6 +1080,7 @@ mod tests {
                 read_only: false,
                 size_bytes: None,
                 seed_from: None,
+                backend_class: None,
             }],
             networks: vec![],
             requested_power_state: RequestedPowerState::Stopped,
@@ -1069,11 +1095,76 @@ mod tests {
     }
 
     #[test]
+    fn storage_attachment_backend_class_is_serde_additive_under_deny_unknown_fields() {
+        // #379 PR 2 pin (A7, the §7 serde caveat): the class field must
+        // be additive on the ONE serde surface where that is not
+        // automatic — StorageAttachmentRef carries
+        // `deny_unknown_fields` + `try_from`, so (i) a pre-#379
+        // attachment JSON (no backend_class key) must still
+        // deserialize, (ii) one carrying the field must deserialize to
+        // the same value, and (iii) serializing a None-class attachment
+        // must OMIT the key (the absent-field = default contract, so
+        // re-serialized definitions stay byte-shaped like pre-#379
+        // ones).
+        let pre = r#"{
+            "attachment_id": "disk-0",
+            "storage_ref": "volume-1",
+            "read_only": false
+        }"#;
+        let decoded: StorageAttachmentRef = serde_json::from_str(pre).unwrap();
+        assert_eq!(decoded.backend_class, None);
+
+        let with_class: StorageAttachmentRef = serde_json::from_str(
+            r#"{
+                "attachment_id": "disk-0",
+                "storage_ref": "volume-1",
+                "read_only": false,
+                "backend_class": "lvm"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(with_class.backend_class.as_deref(), Some("lvm"));
+
+        // Round trip: the carried class survives, and a None class
+        // serializes WITHOUT the key.
+        let encoded = serde_json::to_string(&with_class).unwrap();
+        let reparsed: StorageAttachmentRef = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, with_class);
+
+        let none_class = StorageAttachmentRef {
+            attachment_id: "disk-0".to_string(),
+            storage_ref: "volume-1".to_string(),
+            read_only: false,
+            size_bytes: None,
+            seed_from: None,
+            backend_class: None,
+        };
+        let encoded = serde_json::to_string(&none_class).unwrap();
+        assert!(
+            !encoded.contains("backend_class"),
+            "a None class must omit the key, got: {encoded}"
+        );
+        let reparsed: StorageAttachmentRef = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, none_class);
+
+        // An empty-string class is a malformed value, not a silent
+        // default — the same treatment seed_from gets.
+        let empty_class = r#"{
+            "attachment_id": "disk-0",
+            "storage_ref": "volume-1",
+            "read_only": false,
+            "backend_class": ""
+        }"#;
+        assert!(serde_json::from_str::<StorageAttachmentRef>(empty_class).is_err());
+    }
+
+    #[test]
     fn vm_definition_round_trips_provisioning_and_tuning_fields() {
         // Journals written before these fields existed deserialize with them
         // absent (covered by the fixtures above); this pins the carried
-        // shape: sizing/seed on the attachment, addressing on the NIC, and
-        // userdata/tuning on the definition all survive a round trip.
+        // shape: sizing/seed and the #379 storage class on the attachment,
+        // addressing on the NIC, and userdata/tuning on the definition all
+        // survive a round trip.
         let definition = VmDefinition {
             id: VmId::new("vm-1").unwrap(),
             name: "test".to_string(),
@@ -1085,6 +1176,7 @@ mod tests {
                 read_only: false,
                 size_bytes: Some(10_737_418_240),
                 seed_from: Some("/var/lib/chv/images/ubuntu.img".to_string()),
+                backend_class: Some("lvm".to_string()),
             }],
             networks: vec![NetworkAttachmentRef {
                 attachment_id: "nic-0".to_string(),

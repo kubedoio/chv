@@ -3323,11 +3323,13 @@ mod tests {
     }
 
     /// Shared log of the `open_volume` RPCs the mock stord received:
-    /// `(volume_id, backend_class)` per call, in call order — so tests can
-    /// pin the backend class the agent threads into its opens (#379 PR 1).
+    /// `(volume_id, backend_class, locator)` per call, in call order — so
+    /// tests can pin the backend class and locator the agent threads into
+    /// its opens (#379 PR 1; the locator joins in PR 2 to pin that
+    /// populating the class does NOT change the locator default).
     #[derive(Clone, Default)]
     struct StordOpenLog {
-        opens: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        opens: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     }
 
     #[derive(Default)]
@@ -3353,13 +3355,19 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
             let inner = req.into_inner();
             // #379 PR 1: record the backend class the agent threaded into
-            // this open so the class-plumbing tests can pin it.
+            // this open so the class-plumbing tests can pin it; PR 2 adds
+            // the locator for the same reason.
             self.opens.opens.lock().unwrap().push((
                 inner.volume_id.clone(),
                 inner
                     .backend
                     .as_ref()
                     .map(|b| b.backend_class.clone())
+                    .unwrap_or_default(),
+                inner
+                    .backend
+                    .as_ref()
+                    .map(|b| b.locator.clone())
                     .unwrap_or_default(),
             ));
             Ok(Response::new(
@@ -4099,10 +4107,136 @@ mod tests {
         assert_eq!(
             opens.opens.lock().unwrap().as_slice(),
             [
-                ("vol-cls-a".to_string(), "lvm".to_string()),
-                ("vol-cls-b".to_string(), "local".to_string()),
+                (
+                    "vol-cls-a".to_string(),
+                    "lvm".to_string(),
+                    "vol-cls-a.img".to_string(),
+                ),
+                (
+                    "vol-cls-b".to_string(),
+                    "local".to_string(),
+                    "vol-cls-b".to_string(),
+                ),
             ],
             "A4 must thread the spec_json backend_class, defaulting to local when absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_volume_rpc_parses_the_cp_spec_json_shape() {
+        // #379 PR 2 contract pair (agent half; the CP half is pinned in
+        // chv-controlplane-service — `volume_attach_spec_json` produces
+        // exactly `{"backend_class":"lvm"}`, nothing else). This pins
+        // that the AttachVolume RPC's consumer (A4's parser behind the
+        // A8 dispatch) reads that shape to the same class — and that
+        // populating ONLY the class does NOT change the locator
+        // behavior: with no `locator` key the parser's default (the
+        // bare volume id) applies, the same default the fragment path
+        // has always exercised.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+        let opens = StordOpenLog::default();
+
+        {
+            let opens = opens.clone();
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockStord { opens },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            socket,
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let attach = |volume_id: &str, spec_json: &[u8]| proto::AttachVolumeRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            volume: Some(proto::VolumeMutationSpec {
+                volume_id: volume_id.to_string(),
+                vm_id: "vm-1".to_string(),
+                volume_spec_json: spec_json.to_vec(),
+            }),
+        };
+
+        // The CP producer's exact bytes for a class-carrying volume.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(attach("vol-att-cls", br#"{"backend_class":"lvm"}"#)),
+        )
+        .await;
+        assert!(resp.is_ok(), "attach must succeed: {:?}", resp.err());
+
+        // A spec_json with no class key: the B5 default.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(attach("vol-att-bare", br#"{}"#)),
+        )
+        .await;
+        assert!(resp.is_ok(), "attach must succeed: {:?}", resp.err());
+
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-att-cls".to_string(),
+                    "lvm".to_string(),
+                    // No `locator` key in the CP payload → the parser's
+                    // bare-volume-id default, unchanged by the class.
+                    "vol-att-cls".to_string(),
+                ),
+                (
+                    "vol-att-bare".to_string(),
+                    "local".to_string(),
+                    "vol-att-bare".to_string(),
+                ),
+            ],
+            "A4 must parse the CP-produced spec_json to the same class, keeping the locator default"
+        );
+
+        // The CP producer's exact bytes for a NULL-class volume are
+        // EMPTY (pinned CP-side: `volume_attach_spec_json(None) ==
+        // vec![]`), not `{}` — and the two are NOT equivalent at A4:
+        // `{}` parses and takes the local default, while empty bytes
+        // fail `serde_json::from_slice` with an EOF error that the
+        // handler maps to invalid_argument. This leg pins that
+        // pre-existing behavior as PRESERVED by PR 2 (a NULL-class
+        // attach errors exactly as it did before; no open happens, so
+        // the StordOpenLog above stays two entries). Whether a
+        // NULL-class attach should instead emit `{}` so the attach RPC
+        // path works for all volumes is deliberately left to PR 3's
+        // DP5/locator pass — a behavior change, not a carry.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(attach("vol-att-null", b"")),
+        )
+        .await;
+        assert!(
+            resp.is_err(),
+            "empty spec_json must keep its pre-existing parse failure"
+        );
+        assert_eq!(
+            resp.unwrap_err().code(),
+            tonic::Code::InvalidArgument,
+            "the A4 EOF parse failure maps to invalid_argument, unchanged by PR 2"
         );
     }
 
@@ -4167,8 +4301,17 @@ mod tests {
         assert_eq!(
             opens.opens.lock().unwrap().as_slice(),
             [
-                ("vol-cls-1".to_string(), "lvm".to_string()),
-                ("vol-cls-2".to_string(), "local".to_string()),
+                (
+                    "vol-cls-1".to_string(),
+                    "lvm".to_string(),
+                    // A10's legacy locator convention: {volume_id}.img.
+                    "vol-cls-1.img".to_string(),
+                ),
+                (
+                    "vol-cls-2".to_string(),
+                    "local".to_string(),
+                    "vol-cls-2.img".to_string(),
+                ),
             ],
             "A10 must thread the disk spec's backend_class, defaulting to local when absent"
         );

@@ -31,6 +31,7 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
             read_only: false,
             size_bytes: None,
             seed_from: None,
+            backend_class: None,
         })
         .collect();
     let networks = (0..nnics)
@@ -294,6 +295,42 @@ async fn create_vm_volume_opens_thread_the_configured_backend_class() {
     let opens = h.controller.open_options.lock().expect("options lock");
     assert_eq!(opens.len(), 1, "one open: {opens:?}");
     assert_eq!(opens[0].1, "lvm", "the configured class must reach stord");
+}
+
+#[tokio::test]
+async fn create_vm_volume_opens_thread_the_attachment_backend_class() {
+    // #379 PR 2 pin (A3 consumer / A7 producer): the per-attachment class
+    // carried by the Core definition overrides the runtime's node-level
+    // default — a default-constructed runtime ("local") opens a
+    // class-carrying attachment with the definition's class, and a
+    // class-less attachment on the SAME definition still gets the
+    // runtime default. Red/green: reverting the A3 site to the bare
+    // runtime default fails the vol-cls assertion.
+    let h = harness(None);
+    let vm_id = "vm-cls-att";
+    let mut def = definition(vm_id, 2, 0);
+    def.storage[0].backend_class = Some("lvm".to_string());
+    let command = MutationCommand::CreateVm { definition: def };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-cls-att",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    let opens = h.controller.open_options.lock().expect("options lock");
+    assert_eq!(opens.len(), 2, "two opens: {opens:?}");
+    assert_eq!(
+        opens[0].1, "lvm",
+        "the attachment's class must override the runtime default"
+    );
+    assert_eq!(
+        opens[1].1, "local",
+        "a class-less attachment keeps the runtime default"
+    );
 }
 
 #[tokio::test]
@@ -1302,6 +1339,7 @@ async fn update_attach_detach_are_unsupported() {
                     read_only: false,
                     size_bytes: None,
                     seed_from: None,
+                    backend_class: None,
                 },
             },
         ),

@@ -312,6 +312,12 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
                 storage_ref: disk.volume_id,
                 read_only: disk.read_only,
                 size_bytes: disk.size_bytes,
+                // #379 PR 2 (A7 producer): the per-disk stord backend
+                // class from the CP's VM spec rides the Core definition so
+                // the executor's volume opens dispatch with it — absent
+                // stays absent (the runtime's node-level "local" default),
+                // never materialized.
+                backend_class: disk.backend_class,
                 // The legacy seed path is per-VM and applies to the boot
                 // disk only — a deliberate divergence from the legacy
                 // reconcile loop, which would seed every absent disk from
@@ -599,6 +605,15 @@ mod tests {
             size_bytes: Some(10_737_418_240),
             backend_class: None,
         });
+        // #379 PR 2 (A7 producer): a class-carrying disk (the shape the
+        // CP's AgentDiskSpec emits once a volume has a storage class)
+        // must translate onto the Core definition.
+        spec.disks.push(DiskSpec {
+            volume_id: "volume-b".into(),
+            read_only: true,
+            size_bytes: None,
+            backend_class: Some("lvm".into()),
+        });
         spec.nics.push(NicSpec {
             network_id: "network-a".into(),
             mac_address: "02:00:00:00:00:01".into(),
@@ -637,6 +652,15 @@ mod tests {
         assert_eq!(
             definition.storage[0].seed_from.as_deref(),
             Some("/var/lib/chv/images/ubuntu.img")
+        );
+        assert_eq!(
+            definition.storage[0].backend_class, None,
+            "an absent class must stay absent on the definition (never materialized)"
+        );
+        assert_eq!(
+            definition.storage[1].backend_class.as_deref(),
+            Some("lvm"),
+            "the disk's backend class must ride the Core definition (#379 PR 2)"
         );
         let addressing = definition.networks[0]
             .addressing

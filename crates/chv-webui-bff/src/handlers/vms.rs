@@ -485,6 +485,35 @@ pub async fn create_vm(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
+    // #379 PR 2 (BFF payload field): the boot volume's optional storage
+    // class, validated against the DP3 stord `backend_type` vocabulary at
+    // accept time — the one shared list
+    // (`chv_hypervisor_api::resources::BACKEND_CLASSES`), never a local
+    // copy. Absent (or blank) means NULL in `volumes.storage_class` =
+    // today's behavior byte-exactly: NULL dispatches as "local" all the
+    // way down (the agent's B5 default), and the string "local" is only
+    // stored when the caller names it explicitly. Local aliases
+    // ("local-file"/"localdisk") are stord-boundary-only and reject here.
+    let storage_class = match payload.get("storage_class") {
+        None => None,
+        Some(value) => {
+            let class = value
+                .as_str()
+                .ok_or_else(|| BffError::BadRequest("storage_class must be a string".into()))?;
+            let class = class.trim();
+            if class.is_empty() {
+                None
+            } else if chv_hypervisor_api::resources::is_known_backend_class(class) {
+                Some(class.to_string())
+            } else {
+                return Err(BffError::BadRequest(format!(
+                    "unknown storage_class '{}': must be one of local, iscsi, ceph, lvm",
+                    class
+                )));
+            }
+        }
+    };
+
     // Use BEGIN IMMEDIATE to acquire SQLite's RESERVED lock at tx start, serializing
     // concurrent writers from the get-go. This closes the quota-check TOCTOU window:
     // without IMMEDIATE, two concurrent requests can both pass quota check inside their
@@ -602,8 +631,8 @@ pub async fn create_vm(
     // Insert volume
     sqlx::query(
         r#"
-        INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, updated_at)
-        VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, storage_class, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&volume_id)
@@ -611,6 +640,9 @@ pub async fn create_vm(
     .bind(format!("{}-disk", display_name))
     .bind(&claims.sub)
     .bind(volume_size_bytes)
+    // #379 PR 2: NULL when the caller did not name a class (the
+    // historical row shape — every pre-#379 volume).
+    .bind(&storage_class)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert volume: {}", e)))?;

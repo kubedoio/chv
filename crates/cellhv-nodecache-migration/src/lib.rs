@@ -201,6 +201,12 @@ fn convert_vm(
             storage_ref: disk.volume_id,
             read_only: disk.read_only,
             size_bytes: disk.size_bytes,
+            // #379 PR 2 (A7): the per-disk stord backend class rides the
+            // imported definition so the Core executor's volume opens keep
+            // dispatching with the class the legacy spec carried — absent
+            // stays absent (the executor's "local" default), never
+            // materialized.
+            backend_class: disk.backend_class,
             // The legacy seed path is per-VM and applies to the boot disk
             // only — a deliberate divergence from the legacy reconcile
             // loop, which would seed every absent disk from the same
@@ -506,6 +512,13 @@ struct LegacyDisk {
     read_only: bool,
     #[serde(default)]
     size_bytes: Option<u64>,
+    /// #379 PR 2 (A7): the per-disk stord backend class. `deny_unknown_fields`
+    /// means this MUST be declared — a cache written by a post-#379 agent
+    /// (whose VM fragments carry the key once the CP produces it) would
+    /// otherwise be rejected as unsupported data on the core-activation
+    /// import path.
+    #[serde(default)]
+    backend_class: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -667,6 +680,9 @@ mod tests {
             Some("/var/lib/chv/images/ubuntu.img")
         );
         assert_eq!(definition.storage[0].size_bytes, Some(10_737_418_240));
+        // A disk with no backend_class key imports as absent (the
+        // executor's default), never materialized.
+        assert_eq!(definition.storage[0].backend_class, None);
         // The per-VM legacy seed path seeds the boot disk attachment.
         assert_eq!(
             definition.storage[0].seed_from.as_deref(),
@@ -736,6 +752,43 @@ mod tests {
         let error = plan(&repack(&mut value, &spec)).unwrap_err();
         assert!(matches!(error, MigrationError::Malformed(_)));
         assert!(error.to_string().contains("serial_mode"));
+    }
+
+    #[test]
+    fn disk_backend_class_translates_and_absent_stays_absent() {
+        // #379 PR 2 pin (A7 on the import surface): a legacy cache whose
+        // VM fragment carries a per-disk backend_class (the shape a
+        // post-#379 control plane produces) must import into the Core
+        // definition with the class — `LegacyDisk`'s deny_unknown_fields
+        // would otherwise reject the whole cache as unsupported data —
+        // while a disk without the key keeps the absent default.
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        spec["disks"] = json!([
+            {"volume_id":"vol-cls", "read_only":false, "backend_class":"lvm"},
+            {"volume_id":"vol-bare", "read_only":false}
+        ]);
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let import = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let definition = &import.definitions()[0];
+        assert_eq!(definition.storage.len(), 2);
+        assert_eq!(
+            definition.storage[0].backend_class.as_deref(),
+            Some("lvm"),
+            "the class must ride the imported definition"
+        );
+        assert_eq!(
+            definition.storage[1].backend_class, None,
+            "an absent class must stay absent, never materialized"
+        );
     }
 
     #[test]
