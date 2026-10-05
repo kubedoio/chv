@@ -113,6 +113,8 @@ export type NodeHostedVm = {
 	vm_id: string;
 	name: string;
 	power_state: string;
+	/** #368 P3: the agent-reported failure code when power_state is 'Failed'. */
+	last_error?: string;
 	health: string;
 	cpu: string;
 	memory: string;
@@ -149,6 +151,8 @@ export type VmListItem = {
 	name: string;
 	node_id: string;
 	power_state: string;
+	/** #368 P3: the agent-reported failure code when power_state is 'Failed'. */
+	last_error?: string;
 	health: string;
 	cpu: string;
 	memory: string;

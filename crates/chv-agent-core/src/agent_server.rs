@@ -283,6 +283,159 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 desired_state_version: meta.desired_state_version.clone(),
                 request_unix_ms: meta.request_unix_ms,
             };
+            // #368 C1 create-vs-redrive routing. A generation-1 task for a
+            // VM id whose Core journal already holds a create is never a
+            // fresh create (the `vms` row is durable — a re-submitted
+            // create would PK-conflict): it is a re-drive task, routed on
+            // the journal-derived state of the latest create.
+            // Coupling with the generation gate above: this routing is
+            // reachable only at generation 1 (creates always dispatch at
+            // gen 1; only Delete/Resize carry higher generations, which
+            // that gate rejects as Unimplemented first). If create-family
+            // ops ever dispatch at a higher generation, that gate must be
+            // revisited or this re-drive routing becomes unreachable.
+            let vm_id = cellhv_core_types::VmId::new(inner.vm_id.clone())
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            // Task-identity replay comes FIRST: a verbatim retry of a
+            // control-plane task (same operation id and generation — what
+            // the dispatcher retries) must replay through Core
+            // idempotency whatever the latest create's CURRENT state.
+            // Routing purely on that state would turn a retry of an
+            // in-flight create (or of an already-accepted re-drive) into
+            // a FailedPrecondition refusal instead of a replay — a
+            // dispatch retry is not a re-drive, and a re-drive retry is
+            // not a second re-drive. The two derivations below are the
+            // task's own journal identities: the create form every
+            // create task journals under, and the `:requeue` form every
+            // re-drive task journals under.
+            let create_operation_id = crate::legacy_core_adapter::legacy_operation_id(
+                &meta.target_node_id,
+                &vm_id,
+                &meta.operation_id,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let requeue_operation_id = crate::legacy_core_adapter::legacy_requeue_operation_id(
+                &meta.target_node_id,
+                &vm_id,
+                &meta.operation_id,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            // A verbatim retry of a re-drive task: replay the requeue
+            // (its idempotency key converges on the one requeued
+            // operation, whatever state that operation has since
+            // reached).
+            if journaled_operation_exists(authority, requeue_operation_id).await? {
+                return Ok(Response::new(
+                    dispatch_create_redrive(self, authority, &legacy_meta, &inner.vm_id, &vm_id)
+                        .await?,
+                ));
+            }
+            // A verbatim retry of the original create task: replay the
+            // submission through Core idempotency — the journal answers
+            // whether the create is in flight, inspect-required, or
+            // already terminal; the shim does not guess and never
+            // inserts a second create.
+            if journaled_operation_exists(authority, create_operation_id).await? {
+                let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                    &legacy_meta,
+                    &meta.target_node_id,
+                    crate::legacy_core_adapter::LegacyVmMutation::Create {
+                        vm_id: inner.vm_id.clone(),
+                        spec: Box::new(spec),
+                    },
+                    // The submission pins version 1 like the fresh-create
+                    // path; on replay the idempotency lookup short-circuits
+                    // before any version check, so the pin only matters
+                    // for a task the journal has never seen.
+                    cellhv_core_types::ResourceVersion::new(1)
+                        .expect("resource version 1 is representable"),
+                )
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                let accepted = authority
+                    .submit(intent.submission)
+                    .await
+                    .map_err(map_authority_error)?;
+                return Ok(Response::new(proto::AckResponse {
+                    result: Some(proto::ResultMeta {
+                        operation_id: meta.operation_id.clone(),
+                        status: "ok".to_string(),
+                        node_observed_generation: self
+                            .cache
+                            .lock()
+                            .await
+                            .observed_generation
+                            .clone(),
+                        error_code: "".to_string(),
+                        human_summary: format!("{:?}", accepted.disposition),
+                    }),
+                }));
+            }
+            let latest = authority
+                .latest_create_state(vm_id.clone())
+                .await
+                .map_err(map_authority_error)?;
+            match latest.map(|state| state.status) {
+                // No journaled create for this id: the original path —
+                // submit a fresh create pinned at Core version 1.
+                None => {}
+                // The latest create terminally failed: re-drive it through
+                // the requeue primitive. The definition is re-derived by
+                // the store from the live journal row (the spec in this
+                // fragment is the same generation-1 spec the original
+                // create journaled — it is deliberately not re-converted).
+                Some(cellhv_core_types::OperationStatus::Failed) => {
+                    return Ok(Response::new(
+                        dispatch_create_redrive(
+                            self,
+                            authority,
+                            &legacy_meta,
+                            &inner.vm_id,
+                            &vm_id,
+                        )
+                        .await?,
+                    ));
+                }
+                // The create already converged: a duplicate dispatch is an
+                // idempotent success (the desired state is journaled and
+                // projected — there is nothing to re-drive).
+                Some(cellhv_core_types::OperationStatus::Succeeded) => {
+                    return Ok(Response::new(proto::AckResponse {
+                        result: Some(proto::ResultMeta {
+                            operation_id: meta.operation_id.clone(),
+                            status: "ok".to_string(),
+                            node_observed_generation: self
+                                .cache
+                                .lock()
+                                .await
+                                .observed_generation
+                                .clone(),
+                            error_code: "".to_string(),
+                            human_summary: "create already converged".to_string(),
+                        }),
+                    }));
+                }
+                // A terminally unsupported create is permanent (the Core
+                // requeue only re-drives `failed`): refuse visibly instead
+                // of looping re-drives the store would refuse anyway.
+                Some(cellhv_core_types::OperationStatus::Unsupported) => {
+                    return Err(Status::failed_precondition(
+                        "create for this VM terminally failed as unsupported; \
+                         resolve the spec before retrying",
+                    ));
+                }
+                // An incomplete create (in flight, or inspect-required
+                // after a crash): never re-driven concurrently. The
+                // control plane retries the dispatch later; an
+                // inspect-required create stays resolvable through the
+                // operator resolve RPC.
+                Some(cellhv_core_types::OperationStatus::Accepted)
+                | Some(cellhv_core_types::OperationStatus::Running) => {
+                    return Err(Status::failed_precondition(
+                        "create for this VM is incomplete (in flight or inspect-required); \
+                         retry after it resolves",
+                    ));
+                }
+            }
             let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
                 &legacy_meta,
                 &meta.target_node_id,
@@ -709,6 +862,64 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             }),
         }))
     }
+}
+
+/// Whether the Core journal already holds an operation under this id —
+/// the task-identity probe for the #368 create-vs-redrive routing. A
+/// missing operation is `false`; every other authority failure surfaces.
+async fn journaled_operation_exists(
+    authority: &cellhv_core_operations::AuthorityHandle,
+    id: cellhv_core_types::OperationId,
+) -> Result<bool, Status> {
+    match authority.operation(id).await {
+        Ok(_) => Ok(true),
+        Err(cellhv_core_operations::AuthorityActorError::Service(err))
+            if err.class() == cellhv_core_operations::ErrorClass::NotFound =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(map_authority_error(e)),
+    }
+}
+
+/// #368 C1: submit a create re-drive through the Core requeue primitive
+/// and build the legacy ack. This is also the replay path for a verbatim
+/// retry of a re-drive task: the requeue's own idempotency key converges
+/// on the one requeued operation instead of inserting another.
+async fn dispatch_create_redrive(
+    server: &AgentServer,
+    authority: &cellhv_core_operations::AuthorityHandle,
+    legacy_meta: &crate::legacy_core_adapter::LegacyRequestMeta,
+    vm_id_str: &str,
+    vm_id: &cellhv_core_types::VmId,
+) -> Result<proto::AckResponse, Status> {
+    // The requeue CASes the live row's version: read it, and let a raced
+    // mutation surface as a retryable failed-precondition instead of
+    // guessing.
+    let live = authority
+        .vm(vm_id.clone())
+        .await
+        .map_err(map_authority_error)?;
+    let redrive = crate::legacy_core_adapter::adapt_legacy_create_redrive(
+        legacy_meta,
+        &legacy_meta.target_node_id,
+        vm_id_str,
+        live.resource_version,
+    )
+    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    let accepted = authority
+        .requeue_failed_create(redrive)
+        .await
+        .map_err(map_authority_error)?;
+    Ok(proto::AckResponse {
+        result: Some(proto::ResultMeta {
+            operation_id: legacy_meta.operation_id.clone(),
+            status: "ok".to_string(),
+            node_observed_generation: server.cache.lock().await.observed_generation.clone(),
+            error_code: "".to_string(),
+            human_summary: format!("{:?}", accepted.disposition),
+        }),
+    })
 }
 
 /// Maps a core-operation submit error into a gRPC [`Status`] for the legacy
@@ -4784,6 +4995,40 @@ mod tests {
         }
     }
 
+    /// Claim and terminally fail the VM's latest journaled create through
+    /// the execution capability — the #368 fixture shape (a transient
+    /// effector failure with a public-safe code).
+    async fn terminally_fail_latest_create(
+        authority: &cellhv_core_operations::AuthorityHandle,
+        vm_id: &str,
+    ) {
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new(vm_id).unwrap())
+            .await
+            .unwrap()
+            .expect("fixture requires a journaled create");
+        let execution = authority.execution_handle();
+        let token = cellhv_core_operations::AttemptToken::new("attempt-shim-fail").unwrap();
+        let operation_id = latest.operation_id.clone();
+        assert!(matches!(
+            execution
+                .claim_attempt(operation_id.clone(), token.clone())
+                .await
+                .unwrap(),
+            cellhv_core_operations::ClaimResult::Acquired(_)
+        ));
+        execution
+            .finish(
+                operation_id,
+                token,
+                cellhv_core_operations::TerminalOutcome::Failed(
+                    serde_json::json!({"code": "RUNTIME_UNAVAILABLE"}),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
     /// The M2.5 dispatch shim: a generation-1 desired-state dispatch (the
     /// control plane's create) routes through the Core authority. The VM
     /// lands in the Core journal at version 1, the NodeCache VM axis is
@@ -4845,6 +5090,382 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vm_after.resource_version.get(), 1);
+    }
+
+    /// #368 C1: a generation-1 re-drive task (a NEW control-plane operation
+    /// id for a VM whose journaled create terminally failed) routes through
+    /// the Core requeue primitive — a NEW CreateVm operation is journaled
+    /// for the residue-idempotent effector, the failed original stays
+    /// terminal, and a verbatim retry of the re-drive task converges on the
+    /// one requeued operation.
+    #[tokio::test]
+    async fn core_managed_create_redrive_routes_through_the_requeue_primitive() {
+        let (server, authority, _dir, _join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+
+        // The original create task, then its terminal effector failure.
+        let create_meta = proto::RequestMeta {
+            operation_id: "cp-create-1".to_owned(),
+            ..submit_meta("1")
+        };
+        proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(create_meta, "vm-new", "vm-new", spec)),
+        )
+        .await
+        .expect("original create dispatch must be accepted");
+        terminally_fail_latest_create(&authority, "vm-new").await;
+        let failed = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            failed.status,
+            cellhv_core_types::OperationStatus::Failed,
+            "fixture: the create must be terminally failed before the re-drive"
+        );
+
+        // The re-drive task: same generation, FRESH operation id (what the
+        // orchestrator's re-drive pass issues).
+        let redrive_meta = proto::RequestMeta {
+            operation_id: "cp-redrive-1".to_owned(),
+            ..submit_meta("1")
+        };
+        let resp = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                redrive_meta.clone(),
+                "vm-new",
+                "vm-new",
+                spec,
+            )),
+        )
+        .await
+        .expect("re-drive dispatch must be accepted");
+        let result = resp.into_inner().result.unwrap();
+        assert_eq!(result.status, "ok");
+        assert!(result.human_summary.contains("Accepted"));
+
+        // The journal now holds TWO create operations for the VM: the
+        // failed original (untouched, still terminal) and the requeued
+        // re-drive (accepted, claimable). The live row was never rewritten.
+        let operations = authority.operations().await.unwrap();
+        let creates = operations
+            .iter()
+            .filter(|entry| entry.operation.kind == cellhv_core_types::OperationKind::CreateVm)
+            .count();
+        assert_eq!(creates, 2);
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.status, cellhv_core_types::OperationStatus::Accepted);
+        assert_eq!(
+            authority
+                .vm(cellhv_core_types::VmId::new("vm-new").unwrap())
+                .await
+                .unwrap()
+                .resource_version
+                .get(),
+            1,
+            "the requeue must never rewrite the vms row"
+        );
+
+        // A verbatim retry of the re-drive task (the control plane retries
+        // the same operation row) converges on the one requeued operation.
+        let replay = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                redrive_meta,
+                "vm-new",
+                "vm-new",
+                spec,
+            )),
+        )
+        .await
+        .expect("re-drive retry must replay, not fail");
+        let replay_result = replay.into_inner().result.unwrap();
+        assert_eq!(replay_result.status, "ok");
+        assert!(replay_result.human_summary.contains("Replay"));
+        let operations = authority.operations().await.unwrap();
+        let creates = operations
+            .iter()
+            .filter(|entry| entry.operation.kind == cellhv_core_types::OperationKind::CreateVm)
+            .count();
+        assert_eq!(creates, 2, "the retry must not insert a third create");
+    }
+
+    /// #368 C1 fence cooperation: while the latest create is incomplete
+    /// (in flight or inspect-required), a re-drive dispatch is refused with
+    /// FailedPrecondition — never a concurrent second create.
+    #[tokio::test]
+    async fn core_managed_create_redrive_refuses_an_incomplete_create() {
+        let (server, authority, _dir, _join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let create_meta = proto::RequestMeta {
+            operation_id: "cp-create-1".to_owned(),
+            ..submit_meta("1")
+        };
+        proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(create_meta, "vm-new", "vm-new", spec)),
+        )
+        .await
+        .unwrap();
+        // Leave the create claimed (running) — the in-flight shape.
+        let execution = authority.execution_handle();
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let token = cellhv_core_operations::AttemptToken::new("attempt-shim-1").unwrap();
+        assert!(matches!(
+            execution
+                .claim_attempt(latest.operation_id, token)
+                .await
+                .unwrap(),
+            cellhv_core_operations::ClaimResult::Acquired(_)
+        ));
+
+        let redrive_meta = proto::RequestMeta {
+            operation_id: "cp-redrive-1".to_owned(),
+            ..submit_meta("1")
+        };
+        let error = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                redrive_meta,
+                "vm-new",
+                "vm-new",
+                spec,
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        // No second create was journaled.
+        let operations = authority.operations().await.unwrap();
+        assert_eq!(operations.len(), 1);
+    }
+
+    /// #368 review round 2 — joins the two separately-pinned halves of the
+    /// crash-recovery loop on the agent side: a re-drive claimed by the
+    /// executor and interrupted by a process crash surfaces as
+    /// InspectRequired after the restart classification; the operator
+    /// resolves it as Failed through the REAL resolve RPC, and P1's
+    /// `apply_core_create_states` then reports the VM as
+    /// `runtime_status="Failed"` with the resolution code — the exact
+    /// telemetry state the control plane's `redrive_failed_creates` pass
+    /// keys on. The CP half of the join is pinned in
+    /// chv-controlplane-service
+    /// (`redrive_rearms_after_operator_resolves_inspect_required`), which
+    /// consumes this exact report shape through the real telemetry
+    /// ingestion.
+    #[tokio::test]
+    async fn resolve_inspect_required_as_failed_reports_failed_state_for_redrive() {
+        let (server, authority, dir, join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+
+        // The #368 shape: the original create terminally fails, then the
+        // re-drive dispatch requeues a fresh journaled create.
+        let create_meta = proto::RequestMeta {
+            operation_id: "cp-create-1".to_owned(),
+            ..submit_meta("1")
+        };
+        proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(create_meta, "vm-new", "vm-new", spec)),
+        )
+        .await
+        .expect("original create dispatch must be accepted");
+        terminally_fail_latest_create(&authority, "vm-new").await;
+
+        let redrive_meta = proto::RequestMeta {
+            operation_id: "cp-redrive-1".to_owned(),
+            ..submit_meta("1")
+        };
+        proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                redrive_meta,
+                "vm-new",
+                "vm-new",
+                spec,
+            )),
+        )
+        .await
+        .expect("re-drive dispatch must be accepted");
+
+        // The agent claims the requeued create, then the process dies
+        // mid-run (the crash-during-re-drive window).
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .expect("requeued create");
+        let execution = authority.execution_handle();
+        let token = cellhv_core_operations::AttemptToken::new("attempt-crash").unwrap();
+        assert!(matches!(
+            execution
+                .claim_attempt(latest.operation_id.clone(), token)
+                .await
+                .unwrap(),
+            cellhv_core_operations::ClaimResult::Acquired(_)
+        ));
+        // Crash + restart: shut the actor down, reopen the journal, and
+        // run the restart classification (the existing M2.4 machinery).
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
+        let service =
+            cellhv_core_operations::OperationService::open_existing(&dir.path().join("core.db"))
+                .unwrap();
+        let (authority, join) = cellhv_core_operations::AuthorityActor::spawn(service, 16).unwrap();
+        let classified = authority
+            .execution_handle()
+            .classify_restart_interrupted()
+            .await
+            .unwrap();
+        assert_eq!(
+            classified.len(),
+            1,
+            "the interrupted re-drive must be classified for operator resolution"
+        );
+
+        // While the re-drive is inspect-required, P1 must NOT report the
+        // VM Failed: a rebuild-seeded fragment (reported as its desired
+        // state) is flipped to Pending by the latest-create merge — the
+        // signal that holds the CP's re-drive selection closed.
+        let pre_resolve = crate::reconcile::apply_core_create_states(
+            vec![crate::vm_runtime::VmRecord {
+                vm_id: "vm-new".to_owned(),
+                observed_generation: "1".to_owned(),
+                runtime_status: "Running".to_owned(),
+                last_error: None,
+                consecutive_failures: 0,
+                cpus: 1,
+                memory_bytes: 1024,
+            }],
+            authority.latest_create_states().await.unwrap(),
+        );
+        assert_eq!(pre_resolve.len(), 1, "one record reported: {pre_resolve:?}");
+        assert_eq!(
+            pre_resolve[0].runtime_status, "Pending",
+            "an inspect-required create must report Pending, never Failed nor the desired phantom"
+        );
+
+        // The operator resolves the inspect-required re-drive as Failed
+        // through the real RPC surface (the agent-shim resolve seam).
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .expect("requeued create");
+        let mut resolved_server = test_server();
+        resolved_server.core_authority = Some(authority.clone());
+        let resp =
+            proto::lifecycle_service_server::LifecycleService::resolve_inspect_required_operation(
+                &resolved_server,
+                Request::new(proto::ResolveInspectRequiredOperationRequest {
+                    meta: Some(submit_meta("1")),
+                    vm_id: "vm-new".to_string(),
+                    operation_id: latest.operation_id.as_str().to_string(),
+                    disposition: "failed".to_string(),
+                    note: "operator verified the backend did not recover".to_string(),
+                }),
+            )
+            .await
+            .expect("resolve must succeed against the real authority");
+        assert_eq!(resp.into_inner().result.unwrap().status, "ok");
+
+        // P1: the merged report now carries the Failed state with the
+        // resolution code — the exact VmStateReport payload
+        // (runtime_status="Failed", last_error="OPERATOR_RESOLUTION",
+        // observed_generation="0") the CP-side counterpart test consumes.
+        let merged = crate::reconcile::apply_core_create_states(
+            Vec::new(),
+            authority.latest_create_states().await.unwrap(),
+        );
+        assert_eq!(
+            merged.len(),
+            1,
+            "the failed create must be reported: {merged:?}"
+        );
+        assert_eq!(merged[0].vm_id, "vm-new");
+        assert_eq!(merged[0].runtime_status, "Failed");
+        assert_eq!(
+            merged[0].last_error.as_deref(),
+            Some("OPERATOR_RESOLUTION"),
+            "the public-safe resolution code must ride the report"
+        );
+        assert_eq!(merged[0].observed_generation, "0");
+
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
+
+    /// #368 C1: a duplicate create dispatch after the create converged is
+    /// an idempotent success — no new operation, no requeue.
+    #[tokio::test]
+    async fn core_managed_create_dispatch_after_success_acks_idempotently() {
+        let (server, authority, _dir, _join) = shim_server().await;
+        let spec = r#"{"name":"vm-new","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[]}"#;
+        let create_meta = proto::RequestMeta {
+            operation_id: "cp-create-1".to_owned(),
+            ..submit_meta("1")
+        };
+        proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(create_meta, "vm-new", "vm-new", spec)),
+        )
+        .await
+        .unwrap();
+        // The create succeeds.
+        let execution = authority.execution_handle();
+        let latest = authority
+            .latest_create_state(cellhv_core_types::VmId::new("vm-new").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let token = cellhv_core_operations::AttemptToken::new("attempt-shim-1").unwrap();
+        let succeeded_id = latest.operation_id.clone();
+        execution
+            .claim_attempt(succeeded_id.clone(), token.clone())
+            .await
+            .unwrap();
+        execution
+            .finish(
+                succeeded_id,
+                token,
+                cellhv_core_operations::TerminalOutcome::Succeeded(Some(
+                    serde_json::json!({"runtime": "created"}),
+                )),
+            )
+            .await
+            .unwrap();
+
+        // A NEW generation-1 task for the converged VM acks ok without
+        // journaling anything.
+        let duplicate_meta = proto::RequestMeta {
+            operation_id: "cp-other-1".to_owned(),
+            ..submit_meta("1")
+        };
+        let resp = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(desired_state_request(
+                duplicate_meta,
+                "vm-new",
+                "vm-new",
+                spec,
+            )),
+        )
+        .await
+        .expect("duplicate dispatch after convergence must ack ok");
+        let result = resp.into_inner().result.unwrap();
+        assert_eq!(result.status, "ok");
+        assert_eq!(authority.operations().await.unwrap().len(), 1);
     }
 
     /// A spec update (resize carries generation >= 2) is refused at the

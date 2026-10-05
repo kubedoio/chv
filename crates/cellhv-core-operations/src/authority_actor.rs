@@ -6,9 +6,9 @@
 //! deliberately transport-neutral and has no VMM or provider execution hooks.
 
 use crate::{
-    AcceptedOperation, AttemptToken, ClaimResult, CompletionResult, HostRecord,
-    OperationJournalEntry, OperationService, OperationServiceError, RestartOperation,
-    SubmitMutation, TerminalOutcome,
+    AcceptedOperation, AttemptToken, ClaimResult, CompletionResult, HostRecord, LatestCreateState,
+    OperationJournalEntry, OperationService, OperationServiceError, RequeueCreateSubmission,
+    RestartOperation, SubmitMutation, TerminalOutcome,
 };
 use async_channel::Sender;
 use cellhv_core_types::{OperationEvent, OperationId, VmDefinition, VmId};
@@ -40,12 +40,15 @@ type Reply<T> = oneshot::Sender<std::result::Result<T, OperationServiceError>>;
 
 enum Request {
     Submit(Box<SubmitMutation>, Reply<AcceptedOperation>),
+    RequeueFailedCreate(Box<RequeueCreateSubmission>, Reply<AcceptedOperation>),
     Operation(OperationId, Reply<OperationJournalEntry>),
     Vm(VmId, Reply<VmDefinition>),
     Vms(Reply<Vec<VmDefinition>>),
     Operations(Reply<Vec<OperationJournalEntry>>),
     EventsAfter(u64, u32, Reply<Vec<OperationEvent>>),
     Host(Reply<HostRecord>),
+    LatestCreateState(VmId, Reply<Option<LatestCreateState>>),
+    LatestCreateStates(Reply<Vec<(VmId, Option<LatestCreateState>)>>),
     RestartOperations(Reply<Vec<RestartOperation>>),
     PersistObservedVmState(VmId, cellhv_core_types::ObservedPowerState, Reply<()>),
     ClaimAttempt(OperationId, AttemptToken, Reply<ClaimResult>),
@@ -92,6 +95,44 @@ impl AuthorityHandle {
             receive,
         )
         .await
+    }
+
+    /// #368 C1: re-drive the create of a VM whose latest journaled create
+    /// terminally failed (see [`crate::RequeueCreateSubmission`]). Refusal
+    /// (tombstoned VM, superseded spec, incomplete create, non-failed
+    /// latest create) surfaces as
+    /// [`AuthorityActorError::Service`] with the store's error class.
+    pub async fn requeue_failed_create(
+        &self,
+        submission: RequeueCreateSubmission,
+    ) -> Result<AcceptedOperation> {
+        let (reply, receive) = oneshot::channel();
+        Self::send(
+            &self.sender,
+            Request::RequeueFailedCreate(Box::new(submission), reply),
+            receive,
+        )
+        .await
+    }
+
+    /// Latest CreateVm operation state for one VM (journal-derived; `None`
+    /// when the VM has no journaled create). Read-only.
+    pub async fn latest_create_state(&self, vm_id: VmId) -> Result<Option<LatestCreateState>> {
+        let (reply, receive) = oneshot::channel();
+        Self::send(
+            &self.sender,
+            Request::LatestCreateState(vm_id, reply),
+            receive,
+        )
+        .await
+    }
+
+    /// Latest CreateVm operation state for every live VM, ordered by vm id.
+    /// One queue round trip: the P1 telemetry loop calls this each report
+    /// cycle.
+    pub async fn latest_create_states(&self) -> Result<Vec<(VmId, Option<LatestCreateState>)>> {
+        let (reply, receive) = oneshot::channel();
+        Self::send(&self.sender, Request::LatestCreateStates(reply), receive).await
     }
 
     pub async fn operation(&self, id: OperationId) -> Result<OperationJournalEntry> {
@@ -317,6 +358,9 @@ impl AuthorityActor {
                         Request::Submit(value, reply) => {
                             let _ = reply.send(service.submit(*value));
                         }
+                        Request::RequeueFailedCreate(value, reply) => {
+                            let _ = reply.send(service.requeue_failed_create(*value));
+                        }
                         Request::Operation(id, reply) => {
                             let _ = reply.send(service.operation(&id));
                         }
@@ -334,6 +378,12 @@ impl AuthorityActor {
                         }
                         Request::Host(reply) => {
                             let _ = reply.send(service.host());
+                        }
+                        Request::LatestCreateState(vm_id, reply) => {
+                            let _ = reply.send(service.latest_create_state(&vm_id));
+                        }
+                        Request::LatestCreateStates(reply) => {
+                            let _ = reply.send(service.latest_create_states());
                         }
                         Request::PersistObservedVmState(vm_id, observed, reply) => {
                             let _ = reply.send(service.persist_observed_vm_state(&vm_id, observed));

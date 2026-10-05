@@ -11,8 +11,8 @@ pub use authority_actor::{
 
 use cellhv_core_store::{AcceptOperation, CoreStore, RecoveryAssessmentRecord};
 pub use cellhv_core_store::{
-    Acceptance, AcceptedOperation, AssessmentDisposition, HostRecord, MigrationDisposition,
-    OperationJournalEntry, RecoveryClassification, RecoveryDisposition,
+    Acceptance, AcceptedOperation, AssessmentDisposition, HostRecord, LatestCreateState,
+    MigrationDisposition, OperationJournalEntry, RecoveryClassification, RecoveryDisposition,
 };
 use cellhv_core_types::{
     canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
@@ -172,6 +172,26 @@ pub struct SubmitMutation {
     pub command: MutationCommand,
 }
 
+/// #368 C1 requeue submission: re-drive the create of a VM whose latest
+/// journaled create operation terminally failed. Owned form of the store's
+/// `RequeueCreateRequest` (crosses the authority actor's thread boundary).
+///
+/// Unlike [`SubmitMutation`] this carries no command and no desired state:
+/// the create request envelope is re-derived inside the store transaction
+/// from the live `vms` row (CAS'd at `expected_vm_version`), so the
+/// existing create effector re-executes it residue-idempotently. The
+/// failed original stays terminal — the requeue inserts a NEW CreateVm
+/// operation under a fresh idempotency key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequeueCreateSubmission {
+    pub vm_id: VmId,
+    pub expected_vm_version: ResourceVersion,
+    pub operation_id: OperationId,
+    pub idempotency_scope: String,
+    pub idempotency_key: IdempotencyKey,
+    pub metadata: OperationRequestMetadata,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartDisposition {
     Ready,
@@ -198,12 +218,17 @@ pub struct RecoveryAssessment {
 pub enum ClaimResult {
     Acquired(OperationJournalEntry),
     Replay(OperationJournalEntry),
+    /// Terminally refused by a claim-time fence: the operation is ALREADY
+    /// terminal (Failed) in the journal when this is returned and MUST NOT
+    /// be executed against any provider (#368 C1 create-vs-tombstone
+    /// fence). Not ambiguous, not quarantine-worthy.
+    Refused(OperationJournalEntry),
 }
 
 impl ClaimResult {
     pub fn entry(&self) -> &OperationJournalEntry {
         match self {
-            Self::Acquired(entry) | Self::Replay(entry) => entry,
+            Self::Acquired(entry) | Self::Replay(entry) | Self::Refused(entry) => entry,
         }
     }
 }
@@ -386,6 +411,45 @@ impl OperationService {
         Ok(self.store.operation_entry(id)?)
     }
 
+    /// #368 C1: re-drive a terminally failed create (see
+    /// [`RequeueCreateSubmission`]). All refusal checks (live row, version
+    /// CAS, no incomplete create, latest create terminally failed) run
+    /// inside the store transaction; the attempt bound is the same
+    /// `DEFAULT_MAX_ATTEMPTS` every submitted mutation uses.
+    pub fn requeue_failed_create(
+        &mut self,
+        submission: RequeueCreateSubmission,
+    ) -> Result<AcceptedOperation> {
+        if submission.idempotency_scope.trim().is_empty() {
+            return Err(OperationServiceError::Invalid(
+                "idempotency scope must not be empty".to_owned(),
+            ));
+        }
+        Ok(self
+            .store
+            .requeue_failed_create(&cellhv_core_store::RequeueCreateRequest {
+                vm_id: &submission.vm_id,
+                expected_vm_version: submission.expected_vm_version,
+                operation_id: &submission.operation_id,
+                max_attempts: DEFAULT_MAX_ATTEMPTS,
+                metadata: &submission.metadata,
+                idempotency_scope: &submission.idempotency_scope,
+                idempotency_key: &submission.idempotency_key,
+            })?)
+    }
+
+    /// Latest CreateVm operation state for one VM (journal-derived; `None`
+    /// when the VM has no journaled create). Read-only; backs the agent's
+    /// create-vs-redrive dispatch routing and P1 failed-create reporting.
+    pub fn latest_create_state(&self, vm_id: &VmId) -> Result<Option<LatestCreateState>> {
+        Ok(self.store.latest_create_state(vm_id)?)
+    }
+
+    /// Latest CreateVm operation state for every live VM, ordered by vm id.
+    pub fn latest_create_states(&self) -> Result<Vec<(VmId, Option<LatestCreateState>)>> {
+        Ok(self.store.latest_create_states()?)
+    }
+
     pub fn persist_observed_vm_state(
         &mut self,
         vm_id: &VmId,
@@ -435,6 +499,7 @@ impl OperationService {
         Ok(match claimed.disposition {
             cellhv_core_store::ClaimDisposition::Acquired => ClaimResult::Acquired(claimed.entry),
             cellhv_core_store::ClaimDisposition::Replay => ClaimResult::Replay(claimed.entry),
+            cellhv_core_store::ClaimDisposition::Refused => ClaimResult::Refused(claimed.entry),
         })
     }
 
@@ -1615,5 +1680,256 @@ mod tests {
                 .resource_version,
             version(2)
         );
+    }
+
+    // --- #368 C1: requeue through the service facade and the actor ---
+
+    fn requeue_submission(
+        vm_id: &str,
+        expected: u64,
+        operation: &str,
+        key: &str,
+    ) -> RequeueCreateSubmission {
+        RequeueCreateSubmission {
+            vm_id: VmId::new(vm_id).unwrap(),
+            expected_vm_version: version(expected),
+            operation_id: OperationId::new(operation).unwrap(),
+            idempotency_scope: "local-api".to_owned(),
+            idempotency_key: IdempotencyKey::new(key).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
+        }
+    }
+
+    /// The real #368 shape through the service facade: submit a create,
+    /// claim it, terminally fail it with a public-safe effector code.
+    fn terminally_fail_create(service: &mut OperationService, vm_id: &str, operation: &str) {
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm(vm_id),
+                },
+                operation,
+                operation,
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new(operation).unwrap();
+        let token = AttemptToken::new("attempt-requeue-1").unwrap();
+        assert!(matches!(
+            service.claim_attempt(&id, &token).unwrap(),
+            ClaimResult::Acquired(_)
+        ));
+        service
+            .finish(
+                &id,
+                &token,
+                TerminalOutcome::Failed(serde_json::json!({"code": "RUNTIME_UNAVAILABLE"})),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn requeue_derives_a_canonical_create_envelope() {
+        // Cross-crate shape pin: the store derives the requeued operation's
+        // request WITHOUT depending on this crate, so the envelope it
+        // produces must parse back through the canonical de-envelope
+        // boundary the runtime/projection consumers share.
+        let (_dir, _path, mut service) = service();
+        terminally_fail_create(&mut service, "a", "op-1");
+        let requeued = service
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-1", "requeue-1"))
+            .unwrap();
+        assert_eq!(requeued.disposition, Acceptance::Accepted);
+        assert_eq!(requeued.operation.kind, OperationKind::CreateVm);
+        let entry = service.operation(&requeued.operation.id).unwrap();
+        let parsed = CanonicalRequest::try_from_value(&entry.request)
+            .expect("requeued request must be a canonical envelope")
+            .expect("requeued request must be an object");
+        assert_eq!(
+            parsed.command,
+            MutationCommand::CreateVm {
+                definition: vm("a")
+            }
+        );
+        assert_eq!(parsed.expected_vm_version, serde_json::json!(1));
+        // The requeued create executes end-to-end through the service.
+        let token = AttemptToken::new("attempt-requeue-2").unwrap();
+        assert!(matches!(
+            service
+                .claim_attempt(&requeued.operation.id, &token)
+                .unwrap(),
+            ClaimResult::Acquired(_)
+        ));
+        service
+            .finish(
+                &requeued.operation.id,
+                &token,
+                TerminalOutcome::Succeeded(Some(serde_json::json!({"runtime": "created"}))),
+            )
+            .unwrap();
+        let latest = service
+            .latest_create_state(&VmId::new("a").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.status, OperationStatus::Succeeded);
+        assert_eq!(latest.operation_id, requeued.operation.id);
+    }
+
+    #[test]
+    fn requeue_refusals_surface_the_store_error_class() {
+        let (_dir, _path, mut service) = service();
+        terminally_fail_create(&mut service, "a", "op-1");
+        // A superseded spec is a precondition failure.
+        let stale = service
+            .requeue_failed_create(requeue_submission("a", 2, "requeue-1", "requeue-1"))
+            .unwrap_err();
+        assert_eq!(stale.class(), ErrorClass::Precondition);
+        // A VM whose latest create succeeded is a conflict.
+        let requeued = service
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-2", "requeue-2"))
+            .unwrap();
+        let token = AttemptToken::new("attempt-requeue-3").unwrap();
+        service
+            .claim_attempt(&requeued.operation.id, &token)
+            .unwrap();
+        service
+            .finish(
+                &requeued.operation.id,
+                &token,
+                TerminalOutcome::Succeeded(Some(serde_json::json!({"runtime": "created"}))),
+            )
+            .unwrap();
+        let succeeded = service
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-3", "requeue-3"))
+            .unwrap_err();
+        assert_eq!(succeeded.class(), ErrorClass::Conflict);
+    }
+
+    #[tokio::test]
+    async fn requeue_through_the_actor_is_durable_and_readable() {
+        let (_dir, path, service) = service();
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(service, 2).unwrap();
+        handle
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "op-1",
+                1,
+            ))
+            .await
+            .unwrap();
+        let token = AttemptToken::new("attempt-requeue-1").unwrap();
+        assert!(matches!(
+            execution
+                .claim_attempt(OperationId::new("op-1").unwrap(), token.clone())
+                .await
+                .unwrap(),
+            ClaimResult::Acquired(_)
+        ));
+        execution
+            .finish(
+                OperationId::new("op-1").unwrap(),
+                token,
+                TerminalOutcome::Failed(serde_json::json!({"code": "RUNTIME_UNAVAILABLE"})),
+            )
+            .await
+            .unwrap();
+        // P1 read surface: the terminally failed create is visible with its
+        // public-safe code.
+        let latest = handle
+            .latest_create_state(VmId::new("a").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.status, OperationStatus::Failed);
+        assert_eq!(latest.error_code.as_deref(), Some("RUNTIME_UNAVAILABLE"));
+        // The re-drive through the actor.
+        let requeued = handle
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-1", "requeue-1"))
+            .await
+            .unwrap();
+        assert_eq!(requeued.disposition, Acceptance::Accepted);
+        // A dispatcher retry under the same idempotency key converges.
+        let replay = handle
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-2", "requeue-1"))
+            .await
+            .unwrap();
+        assert_eq!(replay.disposition, Acceptance::Replay);
+        assert_eq!(replay.operation.id, requeued.operation.id);
+        let states = handle.latest_create_states().await.unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].1.as_ref().unwrap().operation_id,
+            requeued.operation.id
+        );
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+        // Durable across restart.
+        let (handle, _execution, join) = AuthorityActor::spawn_with_execution(
+            OperationService::open_existing(&path).unwrap(),
+            2,
+        )
+        .unwrap();
+        let states = handle.latest_create_states().await.unwrap();
+        assert_eq!(
+            states[0].1.as_ref().unwrap().status,
+            OperationStatus::Accepted
+        );
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
+
+    #[test]
+    fn crash_during_redrive_preserves_the_requeued_create_as_inspect_required() {
+        // #368 design §7 "crash-during-re-drive": the requeued create is
+        // an ordinary journaled operation, so a crash between claim and
+        // finish must surface through the EXISTING restart
+        // classification as InspectRequired — never silently dropped,
+        // never auto-resurrected (M2.4 terminality semantics unchanged).
+        let (_dir, path, mut service) = service();
+        terminally_fail_create(&mut service, "a", "op-1");
+        let requeued = service
+            .requeue_failed_create(requeue_submission("a", 1, "requeue-1", "requeue-1"))
+            .unwrap();
+        assert_eq!(requeued.disposition, Acceptance::Accepted);
+        // The agent claims the re-drive, then the process dies mid-run.
+        let token = AttemptToken::new("attempt-crash").unwrap();
+        assert!(matches!(
+            service
+                .claim_attempt(&requeued.operation.id, &token)
+                .unwrap(),
+            ClaimResult::Acquired(_)
+        ));
+        drop(service);
+
+        // Restart: the journal reopens and startup classification marks
+        // the interrupted re-drive InspectRequired (the unmarked Running
+        // op is excluded from the live snapshot until classified).
+        let mut service = OperationService::new(CoreStore::open_existing(&path).unwrap());
+        assert!(service.restart_operations().unwrap().is_empty());
+        let classified = service.classify_restart_interrupted_operations().unwrap();
+        assert_eq!(classified, vec![requeued.operation.id.clone()]);
+        let pending = service.restart_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entry.operation.id, requeued.operation.id);
+        assert_eq!(pending[0].disposition, RestartDisposition::InspectRequired);
+        assert!(pending[0].recovery_assessment.is_some());
+        // The interrupted re-drive stays Running-with-marker for operator
+        // resolution — it is not auto-reclaimed.
+        let requeued_entry = service.operation(&requeued.operation.id).unwrap();
+        assert_eq!(requeued_entry.operation.status, OperationStatus::Running);
+        assert!(requeued_entry.recovery_assessment.is_some());
+        // The ORIGINAL failed create stays terminal across the restart.
+        let original = service
+            .operation(&OperationId::new("op-1").unwrap())
+            .unwrap();
+        assert_eq!(original.operation.status, OperationStatus::Failed);
     }
 }

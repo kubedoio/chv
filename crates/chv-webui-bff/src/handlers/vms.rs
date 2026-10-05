@@ -50,7 +50,16 @@ pub async fn list_vms(
             v.vm_id,
             v.display_name AS name,
             COALESCE(vos.node_id, vds.target_node_id, v.node_id) AS node_id,
-            COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
+            -- #368 P3: an agent-reported Failed state always wins over the
+            -- desired power state — a terminally-failed create (or any
+            -- failed runtime) must render as Failed with its reason, never
+            -- as the phantom desired state. Failure-free VMs keep the
+            -- previous desired-first precedence unchanged.
+            CASE
+                WHEN vos.runtime_status = 'Failed' THEN vos.runtime_status
+                ELSE COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown')
+            END AS power_state,
+            COALESCE(vos.last_error, '') AS last_error,
             COALESCE(vos.health_status, 'unknown') AS health,
             COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
             CASE WHEN vds.memory_bytes IS NULL THEN ''
@@ -98,6 +107,7 @@ pub async fn list_vms(
                 "name": r.name,
                 "node_id": r.node_id,
                 "power_state": r.power_state,
+                "last_error": r.last_error,
                 "health": r.health,
                 "cpu": r.cpu,
                 "memory": r.memory,
@@ -142,7 +152,12 @@ pub async fn get_vm(
             v.vm_id,
             v.display_name AS name,
             COALESCE(vos.node_id, vds.target_node_id, v.node_id) AS node_id,
-            COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
+            -- #368 P3: same Failed-wins precedence as the list view.
+            CASE
+                WHEN vos.runtime_status = 'Failed' THEN vos.runtime_status
+                ELSE COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown')
+            END AS power_state,
+            COALESCE(vos.last_error, '') AS last_error,
             COALESCE(vos.health_status, 'unknown') AS health,
             COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
             CASE WHEN vds.memory_bytes IS NULL THEN ''
@@ -279,6 +294,7 @@ pub async fn get_vm(
                     "name": r.name,
                     "node_id": r.node_id,
                     "power_state": r.power_state,
+                    "last_error": r.last_error,
                     "health": r.health,
                     "cpu": r.cpu,
                     "memory": r.memory,
@@ -1374,6 +1390,7 @@ struct VmRow {
     name: String,
     node_id: Option<String>,
     power_state: String,
+    last_error: Option<String>,
     health: String,
     cpu: String,
     memory: String,
@@ -1388,6 +1405,7 @@ struct VmSummaryRow {
     name: String,
     node_id: Option<String>,
     power_state: String,
+    last_error: Option<String>,
     health: String,
     cpu: String,
     memory: String,

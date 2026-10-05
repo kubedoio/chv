@@ -104,13 +104,7 @@ pub fn adapt_legacy_vm_mutation(
     };
 
     let submission = SubmitMutation {
-        operation_id: OperationId::new(format!(
-            "{LEGACY_OPERATION_ID_PREFIX}{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
-            node_id.len(),
-            vm_id.as_str().len(),
-            meta.operation_id.len(),
-            meta.operation_id
-        ))?,
+        operation_id: legacy_operation_id(node_id, &vm_id, &meta.operation_id)?,
         idempotency_scope: format!(
             "{SCOPE_PREFIX}/node/{}:{node_id}/vm/{}:{vm_id}",
             node_id.len(),
@@ -141,6 +135,111 @@ pub fn adapt_legacy_vm_mutation(
             expected_core_version,
         },
         submission,
+    })
+}
+
+/// Derives the Core operation id for a legacy control-plane task. This is
+/// the durable task identity shared by every boundary that journals or
+/// looks up the task's Core operation: the direct lifecycle handlers, the
+/// desired-state dispatch shim, and (via [`legacy_requeue_operation_id`])
+/// its re-drive twin. Length-prefixed segments keep the id unambiguous
+/// for any safe-id content.
+pub(crate) fn legacy_operation_id(
+    node_id: &str,
+    vm_id: &VmId,
+    operation_id: &str,
+) -> Result<OperationId, ChvError> {
+    OperationId::new(format!(
+        "{LEGACY_OPERATION_ID_PREFIX}{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
+        node_id.len(),
+        vm_id.as_str().len(),
+        operation_id.len(),
+        operation_id
+    ))
+}
+
+/// #368 C1: the re-drive twin of [`legacy_operation_id`] — the same
+/// derivation with a trailing `:requeue` discriminator, so a re-drive
+/// task's journaled operation can never collide with (or be mistaken
+/// for) the original create task's operation under the same
+/// control-plane operation id. The dispatch shim routes verbatim
+/// retries on exactly this distinction: a retry of the original create
+/// task replays the create, a retry of a re-drive task replays the
+/// requeue, and neither is a fresh submission.
+pub(crate) fn legacy_requeue_operation_id(
+    node_id: &str,
+    vm_id: &VmId,
+    operation_id: &str,
+) -> Result<OperationId, ChvError> {
+    OperationId::new(format!(
+        "{LEGACY_OPERATION_ID_PREFIX}{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}:requeue",
+        node_id.len(),
+        vm_id.as_str().len(),
+        operation_id.len(),
+        operation_id
+    ))
+}
+
+/// Translate a legacy generation-1 create task whose Core journal
+/// already holds a terminally failed create for the SAME vm id into a
+/// requeue submission (see `CoreStore::requeue_failed_create`).
+///
+/// Identity derivation mirrors [`adapt_legacy_vm_mutation`] — same scope
+/// and metadata, from the caller's operation id and generation — with two
+/// deliberate differences so a re-drive can never alias the original
+/// create's journal identity: the operation id carries a `:requeue`
+/// discriminator ([`legacy_requeue_operation_id`]), and the idempotency
+/// key carries a `requeue` discriminator so it can NEVER resolve to the
+/// original create's mapping (which would replay-return the failed
+/// original instead of inserting the re-drive). Consequences:
+///
+/// - a dispatcher retry of the SAME re-drive task (same control-plane
+///   operation id) converges on the one requeued Core operation;
+/// - every NEW re-drive task (fresh control-plane operation id, as the
+///   orchestrator's re-drive pass issues) derives a fresh operation id and
+///   key, so each re-drive is a new journaled operation.
+///
+/// The create request envelope is NOT carried: the store re-derives it
+/// from the live journal row inside the requeue transaction, so the
+/// re-drive re-executes exactly the journaled spec (a generation-1 task is
+/// fixed at accept and retried verbatim — a different spec would be a
+/// different, refused generation).
+pub fn adapt_legacy_create_redrive(
+    meta: &LegacyRequestMeta,
+    node_id: &str,
+    vm_id: &str,
+    expected_core_version: ResourceVersion,
+) -> Result<cellhv_core_operations::RequeueCreateSubmission, ChvError> {
+    require_non_empty("node_id", node_id)?;
+    require_non_empty("target_node_id", &meta.target_node_id)?;
+    if meta.target_node_id != node_id {
+        return invalid("target_node_id", "must match request node_id");
+    }
+    require_non_empty("operation_id", &meta.operation_id)?;
+    let desired_generation = parse_generation(&meta.desired_state_version)?;
+    let vm_id = VmId::new(vm_id)?;
+    Ok(cellhv_core_operations::RequeueCreateSubmission {
+        vm_id: vm_id.clone(),
+        expected_vm_version: expected_core_version,
+        operation_id: legacy_requeue_operation_id(node_id, &vm_id, &meta.operation_id)?,
+        idempotency_scope: format!(
+            "{SCOPE_PREFIX}/node/{}:{node_id}/vm/{}:{vm_id}",
+            node_id.len(),
+            vm_id.as_str().len()
+        ),
+        idempotency_key: IdempotencyKey::new(format!(
+            "operation/{}:{}/generation/{}:{}/requeue",
+            meta.operation_id.len(),
+            meta.operation_id,
+            meta.desired_state_version.len(),
+            meta.desired_state_version
+        ))?,
+        metadata: OperationRequestMetadata {
+            requested_by: meta.requested_by.clone(),
+            external_operation_id: meta.operation_id.clone(),
+            request_unix_ms: meta.request_unix_ms,
+            legacy_generation: Some(desired_generation),
+        },
     })
 }
 
