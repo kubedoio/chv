@@ -112,6 +112,55 @@ impl StorageBackend for LVMBackend {
             });
         }
         let path = self.volume_path(volume_id)?;
+        // #379 DP2: create-on-open parity with the local backend. An
+        // absent LV provisions via `lvcreate` when the open carries a
+        // size (the exact create_receiving_volume shape); an absent LV
+        // WITHOUT a size refuses — LVM volumes are not sparse, so a
+        // default-size LV would silently consume real extents, unlike
+        // the local backend's sparse-file default. An existing LV opens
+        // as before (idempotent re-attach).
+        if !path.exists() {
+            // seed_from is unsupported on LVM (DP2 scope cut): reject
+            // with an explicit error instead of silently provisioning an
+            // empty LV under an operator who asked for a seeded image.
+            if locator
+                .options
+                .get("seed_from")
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            {
+                return Err(ChvError::InvalidArgument {
+                    field: "seed_from".to_string(),
+                    reason: "seed_from is not supported on the lvm backend (#379 DP2 scope \
+                             cut); provision the image onto the LV out-of-band"
+                        .to_string(),
+                });
+            }
+            let size_bytes = match locator.options.get("size_bytes") {
+                Some(raw) => raw.parse::<u64>().map_err(|_| ChvError::InvalidArgument {
+                    field: "size_bytes".to_string(),
+                    reason: format!("invalid integer: {}", raw),
+                })?,
+                None => {
+                    return Err(ChvError::InvalidArgument {
+                        field: "size_bytes".to_string(),
+                        reason: "size_bytes is required to create an LVM volume (the logical \
+                                 volume does not exist)"
+                            .to_string(),
+                    })
+                }
+            };
+            warn!(
+                volume_id,
+                path = %path.display(),
+                size_bytes,
+                "logical volume does not exist; provisioning via lvcreate"
+            );
+            let export = self
+                .create_receiving_volume(volume_id, size_bytes, "raw")
+                .await?;
+            return Ok(export);
+        }
         info!(volume_id, path = %path.display(), "opening LVM volume");
         Ok(VolumeExport {
             export_kind: "lvm".to_string(),
@@ -722,19 +771,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lvm_backend_open_returns_lvm_path() {
+    async fn lvm_backend_open_refuses_absent_lv_without_size() {
+        // #379 DP2: create-on-open — an absent LV without a size_bytes
+        // option refuses (LVM volumes are not sparse; a default-size LV
+        // would silently consume real extents). The happy-path open
+        // shape (export path/handle) is pinned by the attach test below
+        // and the root-gated lvm_real roundtrip.
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
         let locator = BackendLocator {
             backend_class: "lvm".to_string(),
             locator: "vg0/vol1".to_string(),
             options: Default::default(),
         };
-        let export = backend
+        match backend
             .open("vol-1", &locator, &DevicePolicy::default())
             .await
-            .unwrap();
-        assert_eq!(export.export_kind, "lvm");
-        assert!(export.export_path.contains("/dev/vg0/vol-1"));
+        {
+            Err(ChvError::InvalidArgument { field, .. }) => {
+                assert_eq!(field, "size_bytes");
+            }
+            other => panic!("expected InvalidArgument(size_bytes), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lvm_backend_open_rejects_seed_from() {
+        // #379 DP2 scope cut: seed_from is unsupported on LVM — reject
+        // explicitly instead of silently provisioning an empty LV.
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let locator = BackendLocator {
+            backend_class: "lvm".to_string(),
+            locator: "vg0/vol1".to_string(),
+            options: [
+                ("size_bytes".to_string(), "1048576".to_string()),
+                ("seed_from".to_string(), "/tmp/seed.qcow2".to_string()),
+            ]
+            .into(),
+        };
+        match backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+        {
+            Err(ChvError::InvalidArgument { field, .. }) => {
+                assert_eq!(field, "seed_from");
+            }
+            other => panic!("expected InvalidArgument(seed_from), got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -892,7 +892,7 @@ impl Orchestrator {
                         None,
                         // #379 PR 2 (A8): the volume's class rides the
                         // attach dispatch (resolved in the claim query);
-                        // NULL keeps the empty spec_json byte-exact.
+                        // NULL emits the key-free `{}` (PR 3 correction).
                         row.volume_storage_class.as_deref(),
                     )
                     .await
@@ -2441,11 +2441,15 @@ mod tests {
 
     /// #379 PR 2 (A8) + the clone carry: the AttachVolume dispatch
     /// populates `volume_spec_json` from the volume's class —
-    /// `{"backend_class":"lvm"}` for a class-carrying volume, EMPTY
-    /// bytes for a NULL-class volume (byte-exact with the pre-#379
-    /// dispatch). The class-carrying volume is a #501 CLONE TARGET
-    /// (the clone copies `storage_class` from the source), pinning that
-    /// a clone of a class-carrying volume dispatches with the class.
+    /// `{"backend_class":"lvm"}` for a class-carrying volume, and `{}`
+    /// (the empty JSON object) for a NULL-class volume. PR 2 pinned the
+    /// NULL-class leg as byte-exact EMPTY bytes but disclosed that they
+    /// fail the agent's A4 JSON parse (EOF on empty input); PR 3 (DP5)
+    /// corrects the leg to `{}` so a NULL-class attach actually reaches
+    /// the open — still no keys, still no materialized `"local"`. The
+    /// class-carrying volume is a #501 CLONE TARGET (the clone copies
+    /// `storage_class` from the source), pinning that a clone of a
+    /// class-carrying volume dispatches with the class.
     #[tokio::test]
     async fn attach_volume_dispatch_carries_the_volume_class() {
         use crate::lifecycle::LifecycleService as _;
@@ -2521,7 +2525,8 @@ mod tests {
             "the #501 clone must copy the source's class (#384/#501 pin, restated for #379)"
         );
 
-        // A NULL-class volume for the byte-exact empty-spec_json leg.
+        // A NULL-class volume for the empty-object spec_json leg (the
+        // PR 3 `{}` correction of PR 2's empty-bytes pin).
         seed_volume(&pool, "vol-bare", "node-att").await;
         sqlx::query(
             "INSERT INTO volume_desired_state \
@@ -2589,9 +2594,9 @@ mod tests {
             "a class-carrying volume's attach must carry exactly the class key"
         );
         assert_eq!(
-            spec_json_for("vol-bare").len(),
-            0,
-            "a NULL-class volume's attach must keep the empty spec_json (byte-exact)"
+            spec_json_for("vol-bare"),
+            b"{}".to_vec(),
+            "a NULL-class volume's attach must carry the empty JSON object (PR 3 correction: parseable, key-free, defaults at the agent)"
         );
 
         // Both ops converged on the OK ack.

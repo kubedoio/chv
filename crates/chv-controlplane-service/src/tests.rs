@@ -4658,6 +4658,314 @@ async fn snapshot_family_fails_open_when_volume_node_is_null() {
     assert_eq!(intent.as_deref(), Some("create"));
 }
 
+// ── #379 DP4: accept-time storage-class capability rejection ──────────
+//
+// The agent's volume open (and stord's own backend-class validation,
+// PR 3's startup guards) is the enforcement boundary; these tests pin
+// the accept-time UX layer in the #495 shape: the lifecycle rejects
+// with InvalidArgument BEFORE journaling (no operations row, no
+// desired-state intent), fails OPEN on never-reported classes (empty
+// list — inventory not landed, or a pre-#379 agent), resolves the
+// VOLUME's node (never the request's advisory node_id), and normalizes
+// the DP3 local aliases so legacy `localdisk` reports keep accepting
+// NULL-class volumes.
+
+/// Seed a node plus an inventory row reporting exactly these storage
+/// classes (the JSON array of strings the inventory paths write; the
+/// pre-#379 directory probe emitted names like `localdisk`).
+async fn seed_node_with_storage_classes(pool: &StorePool, node_id: &str, classes: &[&str]) {
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, 'host', 'host')")
+        .bind(node_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes) \
+         VALUES (?, 'x86_64', 1, 1024, ?)",
+    )
+    .bind(node_id)
+    .bind(serde_json::to_string(classes).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A `volumes` row on `node_id` carrying `storage_class` (`None` =
+/// NULL = local), through the same repository write production uses.
+async fn seed_volume_with_class(
+    pool: &StorePool,
+    volume_id: &str,
+    node_id: Option<&str>,
+    storage_class: Option<&str>,
+) {
+    DesiredStateRepository::new(pool.clone())
+        .upsert_volume(&VolumeDesiredStateInput {
+            volume_id: ResourceId::new(volume_id).unwrap(),
+            node_id: node_id.map(|n| NodeId::new(n).unwrap()),
+            display_name: volume_id.into(),
+            capacity_bytes: 1024,
+            volume_kind: None,
+            storage_class: storage_class.map(str::to_string),
+            owner_id: None,
+            desired_generation: Generation::new(1),
+            desired_status: None,
+            requested_by: None,
+            updated_by: None,
+            attached_vm_id: None,
+            attachment_mode: None,
+            device_name: None,
+            read_only: false,
+            resize_to_bytes: None,
+            snapshot_op: None,
+            snapshot_name: None,
+            clone_source_volume_id: None,
+            requested_unix_ms: 1000,
+        })
+        .await
+        .unwrap();
+}
+
+fn dp4_meta(node: &str) -> proto::RequestMeta {
+    proto::RequestMeta {
+        operation_id: "".into(),
+        requested_by: "test-user".into(),
+        target_node_id: node.into(),
+        desired_state_version: "1".into(),
+        request_unix_ms: 1000,
+    }
+}
+
+fn dp4_create_vm_request(node: &str, vm_id: &str, vm_spec_json: &[u8]) -> proto::CreateVmRequest {
+    proto::CreateVmRequest {
+        meta: Some(dp4_meta(node)),
+        node_id: node.into(),
+        vm: Some(proto::VmMutationSpec {
+            vm_id: vm_id.into(),
+            vm_spec_json: vm_spec_json.to_vec(),
+        }),
+    }
+}
+
+fn dp4_attach_request(node: &str, volume_id: &str, vm_id: &str) -> proto::AttachVolumeRequest {
+    proto::AttachVolumeRequest {
+        meta: Some(dp4_meta(node)),
+        node_id: node.into(),
+        volume: Some(proto::VolumeMutationSpec {
+            volume_id: volume_id.into(),
+            vm_id: vm_id.into(),
+            volume_spec_json: vec![],
+        }),
+    }
+}
+
+/// Assert a rejected create/attach journaled NOTHING: no operation row
+/// of any type, no VM desired-state row, and no attachment intent on
+/// the volume.
+async fn assert_dp4_rejection_journaled_nothing(pool: &StorePool, vm_id: &str, volume_id: &str) {
+    let ops: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(ops, 0, "a rejected request must not journal an operation");
+    let vms: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms WHERE vm_id = ?")
+        .bind(vm_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        vms, 0,
+        "a rejected create must not write a VM desired-state row"
+    );
+    let attached: Option<String> =
+        sqlx::query_scalar("SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = ?")
+            .bind(volume_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(
+        attached, None,
+        "a rejected attach must not write an attachment intent"
+    );
+}
+
+#[tokio::test]
+async fn create_vm_rejects_disk_class_the_node_does_not_offer() {
+    let (service, pool) = snapshot_family_test_service().await;
+    // A local-only node (PR 3's inventory now reports the REAL stord
+    // backend class): an LVM-class disk in the create spec must reject
+    // at accept time instead of burning dispatch retries against a
+    // stord that can never open it.
+    seed_node_with_storage_classes(&pool, "node-local", &["local"]).await;
+    let spec = br#"{"cpu_count":1,"memory_bytes":1024,"disks":[
+        {"volume_id":"vol-dp4-a","backend_class":"lvm"},
+        {"volume_id":"vol-dp4-b"}]}"#;
+    let result = service
+        .create_vm(dp4_create_vm_request("node-local", "vm-dp4-1", spec))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert!(
+                msg.contains("does not offer storage class lvm"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_dp4_rejection_journaled_nothing(&pool, "vm-dp4-1", "vol-dp4-a").await;
+}
+
+#[tokio::test]
+async fn create_vm_rejects_classless_disk_on_lvm_only_node() {
+    // NULL = local (B1) at accept time too: an LVM-only node cannot
+    // serve a classless disk, and the check says so with the canonical
+    // class name rather than materializing "local" into any payload.
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_storage_classes(&pool, "node-lvm", &["lvm"]).await;
+    let spec = br#"{"cpu_count":1,"memory_bytes":1024,"disks":[{"volume_id":"vol-dp4-c"}]}"#;
+    let result = service
+        .create_vm(dp4_create_vm_request("node-lvm", "vm-dp4-2", spec))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert!(
+                msg.contains("does not offer storage class local"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_dp4_rejection_journaled_nothing(&pool, "vm-dp4-2", "vol-dp4-c").await;
+}
+
+#[tokio::test]
+async fn create_vm_accepts_offered_class_and_fails_open_without_report() {
+    let (service, pool) = snapshot_family_test_service().await;
+    // Offered class: an LVM node accepts an LVM-class disk spec.
+    seed_node_with_storage_classes(&pool, "node-lvm", &["lvm"]).await;
+    let spec = br#"{"cpu_count":1,"memory_bytes":1024,"disks":[
+        {"volume_id":"vol-dp4-d","backend_class":"lvm"}]}"#;
+    let ack = service
+        .create_vm(dp4_create_vm_request("node-lvm", "vm-dp4-3", spec))
+        .await
+        .expect("an offered class must accept");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+
+    // Fail-open edges in the #495 discipline: a node with NO inventory
+    // row (never reported — pre-#379 agents) keeps accepting any class,
+    // and the legacy `localdisk` probe report normalizes to local so a
+    // classless disk still matches.
+    seed_node_without_inventory(&pool, "node-noreport").await;
+    seed_node_with_storage_classes(&pool, "node-legacy-probe", &["localdisk"]).await;
+    for (node, vm_id, spec) in [
+        (
+            "node-noreport",
+            "vm-dp4-4",
+            br#"{"cpu_count":1,"memory_bytes":1024,"disks":[{"volume_id":"vol-dp4-e","backend_class":"lvm"}]}"#
+                as &[u8],
+        ),
+        (
+            "node-legacy-probe",
+            "vm-dp4-5",
+            br#"{"cpu_count":1,"memory_bytes":1024,"disks":[{"volume_id":"vol-dp4-f"}]}"#,
+        ),
+    ] {
+        let ack = service
+            .create_vm(dp4_create_vm_request(node, vm_id, spec))
+            .await
+            .unwrap_or_else(|e| panic!("{node} must fail open: {e:?}"));
+        assert_eq!(ack.result.expect("ack result").status, "OK");
+    }
+}
+
+#[tokio::test]
+async fn attach_volume_rejects_class_the_volume_node_does_not_offer() {
+    let (service, pool) = snapshot_family_test_service().await;
+    // The node checked is the VOLUME's node (the dispatch node, #495
+    // lesson), and the class checked is the volumes row's class — the
+    // A8 dispatch producer's source — not the request's spec_json.
+    seed_node_with_storage_classes(&pool, "node-lvm", &["lvm"]).await;
+    seed_volume_with_class(&pool, "vol-dp4-ceph", Some("node-lvm"), Some("ceph")).await;
+
+    // The request names a DIFFERENT node offering ceph: the rejection
+    // must still fire against the volume's node.
+    seed_node_with_storage_classes(&pool, "node-ceph", &["ceph"]).await;
+    let result = service
+        .attach_volume(dp4_attach_request("node-ceph", "vol-dp4-ceph", "vm-dp4-6"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert!(
+                msg.contains("node-lvm does not offer storage class ceph"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_dp4_rejection_journaled_nothing(&pool, "vm-dp4-6", "vol-dp4-ceph").await;
+}
+
+#[tokio::test]
+async fn attach_volume_accepts_match_and_fails_open_on_unknowns() {
+    let (service, pool) = snapshot_family_test_service().await;
+    sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ('vm-dp4-7', 'vm-dp4-7')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ('vm-dp4-8', 'vm-dp4-8')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Definite match: an LVM node + an LVM-class volume.
+    seed_node_with_storage_classes(&pool, "node-lvm", &["lvm"]).await;
+    seed_volume_with_class(&pool, "vol-dp4-lvm", Some("node-lvm"), Some("lvm")).await;
+    let ack = service
+        .attach_volume(dp4_attach_request("node-lvm", "vol-dp4-lvm", "vm-dp4-7"))
+        .await
+        .expect("an offered class must accept");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+
+    // Fail-open edges: a node that never reported classes (no inventory
+    // row) accepts a class the fleet may or may not offer, and a volume
+    // with a NULL node (ON DELETE SET NULL) never falls back to the
+    // request's node — there is nothing definitive to check.
+    seed_node_without_inventory(&pool, "node-noreport").await;
+    seed_volume_with_class(&pool, "vol-dp4-orphan", None, Some("ceph")).await;
+    seed_node_with_storage_classes(&pool, "node-local", &["local"]).await;
+    let ack = service
+        .attach_volume(dp4_attach_request(
+            "node-noreport",
+            "vol-dp4-orphan",
+            "vm-dp4-8",
+        ))
+        .await
+        .expect("unreported classes must fail open (accept)");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+}
+
+#[tokio::test]
+async fn attach_volume_normalizes_legacy_localdisk_report_for_null_class() {
+    // DP3 normalization at the accept-time check: a pre-#379 agent's
+    // `localdisk` probe report compares as `local`, so a NULL-class
+    // volume (NULL = local) keeps attaching exactly as before.
+    let (service, pool) = snapshot_family_test_service().await;
+    sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ('vm-dp4-9', 'vm-dp4-9')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    seed_node_with_storage_classes(&pool, "node-legacy-probe", &["localdisk"]).await;
+    seed_volume_with_class(&pool, "vol-dp4-null", Some("node-legacy-probe"), None).await;
+    let ack = service
+        .attach_volume(dp4_attach_request(
+            "node-legacy-probe",
+            "vol-dp4-null",
+            "vm-dp4-9",
+        ))
+        .await
+        .expect("legacy localdisk report + NULL class must accept");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+}
+
 // ── #378: inventory ingestion persists the authority mode ──────────────
 
 #[tokio::test]

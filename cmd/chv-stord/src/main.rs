@@ -49,7 +49,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = config.runtime_dir.join("stord.db");
     let store = SessionStore::new(&db_path)?;
 
-    // Select backend based on configuration
+    // Select backend based on configuration.
+    //
+    // #379 DP2 fail-closed guards (design §5.1 decision 2), extracted
+    // into [`validate_backend_type`] / [`verify_volume_group`] below:
+    //
+    // - A PRESENT but unrecognized `backend_type` ABORTS at startup. The
+    //   pre-#379 fallback arm silently served local-file for a typo'd
+    //   value — a fail-open footgun on exactly the path this issue
+    //   enables, because the agent now reports the config's class
+    //   verbatim as the node's advertised storage class (DP4), so a
+    //   typo'd value would be advertised as a class nothing serves.
+    //   An ABSENT key still means local (B1) — unchanged.
+    // - `backend_type = "lvm"` verifies the volume group exists (`vgs`)
+    //   before serving: every LVM open would otherwise fail at runtime
+    //   with an opaque `lvcreate` error, and the DP2 create-on-open
+    //   provisioning path would strand half-created VMs. The operator
+    //   pre-provisions the VG (see docs/OPERATIONS.md, "LVM nodes").
+    validate_backend_type(config.backend_type.as_deref())?;
     let backend: Box<dyn StorageBackend> = match config.backend_type.as_deref().unwrap_or("local") {
         "iscsi" => {
             let iscsi_cfg = config
@@ -81,8 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "lvm" => {
             let vg_name = config.lvm_volume_group.as_deref().unwrap_or("chv-vg");
+            // Fail closed on a missing VG: refuse to start instead of
+            // serving a backend whose every open fails at runtime.
+            verify_volume_group(vg_name).await?;
             Box::new(LVMBackend::new(vg_name.to_string())?)
         }
+        // Only None/"local" reach here: validate_backend_type above has
+        // already aborted on any other present value.
         _ => Box::new(LocalFileBackend::new(config.runtime_dir.clone())),
     };
 
@@ -164,6 +186,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// #379 DP2 fail-closed vocabulary guard (B2): a PRESENT but
+/// unrecognized `backend_type` aborts stord at startup. The pre-#379
+/// fallback arm silently served local-file for a typo'd value — a
+/// fail-open footgun on exactly the path #379 enables, because the
+/// agent now reports the config's class verbatim as the node's
+/// advertised storage class (DP4), so a typo'd value would be
+/// advertised as a class nothing serves. An ABSENT key still means
+/// local (B1) — the historical default, unchanged.
+fn validate_backend_type(backend_type: Option<&str>) -> Result<(), String> {
+    match backend_type {
+        // B1: absent key = local.
+        None => Ok(()),
+        Some(known) if ["local", "iscsi", "ceph", "lvm"].contains(&known) => Ok(()),
+        Some(unknown) => Err(format!(
+            "backend_type '{unknown}' is not a recognized stord backend (recognized: local, \
+             iscsi, ceph, lvm); refusing to start. Remove the key to select the local \
+             backend — an absent key still means local (#379 DP2 fail-closed guard)"
+        )),
+    }
+}
+
+/// #379 DP2 fail-closed VG guard: `backend_type = "lvm"` verifies the
+/// volume group is visible (`vgs`) before serving. Every LVM open would
+/// otherwise fail at runtime with an opaque `lvcreate` error, and the
+/// DP2 create-on-open provisioning path would strand half-created VMs;
+/// the operator pre-provisions the VG instead (see
+/// docs/OPERATIONS.md, "LVM nodes").
+async fn verify_volume_group(vg_name: &str) -> Result<(), String> {
+    let vgs = tokio::process::Command::new("vgs")
+        .args(["--noheadings", "--options", "vg_name", vg_name])
+        .output()
+        .await
+        .map_err(|e| {
+            format!(
+                "backend_type is 'lvm' but vgs could not be run to verify the volume group: {e}"
+            )
+        })?;
+    if !vgs.status.success() {
+        return Err(format!(
+            "backend_type is 'lvm' but volume group '{vg_name}' does not exist or is not \
+             visible (vgs: {}); pre-provision the VG before starting stord \
+             (#379 DP2 fail-closed guard)",
+            String::from_utf8_lossy(&vgs.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Load and validate both migration mTLS halves from the `[migration]`
 /// config section, in the daemon's startup order: client (source) half,
 /// receiver (destination) half, then the cross-half check (issue #401).
@@ -218,7 +288,7 @@ fn load_migration_materials(
 
 #[cfg(test)]
 mod tests {
-    use super::load_migration_materials;
+    use super::{load_migration_materials, validate_backend_type, verify_volume_group};
     use chv_config::StordMigrationConfig;
 
     /// Minimal `tracing` subscriber that records the message text of
@@ -486,5 +556,55 @@ mod tests {
                 .any(|m| m.contains("storage migration is disabled")),
             "both-halves startup must not log the disabled-migration line"
         );
+    }
+
+    /// #379 DP2 vocabulary guard: every recognized value — and the
+    /// ABSENT key (B1: absent = local) — passes; only a PRESENT but
+    /// unknown value aborts. The pre-#379 fallback arm would have
+    /// silently served local-file for the typo'd values.
+    #[test]
+    fn backend_type_vocabulary_fails_closed_on_unknown_values() {
+        assert!(
+            validate_backend_type(None).is_ok(),
+            "an absent backend_type still means local (B1)"
+        );
+        for known in ["local", "iscsi", "ceph", "lvm"] {
+            assert!(
+                validate_backend_type(Some(known)).is_ok(),
+                "{known} is a recognized backend_type"
+            );
+        }
+        for typo in ["loca", "LVM", "lvm2", "zfs", ""] {
+            match validate_backend_type(Some(typo)) {
+                Err(msg) => assert!(
+                    msg.contains("is not a recognized stord backend"),
+                    "got: {msg}"
+                ),
+                Ok(()) => panic!("a present-but-unknown backend_type '{typo}' must abort"),
+            }
+        }
+    }
+
+    /// #379 DP2 VG guard: a volume group that does not exist fails the
+    /// startup check. Non-root-safe by construction — `vgs` reports a
+    /// nonexistent VG as an error regardless of privileges — so this
+    /// pins the fail-closed wiring without provisioning anything. (The
+    /// positive leg is exercised end-to-end by the m4.5 Leg G
+    /// qualification on the loopback VG.)
+    #[tokio::test]
+    async fn volume_group_guard_fails_on_missing_vg() {
+        // Either fail-closed shape satisfies the guard: a host without
+        // the lvm2 tools reports "vgs could not be run" (the runner
+        // image is not guaranteed to carry `vgs` — CI only installs
+        // protobuf-compiler), a host with them reports the missing VG.
+        // Both abort startup; neither degrades to serving.
+        match verify_volume_group("chv-no-such-vg-379").await {
+            Err(msg) => assert!(
+                msg.contains("does not exist or is not visible")
+                    || msg.contains("vgs could not be run"),
+                "got: {msg}"
+            ),
+            Ok(()) => panic!("a missing VG must fail the startup guard"),
+        }
     }
 }

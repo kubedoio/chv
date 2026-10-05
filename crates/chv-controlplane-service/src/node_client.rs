@@ -1404,10 +1404,10 @@ fn now_unix_ms() -> i64 {
 }
 
 /// Build the `AttachVolume` RPC's `volume_spec_json` payload (#379 PR 2,
-/// the A8/A9 shared producer).
+/// the A8/A9 shared producer; NULL-class bytes corrected in PR 3).
 ///
 /// The agent's attach handler (A4) parses `backend_class` and `locator`
-/// out of this JSON, defaulting both. PR 2 populates ONLY
+/// out of this JSON, defaulting both. PR 2 populated ONLY
 /// `{"backend_class": …}` and only when the volume carries a class:
 ///
 /// - **NULL class → empty bytes** — byte-exact with the pre-#379
@@ -1415,16 +1415,29 @@ fn now_unix_ms() -> i64 {
 ///   holds end-to-end and the string `"local"` is never materialized
 ///   into the payload (the agent's B5 default resolves it instead).
 /// - **class present → `{"backend_class": "<class>"}`** — no `locator`
-///   key, so A4's default locator (the bare volume id) applies; the
-///   class-dependent dm-path locator convention is DP5, deliberately
-///   scoped to PR 3.
+///   key, so A4's default locator applies; the class-dependent dm-path
+///   locator convention is DP5, deliberately scoped to PR 3.
+///
+/// **PR 3 correction (disclosed, design §2.1):** the NULL-class leg now
+/// emits `{}` instead of empty bytes. PR 2 disclosed that the empty
+/// payload does not parse at the agent's A4 seam (serde_json `from_slice`
+/// on empty bytes is an EOF error — the design doc's "the parser always
+/// takes the defaults" was inaccurate at the letter), and chose to
+/// preserve the pre-existing behavior rather than change it inside the
+/// carry PR. With LVM-class attach dispatch now real (DP5), a NULL-class
+/// attach must actually reach the open, so the payload is the empty JSON
+/// object: still no `backend_class` key, still no `"local"` string
+/// materialized — the agent's B5 default resolves it, and A4's explicit
+/// `locator` key remains absent.
 pub(crate) fn volume_attach_spec_json(storage_class: Option<&str>) -> Vec<u8> {
     match storage_class {
         Some(class) => serde_json::to_vec(&serde_json::json!({ "backend_class": class }))
             // Infallible for a string-valued object; an empty fallback
             // would merely mean the agent's default path.
             .unwrap_or_default(),
-        None => Vec::new(),
+        // `{}` (not empty bytes): parses at A4, carries no keys, and the
+        // agent's defaults apply — see the PR 3 correction above.
+        None => b"{}".to_vec(),
     }
 }
 

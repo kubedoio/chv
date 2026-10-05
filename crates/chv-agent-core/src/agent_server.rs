@@ -24,6 +24,11 @@ pub struct AgentServer {
     pub nwd_socket: std::path::PathBuf,
     pub cache_path: Option<std::path::PathBuf>,
     pub runtime_dir: std::path::PathBuf,
+    /// #379 DP5: the node's stord backend info (class + LVM volume
+    /// group, from `AgentConfig.stord_config_path`) — the source the
+    /// LVM locator shaping uses. Defaults to local/no-VG; set via
+    /// [`AgentServer::with_stord_backend`].
+    pub stord_backend: crate::stord_backend::StordBackendInfo,
     /// Tracks in-flight migration tasks for cancellation and shutdown.
     ///
     /// Before this field existed, `migrate_vm` spawned a `JoinHandle` that
@@ -50,9 +55,21 @@ impl AgentServer {
             nwd_socket,
             cache_path,
             runtime_dir,
+            stord_backend: crate::stord_backend::StordBackendInfo::default(),
             migration_tasks: Arc::new(MigrationTaskRegistry::new()),
             core_authority: None,
         }
+    }
+
+    /// Set the node's stord backend info (#379 DP5): the LVM volume
+    /// group LVM-class open locators are shaped against. Mirrors
+    /// [`AgentServer::with_core_authority`]'s builder shape.
+    pub fn with_stord_backend(
+        mut self,
+        stord_backend: crate::stord_backend::StordBackendInfo,
+    ) -> Self {
+        self.stord_backend = stord_backend;
+        self
     }
 
     pub fn with_core_authority(
@@ -99,16 +116,25 @@ impl AgentServer {
             .get("backend_class")
             .and_then(|v| v.as_str())
             .unwrap_or("local");
-        let locator = spec
-            .get("locator")
-            .and_then(|v| v.as_str())
-            .unwrap_or(volume_id);
+        // #379 DP5: an LVM-class open carries a /dev/mapper/{vg}-{vid}
+        // dm-path locator (VG from the same stord-config source as DP4)
+        // so the standard device_allowlist admits it — the backend itself
+        // ignores the locator and derives /dev/{vg}/{vid}. Every other
+        // class keeps the historical bare-volume-id default.
+        let locator = match spec.get("locator").and_then(|v| v.as_str()) {
+            Some(explicit) => explicit.to_string(),
+            None if backend_class == "lvm" => chv_hypervisor_api::resources::lvm_locator(
+                self.stord_backend.volume_group(),
+                volume_id,
+            ),
+            None => volume_id.to_string(),
+        };
 
         let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
             .await
             .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
         let (_, handle, _) = stord
-            .open_volume(volume_id, backend_class, locator, Some(operation_id))
+            .open_volume(volume_id, backend_class, &locator, Some(operation_id))
             .await
             .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
         stord
@@ -1091,14 +1117,27 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .await
                 .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
             for disk in &vm_spec.disks {
+                // #379 DP5: class-dependent locator shaping — an LVM-class
+                // disk opens against a /dev/mapper/{vg}-{vid} dm-path token
+                // (the standard device_allowlist's shape); every other
+                // class keeps the historical {volume_id}.img default.
+                let backend_class = disk.backend_class_or_local();
+                let locator = if backend_class == "lvm" {
+                    chv_hypervisor_api::resources::lvm_locator(
+                        self.stord_backend.volume_group(),
+                        &disk.volume_id,
+                    )
+                } else {
+                    format!("{}.img", disk.volume_id)
+                };
                 let (_, handle, export_path) = stord
                     .open_volume(
                         &disk.volume_id,
                         // #379 PR 1 (A10): the class value from the disk
                         // spec instead of the inline "local" literal
                         // (absent → local).
-                        disk.backend_class_or_local(),
-                        &format!("{}.img", disk.volume_id),
+                        backend_class,
+                        &locator,
                         Some(op_id),
                     )
                     .await
@@ -4199,9 +4238,12 @@ mod tests {
                 (
                     "vol-att-cls".to_string(),
                     "lvm".to_string(),
-                    // No `locator` key in the CP payload → the parser's
-                    // bare-volume-id default, unchanged by the class.
-                    "vol-att-cls".to_string(),
+                    // #379 DP5: no `locator` key in the CP payload → the
+                    // parser's class-dependent default: an LVM-class open
+                    // carries the dm-path locator convention (VG from the
+                    // node's stord backend info; default chv-vg here) so
+                    // the standard device_allowlist admits it.
+                    "/dev/mapper/chv-vg-vol-att-cls".to_string(),
                 ),
                 (
                     "vol-att-bare".to_string(),
@@ -4209,34 +4251,53 @@ mod tests {
                     "vol-att-bare".to_string(),
                 ),
             ],
-            "A4 must parse the CP-produced spec_json to the same class, keeping the locator default"
+            "A4 must parse the CP-produced spec_json to the same class, shaping the LVM locator default"
         );
 
-        // The CP producer's exact bytes for a NULL-class volume are
-        // EMPTY (pinned CP-side: `volume_attach_spec_json(None) ==
-        // vec![]`), not `{}` — and the two are NOT equivalent at A4:
-        // `{}` parses and takes the local default, while empty bytes
-        // fail `serde_json::from_slice` with an EOF error that the
-        // handler maps to invalid_argument. This leg pins that
-        // pre-existing behavior as PRESERVED by PR 2 (a NULL-class
-        // attach errors exactly as it did before; no open happens, so
-        // the StordOpenLog above stays two entries). Whether a
-        // NULL-class attach should instead emit `{}` so the attach RPC
-        // path works for all volumes is deliberately left to PR 3's
-        // DP5/locator pass — a behavior change, not a carry.
+        // The CP producer's exact bytes for a NULL-class volume are `{}`
+        // (pinned CP-side: `volume_attach_spec_json(None) == b"{}"`) — a
+        // parseable empty object whose absent keys take the A4 defaults
+        // (local class, bare-id locator), so the attach RPC path now
+        // WORKS for class-less volumes. HISTORY (the PR 2 pin this leg
+        // replaces): the pre-#379 dispatch sent EMPTY bytes, which fail
+        // `serde_json::from_slice` with an EOF error the handler maps to
+        // invalid_argument — every NULL-class attach errored. PR 2
+        // preserved that byte-exactly and left the fix to PR 3's
+        // DP5/locator pass (design §5 DP5, "the carried {}-vs-[]
+        // question"); this PR changes the producer to `{}` — a disclosed
+        // behavior change (see the CHANGELOG) — so the same RPC now
+        // opens with the defaults instead of failing. A local-class open
+        // happens for the NULL volume (the third StordOpenLog entry).
         let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
             &server,
-            Request::new(attach("vol-att-null", b"")),
+            Request::new(attach("vol-att-null", b"{}")),
         )
         .await;
         assert!(
-            resp.is_err(),
-            "empty spec_json must keep its pre-existing parse failure"
+            resp.is_ok(),
+            "the CP producer's NULL-class bytes must parse and take the defaults: {:?}",
+            resp.err()
         );
         assert_eq!(
-            resp.unwrap_err().code(),
-            tonic::Code::InvalidArgument,
-            "the A4 EOF parse failure maps to invalid_argument, unchanged by PR 2"
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-att-cls".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-att-cls".to_string(),
+                ),
+                (
+                    "vol-att-bare".to_string(),
+                    "local".to_string(),
+                    "vol-att-bare".to_string(),
+                ),
+                (
+                    "vol-att-null".to_string(),
+                    "local".to_string(),
+                    "vol-att-null".to_string(),
+                ),
+            ],
+            "the NULL-class empty-object payload must open with the local defaults, not error"
         );
     }
 
@@ -4304,8 +4365,11 @@ mod tests {
                 (
                     "vol-cls-1".to_string(),
                     "lvm".to_string(),
-                    // A10's legacy locator convention: {volume_id}.img.
-                    "vol-cls-1.img".to_string(),
+                    // #379 DP5: an LVM-class disk opens against the
+                    // dm-path locator convention (VG from the node's
+                    // stord backend info — the default chv-vg when no
+                    // operator config names one).
+                    "/dev/mapper/chv-vg-vol-cls-1".to_string(),
                 ),
                 (
                     "vol-cls-2".to_string(),
@@ -4314,6 +4378,80 @@ mod tests {
                 ),
             ],
             "A10 must thread the disk spec's backend_class, defaulting to local when absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_vm_legacy_branch_shapes_lvm_locator_from_stord_backend() {
+        // #379 DP5 (A10 locator): the dm-path locator's VG comes from the
+        // server's stord backend info — an operator-configured
+        // lvm_volume_group shapes the locator, not the hardcoded default.
+        // The locator is an allowlist token the LVM backend ignores, but
+        // it must carry the node's real VG so the standard
+        // device_allowlist posture stays meaningful (see the
+        // lvm_locator pins in chv-hypervisor-api).
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+        let opens = StordOpenLog::default();
+
+        {
+            let opens = opens.clone();
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockStord { opens },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            socket,
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
+            dir.path().to_path_buf(),
+        )
+        .with_stord_backend(crate::stord_backend::StordBackendInfo {
+            backend_class: "lvm".to_string(),
+            lvm_volume_group: Some("qual-vg".to_string()),
+        });
+
+        let spec_json = r#"{"name":"vm-cls-vg","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-vg-1","backend_class":"lvm"}],"nics":[]}"#;
+        let req = proto::CreateVmRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            vm: Some(proto::VmMutationSpec {
+                vm_id: "vm-cls-vg".to_string(),
+                vm_spec_json: spec_json.as_bytes().to_vec(),
+            }),
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::create_vm(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok(), "create_vm must succeed: {:?}", resp.err());
+
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [(
+                "vol-vg-1".to_string(),
+                "lvm".to_string(),
+                "/dev/mapper/qual-vg-vol-vg-1".to_string(),
+            )],
+            "the LVM locator must carry the configured volume group"
         );
     }
 

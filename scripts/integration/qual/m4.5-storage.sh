@@ -21,20 +21,36 @@
 #                 dispatch remains the enforcement backstop), and VM
 #                 delete closes the stord session.
 #
-#   LVM         — the stord LAYER only (loopback PV → VG → LV): the
-#                 LVMBackend's real contract (open/export, block
-#                 write/read, COW snapshot, clone, resize, read-only
-#                 policy, health) via the root-gated integration tests
-#                 in crates/chv-stord-backends/tests/lvm_real.rs (the
+#   LVM         — TWO legs since #379:
+#                 (stord layer, Leg F) the LVMBackend's real contract
+#                 (open/export, block write/read, COW snapshot, clone,
+#                 resize, read-only policy, health, and — new in #379
+#                 DP2 — create-on-open provisioning of an absent LV)
+#                 via the root-gated integration tests in
+#                 crates/chv-stord-backends/tests/lvm_real.rs (the
 #                 host-safety pattern: harness provisions the VG, runs
-#                 the built test binary, asserts no residue).
+#                 the built test binary, asserts no residue);
+#                 (VM-integrated, Leg G) the node's stord flips to
+#                 backend_type=lvm (operator stord.toml via the #385
+#                 stord_config_path pass-through, agent restarted so it
+#                 re-parses the same file — DP4 inventory + DP5 locator
+#                 shaping), a storage_class=lvm VM create provisions its
+#                 boot LV via DP2 create-on-open, the operator seeds it
+#                 out-of-band (qemu-img convert onto the LV — LVM has
+#                 no seed path by design), and the guest
+#                 boots/writes/persists through the dm-path locator the
+#                 device_allowlist admits.
 #
 # Layer truths this scenario records (not works around):
-#   - No VM-integrated LVM path exists: the agent's volume reconcile
-#     hardcodes backend_class "local", and LVMBackend::open consumes
-#     pre-provisioned LVs (provisioning is the host operator's job).
-#     LVM is qualified at the stord layer; the integration gap is a
-#     finding for the evidence doc.
+#   - The VM-integrated LVM path exists since #379 (DP1/DP2/DP5): a
+#     class-carrying disk dispatches to the LVM backend, the open
+#     locator is shaped /dev/mapper/{vg}-{vid} (the device_allowlist's
+#     dm-path shape), and LVMBackend::open provisions an absent LV when
+#     the open carries size_bytes. LVM remains SEED-LESS: image seeding
+#     is out-of-band (qemu-img convert onto the LV — the documented
+#     operator model, docs/OPERATIONS.md), and LV reclamation on VM
+#     delete is out-of-band too (stord closes the session but never
+#     lvremoves — Leg G asserts and cleans up).
 #   - VM create makes exactly ONE boot volume (no data volumes, no
 #     standalone volume-create API) — the contract's "guest write/read"
 #     is proven on the boot volume (vda).
@@ -89,6 +105,12 @@ LVM_VG="chvqual-m45"    # disposable VG for the LVM leg (FIXED name: single-
                         # a leftover chvqual-m45 from an aborted run is
                         # removed by this run's cleanup.)
 LVM_BACKING_MB=256      # loopback PV size (sparse file)
+LVM_VG_G="chvqual-m45g" # Leg G's OWN VG (distinct from Leg F's so neither
+                        # leg's teardown can touch the other's; same
+                        # fixed-name/single-run reasoning as LVM_VG)
+LVM_BACKING_GB_G=6      # Leg G loopback PV size (sparse): the guest image's
+                        # VIRTUAL size is 3.5 GiB, so the LV must be ≥ 4 GiB
+                        # for the out-of-band raw convert to fit
 
 # Persistent evidence artifacts (deploy.sh removes TEST_DIR on success).
 EVIDENCE_DIR="${CHV_QUAL_ROOT:-/var/lib/chv/qual}/m4.5-artifacts"
@@ -226,11 +248,11 @@ volume_field() {
 }
 
 # stord_sessions VOLUME_ID — open session rows for the volume in the LIVE
-# stord's stord.db. #376 truth: the supervisor-respawned stord runs with
-# runtime_dir = the AGENT dir, not the deploy's stord dir — the sessions
-# DB relocates on restart. Resolve the CURRENT stord's config (its argv)
+# stord's stord.db. #385 truth: with stord_config_path set, the
+# supervisor-respawned stord runs the OPERATOR config — runtime_dir stays
+# the deploy's stord dir. Resolve the CURRENT stord's config (its argv)
 # per call so the query always targets the live daemon's DB; fall back to
-# the deploy's path (pre-restart / unresolvable).
+# the deploy's path (unresolvable).
 stord_pid() {
     pgrep -f "(^|/)chv-stord( |$).*${QUAL_TEST_DIR}" 2>/dev/null | head -1
 }
@@ -349,8 +371,9 @@ save_evidence() {
         echo "--- stord sessions (deploy's stord.db):"
         sqlite_query "$STORD_DB" \
             "SELECT volume_id, vm_id, runtime_status FROM sessions" 2>/dev/null || true
-        # #376: after a supervisor restart the LIVE stord runs with
-        # runtime_dir = the agent dir — capture both DBs when they differ.
+        # #385: with stord_config_path set the respawned stord runs the
+        # operator config — same runtime_dir as deploy's. Capture the live
+        # dir's DB too when a config ever relocates it again.
         if [ "$(stord_db)" != "$STORD_DB" ]; then
             echo "--- live stord runtime_dir ($(stord_runtime_dir)):"
             ls -la "$(stord_runtime_dir)" 2>/dev/null || true
@@ -537,12 +560,15 @@ qual_pass "stord restarted by the agent supervisor (pid ${STORD_PID_BEFORE} → 
 wait_for "restarted stord socket live" 20 stord_socket_live \
     || qual_error "restarted stord socket not accepting"
 
-# #376 truth, asserted: the supervisor respawns stord with a GENERATED
-# config (runtime_dir = the agent dir — the sessions DB relocates from
-# the deploy's stord dir; recorded in the evidence doc). The #376/#377
-# fix must keep the operator's path confinement in that generated
-# config (deploy's agent.toml sets stord_path_allowlist; an empty
-# allowlist would mean the respawned daemon runs allow-all).
+# #385/#379 truth, asserted: with deploy.sh's agent.toml setting
+# stord_config_path to the operator's stord.toml, the supervisor
+# respawns stord by exec'ing THAT FILE directly (the #385 pass-through)
+# — runtime_dir stays the deploy's stord dir and the sessions DB does
+# NOT relocate (the pre-#385 generated-config respawn relocated both;
+# recorded in the evidence doc). The respawned daemon therefore keeps
+# every operator key by construction; the assertions below pin the
+# pass-through itself plus the confinement keys that matter
+# (#376 path_allowlist, #379 device_allowlist).
 # (Guarded pid → config resolution: an unguarded empty pid reads
 # /proc/cmdline — the HOST kernel cmdline, run-6 finding.)
 stord_config_path() {
@@ -559,11 +585,24 @@ stord_config_path() {
 }
 STORD_CFG_AFTER="$(stord_config_path)"
 qual_info "respawned stord config: ${STORD_CFG_AFTER:-unresolved} (runtime_dir: $(stord_runtime_dir))"
-if [ -f "$STORD_CFG_AFTER" ] && grep -q '^path_allowlist' "$STORD_CFG_AFTER"; then
-    qual_pass "respawned stord keeps path confinement (#376 fix: path_allowlist present)"
-    grep '^path_allowlist' "$STORD_CFG_AFTER" >> "${EVIDENCE_DIR}/respawned-stord-config.txt" 2>/dev/null || true
+if [ "$STORD_CFG_AFTER" = "${QUAL_TEST_DIR}/stord.toml" ]; then
+    qual_pass "respawned stord execs the OPERATOR config (#385 pass-through: ${STORD_CFG_AFTER})"
+    grep -E '^(path_allowlist|device_allowlist)' "$STORD_CFG_AFTER" \
+        >> "${EVIDENCE_DIR}/respawned-stord-config.txt" 2>/dev/null || true
+    grep -q '^path_allowlist' "$STORD_CFG_AFTER" \
+        && qual_pass "respawned stord keeps path confinement (#376 fix: path_allowlist present)" \
+        || qual_warn "operator stord.toml has NO path_allowlist (#376: the daemon runs allow-all after restart)"
+    grep -q '^device_allowlist' "$STORD_CFG_AFTER" \
+        && qual_pass "respawned stord keeps device confinement (#379: device_allowlist present)" \
+        || qual_warn "operator stord.toml has NO device_allowlist (#379: device opens are unconfined)"
 else
-    qual_warn "respawned stord config has NO path_allowlist (#376: the daemon runs allow-all after restart)"
+    qual_warn "respawned stord is NOT running the operator config (${STORD_CFG_AFTER:-unresolved}) — the #385 pass-through did not engage (generated-config fallback?)"
+fi
+# The sessions DB must stay at the deploy's stord dir (no relocation).
+if [ "$(stord_runtime_dir)" = "$STORD_DIR" ]; then
+    qual_pass "respawned stord runtime_dir unchanged (no DB relocation: $(stord_db))"
+else
+    qual_warn "respawned stord runtime_dir moved to $(stord_runtime_dir) — sessions DB relocated from ${STORD_DB}"
 fi
 
 # Recovery must serve NEW provisioning (the repeat of the contract): a
@@ -615,8 +654,8 @@ save_evidence "leg-c recovered"
 qual_info "--- Leg D: snapshot + clone — rejected at accept time on core-managed nodes (#378, fixed by #495)"
 
 # The would-be snapshot/clone destination is the LIVE stord's runtime_dir
-# (after Leg C's restart: the agent dir, #376) — used for the NO-side-
-# effect assertions below.
+# (after Leg C's restart: the deploy's stord dir, #385 pass-through) —
+# used for the NO-side-effect assertions below.
 STORD_LIVE_DIR="$(stord_runtime_dir)"
 qual_info "live stord runtime_dir: ${STORD_LIVE_DIR}"
 
@@ -874,9 +913,12 @@ vgcreate "$LVM_VG" "$LVM_LOOP" >/dev/null 2>&1 || qual_die "vgcreate failed"
 qual_pass "loopback VG provisioned: ${LVM_LOOP} → ${LVM_VG} ($(vgs "$LVM_VG" --noheadings -o vg_size 2>/dev/null | tr -d ' '))"
 
 # Run the real-LVM contract tests serially (snapshots claim 100%FREE).
+# The three #379 DP2 tests (create-on-open + its two refusals) run with
+# the contract suite — they are the new provisioning contract.
 LVM_TESTS="lvm_real_open_export_and_block_roundtrip lvm_real_open_rejects_wrong_class \
-lvm_real_snapshot_is_copy_on_write lvm_real_clone_copies_data lvm_real_resize_grows_volume \
-lvm_real_read_only_policy_blocks_writes lvm_real_health_reflects_existence"
+lvm_real_open_provisions_absent_lv_with_size lvm_real_open_refuses_absent_lv_without_size \
+lvm_real_open_rejects_seed_from lvm_real_snapshot_is_copy_on_write lvm_real_clone_copies_data \
+lvm_real_resize_grows_volume lvm_real_read_only_policy_blocks_writes lvm_real_health_reflects_existence"
 LVM_FAILED=0
 for test_name in $LVM_TESTS; do
     qual_info "running ${test_name} (ignored/root-gated real-LVM test)..."
@@ -915,10 +957,302 @@ NEW_LOOPS="$(comm -13 <(printf '%s\n' "$LOOPS_BEFORE") <(printf '%s\n' "$LOOPS_A
     || qual_error "backing file remains: ${LVM_BACKING}"
 
 [ "$LVM_FAILED" = "0" ] \
-    && qual_pass "LVM backend contract proven on real LVM (7 root-gated tests)" \
+    && qual_pass "LVM backend contract proven on real LVM (10 root-gated tests)" \
     || qual_error "LVM backend contract has failures"
 
 save_evidence "leg-f lvm done"
+
+# ---------------------------------------------------------------------------
+# Leg G — LVM profile (VM-integrated, #379): node backend flip → lvm-class
+# VM create (DP2 create-on-open) → out-of-band seed → boot → persist →
+# teardown. The agent restart is the m4.3-proven shape and is REQUIRED
+# here: the agent parses stord_config_path at startup (DP4 inventory
+# reporting + DP5 locator shaping), so flipping stord alone would leave
+# the agent reporting/shaping against a backend class it no longer
+# serves. Seeding is out-of-band (qemu-img convert onto the LV) — LVM
+# has no seed path by design (DP2 scope cut, documented in
+# docs/OPERATIONS.md); LV reclamation on VM delete is out-of-band too
+# (stord closes the session but never lvremoves).
+# ---------------------------------------------------------------------------
+qual_info "--- Leg G: LVM (VM-integrated) — backend flip → lvm-class vm create → out-of-band seed → boot/persist"
+
+command -v qemu-img >/dev/null 2>&1 \
+    || qual_die "Leg G needs qemu-img on the qualification host"
+
+# stop_daemon PID — SIGTERM, wait up to 10 s, then SIGKILL (m4.3's shape).
+stop_daemon() {
+    local pid="$1"
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -9 "$pid" 2>/dev/null || true
+}
+
+# 1. Provision Leg G's OWN loopback VG FIRST — stord's DP2 fail-closed
+#    startup guard (verify_volume_group) aborts the daemon when
+#    backend_type=lvm names a VG that does not exist; provisioning the
+#    VG before the flip keeps the respawn thrash-free.
+LVM_BACKING_G="${QUAL_TEST_DIR}/m45-lvm-g-backing.img"
+LVM_LOOP_G=""
+VOL3_ID=""
+VOL3_LV=""
+LOOPS_BEFORE_G="$(losetup -a 2>/dev/null | cut -d: -f1 | sort)"
+# Idempotent, best-effort cleanup on ANY exit path (Leg F's pattern).
+lvm_g_cleanup() {
+    [ -n "$VOL3_LV" ] && lvremove -f "$VOL3_LV" >/dev/null 2>&1 || true
+    vgremove -f "${LVM_VG_G}" >/dev/null 2>&1 || true
+    [ -n "${LVM_LOOP_G}" ] && losetup -d "${LVM_LOOP_G}" >/dev/null 2>&1 || true
+    rm -f "${LVM_BACKING_G}" 2>/dev/null || true
+}
+trap lvm_g_cleanup EXIT
+trap 'exit 1' INT TERM
+truncate -s "${LVM_BACKING_GB_G}G" "$LVM_BACKING_G"
+LVM_LOOP_G="$(losetup -f --show "$LVM_BACKING_G")"
+[ -n "$LVM_LOOP_G" ] || qual_die "no free loop device (Leg G)"
+pvcreate -f "$LVM_LOOP_G" >/dev/null 2>&1 || qual_die "pvcreate failed (Leg G)"
+vgcreate "$LVM_VG_G" "$LVM_LOOP_G" >/dev/null 2>&1 || qual_die "vgcreate failed (Leg G)"
+qual_pass "Leg G loopback VG provisioned: ${LVM_LOOP_G} → ${LVM_VG_G}"
+
+# 2. Flip the operator stord.toml to the LVM shape (backup first). The
+#    flip only APPENDS backend_type/lvm_volume_group, so every deploy
+#    key survives into the LVM daemon by construction — including the
+#    #376 path_allowlist and the #379 device_allowlist the Leg G open
+#    must pass.
+STORD_TOML="${QUAL_TEST_DIR}/stord.toml"
+cp "$STORD_TOML" "${QUAL_TEST_DIR}/stord.toml.local-backup"
+printf '\n# m4.5 Leg G (#379): LVM flip, appended on top of the deploy shape\nbackend_type = "lvm"\nlvm_volume_group = "%s"\n' \
+    "$LVM_VG_G" >> "$STORD_TOML"
+qual_pass "operator stord.toml flipped to backend_type=lvm (vg ${LVM_VG_G}; backup: stord.toml.local-backup)"
+
+# 3. Restart the agent: its shutdown kills the supervised stord, and its
+#    startup respawns stord from stord_config_path — now the LVM shape,
+#    through the DP2 vgs guard — while the agent itself re-parses the
+#    same file (DP4 inventory + DP5 locator shaping). A still-listening
+#    stord is stopped explicitly: the supervisor ADOPTS a live socket
+#    and would otherwise keep the local-class daemon serving.
+AGENT_PID_G_BEFORE="$QUAL_AGENT_PID"
+stop_daemon "$QUAL_AGENT_PID"
+STORD_PID_G="$(stord_pid)"
+[ -z "$STORD_PID_G" ] || stop_daemon "$STORD_PID_G"
+rm -f "${STORD_DIR}/api.sock" "${QUAL_AGENT_DIR}/api.sock" "${QUAL_AGENT_DIR}/core.sock"
+"${QUAL_BINARY_DIR}/chv-agent" "${QUAL_TEST_DIR}/agent.toml" \
+    >> "${QUAL_LOGS_DIR}/agent.log" 2>&1 &
+QUAL_AGENT_PID=$!
+pids_current
+wait_for "agent gRPC socket up after LVM restart" 60 \
+    test -S "${QUAL_AGENT_DIR}/api.sock" \
+    || qual_die "agent did not come back (Leg G) — log: $(tail -30 "${QUAL_LOGS_DIR}/agent.log")"
+wait_for "stord respawned from the LVM config (DP2 vgs guard passed)" \
+    "$STORD_RESTART_TIMEOUT" stord_socket_live \
+    || qual_die "stord did not come back on the LVM config (Leg G) — agent log: $(tail -30 "${QUAL_LOGS_DIR}/agent.log")"
+qual_pass "agent + stord restarted on the LVM config (agent pid ${AGENT_PID_G_BEFORE} → ${QUAL_AGENT_PID})"
+
+# The respawned stord must exec the operator config and run the LVM
+# backend (its startup line lands in agent.log via inherited stdio —
+# supervisor.rs M4.4 lesson).
+STORD_CFG_G="$(stord_config_path)"
+[ "$STORD_CFG_G" = "$STORD_TOML" ] \
+    && qual_pass "LVM stord execs the operator config (${STORD_CFG_G})" \
+    || qual_error "LVM stord is NOT the operator config: ${STORD_CFG_G:-unresolved}"
+grep -aq 'backend_type=lvm' "${QUAL_LOGS_DIR}/agent.log" \
+    && qual_pass "stord initialized the LVM backend (backend_type=lvm in agent.log)" \
+    || qual_error "no backend_type=lvm startup line in agent.log — the respawned stord is not the LVM daemon"
+
+# DP4: the node's inventory must report the REAL backend class.
+node_reports_lvm() {
+    [ "$(sqlite_query "$QUAL_DB" \
+        "SELECT storage_classes FROM node_inventory WHERE node_id='${QUAL_NODE_ID}'" 2>/dev/null | head -1)" = '["lvm"]' ]
+}
+wait_for "node inventory reports storage_classes=[\"lvm\"] (DP4)" 180 node_reports_lvm \
+    && qual_pass "node inventory reports the real backend class (DP4: [\"lvm\"])" \
+    || qual_error "node inventory never reported lvm (DP4): $(sqlite_query "$QUAL_DB" "SELECT storage_classes FROM node_inventory WHERE node_id='${QUAL_NODE_ID}'" 2>/dev/null | head -1)"
+save_evidence "leg-g backend flipped"
+
+# 4. lvm-class VM create: storage_class=lvm boot volume, image_ref
+#    "default" (NO seed — the LVM contract has none), volume_size_gb
+#    sized above the guest image's 3.5 GiB virtual size.
+create_vm_lvm() {
+    local name="$1" cpu="$2" mem="$3" size_gb="$4" payload http
+    payload="$(python3 - "$name" "$cpu" "$mem" "$size_gb" "$M45_MARKER" <<'PYEOF'
+import json, sys
+name, cpu, mem, size_gb, marker = sys.argv[1:6]
+userdata = (
+    "#cloud-config\n"
+    "bootcmd:\n"
+    "  - [ sh, -c, 'if [ -f /var/lib/m45.marker ]; then "
+    "echo \"M45-MARKER-READBACK:$(cat /var/lib/m45.marker)\" > /dev/console; fi' ]\n"
+    "runcmd:\n"
+    "  - [ sh, -c, "
+    f"'echo \"{marker}\" > /var/lib/m45.marker; "
+    "echo \"M45-MARKER-WRITTEN:$(cat /var/lib/m45.marker)\" > /dev/console' ]\n"
+)
+print(json.dumps({
+    "name": name,
+    "cpu_count": int(cpu),
+    "memory_mb": int(mem),
+    "image_ref": "default",
+    "network_id": "default",
+    "storage_class": "lvm",
+    "volume_size_gb": int(size_gb),
+    "cloud_init_userdata": userdata,
+}))
+PYEOF
+)" || { qual_error "could not build lvm vm-create payload for ${name}"; return 1; }
+    http="$(curl -s -o "${EVIDENCE_DIR}/vm-create-${name}.json" -w '%{http_code}' \
+        -X POST "${QUAL_BFF_URL}/v1/vms/create" \
+        -H "Authorization: Bearer $(bff_token)" -H "Content-Type: application/json" \
+        -d "$payload")"
+    [ "$http" = "200" ] \
+        || { qual_error "BFF vm create ${name} failed (HTTP ${http}): $(cat "${EVIDENCE_DIR}/vm-create-${name}.json" 2>/dev/null)"; return 1; }
+    python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(data.get("vm_id") or data.get("id") or "")' "${EVIDENCE_DIR}/vm-create-${name}.json"
+}
+
+VM3_ID="$(create_vm_lvm qual-stor-lvm 2 1024 4)" || qual_die "lvm-class vm create failed (Leg G)"
+qual_pass "lvm-class vm created: qual-stor-lvm (${VM3_ID})"
+VOL3_ID="$(volume_id_of "$VM3_ID")"
+[ -n "$VOL3_ID" ] || qual_die "no volume in volume_desired_state for ${VM3_ID} (Leg G)"
+VOL3_CLASS="$(volume_field "$VOL3_ID" storage_class)"
+[ "$VOL3_CLASS" = "lvm" ] \
+    && qual_pass "boot volume carries storage_class=lvm in the CP DB (${VOL3_ID})" \
+    || qual_error "boot volume storage_class is '${VOL3_CLASS:-NULL}', expected lvm"
+
+# 5. DP2 create-on-open: the reconcile dispatch carries size_bytes and
+#    the LVM backend provisions the ABSENT LV (lvcreate). The block
+#    device appearing IS the proof — no operator pre-provisioning ran.
+VOL3_LV="/dev/${LVM_VG_G}/${VOL3_ID}"
+lv_provisioned() { [ -b "$VOL3_LV" ]; }
+wait_for "boot LV provisioned via DP2 create-on-open (${VOL3_LV})" \
+    "$DISPATCH_TIMEOUT" lv_provisioned \
+    && qual_pass "boot LV provisioned by create-on-open: ${VOL3_LV}" \
+    || qual_die "LV never materialized (DP2 create-on-open): ${VOL3_LV}"
+LV3_SIZE_BYTES="$(blockdev --getsize64 "$VOL3_LV" 2>/dev/null || echo 0)"
+[ "$LV3_SIZE_BYTES" -ge 4294967296 ] \
+    && qual_pass "LV size honors the requested capacity (${LV3_SIZE_BYTES} bytes ≥ 4 GiB)" \
+    || qual_warn "LV size ${LV3_SIZE_BYTES} < requested 4 GiB"
+
+# The stord session: the open went through the dm-path locator
+# (/dev/mapper/{vg}-{vid}, DP5) and the device_allowlist admitted it —
+# a denied locator would have failed the open (and the LV would never
+# have been provisioned).
+stord_session_open_g() { [ "$(stord_sessions "$VOL3_ID")" -ge 1 ]; }
+wait_for "stord session open for the LV volume (DP5 locator passed the device_allowlist)" \
+    "$DISPATCH_TIMEOUT" stord_session_open_g \
+    && qual_pass "stord session open (dm-path locator admitted by device_allowlist)" \
+    || qual_error "no stord session row for ${VOL3_ID}"
+{
+    echo "### leg-g lvs ($(date -u +%FT%TZ))"
+    lvs "$LVM_VG_G" --noheadings 2>/dev/null || true
+} >> "${EVIDENCE_DIR}/host-state.txt"
+save_evidence "leg-g lvm volume provisioned"
+
+# 6. Out-of-band seeding (the documented operator model): the VM is
+#    Stopped and nothing re-opens volumes on start (Core uses the
+#    persisted config), so converting the guest image straight onto the
+#    LV is safe. qemu-img convert respects the target's bounds — the
+#    4 GiB LV holds the image's 3.5 GiB virtual size.
+qemu-img convert -O raw "$GUEST_IMAGE_PATH" "$VOL3_LV" \
+    || qual_die "out-of-band seed (qemu-img convert) failed onto ${VOL3_LV}"
+qual_pass "boot LV seeded out-of-band (qemu-img convert → ${VOL3_LV})"
+
+# 7. Boot from the LV + guest WRITE (the marker, on vda = the LV).
+qual_chvctl vm start "$VM3_ID" >/dev/null || qual_die "vm start failed for ${VM3_ID} (Leg G)"
+wait_boot "$VM3_ID" || qual_die "guest did not boot from the LVM boot volume (Leg G)"
+wait_for "guest wrote the marker on the LVM boot volume (console)" "$LOGIND_TIMEOUT" \
+    console_has "$VM3_ID" "M45-MARKER-WRITTEN:${M45_MARKER}" \
+    || qual_die "marker write never appeared in the guest console (Leg G)"
+qual_pass "guest WROTE the marker on the LVM boot volume: ${M45_MARKER}"
+save_console_evidence "$VM3_ID" leg-g
+
+# 8. stop → start → the SAME bytes read back (LV persistence across the
+#    attach/detach cycle).
+qual_chvctl vm stop "$VM3_ID" >/dev/null || qual_error "vm stop failed for ${VM3_ID} (Leg G)"
+wait_vm_stopped "$VM3_ID" || qual_die "vm did not stop (Leg G)"
+qual_chvctl vm start "$VM3_ID" >/dev/null || qual_die "vm re-start failed for ${VM3_ID} (Leg G)"
+wait_for "vm ${VM3_ID}: re-booted (logind lines in the fresh console)" \
+    "$LOGIND_TIMEOUT" \
+    console_has "$VM3_ID" "systemd-logind" \
+    || qual_die "guest did not re-boot (Leg G)"
+wait_for "guest read the marker back (LVM console)" "$LOGIND_TIMEOUT" \
+    console_has "$VM3_ID" "M45-MARKER-READBACK:${M45_MARKER}" \
+    || qual_die "marker read-back never appeared in the guest console (Leg G)"
+qual_pass "guest READ BACK the same marker after restart on the LV: ${M45_MARKER}"
+save_console_evidence "$VM3_ID" leg-g-restart
+
+# 9. Delete → session closed; the LV itself REMAINS (stord never
+#    lvremoves — the out-of-band reclamation model; asserted, then
+#    cleaned up with the VG below).
+qual_chvctl vm delete "$VM3_ID" >/dev/null || qual_error "vm delete failed for ${VM3_ID} (Leg G)"
+wait_vm_stopped "$VM3_ID" || qual_error "vm ${VM3_ID} did not stop for delete (Leg G)"
+wait_for "vm ${VM3_ID}: CH gone" 30 vm_ch_gone "$VM3_ID" || true
+vm3_session_closed() { [ "$(stord_sessions "$VOL3_ID")" = "0" ]; }
+wait_for "stord session for ${VOL3_ID} closed on delete" "$DISPATCH_TIMEOUT" \
+    vm3_session_closed \
+    && qual_pass "stord session closed on VM delete (LVM)" \
+    || qual_error "stord session for ${VOL3_ID} NOT closed on VM delete"
+[ -b "$VOL3_LV" ] \
+    && qual_pass "LV retained on VM delete (out-of-band reclamation: operator lvremoves)" \
+    || qual_warn "LV disappeared on VM delete (unexpected — stord does not remove LVs)"
+save_evidence "leg-g lvm vm deleted"
+
+# 10. Restore the local shape and restart the agent (the flip's mirror;
+#     leaves the deployment in the state the Summary and deploy teardown
+#     expect: local backend, operator config restored byte-for-byte).
+cp "${QUAL_TEST_DIR}/stord.toml.local-backup" "$STORD_TOML"
+rm -f "${QUAL_TEST_DIR}/stord.toml.local-backup"
+stop_daemon "$QUAL_AGENT_PID"
+STORD_PID_G="$(stord_pid)"
+[ -z "$STORD_PID_G" ] || stop_daemon "$STORD_PID_G"
+rm -f "${STORD_DIR}/api.sock" "${QUAL_AGENT_DIR}/api.sock" "${QUAL_AGENT_DIR}/core.sock"
+"${QUAL_BINARY_DIR}/chv-agent" "${QUAL_TEST_DIR}/agent.toml" \
+    >> "${QUAL_LOGS_DIR}/agent.log" 2>&1 &
+QUAL_AGENT_PID=$!
+pids_current
+wait_for "agent gRPC socket up after restore" 60 \
+    test -S "${QUAL_AGENT_DIR}/api.sock" \
+    || qual_die "agent did not come back (Leg G restore) — log: $(tail -30 "${QUAL_LOGS_DIR}/agent.log")"
+wait_for "stord respawned on the restored local config" \
+    "$STORD_RESTART_TIMEOUT" stord_socket_live \
+    || qual_die "stord did not come back on the restored config (Leg G)"
+node_reports_local() {
+    [ "$(sqlite_query "$QUAL_DB" \
+        "SELECT storage_classes FROM node_inventory WHERE node_id='${QUAL_NODE_ID}'" 2>/dev/null | head -1)" = '["local"]' ]
+}
+wait_for "node inventory back to storage_classes=[\"local\"]" 180 node_reports_local \
+    && qual_pass "node inventory restored to [\"local\"]" \
+    || qual_error "node inventory did not return to local after restore: $(sqlite_query "$QUAL_DB" "SELECT storage_classes FROM node_inventory WHERE node_id='${QUAL_NODE_ID}'" 2>/dev/null | head -1)"
+qual_pass "deployment restored to the local backend (agent pid → ${QUAL_AGENT_PID})"
+
+# 11. Teardown Leg G's VG + residue assertions (Leg F's pattern).
+lvremove -f "$VOL3_LV" >/dev/null 2>&1 || qual_error "lvremove failed for ${VOL3_LV}"
+vgremove -f "$LVM_VG_G" >/dev/null 2>&1 || qual_error "vgremove failed (Leg G)"
+pvremove "$LVM_LOOP_G" >/dev/null 2>&1 || qual_error "pvremove failed (Leg G)"
+losetup -d "$LVM_LOOP_G" 2>/dev/null || qual_error "losetup -d failed (Leg G)"
+rm -f "$LVM_BACKING_G"
+trap - INT TERM EXIT   # explicit teardown done
+
+[ -z "$(vgs --noheadings -o vg_name 2>/dev/null | grep -x "$LVM_VG_G")" ] \
+    && qual_pass "no Leg G VG residue (${LVM_VG_G} removed)" \
+    || qual_error "VG ${LVM_VG_G} still present"
+[ -z "$(lvs --noheadings -o lv_name,vg_name 2>/dev/null | grep "$LVM_VG_G")" ] \
+    && qual_pass "no Leg G LV residue in ${LVM_VG_G}" \
+    || qual_error "LVs remain in ${LVM_VG_G}: $(lvs "$LVM_VG_G" --noheadings 2>/dev/null)"
+losetup "$LVM_LOOP_G" >/dev/null 2>&1 \
+    && qual_error "loop device ${LVM_LOOP_G} still attached" \
+    || qual_pass "loop device ${LVM_LOOP_G} detached"
+LOOPS_AFTER_G="$(losetup -a 2>/dev/null | cut -d: -f1 | sort)"
+NEW_LOOPS_G="$(comm -13 <(printf '%s\n' "$LOOPS_BEFORE_G") <(printf '%s\n' "$LOOPS_AFTER_G") | grep -v '^$' || true)"
+[ -z "$NEW_LOOPS_G" ] \
+    && qual_pass "no new loop devices remain (Leg G)" \
+    || qual_error "new loop devices remain (Leg G): ${NEW_LOOPS_G}"
+[ ! -f "$LVM_BACKING_G" ] \
+    && qual_pass "Leg G loopback backing file removed" \
+    || qual_error "Leg G backing file remains: ${LVM_BACKING_G}"
+save_evidence "leg-g lvm-vm done"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -933,5 +1267,5 @@ if [ "$QUAL_ERRORS" -gt 0 ]; then
     fi
     exit 1
 fi
-qual_pass "M4.5 storage scenario complete: local file (VM-integrated) + LVM (stord layer) qualified"
+qual_pass "M4.5 storage scenario complete: local file (VM-integrated) + LVM (stord layer + VM-integrated) qualified"
 exit 0

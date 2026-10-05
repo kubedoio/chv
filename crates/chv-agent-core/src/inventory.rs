@@ -1,7 +1,9 @@
 use chv_config::AgentAuthorityMode;
 use control_plane_node_api::control_plane_node_api as proto;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::warn;
+
+use crate::stord_backend::StordBackendInfo;
 
 /// Node fabric identity reported by nwd's `GetFabricIdentity` RPC
 /// (ADR-021). An empty public key / zero MTU means "no identity yet"
@@ -48,7 +50,13 @@ pub async fn fetch_fabric_identity(nwd_socket: &Path) -> FabricIdentity {
 pub struct InventoryReporter {
     node_id: String,
     hostname: String,
-    storage_base_dir: PathBuf,
+    /// #379 DP4: the node's ACTUAL stord backend class, learned from the
+    /// operator's `stord.toml` via `AgentConfig.stord_config_path` —
+    /// never directory probing (the pre-#379 probe reported
+    /// `["localdisk"]` on LVM nodes and listed a non-existent `nfs`;
+    /// design §2.5). Defaults to `local` (the supervisor-managed stord's
+    /// generated config never sets `backend_type`).
+    stord_backend: StordBackendInfo,
     /// #378: the agent's authority mode (a static per-process config
     /// fact), reported on every inventory so the control plane can
     /// reject volume snapshot-family requests at accept time. Defaults to
@@ -62,22 +70,17 @@ impl InventoryReporter {
         Self {
             node_id: node_id.into(),
             hostname: hostname.into(),
-            storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
+            stord_backend: StordBackendInfo::default(),
             authority_mode: AgentAuthorityMode::Legacy,
         }
     }
 
-    pub fn with_storage_base_dir(
-        node_id: impl Into<String>,
-        hostname: impl Into<String>,
-        storage_base_dir: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            node_id: node_id.into(),
-            hostname: hostname.into(),
-            storage_base_dir: storage_base_dir.into(),
-            authority_mode: AgentAuthorityMode::Legacy,
-        }
+    /// Set the reported stord backend info (#379 DP4) — the class the
+    /// node's stord actually serves, from the same
+    /// `stord_config_path`-parsed source the DP5 locator shaping uses.
+    pub fn with_stord_backend(mut self, stord_backend: StordBackendInfo) -> Self {
+        self.stord_backend = stord_backend;
+        self
     }
 
     /// Set the reported authority mode from the agent's local config
@@ -89,16 +92,6 @@ impl InventoryReporter {
 
     fn probe_kvm_available() -> bool {
         std::path::Path::new("/dev/kvm").exists()
-    }
-
-    fn probe_storage_classes(base: &Path) -> Vec<String> {
-        // Known storage class subdirectory names mirroring the stord backend names.
-        const KNOWN: &[&str] = &["localdisk", "ceph", "nfs"];
-        KNOWN
-            .iter()
-            .filter(|&&name| base.join(name).is_dir())
-            .map(|&name| name.to_string())
-            .collect()
     }
 
     pub fn build_inventory(&self) -> proto::NodeInventory {
@@ -125,7 +118,12 @@ impl InventoryReporter {
                 .map(|n| n.get() as u64)
                 .unwrap_or(0),
             memory_bytes: probe_memory_bytes(),
-            storage_classes: Self::probe_storage_classes(&self.storage_base_dir),
+            // #379 DP4: the node's actual backend class (the stord
+            // `backend_type` vocabulary — `local`/`iscsi`/`ceph`/`lvm`),
+            // from the parsed stord config. The pre-#379 directory probe
+            // is gone: it reported "localdisk" on LVM nodes and invented
+            // an "nfs" class no stord backend serves.
+            storage_classes: self.stord_backend.offered_storage_classes(),
             network_capabilities: vec![],
             labels: std::collections::HashMap::new(),
             hypervisor_capabilities,
@@ -226,20 +224,27 @@ mod tests {
     }
 
     #[test]
-    fn storage_classes_empty_when_no_dirs() {
-        let dir = tempdir().unwrap();
-        let reporter = InventoryReporter::with_storage_base_dir("n", "h", dir.path());
+    fn storage_classes_default_to_the_local_backend() {
+        // #379 DP4: with no stord backend info, the node reports exactly
+        // ["local"] — the supervisor-managed stord's backend. This is the
+        // truthful replacement for the pre-#379 directory probe (which
+        // reported whatever subdirectories existed under storage_base_dir,
+        // inventing classes no stord backend serves).
+        let reporter = InventoryReporter::new("n", "h");
         let inventory = reporter.build_inventory();
-        assert!(inventory.storage_classes.is_empty());
+        assert_eq!(inventory.storage_classes, vec!["local"]);
     }
 
     #[test]
-    fn storage_classes_discovered_when_dirs_exist() {
-        let dir = tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("localdisk")).unwrap();
-        let reporter = InventoryReporter::with_storage_base_dir("n", "h", dir.path());
+    fn storage_classes_report_the_configured_stord_backend() {
+        // #379 DP4: an LVM node reports exactly ["lvm"] — the daemon's
+        // single backend, never a probed directory list.
+        let reporter = InventoryReporter::new("n", "h").with_stord_backend(StordBackendInfo {
+            backend_class: "lvm".to_string(),
+            lvm_volume_group: Some("vg-0".to_string()),
+        });
         let inventory = reporter.build_inventory();
-        assert_eq!(inventory.storage_classes, vec!["localdisk"]);
+        assert_eq!(inventory.storage_classes, vec!["lvm"]);
     }
 
     #[test]

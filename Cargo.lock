@@ -871,6 +871,7 @@ dependencies = [
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-errors",
+ "chv-hypervisor-api",
  "chv-observability",
  "chv-webui-bff",
  "chv-webui-bff-api",

@@ -20,6 +20,7 @@ pub mod reconcile;
 pub mod resources;
 pub mod spec;
 pub mod state_machine;
+pub mod stord_backend;
 pub mod supervisor;
 pub mod telemetry;
 pub mod vm_runtime;

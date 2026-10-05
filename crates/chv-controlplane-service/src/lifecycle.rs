@@ -395,6 +395,75 @@ impl LifecycleServiceImplementation {
         Ok(())
     }
 
+    /// #379 DP4: accept-time storage-class capability check, on an
+    /// already-resolved node. The node's last reported
+    /// `NodeInventory.storage_classes` — the REAL stord backend class
+    /// since PR 3's inventory change, no longer the pre-#379 directory
+    /// probe — must cover the requested class, compared with DP3
+    /// normalization (`localdisk`/`local-file` fold to `local`; a NULL
+    /// request class is `local`).
+    ///
+    /// Same discipline as [`Self::ensure_node_not_core_managed`] (#495
+    /// shape): UX hardening, not the enforcement boundary — an operator
+    /// gets an immediate `InvalidArgument` (HTTP 400 through the BFF's
+    /// `map_ack`) instead of a 200-accepted operation that burns dispatch
+    /// retries against a node whose stord can never open the volume.
+    /// Fails OPEN when the node has never reported classes (empty list:
+    /// inventory not landed yet, or a pre-#379 agent still reporting the
+    /// empty probe) — the agent's open and stord's own backend
+    /// validation remain the backstop. Must be called BEFORE any
+    /// journaling: a rejection leaves no operations row and no
+    /// desired-state intent.
+    async fn ensure_node_offers_storage_class(
+        &self,
+        node_id: &NodeId,
+        requested: Option<&str>,
+        surface: &str,
+    ) -> Result<(), ControlPlaneServiceError> {
+        let advertised = self.node_repo.get_storage_classes(node_id).await?;
+        match chv_hypervisor_api::resources::node_offers_storage_class(&advertised, requested) {
+            Some(false) => Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "node {} does not offer storage class {} (advertised: {}) for {}",
+                node_id,
+                requested.unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS),
+                advertised.join(", "),
+                surface,
+            ))),
+            // Some(true): definite match. None: the node never reported
+            // classes — fail OPEN (see above).
+            Some(true) | None => Ok(()),
+        }
+    }
+
+    /// The distinct storage classes a create_vm request's disk specs
+    /// name (#379 DP4): `disks[].backend_class` from the raw agent-spec
+    /// JSON, `None` for a classless disk (NULL = local). A spec without
+    /// disks — the common BFF shape, where volumes attach separately and
+    /// the dispatch tier assembles disks from the volume rows — yields
+    /// nothing, as does a disks entry of unexpected shape: the typed
+    /// `VmSpec` parse at the call site already rejects malformed JSON,
+    /// and anything else is left to the dispatch tier's own validation
+    /// (fail-open, the #495 discipline).
+    fn vm_spec_disk_classes(vm_spec_json: &[u8]) -> Vec<Option<String>> {
+        let Ok(spec) = serde_json::from_slice::<serde_json::Value>(vm_spec_json) else {
+            return Vec::new();
+        };
+        let Some(disks) = spec.get("disks").and_then(|d| d.as_array()) else {
+            return Vec::new();
+        };
+        let mut classes: Vec<Option<String>> = Vec::new();
+        for disk in disks {
+            let class = disk
+                .get("backend_class")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            if !classes.contains(&class) {
+                classes.push(class);
+            }
+        }
+        classes
+    }
+
     fn resource_id_from_node_id(node_id: &NodeId) -> Result<ResourceId, ControlPlaneServiceError> {
         ResourceId::new(node_id.as_str())
             .map_err(|e| ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e)))
@@ -613,6 +682,17 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ControlPlaneServiceError::InvalidArgument(format!("invalid vm_spec_json: {}", e))
             })?
         };
+
+        // #379 DP4: accept-time capability check — every class the
+        // request's disk specs name (a classless disk names `local`) must
+        // be offered by the node this create journals on, the same node
+        // the orchestrator later dispatches to. Before any journaling:
+        // a rejection leaves no operations row and no desired-state
+        // intent. Fails OPEN on a node that never reported classes.
+        for class in Self::vm_spec_disk_classes(&vm.vm_spec_json) {
+            self.ensure_node_offers_storage_class(&node_id, class.as_deref(), "vm create")
+                .await?;
+        }
 
         let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(
@@ -873,6 +953,35 @@ impl LifecycleService for LifecycleServiceImplementation {
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing volume".into()))?;
         let volume_id = Self::parse_volume_id(volume.volume_id)?;
         let vm_id = Self::parse_vm_id(volume.vm_id)?;
+
+        // #379 DP4: accept-time capability check in the #495 shape. The
+        // node checked is the node the dispatch actually uses — the
+        // VOLUMES row's node, which the orchestrator's claim query
+        // resolves, never the request's advisory `node_id` — and the
+        // class checked is the VOLUMES row's `storage_class` (the A8
+        // dispatch producer's source), not the request's spec_json.
+        // Fails OPEN when the volume row or its node is unknown (no row
+        // yet, NULL `volumes.node_id`, unparseable id): a missing volume
+        // must not change the accept-then-fail-later shape, and the
+        // agent's open remains the enforcement boundary.
+        if let Some(summary) = self
+            .desired_state_repo
+            .get_volume_summary(&volume_id)
+            .await?
+        {
+            if let Some(node) = summary
+                .node_id
+                .as_deref()
+                .and_then(|node| NodeId::new(node).ok())
+            {
+                self.ensure_node_offers_storage_class(
+                    &node,
+                    summary.storage_class.as_deref(),
+                    "volume attach",
+                )
+                .await?;
+            }
+        }
 
         let (operation_id, desired_generation, _operation_created) = self
             .create_operation_and_emit(

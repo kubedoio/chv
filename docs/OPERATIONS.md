@@ -353,6 +353,79 @@ operator config (create/widen the `runtime_dir`, repair the backend or TLS
 material). The health check is never wedged: the agent keeps reporting stord
 unhealthy and keeps retrying under the throttle while the file is broken.
 
+### LVM Storage Nodes (#379)
+
+A node serves LVM volumes when its stord runs `backend_type = "lvm"`. The
+operator contract:
+
+**1. Provision the VG out-of-band — stord never creates it.**
+
+```bash
+pvcreate /dev/nvme0n1
+vgcreate chv-vg /dev/nvme0n1
+```
+
+**2. Configure stord, and point the agent at the same file.** In
+`/etc/chv/stord.toml`:
+
+```toml
+backend_type = "lvm"
+lvm_volume_group = "chv-vg"          # default when unset
+device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
+```
+
+and in `/etc/chv/agent.toml`, `stord_config_path = "/etc/chv/stord.toml"`
+(the #385 pass-through key — it makes supervisor respawns keep the LVM shape,
+and it is the SAME file the agent parses at startup to learn the node's real
+backend class for inventory reporting and LVM locator shaping). **Changing the
+backend requires an agent restart**: the agent parses `stord_config_path` once
+at startup, so flipping `backend_type` without restarting the agent leaves it
+reporting and dispatching against the old class.
+
+**3. Fail-closed startup guards (by design).** stord aborts at startup rather
+than serving the wrong backend: a present-but-unrecognized `backend_type`
+(e.g. a typo'd `"lvv"`) aborts with `backend_type '…' is not a recognized stord
+backend`, and `backend_type = "lvm"` against a VG that does not exist (or a
+host without `vgs`) aborts with `backend_type is 'lvm' but volume group '…'
+does not exist`. An *absent* `backend_type` still means `local` — the default
+contract is unchanged.
+
+**4. Volume opens are dm-path-shaped and allowlist-checked.** The agent opens
+LVM-class volumes with a `/dev/mapper/{vg}-{volume_id}` locator token; the
+`device_allowlist` check fires only for `lvm`/`block`-class opens, so the
+recommended allowlist above admits exactly those tokens while a VM-dir path
+(`{volume_id}.img`) is denied. Omitting `device_allowlist` leaves device opens
+unconfined (fail-open) — set it explicitly on LVM nodes.
+
+**5. Provisioning is create-on-open; seeding is out-of-band.** An open of an
+**absent** LV with a size provisions it (`lvcreate`, sized from the volume's
+capacity — a VM's boot disk carries its `volume_size_gb`); an open of an absent
+LV *without* a size is rejected (`size_bytes`), and so is any `seed_from`
+(`InvalidArgument` — LVM has no seed path by design). To place an image on an
+LV, seed it out-of-band while the VM is stopped:
+
+```bash
+qemu-img convert -O raw /var/lib/chv/images/noble.raw /dev/chv-vg/<volume_id>
+```
+
+**6. Reclamation is out-of-band.** Deleting the VM closes the stord session
+but never removes the LV — reclaim capacity with
+`lvremove /dev/chv-vg/<volume_id>` once the data is no longer wanted.
+
+**7. Class mismatches are rejected at accept time.** The node's inventory
+reports the real backend class (from the parsed `stord_config_path`), and the
+control plane rejects a VM create or volume attach requesting a class the node
+does not offer (`400`, before any intent is journaled). A NULL/absent class
+still means `local` everywhere.
+
+| Check | Command |
+|-------|---------|
+| VG exists and has free space | `vgs chv-vg` |
+| stord running the LVM backend | `journalctl -u chv-stord \| grep backend_type` |
+| Node reports the class | `chvctl node list` (storage classes in node detail) |
+| LV materialized for a VM volume | `lvs chv-vg` |
+| Agent failed to parse the config | `journalctl -u chv-agent \| grep -i stord_config` (silence is expected on success — the agent logs this key only on the warn/degrade path; "Node reports the class" above is the positive signal) |
+
 ### Upgrade Failures
 
 The automated upgrade orchestrator was removed in PR #213, and the `chvctl upgrade` subcommands were removed in #427 — they targeted `/v1/upgrades` BFF routes that were never registered. There is no automated upgrade surface to troubleshoot; upgrades are performed manually (see "Upgrade Procedure (Manual)" below). If a manual binary swap leaves a node drained, force it back to a healthy state:

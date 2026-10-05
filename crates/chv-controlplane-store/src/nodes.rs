@@ -365,6 +365,27 @@ impl NodeRepository {
         Ok(mode.flatten())
     }
 
+    /// The node's last reported storage classes (#379 DP4): parsed from
+    /// the `node_inventory.storage_classes` JSON column (the enrollment
+    /// and inventory paths serialize the proto's repeated string as a
+    /// JSON array of strings). EMPTY when the node has no inventory row,
+    /// never reported classes, or the stored blob is not a JSON array of
+    /// strings — the #379 accept-time check fails OPEN on empty, exactly
+    /// like [`get_authority_mode`]'s `None` (the agent-side open remains
+    /// the enforcement boundary).
+    pub async fn get_storage_classes(&self, node_id: &NodeId) -> Result<Vec<String>, StoreError> {
+        let blob = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT storage_classes FROM node_inventory WHERE node_id = ?",
+        )
+        .bind(node_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(blob
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default())
+    }
+
     pub async fn append_version(&self, input: &NodeVersionInput) -> Result<(), StoreError> {
         sqlx::query(INSERT_NODE_VERSION_SQL)
             .bind(input.node_id.as_str())

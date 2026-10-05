@@ -8,14 +8,20 @@
 //! (`CHV_LVM_TEST_VG`), runs these tests via the built test binary, and
 //! asserts afterwards that no residue remains.
 //!
-//! Layer truth (why provisioning is out-of-band here): `LVMBackend::open`
-//! does not create LVs — provisioning (`lvcreate`) is the host operator's
-//! job; stord consumes pre-provisioned volumes. Each test therefore
-//! provisions its own LVs and removes them again (Drop guard), mirroring
-//! the operator model. No VM-integrated path reaches an LVM volume today
-//! (the agent's reconcile paths hardcode `backend_class "local"`); these
-//! tests qualify the stord-layer contract a future integration will
-//! build on.
+//! Layer truth: since #379 DP2, `LVMBackend::open` does create-on-open —
+//! an absent LV with a `size_bytes` option provisions via `lvcreate`
+//! (parity with the local backend's sparse-file create-on-open), and an
+//! absent LV WITHOUT a size refuses (LVM volumes are not sparse; a
+//! default-size LV would silently consume real extents). Tests that
+//! exercise the pre-provisioned contract provision their own LVs and
+//! remove them again (Drop guard), mirroring the operator model; the
+//! create-on-open tests let the backend provision and guard the result
+//! the same way. The VM-integrated path is real since PR 3 (the agent
+//! shapes LVM-class opens, DP5; qualified end-to-end by m4.5 Leg G);
+//! these tests pin the stord-layer contract it builds on.
+//!
+//! `seed_from` is unsupported on LVM (DP2 scope cut): the create-on-open
+//! test below pins the explicit rejection.
 //!
 //! Run serially (snapshots/clones claim `100%FREE` of the shared VG, so
 //! parallel tests would starve each other):
@@ -55,6 +61,16 @@ fn locator() -> BackendLocator {
         backend_class: "lvm".to_string(),
         locator: format!("{}/ignored-by-lvm-backend", vg()),
         options: Default::default(),
+    }
+}
+
+/// A create-on-open locator: `size_bytes` rides the options map exactly
+/// as the agent's open sites send it (#379 DP2).
+fn creating_locator(size_bytes: u64) -> BackendLocator {
+    BackendLocator {
+        backend_class: "lvm".to_string(),
+        locator: format!("{}/ignored-by-lvm-backend", vg()),
+        options: [("size_bytes".to_string(), size_bytes.to_string())].into(),
     }
 }
 
@@ -214,6 +230,124 @@ async fn lvm_real_open_rejects_wrong_class() {
         Err(ChvError::BackendUnavailable { .. }) => {}
         other => panic!("expected BackendUnavailable for local-class locator, got {other:?}"),
     }
+}
+
+/// #379 DP2 create-on-open: an absent LV with a `size_bytes` option is
+/// provisioned by the open itself (`lvcreate`, the
+/// create_receiving_volume shape) and the export is the new LV device —
+/// the parity the VM-integrated LVM path (m4.5 Leg G) depends on.
+#[tokio::test]
+#[ignore = "root-gated real-LVM test; requires CHV_LVM_TEST_VG (harness)"]
+async fn lvm_real_open_provisions_absent_lv_with_size() {
+    let vid = "m45rt-create1";
+    assert!(
+        !lv_path(vid).exists(),
+        "precondition: the LV must not exist before the create-on-open"
+    );
+    let _lv = LvGuard(vid.to_string());
+    let backend = backend();
+
+    let export = backend
+        .open(
+            vid,
+            &creating_locator(64 * 1024 * 1024),
+            &DevicePolicy::default(),
+        )
+        .await
+        .expect("create-on-open");
+    assert_eq!(export.export_kind, "lvm");
+    assert_eq!(
+        export.export_path,
+        lv_path(vid).to_string_lossy().to_string(),
+        "export path must be the provisioned LV device node"
+    );
+    assert_eq!(export.attachment_handle, format!("lvm-{}-{vid}", vg()));
+    assert!(lv_path(vid).exists(), "the LV must exist after the open");
+
+    // The provisioned LV really is the requested size (rounded up to
+    // extents by lvcreate; 64MiB is extent-aligned).
+    assert_eq!(
+        blockdev_get_u64("--getsize64", &lv_path(vid)),
+        64 * 1024 * 1024,
+        "the provisioned LV must be 64MiB"
+    );
+
+    // The new volume is writable (the guest's first-boot contract).
+    let data = pattern(0x55, 4096);
+    backend
+        .write_block(vid, &export.attachment_handle, 0, &data)
+        .await
+        .expect("write_block on the provisioned LV");
+    assert_eq!(read_direct(&lv_path(vid), 0, 4096), data);
+
+    // Idempotence: a second open of the now-existing LV (no size option)
+    // does NOT re-provision — it exports the same device and the data
+    // survives.
+    let again = backend
+        .open(vid, &locator(), &DevicePolicy::default())
+        .await
+        .expect("re-open of existing LV");
+    assert_eq!(again.export_path, export.export_path);
+    assert_eq!(
+        read_direct(&lv_path(vid), 0, 4096),
+        data,
+        "re-open must not re-provision (data survives)"
+    );
+}
+
+/// #379 DP2: an absent LV WITHOUT a size refuses. LVM volumes are not
+/// sparse — a default-size LV would silently consume real extents, so
+/// unlike the local backend there is no default size.
+#[tokio::test]
+#[ignore = "root-gated real-LVM test; requires CHV_LVM_TEST_VG (harness)"]
+async fn lvm_real_open_refuses_absent_lv_without_size() {
+    let vid = "m45rt-nosize";
+    let backend = backend();
+    match backend
+        .open(vid, &locator(), &DevicePolicy::default())
+        .await
+    {
+        Err(ChvError::InvalidArgument { field, .. }) => {
+            assert_eq!(field, "size_bytes");
+        }
+        other => panic!("expected InvalidArgument(size_bytes), got {other:?}"),
+    }
+    assert!(
+        !lv_path(vid).exists(),
+        "the refused open must not leave an LV behind"
+    );
+}
+
+/// #379 DP2 scope cut, pinned: `seed_from` is unsupported on LVM — the
+/// open rejects explicitly instead of silently provisioning an empty LV
+/// under an operator who asked for a seeded image.
+#[tokio::test]
+#[ignore = "root-gated real-LVM test; requires CHV_LVM_TEST_VG (harness)"]
+async fn lvm_real_open_rejects_seed_from() {
+    let vid = "m45rt-seed1";
+    let backend = backend();
+    let seeded = BackendLocator {
+        backend_class: "lvm".to_string(),
+        locator: format!("{}/ignored-by-lvm-backend", vg()),
+        options: [
+            ("size_bytes".to_string(), (64 * 1024 * 1024).to_string()),
+            (
+                "seed_from".to_string(),
+                "/tmp/no-such-image.qcow2".to_string(),
+            ),
+        ]
+        .into(),
+    };
+    match backend.open(vid, &seeded, &DevicePolicy::default()).await {
+        Err(ChvError::InvalidArgument { field, .. }) => {
+            assert_eq!(field, "seed_from");
+        }
+        other => panic!("expected InvalidArgument(seed_from), got {other:?}"),
+    }
+    assert!(
+        !lv_path(vid).exists(),
+        "the refused open must not leave an LV behind"
+    );
 }
 
 /// A snapshot is a real COW snapshot: after the origin is overwritten, the

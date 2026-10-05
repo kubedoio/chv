@@ -86,6 +86,14 @@ pub struct Reconciler {
     /// Core runtime is the only effector; NodeCache is rebuilt from the Core
     /// store at startup and projected only after Core execution.
     mutation: Option<LegacyMutation>,
+    /// #379 DP5: the node's stord backend info (class + LVM volume
+    /// group, from `AgentConfig.stord_config_path`) — the source the
+    /// legacy open sites' LVM locator shaping uses. Defaults to
+    /// local/no-VG (every pre-#379 construction is unchanged); set via
+    /// [`Reconciler::with_stord_backend`]. Held on the Reconciler (not
+    /// inside `LegacyMutation`) because it is read-only dispatch data,
+    /// not a mutation surface.
+    stord_backend: crate::stord_backend::StordBackendInfo,
 }
 
 /// Mutation-only state for the legacy reconcile path: the VM runtime dir used
@@ -157,6 +165,7 @@ impl Reconciler {
             drain_block_logged: None,
             migration_registry,
             mutation: Some(LegacyMutation { runtime_dir }),
+            stord_backend: crate::stord_backend::StordBackendInfo::default(),
         }
     }
 
@@ -185,7 +194,20 @@ impl Reconciler {
             drain_block_logged: None,
             migration_registry,
             mutation: None,
+            stord_backend: crate::stord_backend::StordBackendInfo::default(),
         }
+    }
+
+    /// Set the node's stord backend info (#379 DP5): the LVM volume
+    /// group the legacy open sites' LVM-class locators are shaped
+    /// against. Builder shape (data, not a mutation surface): the
+    /// observe-only/legacy split stays fixed at construction.
+    pub fn with_stord_backend(
+        mut self,
+        stord_backend: crate::stord_backend::StordBackendInfo,
+    ) -> Self {
+        self.stord_backend = stord_backend;
+        self
     }
 
     /// Fail closed on an observe-only (core-managed) Reconciler: the legacy
@@ -948,14 +970,24 @@ impl Reconciler {
             if !cached_handles.contains_key(&volume_id) {
                 continue;
             }
-            let locator = format!("{}.img", volume_id);
-            let op_id = format!("reconcile-volume-attach-{}-{}", vm_id, volume_id);
             // #379 PR 1 (A2): the class value from the disk's desired-state
             // spec instead of the inline "local" literal (absent → local).
             let backend_class = backend_classes
                 .get(&(vm_id.clone(), volume_id.clone()))
                 .map(String::as_str)
                 .unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS);
+            // #379 DP5: an LVM-class re-attach opens against the dm-path
+            // locator convention (same shaping as the create path); every
+            // other class keeps the historical {volume_id}.img default.
+            let locator = if backend_class == "lvm" {
+                chv_hypervisor_api::resources::lvm_locator(
+                    self.stord_backend.volume_group(),
+                    &volume_id,
+                )
+            } else {
+                format!("{}.img", volume_id)
+            };
+            let op_id = format!("reconcile-volume-attach-{}-{}", vm_id, volume_id);
             match stord
                 .open_volume(&volume_id, backend_class, &locator, Some(&op_id))
                 .await
@@ -1094,7 +1126,10 @@ impl Reconciler {
 ///
 /// Takes the cache as an owned `Arc` so it can be cloned cheaply per parallel
 /// slot. The stord/nwd clients are passed by `&mut` because each slot owns its
-/// own short-lived clients in the parallel section.
+/// own short-lived clients in the parallel section. (The #379 stord-backend
+/// arg is the DP5 locator source; bundling it would hide it from the open
+/// sites that consume it.)
+#[allow(clippy::too_many_arguments)]
 async fn prepare_vm_resources(
     cache: &Arc<tokio::sync::Mutex<NodeCache>>,
     runtime_dir: &Path,
@@ -1103,6 +1138,7 @@ async fn prepare_vm_resources(
     vm_id: &str,
     vm_spec: &crate::spec::VmSpec,
     operation_id: &str,
+    stord_backend: &crate::stord_backend::StordBackendInfo,
 ) -> Result<VmConfig, ChvError> {
     let vm_dir = vm_runtime_dir(runtime_dir, vm_id);
     tokio::fs::create_dir_all(&vm_dir)
@@ -1147,11 +1183,25 @@ async fn prepare_vm_resources(
         {
             open_options.insert("seed_from".to_string(), seed_from.to_string());
         }
+        let backend_class = disk.backend_class_or_local();
         let disk_path = vm_dir.join(format!("{}.img", disk.volume_id));
+        // #379 DP5: class-dependent locator shaping — an LVM-class disk
+        // opens against a /dev/mapper/{vg}-{vid} dm-path token the
+        // standard device_allowlist admits (the backend ignores the
+        // locator and derives /dev/{vg}/{vid} itself); every other class
+        // keeps the historical {volume_id}.img under the VM dir.
+        let locator = if backend_class == "lvm" {
+            chv_hypervisor_api::resources::lvm_locator(
+                stord_backend.volume_group(),
+                &disk.volume_id,
+            )
+        } else {
+            disk_path.to_string_lossy().into_owned()
+        };
         tracing::info!(
             vm_id = %vm_id,
             volume_id = %disk.volume_id,
-            locator = %disk_path.display(),
+            locator = %locator,
             "opening volume via stord"
         );
         let (_volume_id, handle, export_path) = stord
@@ -1159,8 +1209,8 @@ async fn prepare_vm_resources(
                 &disk.volume_id,
                 // #379 PR 1 (A1): the class value from the disk spec
                 // instead of the inline "local" literal (absent → local).
-                disk.backend_class_or_local(),
-                &disk_path.to_string_lossy(),
+                backend_class,
+                &locator,
                 open_options,
                 Some(&open_op_id),
             )
@@ -1358,6 +1408,8 @@ impl Reconciler {
             let stord_socket: Arc<PathBuf> = Arc::new(self.stord_socket.clone());
             let nwd_socket: Arc<PathBuf> = Arc::new(self.nwd_socket.clone());
             let runtime_dir: Arc<PathBuf> = Arc::new(mutation.runtime_dir.clone());
+            let stord_backend: Arc<crate::stord_backend::StordBackendInfo> =
+                Arc::new(self.stord_backend.clone());
 
             let _: Vec<()> = stream::iter(create_inputs)
                 .map(|input| {
@@ -1366,6 +1418,7 @@ impl Reconciler {
                     let stord_socket = stord_socket.clone();
                     let nwd_socket = nwd_socket.clone();
                     let runtime_dir = runtime_dir.clone();
+                    let stord_backend = stord_backend.clone();
                     async move {
                         create_one_vm(
                             input,
@@ -1375,6 +1428,7 @@ impl Reconciler {
                             nwd_socket,
                             runtime_dir,
                             reconcile_tick,
+                            stord_backend,
                         )
                         .await
                     }
@@ -1451,6 +1505,8 @@ impl Reconciler {
             let stord_socket: Arc<PathBuf> = Arc::new(self.stord_socket.clone());
             let nwd_socket: Arc<PathBuf> = Arc::new(self.nwd_socket.clone());
             let runtime_dir: Arc<PathBuf> = Arc::new(mutation.runtime_dir.clone());
+            let stord_backend: Arc<crate::stord_backend::StordBackendInfo> =
+                Arc::new(self.stord_backend.clone());
 
             reconcile_results = stream::iter(reconcile_inputs)
                 .map(|input| {
@@ -1459,6 +1515,7 @@ impl Reconciler {
                     let stord_socket = stord_socket.clone();
                     let nwd_socket = nwd_socket.clone();
                     let runtime_dir = runtime_dir.clone();
+                    let stord_backend = stord_backend.clone();
                     async move {
                         reconcile_one_vm(
                             input,
@@ -1468,6 +1525,7 @@ impl Reconciler {
                             nwd_socket,
                             runtime_dir,
                             reconcile_tick,
+                            stord_backend,
                         )
                         .await
                     }
@@ -1525,6 +1583,8 @@ struct ReconcileResult {
 /// Per-VM CREATE worker. Runs in parallel with up to
 /// `VM_RECONCILE_CONCURRENCY-1` peers. Opens its own short-lived stord/nwd
 /// clients so it does not contend with sibling slots on a shared connection.
+/// (The #379 stord-backend arg is the DP5 locator source for the open sites.)
+#[allow(clippy::too_many_arguments)]
 async fn create_one_vm(
     input: CreateInput,
     cache: Arc<tokio::sync::Mutex<NodeCache>>,
@@ -1533,6 +1593,7 @@ async fn create_one_vm(
     nwd_socket: Arc<PathBuf>,
     runtime_dir: Arc<PathBuf>,
     reconcile_tick: u64,
+    stord_backend: Arc<crate::stord_backend::StordBackendInfo>,
 ) {
     let CreateInput {
         vm_id,
@@ -1602,6 +1663,7 @@ async fn create_one_vm(
         &vm_id,
         &spec,
         &op_id,
+        &stord_backend,
     )
     .await
     {
@@ -1682,7 +1744,9 @@ async fn delete_one_vm(
 
 /// Per-VM RECONCILE worker for VMs that exist in both desired and actual.
 /// Drives the start/stop/recover/resize/delete state machine for one VM and
-/// returns the cache mutations the caller must apply serially.
+/// returns the cache mutations the caller must apply serially. (The #379
+/// stord-backend arg is the DP5 locator source for the re-attach opens.)
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_one_vm(
     input: ReconcileInput,
     cache: Arc<tokio::sync::Mutex<NodeCache>>,
@@ -1691,6 +1755,7 @@ async fn reconcile_one_vm(
     nwd_socket: Arc<PathBuf>,
     runtime_dir: Arc<PathBuf>,
     reconcile_tick: u64,
+    stord_backend: Arc<crate::stord_backend::StordBackendInfo>,
 ) -> ReconcileResult {
     let ReconcileInput {
         vm_id,
@@ -1799,6 +1864,7 @@ async fn reconcile_one_vm(
             &vm_id,
             &spec,
             &recover_op_id,
+            &stord_backend,
         )
         .await
         {
@@ -1898,6 +1964,7 @@ async fn reconcile_one_vm(
                     &vm_id,
                     &spec,
                     &recreate_op_id,
+                    &stord_backend,
                 )
                 .await
                 {
