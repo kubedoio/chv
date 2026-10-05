@@ -19,6 +19,15 @@ use chv_common::hypervisor::HypervisorOverrides;
 
 const MAX_DISPATCH_RETRIES: i32 = 3;
 
+/// Terminal error code written when a dispatch fails because the agent
+/// answered gRPC `UNIMPLEMENTED` for the dispatched RPC (#378 §7
+/// fast-fail piece). Distinct from `AGENT_REJECTED` (the agent examined
+/// and refused the request) and `DISPATCH_FAILED` (retries exhausted):
+/// this code names a peer/method mismatch — the agent does not
+/// implement the RPC (e.g. a legacy-only surface behind the Core
+/// authority), so a verbatim retry can never succeed.
+const UNSUPPORTED_BY_AGENT_ERROR_CODE: &str = "UNSUPPORTED_BY_AGENT";
+
 /// Background task that polls for accepted operations and dispatches them to node agents.
 pub struct Orchestrator {
     pool: StorePool,
@@ -280,6 +289,26 @@ impl Orchestrator {
                     error = %e,
                     "dispatch failed"
                 );
+
+                // #378 §7 fast-fail: gRPC UNIMPLEMENTED is terminal-class
+                // for this method on this peer — a verbatim retry can never
+                // succeed — so the operation must NOT enter the shared
+                // retry arm. This bypass is load-bearing: the retry arm
+                // below would call `mark_for_retry`, whose UPDATE has no
+                // status guard and would RESURRECT the terminal `Failed`
+                // row `dispatch_operation` just wrote back to
+                // `RetryPending`. The terminal row (Failed /
+                // UNSUPPORTED_BY_AGENT, carrying the agent's refusal
+                // message) is written in `dispatch_operation`'s error arm
+                // before the error propagates here.
+                if matches!(e, ChvError::Unimplemented { .. }) {
+                    info!(
+                        operation_id = %row.operation_id,
+                        operation_type = %row.operation_type,
+                        "dispatch refused with Unimplemented: operation failed terminally without retry"
+                    );
+                    continue;
+                }
 
                 // Check current retry count
                 let retry_count: i32 =
@@ -1220,6 +1249,17 @@ impl Orchestrator {
                 if matches!(e, ChvError::BackendUnavailable { .. }) {
                     self.node_client_pool.evict(node_id);
                 }
+                // #378 §7 fast-fail: an UNIMPLEMENTED answer names the
+                // cause (the agent does not implement this RPC — e.g. a
+                // legacy-only surface behind the Core authority), so the
+                // terminal row's error code must name it too. The tick
+                // handler bypasses its retry arm for this class; the
+                // message text is the agent's own refusal explanation.
+                let error_code = if matches!(e, ChvError::Unimplemented { .. }) {
+                    UNSUPPORTED_BY_AGENT_ERROR_CODE
+                } else {
+                    "AGENT_REJECTED"
+                };
                 self.operation_repo
                     .update_status(&OperationStatusUpdateInput {
                         operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
@@ -1228,13 +1268,17 @@ impl Orchestrator {
                             }
                         })?,
                         status: OperationStatus::Failed,
-                        error_code: Some("AGENT_REJECTED".into()),
+                        error_code: Some(error_code.into()),
                         error_message: Some(e.to_string()),
                         observed_generation: None,
                         updated_by: Some("orchestrator".into()),
                         updated_unix_ms: now_unix_ms(),
                     })
                     .await
+                    // #378 §7 fast-fail: if this terminal write itself
+                    // fails, the Unimplemented identity is deliberately
+                    // flattened to Internal (not preserved) — the row
+                    // stays retryable and a re-dispatch re-derives it.
                     .map_err(|e2| ChvError::Internal {
                         reason: format!("agent rejected operation and status update failed: {e2}"),
                     })?;
@@ -2814,6 +2858,661 @@ mod tests {
             recreate_op_rows(&pool, "vm-e2e").await.len(),
             1,
             "no second re-drive inside the backoff window"
+        );
+    }
+
+    // ============================================================
+    // #378 §7 — Unimplemented dispatch fast-fail (no retry, no
+    // mark_for_retry resurrection of the terminal Failed row)
+    // ============================================================
+
+    /// Mock agent-side LifecycleService served over a real UDS socket:
+    /// records every `SnapshotVolume` / `SnapshotVm` request and answers
+    /// it with the configured tonic status; every other RPC fails
+    /// closed. Driving the real tonic client against this socket means
+    /// the tests pin the full identity-preservation path: server
+    /// status → `with_timeout` mapping → `ChvError` variant →
+    /// orchestrator classification.
+    #[derive(Clone)]
+    struct MockLifecycleAgent {
+        snapshot_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::SnapshotVolumeRequest>>>,
+        snapshot_status: tonic::Status,
+        snapshot_vm_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::SnapshotVmRequest>>>,
+        snapshot_vm_status: tonic::Status,
+    }
+
+    #[tonic::async_trait]
+    impl proto::lifecycle_service_server::LifecycleService for MockLifecycleAgent {
+        async fn snapshot_volume(
+            &self,
+            request: tonic::Request<proto::SnapshotVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            self.snapshot_calls
+                .lock()
+                .unwrap()
+                .push(request.into_inner());
+            Err(self.snapshot_status.clone())
+        }
+
+        async fn create_vm(
+            &self,
+            _request: tonic::Request<proto::CreateVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn start_vm(
+            &self,
+            _request: tonic::Request<proto::StartVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn stop_vm(
+            &self,
+            _request: tonic::Request<proto::StopVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn reboot_vm(
+            &self,
+            _request: tonic::Request<proto::RebootVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn delete_vm(
+            &self,
+            _request: tonic::Request<proto::DeleteVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_vm(
+            &self,
+            _request: tonic::Request<proto::ResizeVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn pause_vm(
+            &self,
+            _request: tonic::Request<proto::PauseVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resume_vm(
+            &self,
+            _request: tonic::Request<proto::ResumeVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn power_button_vm(
+            &self,
+            _request: tonic::Request<proto::PowerButtonVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn attach_volume(
+            &self,
+            _request: tonic::Request<proto::AttachVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn detach_volume(
+            &self,
+            _request: tonic::Request<proto::DetachVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_volume(
+            &self,
+            _request: tonic::Request<proto::ResizeVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn restore_volume(
+            &self,
+            _request: tonic::Request<proto::RestoreVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn delete_volume_snapshot(
+            &self,
+            _request: tonic::Request<proto::DeleteVolumeSnapshotRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn clone_volume(
+            &self,
+            _request: tonic::Request<proto::CloneVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn add_disk(
+            &self,
+            _request: tonic::Request<proto::AddDiskRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn remove_device(
+            &self,
+            _request: tonic::Request<proto::RemoveDeviceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn add_net(
+            &self,
+            _request: tonic::Request<proto::AddNetRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resize_disk(
+            &self,
+            _request: tonic::Request<proto::ResizeDiskRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn snapshot_vm(
+            &self,
+            request: tonic::Request<proto::SnapshotVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            self.snapshot_vm_calls
+                .lock()
+                .unwrap()
+                .push(request.into_inner());
+            Err(self.snapshot_vm_status.clone())
+        }
+
+        async fn restore_snapshot(
+            &self,
+            _request: tonic::Request<proto::RestoreSnapshotRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn coredump_vm(
+            &self,
+            _request: tonic::Request<proto::CoredumpVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn ping_vmm(
+            &self,
+            _request: tonic::Request<proto::PingVmmRequest>,
+        ) -> Result<tonic::Response<proto::PingVmmResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn pause_node_scheduling(
+            &self,
+            _request: tonic::Request<proto::PauseNodeSchedulingRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resume_node_scheduling(
+            &self,
+            _request: tonic::Request<proto::ResumeNodeSchedulingRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn drain_node(
+            &self,
+            _request: tonic::Request<proto::DrainNodeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn enter_maintenance(
+            &self,
+            _request: tonic::Request<proto::EnterMaintenanceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn exit_maintenance(
+            &self,
+            _request: tonic::Request<proto::ExitMaintenanceRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn start_network(
+            &self,
+            _request: tonic::Request<proto::StartNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn stop_network(
+            &self,
+            _request: tonic::Request<proto::StopNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn restart_network(
+            &self,
+            _request: tonic::Request<proto::RestartNetworkRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn migrate_vm(
+            &self,
+            _request: tonic::Request<proto::MigrateVmRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn update_overlay(
+            &self,
+            _request: tonic::Request<proto::UpdateOverlayRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _request: tonic::Request<proto::SendGratuitousArpRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn resolve_inspect_required_operation(
+            &self,
+            _request: tonic::Request<proto::ResolveInspectRequiredOperationRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    /// Seed the volume-op shape the fast-fail tests dispatch: a node, a
+    /// volume on it (the claim query resolves the dispatch node from
+    /// `volumes.node_id`), and an Accepted `SnapshotVolume` operation.
+    async fn seed_snapshot_op(pool: &StorePool, node_id: &str, volume_id: &str, op_id: &str) {
+        seed_node(pool, node_id).await;
+        seed_volume(pool, volume_id, node_id).await;
+        seed_accepted_op(
+            pool,
+            op_id,
+            "Volume",
+            volume_id,
+            "SnapshotVolume",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+    }
+
+    /// Seed the VM-snapshot shape the second fast-fail test dispatches:
+    /// a node, a VM placed on it (the claim query resolves the dispatch
+    /// node from `vm_desired_state.target_node_id`), and an Accepted
+    /// `SnapshotVm` operation.
+    async fn seed_snapshot_vm_op(pool: &StorePool, node_id: &str, vm_id: &str, op_id: &str) {
+        seed_node(pool, node_id).await;
+        seed_vm(pool, vm_id, node_id).await;
+        seed_accepted_op(
+            pool,
+            op_id,
+            "vm",
+            vm_id,
+            "SnapshotVm",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+    }
+
+    /// The operations row as the ops surface reads it: status, error
+    /// code, error message, retry bookkeeping, and terminal timestamp.
+    #[allow(clippy::type_complexity)]
+    async fn op_row(
+        pool: &StorePool,
+        op_id: &str,
+    ) -> (
+        String,
+        Option<String>,
+        Option<String>,
+        i32,
+        Option<String>,
+        Option<String>,
+    ) {
+        sqlx::query_as(
+            "SELECT status, error_code, error_message, retry_count, next_retry_at, completed_at \
+             FROM operations WHERE operation_id = ?",
+        )
+        .bind(op_id)
+        .fetch_one(pool)
+        .await
+        .expect("operations row")
+    }
+
+    /// Serve a mock lifecycle agent on a UDS socket matching `pattern`
+    /// for `node_id`.
+    fn spawn_mock_lifecycle_agent(pattern: &str, node_id: &str, agent: MockLifecycleAgent) {
+        let socket = pattern.replace("{node_id}", node_id);
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        let service = proto::lifecycle_service_server::LifecycleServiceServer::new(agent);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+    }
+
+    /// §7 fast-fail, the pinned behavior: an agent answering gRPC
+    /// `Unimplemented` (here: a core-managed node's fail-closed
+    /// `snapshot_volume` gate) sends the operation terminal on the
+    /// FIRST dispatch — `Failed` with the cause-naming
+    /// `UNSUPPORTED_BY_AGENT` code carrying the agent's refusal text —
+    /// with zero retries and no `mark_for_retry` resurrection of the
+    /// terminal row (retry_count stays 0, no `next_retry_at` is ever
+    /// scheduled, and the agent sees exactly one request).
+    #[tokio::test]
+    async fn unimplemented_dispatch_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_snapshot_op(&pool, "node-ff", "vol-ff", "op-ff-1").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(
+                "snapshot_volume is unsupported in core-managed mode",
+            ),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ff-1").await;
+        assert_eq!(
+            status, "Failed",
+            "Unimplemented is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("snapshot_volume is unsupported in core-managed mode"),
+            "the agent's refusal text must ride the error message: {error_message:?}"
+        );
+        assert_eq!(
+            retry_count, 0,
+            "no retry may be scheduled for a terminal-class error"
+        );
+        assert_eq!(
+            next_retry_at, None,
+            "mark_for_retry must never run: no next_retry_at may be written"
+        );
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+
+        // Further ticks must not resurrect the terminal row (the
+        // mark_for_retry UPDATE has no status guard — the bypass in the
+        // tick error handler is what prevents the Failed → RetryPending
+        // flip) and must not re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.snapshot_calls.lock().unwrap().len(),
+            1,
+            "exactly one agent dispatch across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ff-1").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// §7 fast-fail pinned on a second, NON-volume surface: `SnapshotVm`
+    /// — another simple fail-closed core-managed gate in the agent
+    /// (`snapshot_vm is unsupported in core-managed mode`, same
+    /// core-authority check as the volume surfaces) dispatched through
+    /// the identical single-node error arm. Pinning the same properties
+    /// on a VM-surface operation proves the fast-fail is a property of
+    /// the shared dispatch path, not of the volume surfaces: terminal
+    /// `Failed` / `UNSUPPORTED_BY_AGENT` with the agent's refusal text
+    /// on the FIRST dispatch, `retry_count` 0, no `next_retry_at` ever
+    /// written, exactly one agent request, and no resurrection across
+    /// further ticks.
+    #[tokio::test]
+    async fn unimplemented_snapshot_vm_dispatch_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_snapshot_vm_op(&pool, "node-ff", "vm-ff", "op-ff-4").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(
+                "snapshot_vm is unsupported in core-managed mode",
+            ),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ff-4").await;
+        assert_eq!(
+            status, "Failed",
+            "Unimplemented is terminal on first dispatch (non-volume surface)"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause on the shared dispatch path"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("snapshot_vm is unsupported in core-managed mode"),
+            "the agent's refusal text must ride the error message: {error_message:?}"
+        );
+        assert_eq!(
+            retry_count, 0,
+            "no retry may be scheduled for a terminal-class error"
+        );
+        assert_eq!(
+            next_retry_at, None,
+            "mark_for_retry must never run: no next_retry_at may be written"
+        );
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+
+        // Further ticks must not resurrect the terminal row and must
+        // not re-dispatch — same pins as the volume-surface test.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.snapshot_vm_calls.lock().unwrap().len(),
+            1,
+            "exactly one agent dispatch across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ff-4").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// Control for the fast-fail: a non-Unimplemented tonic status
+    /// (`Unavailable` from the agent) keeps today's retry semantics
+    /// byte-for-byte — the dispatch failure write (`Failed` /
+    /// `AGENT_REJECTED`) is resurrected to `RetryPending` by the tick
+    /// error handler with the 10/20/40 s backoff curve, and exhaustion
+    /// still lands on `Failed` / `DISPATCH_FAILED` after exactly
+    /// MAX_DISPATCH_RETRIES retries.
+    #[tokio::test]
+    async fn unavailable_dispatch_retries_exactly_as_before() {
+        let pool = create_test_pool().await;
+        seed_snapshot_op(&pool, "node-ff", "vol-ff", "op-ff-2").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unavailable("agent restarting"),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unavailable("agent restarting"),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // Attempt 1: dispatch fails → Failed/AGENT_REJECTED written by
+        // dispatch_operation, then resurrected to RetryPending (retry 1).
+        orchestrator.tick().await.expect("tick 1");
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ff-2").await;
+        assert_eq!(
+            status, "RetryPending",
+            "non-Unimplemented errors keep the retry semantics"
+        );
+        assert_eq!(retry_count, 1);
+        assert!(
+            next_retry_at.is_some(),
+            "the backoff schedule is written as before"
+        );
+
+        // Attempts 2 and 3: backdate the backoff anchor and re-tick.
+        for expected_retry in [2, 3] {
+            sqlx::query("UPDATE operations SET next_retry_at = '2026-01-01T00:00:00Z' WHERE operation_id = 'op-ff-2'")
+                .execute(&pool)
+                .await
+                .expect("backdate retry anchor");
+            orchestrator.tick().await.expect("retry tick");
+            let (status, _, _, retry_count, _, _) = op_row(&pool, "op-ff-2").await;
+            assert_eq!(status, "RetryPending");
+            assert_eq!(retry_count, expected_retry);
+        }
+
+        // Attempt 4 exceeds MAX_DISPATCH_RETRIES: terminal
+        // Failed/DISPATCH_FAILED with the exhaustion message.
+        sqlx::query("UPDATE operations SET next_retry_at = '2026-01-01T00:00:00Z' WHERE operation_id = 'op-ff-2'")
+            .execute(&pool)
+            .await
+            .expect("backdate retry anchor");
+        orchestrator.tick().await.expect("exhaustion tick");
+        let (status, error_code, error_message, _, _, _) = op_row(&pool, "op-ff-2").await;
+        assert_eq!(status, "Failed");
+        assert_eq!(error_code.as_deref(), Some("DISPATCH_FAILED"));
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("permanently failed after 3 retries"),
+            "the exhaustion message shape is unchanged: {error_message:?}"
+        );
+
+        // The full curve dispatched exactly 1 + MAX_DISPATCH_RETRIES times.
+        assert_eq!(
+            agent.snapshot_calls.lock().unwrap().len(),
+            4,
+            "initial attempt plus 3 retries — the retry curve is unchanged"
+        );
+    }
+
+    /// Control for the fast-fail, transport class: an unreachable agent
+    /// (no socket — the `BackendUnavailable` connect failure, which
+    /// bypasses `dispatch_operation`'s error arm entirely) is scheduled
+    /// for retry exactly as before, with no terminal write.
+    #[tokio::test]
+    async fn transport_unavailable_dispatch_retries_as_before() {
+        let pool = create_test_pool().await;
+        seed_snapshot_op(&pool, "node-ff", "vol-ff", "op-ff-3").await;
+
+        // A pattern whose socket is never bound: connect fails with
+        // BackendUnavailable, the same class as an agent restart.
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick 1");
+
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ff-3").await;
+        assert_eq!(
+            status, "RetryPending",
+            "transport failures keep the retry semantics"
+        );
+        assert_eq!(retry_count, 1);
+        assert!(
+            next_retry_at.is_some(),
+            "the backoff schedule is written as before"
+        );
+        assert_eq!(
+            error_code, None,
+            "no terminal write happens on the connect-failure path (as before)"
+        );
+        assert!(
+            completed_at.is_none(),
+            "the op is not terminal: it is queued for retry"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("agent"),
+            "the retry row carries the failure text: {error_message:?}"
         );
     }
 }
