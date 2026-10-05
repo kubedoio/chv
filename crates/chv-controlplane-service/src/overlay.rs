@@ -54,6 +54,9 @@ impl OverlayManager {
         operation_id: &str,
     ) -> Result<(), ChvError> {
         let mut failures: Vec<String> = Vec::new();
+        // #378 §7 fast-fail, overlay leg: whether every per-node failure
+        // was an `Unimplemented` refusal (the all-core-managed shape).
+        let mut all_refusals = true;
 
         for compiled in plans {
             let node_id = compiled.node_id.clone();
@@ -78,6 +81,9 @@ impl OverlayManager {
                         error = %e,
                         "failed to dispatch fabric plan to node"
                     );
+                    if !matches!(e, ChvError::Unimplemented { .. }) {
+                        all_refusals = false;
+                    }
                     failures.push(format!("{node_id}: {e}"));
                 }
             }
@@ -85,6 +91,28 @@ impl OverlayManager {
 
         if failures.is_empty() {
             Ok(())
+        } else if all_refusals {
+            // #378 §7 fast-fail, overlay leg: when EVERY per-node failure
+            // is an `Unimplemented` refusal, the aggregation preserves the
+            // refusal identity instead of flattening to Internal, so the
+            // orchestrator's tick handler fast-fails the `UpdateOverlay`
+            // operation terminal (`Failed` / `UNSUPPORTED_BY_AGENT`, no
+            // retry) exactly like the single-node dispatch path. The
+            // reason is the per-node roll-up in fan-out order (the plans
+            // arrive in a deterministic compile order), so the operation
+            // record still shows which agents refused. Mixed failures
+            // (some refusals, some other classes) deliberately keep the
+            // Internal aggregation below: a partial refusal is not
+            // terminal-class for the operation — the non-refusing nodes
+            // may still fail transiently and succeed on retry — so the
+            // shared retry curve must stay in charge.
+            Err(ChvError::Unimplemented {
+                reason: format!(
+                    "fabric update for network {network_id} refused by all {} node(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            })
         } else {
             Err(ChvError::Internal {
                 reason: format!(

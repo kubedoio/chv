@@ -43,6 +43,8 @@ curl -X POST https://controlplane.example.com/v1/volumes/restore-snapshot \
   }' | jq
 ```
 
+> **Note:** On core-managed nodes the restore is rejected at accept time (HTTP 400, "volume restore is not supported on core-managed nodes") — Path A applies to legacy-mode nodes only. For a volume accepted before that gate existed (pre-upgrade fail-open window), the agent's dispatch refusal now fails the operation terminally (`Failed` / `UNSUPPORTED_BY_AGENT`) on first dispatch instead of retrying for ~70 s.
+
 ### 2c. Monitor Operation
 
 Volume restore is dispatched as a `RestoreVolume` operation:
