@@ -155,8 +155,26 @@ where
             backend: backend.to_string(),
             reason: format!("{method} timed out after 30s"),
         })?
-        .map_err(|e| ChvError::Internal {
-            reason: format!("{method} failed: {e}"),
+        .map_err(|e| {
+            // Preserve the error's identity for gRPC UNIMPLEMENTED (#378
+            // §7 fast-fail piece): it is terminal-class for this method on
+            // this peer — a verbatim retry can never succeed — so callers
+            // (the orchestrator's dispatch-retry machinery) must be able to
+            // distinguish it from retryable failures without string-matching
+            // the status text. The message text is kept byte-identical to
+            // the Internal flattening below so the agent's refusal
+            // explanation (e.g. "snapshot_volume is unsupported in
+            // core-managed mode") still rides the error. Every other tonic
+            // code flattens exactly as before.
+            if e.code() == tonic::Code::Unimplemented {
+                ChvError::Unimplemented {
+                    reason: format!("{method} failed: {e}"),
+                }
+            } else {
+                ChvError::Internal {
+                    reason: format!("{method} failed: {e}"),
+                }
+            }
         })
         .map(|r| r.into_inner())
 }

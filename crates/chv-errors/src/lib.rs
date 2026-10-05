@@ -32,6 +32,9 @@ pub enum ChvError {
     #[error("network unavailable: {resource} — {reason}")]
     NetworkUnavailable { resource: String, reason: String },
 
+    #[error("unimplemented: {reason}")]
+    Unimplemented { reason: String },
+
     #[error("conflict: {resource} {id}")]
     Conflict { resource: String, id: String },
 
@@ -71,6 +74,7 @@ impl ErrorCode {
     pub const QUOTA_EXCEEDED: &str = "QUOTA_EXCEEDED";
     pub const BACKEND_UNAVAILABLE: &str = "BACKEND_UNAVAILABLE";
     pub const NETWORK_UNAVAILABLE: &str = "NETWORK_UNAVAILABLE";
+    pub const UNIMPLEMENTED: &str = "UNIMPLEMENTED";
     pub const CONFLICT: &str = "CONFLICT";
     pub const STALE_GENERATION: &str = "STALE_GENERATION";
     pub const CONTROL_PLANE_UNAVAILABLE: &str = "CONTROL_PLANE_UNAVAILABLE";
@@ -90,6 +94,7 @@ impl ChvError {
             ChvError::QuotaExceeded { .. } => ErrorCode::QUOTA_EXCEEDED,
             ChvError::BackendUnavailable { .. } => ErrorCode::BACKEND_UNAVAILABLE,
             ChvError::NetworkUnavailable { .. } => ErrorCode::NETWORK_UNAVAILABLE,
+            ChvError::Unimplemented { .. } => ErrorCode::UNIMPLEMENTED,
             ChvError::Conflict { .. } => ErrorCode::CONFLICT,
             ChvError::StaleGeneration { .. } => ErrorCode::STALE_GENERATION,
             ChvError::ControlPlaneUnavailable { .. } => ErrorCode::CONTROL_PLANE_UNAVAILABLE,
@@ -151,9 +156,49 @@ impl From<ChvError> for tonic::Status {
             ChvError::NetworkUnavailable { resource, .. } => {
                 tonic::Status::unavailable(format!("{resource} unavailable"))
             }
+            ChvError::Unimplemented { reason } => tonic::Status::unimplemented(reason.clone()),
             ChvError::Io { .. } | ChvError::Internal { .. } => {
                 tonic::Status::internal("internal error")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #378 §7 fast-fail piece: the `Unimplemented` variant must keep
+    /// the error's identity through every structured rendering — the
+    /// structured error code (consumed by e.g. nwd's `ResultMeta`
+    /// rendering via `to_result_fields`), the Display text (which rides
+    /// the operations row's `error_message`), and the tonic round-trip
+    /// (`From<ChvError> for tonic::Status` maps it back to
+    /// `Code::Unimplemented`, never the generic internal flattening).
+    #[test]
+    fn unimplemented_variant_preserves_identity_in_structured_renderings() {
+        let err = ChvError::Unimplemented {
+            reason: "snapshot_volume failed: status: Unimplemented, message: \
+                     \"snapshot_volume is unsupported in core-managed mode\""
+                .to_string(),
+        };
+
+        assert_eq!(err.error_code(), ErrorCode::UNIMPLEMENTED);
+        assert_eq!(ErrorCode::UNIMPLEMENTED, "UNIMPLEMENTED");
+
+        let (status, code, message) = err.to_result_fields();
+        assert_eq!(status, "error");
+        assert_eq!(code, ErrorCode::UNIMPLEMENTED);
+        assert!(
+            message.contains("snapshot_volume is unsupported in core-managed mode"),
+            "the refusal text must ride the Display rendering: {message}"
+        );
+        assert!(
+            message.starts_with("unimplemented: "),
+            "the Display names the class: {message}"
+        );
+
+        let tonic_status = tonic::Status::from(err);
+        assert_eq!(tonic_status.code(), tonic::Code::Unimplemented);
     }
 }
