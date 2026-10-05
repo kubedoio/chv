@@ -234,6 +234,10 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                         })?,
                     )
                 },
+                // #378: the authority mode rides the enrollment inventory
+                // (first contact) and is re-reported on every periodic
+                // inventory cycle.
+                authority_mode: crate::inventory::authority_mode_text(inventory.authority_mode),
                 reported_unix_ms: now,
             })
             .await?;

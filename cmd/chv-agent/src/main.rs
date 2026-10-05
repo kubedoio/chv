@@ -655,7 +655,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &cache.node_id,
                         &hostname,
                         &config.storage_base_dir,
-                    );
+                    )
+                    .with_authority_mode(config.authority_mode.clone());
                     // Best-effort fabric identity (ADR-021): nwd may not be
                     // up yet during enrollment; the empty identity is
                     // reported then and re-sent on the periodic inventory
@@ -1006,7 +1007,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
     let node_id = cache.lock().await.node_id.clone();
     let inventory_reporter =
-        InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
+        InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir)
+            .with_authority_mode(config.authority_mode.clone());
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
     let mut consecutive_reconcile_failures: u32 = 0;

@@ -46,6 +46,7 @@ pub use networks::{NetworkRepository, NetworkRow};
 pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
     NodeSchedulingPatchInput, NodeStatePatchInput, NodeUpsertInput, NodeVersionInput,
+    AUTHORITY_MODE_CORE_MANAGED, AUTHORITY_MODE_CORE_NATIVE, AUTHORITY_MODE_LEGACY,
 };
 pub use observed_state::{
     NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository, VmMetricsInput,

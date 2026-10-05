@@ -40,6 +40,23 @@ message NodeInventory {
   // Measured default-route MTU of the node's underlay (0 = unmeasured),
   // used by the control plane to derive tenant/fabric MTUs.
   uint32 underlay_mtu = 12;
+  // The node's authority mode — who owns lifecycle mutations on the node
+  // (issue #378). Reported from the agent's local `authority_mode` config
+  // (a static per-process fact) at enrollment and on every periodic
+  // inventory cycle; the control plane persists it on the node's
+  // inventory row. UNSPECIFIED means the agent has not reported a mode
+  // (pre-field agents); consumers must fail OPEN on it — the agent's
+  // fail-closed dispatch remains the enforcement boundary.
+  AuthorityMode authority_mode = 13;
+}
+
+// Who owns lifecycle mutation authority on a node. Mirrors the agent
+// config's kebab-case spellings (legacy / core-managed / core-native).
+enum AuthorityMode {
+  AUTHORITY_MODE_UNSPECIFIED = 0;
+  AUTHORITY_MODE_LEGACY = 1;
+  AUTHORITY_MODE_CORE_MANAGED = 2;
+  AUTHORITY_MODE_CORE_NATIVE = 3;
 }
 
 message ServiceVersions {

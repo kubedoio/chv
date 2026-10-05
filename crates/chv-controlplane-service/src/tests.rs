@@ -433,6 +433,7 @@ async fn test_enrollment_extended_inventory_persistence() {
             vtep_ip: String::new(),
             wireguard_public_key: String::new(),
             underlay_mtu: 0,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-new-1".into(),
@@ -507,6 +508,7 @@ async fn test_enrollment_registers_fabric_identity() {
             vtep_ip: String::new(),
             wireguard_public_key: "pub-key-material-base64".into(),
             underlay_mtu: 1500,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-fab-1".into(),
@@ -570,6 +572,7 @@ async fn test_enrollment_registers_fabric_identity() {
                 vtep_ip: String::new(),
                 wireguard_public_key: "pub-key-rotated".into(),
                 underlay_mtu: 0,
+                authority_mode: Default::default(),
             }),
         },
         // The transport-level peer address observed by tonic: the periodic
@@ -636,6 +639,7 @@ async fn test_enrollment_with_peer_addr_derives_underlay_endpoint() {
             vtep_ip: String::new(),
             wireguard_public_key: "pub-key-ep-base64".into(),
             underlay_mtu: 1500,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-fab-ep".into(),
@@ -730,6 +734,7 @@ async fn test_enrollment_with_ipv6_peer_addr_stores_bracketed_endpoint() {
             vtep_ip: String::new(),
             wireguard_public_key: "pub-key-v6-base64".into(),
             underlay_mtu: 1500,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-fab-v6".into(),
@@ -796,6 +801,7 @@ async fn test_inventory_re_report_does_not_rotate_pinned_underlay_endpoint() {
             vtep_ip: String::new(),
             wireguard_public_key: "pub-key-pin-base64".into(),
             underlay_mtu: 1500,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-fab-pin".into(),
@@ -844,6 +850,7 @@ async fn test_inventory_re_report_does_not_rotate_pinned_underlay_endpoint() {
                 vtep_ip: String::new(),
                 wireguard_public_key: "pub-key-rotated".into(),
                 underlay_mtu: 1500,
+                authority_mode: Default::default(),
             }),
         },
         Some("203.0.113.77:9999".parse().unwrap()),
@@ -1028,6 +1035,7 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
             vtep_ip: String::new(),
             wireguard_public_key: String::new(),
             underlay_mtu: 0,
+            authority_mode: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-invalid".into(),
@@ -3970,4 +3978,674 @@ async fn clone_volume_rejects_missing_source() {
             .await
             .unwrap();
     assert_eq!(count, 0, "rejected clone must not journal an operation");
+}
+
+// ── #378: accept-time rejection of the volume snapshot family on
+//    core-managed nodes ─────────────────────────────────────────────────
+//
+// The agent's fail-closed dispatch (Unimplemented on every volume
+// snapshot-family RPC in core-managed mode) is the enforcement; these
+// tests pin the accept-time UX layer: the CP lifecycle rejects with
+// InvalidArgument BEFORE journaling (no operations row, no
+// volume_desired_state intent, no clone target volume row), fails OPEN
+// on unknown/NULL mode, and leaves legacy nodes byte-for-byte unchanged.
+
+async fn snapshot_family_test_service(
+) -> (crate::lifecycle::LifecycleServiceImplementation, StorePool) {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let service = crate::lifecycle::LifecycleServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        DesiredStateRepository::new(pool.clone()),
+    );
+    (service, pool)
+}
+
+/// Seed a node plus an inventory row carrying `mode` (`None` = the
+/// column is NULL — never reported; there is no inventory row only when
+/// the node is seeded with [`seed_node_without_inventory`]).
+async fn seed_node_with_authority_mode(pool: &StorePool, node_id: &str, mode: Option<&str>) {
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, 'host', 'host')")
+        .bind(node_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, authority_mode) \
+         VALUES (?, 'x86_64', 1, 1024, ?)",
+    )
+    .bind(node_id)
+    .bind(mode)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A node that exists but has never reported inventory at all — the
+/// fail-open edge for pre-#378 agents.
+async fn seed_node_without_inventory(pool: &StorePool, node_id: &str) {
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, 'host', 'host')")
+        .bind(node_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn seed_volume_on_node(pool: &StorePool, volume_id: &str, node_id: &str) {
+    seed_volume(pool, volume_id, Some(node_id)).await;
+}
+
+/// A `volumes` row with a NULL `node_id` (the column is `ON DELETE SET
+/// NULL`) — the volume's owning node is unknown, so the accept-time mode
+/// check must fail open (#495: the helper resolves `volumes.node_id` and
+/// never falls back to the request's node).
+async fn seed_volume_without_node(pool: &StorePool, volume_id: &str) {
+    seed_volume(pool, volume_id, None).await;
+}
+
+async fn seed_volume(pool: &StorePool, volume_id: &str, node_id: Option<&str>) {
+    DesiredStateRepository::new(pool.clone())
+        .upsert_volume(&VolumeDesiredStateInput {
+            volume_id: ResourceId::new(volume_id).unwrap(),
+            node_id: node_id.map(|n| NodeId::new(n).unwrap()),
+            display_name: volume_id.into(),
+            capacity_bytes: 1024,
+            volume_kind: None,
+            storage_class: None,
+            owner_id: None,
+            desired_generation: Generation::new(1),
+            desired_status: None,
+            requested_by: None,
+            updated_by: None,
+            attached_vm_id: None,
+            attachment_mode: None,
+            device_name: None,
+            read_only: false,
+            resize_to_bytes: None,
+            snapshot_op: None,
+            snapshot_name: None,
+            clone_source_volume_id: None,
+            requested_unix_ms: 1000,
+        })
+        .await
+        .unwrap();
+}
+
+fn snapshot_family_meta(node: &str) -> proto::RequestMeta {
+    proto::RequestMeta {
+        operation_id: "".into(),
+        requested_by: "test-user".into(),
+        target_node_id: node.into(),
+        desired_state_version: "1".into(),
+        request_unix_ms: 1000,
+    }
+}
+
+fn snapshot_request(node: &str, volume: &str) -> proto::SnapshotVolumeRequest {
+    proto::SnapshotVolumeRequest {
+        meta: Some(snapshot_family_meta(node)),
+        node_id: node.into(),
+        volume_id: volume.into(),
+        snapshot_name: "snap-1".into(),
+    }
+}
+
+fn restore_request(node: &str, volume: &str) -> proto::RestoreVolumeRequest {
+    proto::RestoreVolumeRequest {
+        meta: Some(snapshot_family_meta(node)),
+        node_id: node.into(),
+        volume_id: volume.into(),
+        snapshot_name: "snap-1".into(),
+    }
+}
+
+fn delete_snapshot_request(node: &str, volume: &str) -> proto::DeleteVolumeSnapshotRequest {
+    proto::DeleteVolumeSnapshotRequest {
+        meta: Some(snapshot_family_meta(node)),
+        node_id: node.into(),
+        volume_id: volume.into(),
+        snapshot_name: "snap-1".into(),
+    }
+}
+
+/// Assert the rejection journaled NOTHING: no operation row of any type
+/// and no `volume_desired_state` snapshot intent for the volume. The
+/// volume's own rows may pre-exist (the #495 volume-node resolution
+/// needs a seeded `volumes` row) — what must not appear is an operation
+/// or a `snapshot_op` intent written onto them.
+async fn assert_nothing_journaled(pool: &StorePool, volume_id: &str) {
+    let ops: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(ops, 0, "a rejected request must not journal an operation");
+    let intent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM volume_desired_state WHERE volume_id = ? AND snapshot_op IS NOT NULL",
+    )
+    .bind(volume_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        intent, 0,
+        "a rejected request must not write a volume_desired_state intent"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_volume_rejects_core_managed_node() {
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    // #495: the check resolves the volume's node, so the volume must
+    // live on the core-managed node (the BFF-equality shape: request
+    // node == volume node).
+    seed_volume_on_node(&pool, "vol-cm-1", "node-cm").await;
+
+    let result = service
+        .snapshot_volume(snapshot_request("node-cm", "vol-cm-1"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert_eq!(
+                msg, "volume snapshot is not supported on core-managed nodes",
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_nothing_journaled(&pool, "vol-cm-1").await;
+}
+
+#[tokio::test]
+async fn restore_volume_rejects_core_managed_node() {
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_volume_on_node(&pool, "vol-cm-1", "node-cm").await;
+
+    let result = service
+        .restore_volume(restore_request("node-cm", "vol-cm-1"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert_eq!(
+                msg, "volume restore is not supported on core-managed nodes",
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_nothing_journaled(&pool, "vol-cm-1").await;
+}
+
+#[tokio::test]
+async fn delete_volume_snapshot_rejects_core_managed_node() {
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_volume_on_node(&pool, "vol-cm-1", "node-cm").await;
+
+    let result = service
+        .delete_volume_snapshot(delete_snapshot_request("node-cm", "vol-cm-1"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert_eq!(
+                msg, "volume snapshot deletion is not supported on core-managed nodes",
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_nothing_journaled(&pool, "vol-cm-1").await;
+}
+
+#[tokio::test]
+async fn clone_volume_rejects_core_managed_placement_node() {
+    let (service, pool) = snapshot_family_test_service().await;
+    // The source lives on the core-managed node; the REQUEST names a
+    // legacy node. The check must follow the placement node (the source's
+    // node — the one the operation journals and dispatches to), not the
+    // raw request node_id (#381 placement rule).
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_node_with_authority_mode(&pool, "node-leg", Some("legacy")).await;
+    seed_volume_on_node(&pool, "vol-src-cm", "node-cm").await;
+
+    let result = service
+        .clone_volume(clone_request("node-leg", "vol-src-cm", "vol-dst-cm"))
+        .await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert_eq!(
+                msg, "volume clone is not supported on core-managed nodes",
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected invalid-argument, got {other:?}"),
+    }
+    assert_nothing_journaled(&pool, "vol-dst-cm").await;
+    let target: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM volumes WHERE volume_id = 'vol-dst-cm'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        target, 0,
+        "a rejected clone must not materialize the target volume row"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_family_fails_open_on_unknown_mode() {
+    // NULL column (reported, no mode) and no inventory row at all
+    // (never reported — pre-#378 agents) must BOTH keep accepting: the
+    // agent's fail-closed dispatch remains the enforcement, so the
+    // accept-time check only fires on a definite core-managed report.
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-null", None).await;
+    seed_node_without_inventory(&pool, "node-noreport").await;
+    seed_volume_on_node(&pool, "vol-null-1", "node-null").await;
+    seed_volume_on_node(&pool, "vol-noreport-1", "node-noreport").await;
+
+    for (node, volume) in [
+        ("node-null", "vol-null-1"),
+        ("node-noreport", "vol-noreport-1"),
+    ] {
+        let ack = service
+            .snapshot_volume(snapshot_request(node, volume))
+            .await
+            .unwrap_or_else(|e| panic!("unknown mode must fail open ({node}): {e:?}"));
+        assert_eq!(
+            ack.result.expect("ack result").status,
+            "OK",
+            "unknown mode must fail open ({node})"
+        );
+    }
+
+    // And the accepts journaled as before: operation Accepted + snapshot
+    // intent written.
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM operations WHERE operation_type = 'SnapshotVolume'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec!["Accepted".to_string(); 2]);
+    let intent: Option<String> = sqlx::query_scalar(
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id = 'vol-null-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(intent.as_deref(), Some("create"));
+}
+
+#[tokio::test]
+async fn snapshot_volume_accepts_legacy_node_unchanged() {
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-leg", Some("legacy")).await;
+    seed_volume_on_node(&pool, "vol-leg-1", "node-leg").await;
+
+    let ack = service
+        .snapshot_volume(snapshot_request("node-leg", "vol-leg-1"))
+        .await
+        .expect("legacy node must accept exactly as before");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM operations WHERE operation_type = 'SnapshotVolume'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "Accepted");
+    let intent: Option<String> = sqlx::query_scalar(
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id = 'vol-leg-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(intent.as_deref(), Some("create"));
+}
+
+// ── #495: the check resolves the VOLUME's node (volumes.node_id — what
+//    the orchestrator's dispatch uses), not the request's node_id. A
+//    direct-gRPC caller can name any node; the mismatched shapes below
+//    pin both directions plus the NULL-node fail-open. ────────────────
+
+#[tokio::test]
+async fn snapshot_family_ignores_core_managed_request_node_when_volume_on_legacy_node() {
+    // Request names a core-managed node, volume is owned by a legacy
+    // node: the dispatch goes to the LEGACY node (the orchestrator reads
+    // volumes.node_id), so this must ACCEPT and journal as before — the
+    // request-node check of the first cut would have 400'd an operation
+    // that pre-#378 executed fine.
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_node_with_authority_mode(&pool, "node-leg", Some("legacy")).await;
+    seed_volume_on_node(&pool, "vol-mismatch-leg", "node-leg").await;
+
+    let ack = service
+        .snapshot_volume(snapshot_request("node-cm", "vol-mismatch-leg"))
+        .await
+        .expect("volume on legacy node must accept regardless of request node");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM operations WHERE operation_type = 'SnapshotVolume'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec!["Accepted".to_string()]);
+    let intent: Option<String> = sqlx::query_scalar(
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id = 'vol-mismatch-leg'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(intent.as_deref(), Some("create"));
+}
+
+#[tokio::test]
+async fn snapshot_family_rejects_legacy_request_node_when_volume_on_core_managed_node() {
+    // Request names a legacy node, volume is owned by a core-managed
+    // node: the dispatch goes to the CORE-MANAGED node, so this must
+    // reject pre-journal — without the volume-node resolution the check
+    // missed exactly the case it exists to catch (the ~70 s
+    // Unimplemented-retry path).
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_node_with_authority_mode(&pool, "node-leg", Some("legacy")).await;
+    seed_volume_on_node(&pool, "vol-mismatch-cm", "node-cm").await;
+
+    for (surface, op) in [
+        ("volume snapshot", "snapshot"),
+        ("volume restore", "restore"),
+        ("volume snapshot deletion", "snapshot deletion"),
+    ] {
+        let result = match op {
+            "snapshot" => {
+                service
+                    .snapshot_volume(snapshot_request("node-leg", "vol-mismatch-cm"))
+                    .await
+            }
+            "restore" => {
+                service
+                    .restore_volume(restore_request("node-leg", "vol-mismatch-cm"))
+                    .await
+            }
+            _ => {
+                service
+                    .delete_volume_snapshot(delete_snapshot_request("node-leg", "vol-mismatch-cm"))
+                    .await
+            }
+        };
+        match result {
+            Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+                assert_eq!(
+                    msg,
+                    format!("{surface} is not supported on core-managed nodes"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected invalid-argument for {op}, got {other:?}"),
+        }
+        assert_nothing_journaled(&pool, "vol-mismatch-cm").await;
+    }
+}
+
+#[tokio::test]
+async fn snapshot_family_fails_open_when_volume_node_is_null() {
+    // The volume's owning node is unknown (NULL volumes.node_id): the
+    // mode check cannot resolve a node and must fail open — it never
+    // falls back to the request's node, which here names a core-managed
+    // node the old request-node check would have rejected on.
+    let (service, pool) = snapshot_family_test_service().await;
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_volume_without_node(&pool, "vol-orphan").await;
+
+    let ack = service
+        .snapshot_volume(snapshot_request("node-cm", "vol-orphan"))
+        .await
+        .expect("NULL volume node must fail open (accept)");
+    assert_eq!(ack.result.expect("ack result").status, "OK");
+
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM operations WHERE operation_type = 'SnapshotVolume'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec!["Accepted".to_string()]);
+    let intent: Option<String> = sqlx::query_scalar(
+        "SELECT snapshot_op FROM volume_desired_state WHERE volume_id = 'vol-orphan'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(intent.as_deref(), Some("create"));
+}
+
+// ── #378: inventory ingestion persists the authority mode ──────────────
+
+#[tokio::test]
+async fn report_node_inventory_persists_authority_mode() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let inventory_service = crate::inventory::InventoryServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        VtepRepository::new(pool.clone()),
+    );
+
+    let report = |node: &str, mode: i32| proto::ReportNodeInventoryRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: format!("op-{node}"),
+            requested_by: "test".into(),
+            target_node_id: node.into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        inventory: Some(proto::NodeInventory {
+            node_id: node.into(),
+            hostname: "host".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 1,
+            memory_bytes: 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
+            labels: std::collections::HashMap::new(),
+            vtep_ip: String::new(),
+            wireguard_public_key: String::new(),
+            underlay_mtu: 0,
+            authority_mode: mode,
+        }),
+    };
+
+    let node_repo = NodeRepository::new(pool.clone());
+
+    // A definite core-managed report persists to the column.
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        report("node-inv-cm", proto::AuthorityMode::CoreManaged as i32),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        node_repo
+            .get_authority_mode(&NodeId::new("node-inv-cm").unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("core-managed")
+    );
+
+    // UNSPECIFIED (pre-#378 agent) stores NULL — the fail-open edge.
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        report("node-inv-unset", proto::AuthorityMode::Unspecified as i32),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        node_repo
+            .get_authority_mode(&NodeId::new("node-inv-unset").unwrap())
+            .await
+            .unwrap(),
+        None,
+        "unspecified mode must persist NULL (fail-open)"
+    );
+
+    // An unknown enum int (e.g. a future mode an old CP does not know)
+    // ingests to NULL too — not an error, not a persisted garbage value.
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        report("node-inv-unknown", 99),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        node_repo
+            .get_authority_mode(&NodeId::new("node-inv-unknown").unwrap())
+            .await
+            .unwrap(),
+        None,
+        "an unknown authority-mode enum int must persist NULL (fail-open)"
+    );
+
+    // An unspecified re-report must not wipe an established mode (the
+    // upsert COALESCEs like the version columns).
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        report("node-inv-cm", proto::AuthorityMode::Unspecified as i32),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        node_repo
+            .get_authority_mode(&NodeId::new("node-inv-cm").unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("core-managed"),
+        "an unspecified re-report must not wipe an established mode"
+    );
+
+    // A mode flip (core-managed → legacy at agent restart) overwrites.
+    crate::inventory::InventoryService::report_node_inventory(
+        &inventory_service,
+        report("node-inv-cm", proto::AuthorityMode::Legacy as i32),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        node_repo
+            .get_authority_mode(&NodeId::new("node-inv-cm").unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("legacy")
+    );
+}
+
+// ── #378: the BFF surface over HTTP (router → mutation service →
+//    lifecycle), same harness as the admin-router tests above ───────────
+
+#[tokio::test]
+async fn volume_snapshot_rejected_over_http_on_core_managed_node() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    seed_node_with_authority_mode(&pool, "node-cm", Some("core-managed")).await;
+    seed_node_with_authority_mode(&pool, "node-leg", Some("legacy")).await;
+    seed_volume_on_node(&pool, "vol-http-cm", "node-cm").await;
+    seed_volume_on_node(&pool, "vol-http-leg", "node-leg").await;
+
+    let app = crate::api::router::admin_router(
+        test_app_state(pool.clone()),
+        crate::convergence_metrics::new_shared(),
+    );
+    let token = test_admin_token();
+
+    let post = |path: &str, body: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // Core-managed node: HTTP 400 with the CP's message — the immediate,
+    // explicit rejection that replaces 200-accepted-then-~70 s-of-retries.
+    let response = app
+        .clone()
+        .oneshot(post(
+            "/v1/volumes/snapshot",
+            r#"{"volume_id":"vol-http-cm","snapshot_name":"snap-1"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("volume snapshot is not supported on core-managed nodes"),
+        "rejection must carry the CP's message: {body}"
+    );
+
+    // Nothing was journaled for the rejected request.
+    let ops: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ops, 0, "the rejected HTTP snapshot must journal nothing");
+
+    // Legacy node: unchanged — 200 accepted.
+    let response = app
+        .clone()
+        .oneshot(post(
+            "/v1/volumes/snapshot",
+            r#"{"volume_id":"vol-http-leg","snapshot_name":"snap-1"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["accepted"].as_bool(), Some(true));
+
+    // Clone against a core-managed source over HTTP: same 400 contract.
+    let response = app
+        .oneshot(post(
+            "/v1/volumes/clone",
+            r#"{"source_volume_id":"vol-http-cm","target_volume_id":"vol-http-dst"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("volume clone is not supported on core-managed nodes"),
+        "clone rejection must carry the CP's message: {body}"
+    );
 }

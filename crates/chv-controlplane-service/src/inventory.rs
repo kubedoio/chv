@@ -55,6 +55,25 @@ use chv_controlplane_types::constants::{
     SOURCE_PERIODIC, STATUS_OK, SUMMARY_INVENTORY_REPORTED, SUMMARY_VERSIONS_REPORTED,
 };
 
+/// Map a reported `AuthorityMode` onto the store's kebab-case spelling
+/// (#378). `UNSPECIFIED` — pre-field agents — and any unrecognized value
+/// map to `None` so the `node_inventory.authority_mode` column keeps its
+/// fail-open NULL semantics for nodes that have not reported a mode.
+pub(crate) fn authority_mode_text(mode: i32) -> Option<String> {
+    match proto::AuthorityMode::try_from(mode) {
+        Ok(proto::AuthorityMode::Legacy) => {
+            Some(chv_controlplane_store::AUTHORITY_MODE_LEGACY.into())
+        }
+        Ok(proto::AuthorityMode::CoreManaged) => {
+            Some(chv_controlplane_store::AUTHORITY_MODE_CORE_MANAGED.into())
+        }
+        Ok(proto::AuthorityMode::CoreNative) => {
+            Some(chv_controlplane_store::AUTHORITY_MODE_CORE_NATIVE.into())
+        }
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl InventoryService for InventoryServiceImplementation {
     async fn report_node_inventory(
@@ -152,6 +171,7 @@ impl InventoryService for InventoryServiceImplementation {
                 network_capabilities,
                 labels,
                 hypervisor_capabilities,
+                authority_mode: authority_mode_text(inventory.authority_mode),
                 reported_unix_ms: now,
             })
             .await?;

@@ -282,6 +282,7 @@ mod tests {
             vtep_ip: String::new(),
             wireguard_public_key: String::new(),
             underlay_mtu: 0,
+            authority_mode: Default::default(),
         };
         let versions = proto::ServiceVersions {
             node_id: "node-123".to_string(),

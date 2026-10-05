@@ -1,3 +1,4 @@
+use chv_config::AgentAuthorityMode;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -48,6 +49,12 @@ pub struct InventoryReporter {
     node_id: String,
     hostname: String,
     storage_base_dir: PathBuf,
+    /// #378: the agent's authority mode (a static per-process config
+    /// fact), reported on every inventory so the control plane can
+    /// reject volume snapshot-family requests at accept time. Defaults to
+    /// `Legacy` — the config default — so existing constructions are
+    /// unchanged.
+    authority_mode: AgentAuthorityMode,
 }
 
 impl InventoryReporter {
@@ -56,6 +63,7 @@ impl InventoryReporter {
             node_id: node_id.into(),
             hostname: hostname.into(),
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
+            authority_mode: AgentAuthorityMode::Legacy,
         }
     }
 
@@ -68,7 +76,15 @@ impl InventoryReporter {
             node_id: node_id.into(),
             hostname: hostname.into(),
             storage_base_dir: storage_base_dir.into(),
+            authority_mode: AgentAuthorityMode::Legacy,
         }
+    }
+
+    /// Set the reported authority mode from the agent's local config
+    /// (#378).
+    pub fn with_authority_mode(mut self, authority_mode: AgentAuthorityMode) -> Self {
+        self.authority_mode = authority_mode;
+        self
     }
 
     fn probe_kvm_available() -> bool {
@@ -116,6 +132,7 @@ impl InventoryReporter {
             vtep_ip: "".to_string(),
             wireguard_public_key: fabric.wireguard_public_key,
             underlay_mtu: fabric.underlay_mtu,
+            authority_mode: authority_mode_proto(self.authority_mode.clone()).into(),
         }
     }
 
@@ -128,6 +145,17 @@ impl InventoryReporter {
             cloud_hypervisor_version: "".to_string(),
             host_bundle_version: "".to_string(),
         }
+    }
+}
+
+/// Map the agent config's authority mode onto the inventory proto enum
+/// (#378). The control plane persists the reported mode on the node's
+/// inventory row and uses it for accept-time policy checks.
+fn authority_mode_proto(mode: AgentAuthorityMode) -> proto::AuthorityMode {
+    match mode {
+        AgentAuthorityMode::Legacy => proto::AuthorityMode::Legacy,
+        AgentAuthorityMode::CoreManaged => proto::AuthorityMode::CoreManaged,
+        AgentAuthorityMode::CoreNative => proto::AuthorityMode::CoreNative,
     }
 }
 
@@ -162,6 +190,39 @@ mod tests {
         let inventory = reporter.build_inventory();
         assert_eq!(inventory.node_id, "node-abc");
         assert_eq!(inventory.hostname, "host-1");
+    }
+
+    #[test]
+    fn inventory_reports_authority_mode_from_config() {
+        // #378: the agent reports its authority mode (a static per-process
+        // config fact) on every inventory so the CP can reject the volume
+        // snapshot family at accept time. Default construction reports
+        // Legacy — the config default — so pre-#378 call sites are
+        // unchanged.
+        assert_eq!(
+            InventoryReporter::new("n", "h")
+                .build_inventory()
+                .authority_mode,
+            proto::AuthorityMode::Legacy as i32
+        );
+        for (mode, expected) in [
+            (AgentAuthorityMode::Legacy, proto::AuthorityMode::Legacy),
+            (
+                AgentAuthorityMode::CoreManaged,
+                proto::AuthorityMode::CoreManaged,
+            ),
+            (
+                AgentAuthorityMode::CoreNative,
+                proto::AuthorityMode::CoreNative,
+            ),
+        ] {
+            let reporter = InventoryReporter::new("n", "h").with_authority_mode(mode.clone());
+            assert_eq!(
+                reporter.build_inventory().authority_mode,
+                expected as i32,
+                "config mode {mode:?} must be reported verbatim"
+            );
+        }
     }
 
     #[test]
