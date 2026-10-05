@@ -335,6 +335,66 @@ impl LifecycleServiceImplementation {
         })
     }
 
+    /// #378: accept-time rejection of the volume snapshot family
+    /// (snapshot / restore / delete-snapshot / clone) on core-managed
+    /// nodes. The agent's fail-closed dispatch (`Unimplemented`) remains
+    /// the enforcement boundary; this check is UX hardening so an
+    /// operator gets an immediate `InvalidArgument` (HTTP 400 through the
+    /// BFF's `map_ack`) instead of a 200-accepted operation that burns
+    /// ~70 s of dispatch retries against a node that will never execute
+    /// it. Must be called BEFORE any journaling: a rejection leaves no
+    /// operations row and no desired-state intent. Fails OPEN on unknown
+    /// mode (NULL / never reported / legacy / core-native) — a node whose
+    /// inventory has not landed keeps accepting exactly as before.
+    ///
+    /// #495 review: the node checked is the node the dispatch actually
+    /// uses. The orchestrator resolves the dispatch node from the VOLUMES
+    /// row — `(SELECT node_id FROM volumes WHERE volume_id =
+    /// operations.resource_id)` in the claim queries — never from the
+    /// request, so this resolves `volumes.node_id` for the volume the
+    /// request names; the request's own `node_id` field is advisory for
+    /// this check on the snapshot/restore/delete-snapshot surfaces (the
+    /// BFF always sends the volume's node anyway). Fails OPEN when the
+    /// volume's node is unknown (no `volumes` row yet, a NULL
+    /// `volumes.node_id` — the column is `ON DELETE SET NULL` — or an
+    /// unparseable stored value): the mode check is hardening only, the
+    /// agent-side enforcement is the backstop, and a missing volume row
+    /// must not change the pre-#378 accept-then-fail-later shape.
+    async fn ensure_volume_snapshot_family_supported(
+        &self,
+        volume_id: &ResourceId,
+        surface: &str,
+    ) -> Result<(), ControlPlaneServiceError> {
+        let volume_node = self
+            .desired_state_repo
+            .get_volume_summary(volume_id)
+            .await?
+            .and_then(|summary| summary.node_id)
+            .and_then(|node| NodeId::new(node).ok());
+        match volume_node {
+            Some(node_id) => self.ensure_node_not_core_managed(&node_id, surface).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The mode check itself, on an already-resolved node. Clone calls
+    /// this directly with its placement node (the source volume's node —
+    /// the node the clone journals, materializes the target on, and the
+    /// orchestrator therefore dispatches to).
+    async fn ensure_node_not_core_managed(
+        &self,
+        node_id: &NodeId,
+        surface: &str,
+    ) -> Result<(), ControlPlaneServiceError> {
+        let mode = self.node_repo.get_authority_mode(node_id).await?;
+        if mode.as_deref() == Some(chv_controlplane_store::AUTHORITY_MODE_CORE_MANAGED) {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "volume {surface} is not supported on core-managed nodes"
+            )));
+        }
+        Ok(())
+    }
+
     fn resource_id_from_node_id(node_id: &NodeId) -> Result<ResourceId, ControlPlaneServiceError> {
         ResourceId::new(node_id.as_str())
             .map_err(|e| ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e)))
@@ -926,6 +986,13 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
+        // #378: reject before journaling. #495 review: the helper checks
+        // the VOLUME's node (volumes.node_id — the node the orchestrator
+        // dispatches to), not the request's node_id, which is advisory
+        // here for direct-gRPC callers.
+        self.ensure_volume_snapshot_family_supported(&volume_id, "snapshot")
+            .await?;
+
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "SnapshotVolume",
@@ -964,6 +1031,11 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
+        // #378: reject before journaling (same volume-node resolution the
+        // dispatch uses — see snapshot_volume).
+        self.ensure_volume_snapshot_family_supported(&volume_id, "restore")
+            .await?;
+
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "RestoreVolume",
@@ -1001,6 +1073,11 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
+
+        // #378: reject before journaling (same volume-node resolution the
+        // dispatch uses — see snapshot_volume).
+        self.ensure_volume_snapshot_family_supported(&volume_id, "snapshot deletion")
+            .await?;
 
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(
@@ -1086,6 +1163,13 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ControlPlaneServiceError::InvalidArgument(format!("invalid source node id: {}", e))
             })?
             .unwrap_or_else(|| node_id.clone());
+
+        // #378: reject before journaling — checked against the PLACEMENT
+        // node (the source's node, the one the operation journals, the
+        // target materializes on, and the orchestrator dispatches to),
+        // not the raw request node_id.
+        self.ensure_node_not_core_managed(&placement_node_id, "clone")
+            .await?;
 
         let (operation_id, desired_generation) = self
             .create_operation_and_emit(

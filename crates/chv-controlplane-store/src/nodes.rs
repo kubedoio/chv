@@ -1,6 +1,13 @@
 use crate::{StoreError, StorePool};
 use chv_controlplane_types::domain::{Generation, NodeId, NodeState};
 
+/// `node_inventory.authority_mode` values (#378) — the agent config's
+/// kebab-case authority-mode spellings, persisted verbatim by inventory
+/// ingestion and compared by accept-time policy checks.
+pub const AUTHORITY_MODE_LEGACY: &str = "legacy";
+pub const AUTHORITY_MODE_CORE_MANAGED: &str = "core-managed";
+pub const AUTHORITY_MODE_CORE_NATIVE: &str = "core-native";
+
 const UPSERT_NODE_SQL: &str = r#"
 INSERT INTO nodes (
     node_id,
@@ -84,6 +91,7 @@ INSERT INTO node_inventory (
     network_capabilities,
     labels,
     hypervisor_capabilities,
+    authority_mode,
     last_reported_at,
     updated_at
 )
@@ -105,8 +113,9 @@ VALUES (
     $15,
     $16,
     $17,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $18 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $18 / 1000.0, 'unixepoch')
+    $18,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $19 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $19 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     architecture = EXCLUDED.architecture,
@@ -125,6 +134,11 @@ ON CONFLICT (node_id) DO UPDATE SET
     network_capabilities = EXCLUDED.network_capabilities,
     labels = EXCLUDED.labels,
     hypervisor_capabilities = EXCLUDED.hypervisor_capabilities,
+    -- COALESCE, like the version columns: an agent that reports no mode
+    -- (pre-#378 binaries, UNSPECIFIED) must not wipe a mode a previous
+    -- report established. A mode flip always reports a non-NULL value and
+    -- overwrites.
+    authority_mode = COALESCE(EXCLUDED.authority_mode, node_inventory.authority_mode),
     last_reported_at = EXCLUDED.last_reported_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -329,10 +343,26 @@ impl NodeRepository {
             .bind(&input.network_capabilities)
             .bind(&input.labels)
             .bind(&input.hypervisor_capabilities)
+            .bind(&input.authority_mode)
             .bind(input.reported_unix_ms)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// The node's last reported authority mode (#378): `None` when the
+    /// node has no inventory row or has never reported a mode. Accept-time
+    /// policy checks compare against
+    /// [`AUTHORITY_MODE_CORE_MANAGED`] and fail OPEN on every other
+    /// value — the agent's fail-closed dispatch remains the enforcement.
+    pub async fn get_authority_mode(&self, node_id: &NodeId) -> Result<Option<String>, StoreError> {
+        let mode = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT authority_mode FROM node_inventory WHERE node_id = ?",
+        )
+        .bind(node_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(mode.flatten())
     }
 
     pub async fn append_version(&self, input: &NodeVersionInput) -> Result<(), StoreError> {
@@ -471,6 +501,10 @@ pub struct NodeInventoryInput {
     pub network_capabilities: Option<serde_json::Value>,
     pub labels: Option<serde_json::Value>,
     pub hypervisor_capabilities: Option<serde_json::Value>,
+    /// #378: the node's authority mode, using the agent config's
+    /// kebab-case spellings ([`AUTHORITY_MODE_LEGACY`] and friends).
+    /// `None` = not reported (fail-open).
+    pub authority_mode: Option<String>,
     pub reported_unix_ms: i64,
 }
 
