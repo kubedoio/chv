@@ -41,3 +41,15 @@ jwt_secret = "<same-as-controlplane>"
 # the volume locator dir (storage_base_dir and the dirs the agent
 # passes as volume locators) and any image/seed dirs.
 stord_path_allowlist = ["/var/lib/chv/storage", "/var/lib/chv/agent"]
+
+# Stord respawn config fidelity (#385). Point this at the operator's
+# stord.toml and a supervisor respawn execs chv-stord with THAT file
+# (validated: its socket_path must match stord_socket above) instead of
+# generating a minimal config — runtime_dir, backend_type,
+# device_allowlist and [migration] then survive the respawn, and
+# stord.db stays where the operator put it. Omitted (default) keeps the
+# historical generated-config respawn; an unreadable/malformed file or
+# a socket mismatch falls back to it with a loud warning. The agent
+# user must be able to read the file (the standard install grants this
+# via the chv-stord group).
+stord_config_path = "/etc/chv/stord.toml"

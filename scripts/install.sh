@@ -1017,6 +1017,13 @@ jwt_secret = "${JWT_SECRET}"
 # respawns — mirrors stord.toml's path_allowlist below so a respawned
 # stord keeps the operator's posture instead of running allow-all.
 stord_path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/storage/lvm", "${CHV_DATA_DIR}/agent"]
+
+# #385: respawn config fidelity — when the agent's supervisor has to
+# respawn a dead stord, exec it with the operator's stord.toml below
+# (validated: same socket) instead of generating a lossy config, so
+# runtime_dir, backend_type, device_allowlist and [migration] survive
+# the respawn. The agent user reads it via the chv-stord group.
+stord_config_path = "${CHV_CONFIG_DIR}/stord.toml"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
