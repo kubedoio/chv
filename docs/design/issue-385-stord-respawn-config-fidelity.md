@@ -619,8 +619,12 @@ qual scenario's respawn-parity leg (m4.5-storage.md §4.2).
    to an m4.5 re-qualification (§9.7). Warn-on-fallback only if Option
    A's check rides along.
 2. **Readability is an install-time side effect.** The agent can read
-   `stord.toml` only because `install.sh` adds the agent user to the
-   `chv-stord` group (`install.sh:221`). A deployment that tightens
+   `stord.toml` only because the install surfaces add the agent user to
+   the `chv-stord` group (`install.sh:221`; the `.deb` postinst carries
+   the same grant via a parity follow-up to this issue — before it, the
+   shipped `/etc/chv/stord.toml` was 0644 root:root and a `.deb`
+   operator applying the documented `root:chv-stord 0640` hardening
+   made the file unreadable by the agent). A deployment that tightens
    group membership silently loses the feature (falls back + warns —
    safe, but surprising). The loose-file permission guard considered
    during investigation is deliberately deferred, not implemented (the

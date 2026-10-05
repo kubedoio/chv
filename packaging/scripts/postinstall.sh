@@ -111,6 +111,21 @@ if ! id -nG chv-stord | tr ' ' '\n' | grep -qx chv; then
     usermod -aG chv chv-stord
 fi
 
+# Add chv (the agent service user) to the chv-stord group so the agent can
+# read a hardened stord.toml (root:chv-stord 0640) for #385 respawn
+# pass-through — the same grant scripts/install.sh makes at install time.
+# Without it, a .deb operator applying the documented hardening makes
+# stord.toml unreadable by the agent and every respawn silently degrades
+# to the generated config. Idempotent: the guard skips an already-granted
+# membership on reinstall/upgrade. The grant applies at the agent's next
+# (re)start — systemd merges the user's NSS groups into the unit's
+# SupplementaryGroups — and respawns before that warn and fall back to
+# the generated config safely (postinst deliberately does not restart
+# services, matching the preremove upgrade contract).
+if ! id -nG chv | tr ' ' '\n' | grep -qx chv-stord; then
+    usermod -aG chv-stord chv
+fi
+
 # Reload systemd so new service files are recognized
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
