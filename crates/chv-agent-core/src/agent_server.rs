@@ -1378,6 +1378,134 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    /// #522 (DP2, PR 1 of the decomposition): the volume-delete
+    /// dispatch carrier's agent half — close → destroy → evict.
+    /// Dead-but-live with this PR: no producer journals a
+    /// `DeleteVolume` operation until the BFF route lands (PR 2).
+    ///
+    /// The sequence is the design's DP2/DP3 contract: the cached
+    /// stord handle (if any) is closed FIRST (stord's
+    /// `destroy_volume` refuses while a session is open — the agent
+    /// is the cooperative caller), then the backing store is
+    /// destroyed through stord at the DP4 CARRIER locator
+    /// (byte-identical to the create handler's shaping — the
+    /// relative `{volume_id}.img` for local, the
+    /// `/dev/mapper/{vg}-{vid}` dm-path token for LVM; NEVER the
+    /// attach path's stray bare-id file, which is #533's to fix), then
+    /// the cache entry is evicted and persisted. The destroy is
+    /// idempotent by stord's contract, so a redriven delete of an
+    /// already-gone volume re-acks.
+    async fn delete_volume(
+        &self,
+        req: Request<proto::DeleteVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        // #522 DP10 (the #378/#495 posture, mirroring create_volume):
+        // the destroy is a legacy-path stord side effect; on a
+        // core-managed node the single writer is Core. Fail closed
+        // exactly like the sibling legacy volume RPCs — the
+        // orchestrator's Unimplemented fast-fail takes the refused
+        // operation terminal without retry.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "delete_volume is unsupported in core-managed mode",
+            ));
+        }
+
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        // The volume id becomes a path component of the destroy
+        // locator (`{volume_id}.img` under stord's runtime dir for
+        // local, `/dev/mapper/{vg}-{vid}` for LVM): a crafted id
+        // (`../..`) is a REMOVAL traversal — worse than the write
+        // traversal the create handler guards. Reject anything that
+        // is not a single safe component at the node boundary.
+        if !chv_common::is_safe_id(&inner.volume_id) {
+            return Err(Status::invalid_argument(format!(
+                "'{}' is not a safe volume id (must be a single path component)",
+                inner.volume_id
+            )));
+        }
+        {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            // lock dropped here
+        }
+        // The class rides the dispatch (resolved in the CP's claim
+        // query like the attach arm's) so the DP4 locator can be
+        // shaped byte-identically to the create handler's; an empty
+        // class is the NULL-class discipline (local, never
+        // materialized).
+        let backend_class = if inner.backend_class.is_empty() {
+            "local"
+        } else {
+            inner.backend_class.as_str()
+        };
+        let locator = if backend_class == "lvm" {
+            chv_hypervisor_api::resources::lvm_locator(
+                self.stord_backend.volume_group(),
+                &inner.volume_id,
+            )
+        } else {
+            format!("{}.img", inner.volume_id)
+        };
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        // Close the cached handle first (cooperative half of stord's
+        // session refusal). A volume with no cached handle skips the
+        // close — stord's own session table is the authority, and an
+        // uncached-but-open session is stord's refusal to make, not
+        // ours to paper over. The handle is cloned and the cache lock
+        // dropped BEFORE the stord round-trip (review NIT — the create
+        // handler's scoping: never hold the NodeCache mutex across an
+        // await on another daemon, it serializes every cache-dependent
+        // request behind the RPC).
+        let cached_handle = {
+            let cache = self.cache.lock().await;
+            cache.volume_handles.get(&inner.volume_id).cloned()
+        };
+        if let Some(handle) = cached_handle {
+            stord
+                .close_volume(&inner.volume_id, &handle, Some(&meta.operation_id))
+                .await
+                .map_err(|e| Status::internal(format!("close_volume failed: {}", e)))?;
+        }
+
+        stord
+            .destroy_volume(
+                &inner.volume_id,
+                backend_class,
+                &locator,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("destroy_volume failed: {}", e)))?;
+
+        // Evict the cache entry (if any) and persist: a stale handle
+        // must never outlive the backing store it names.
+        let observed_generation = {
+            let mut cache = self.cache.lock().await;
+            cache.volume_handles.remove(&inner.volume_id);
+            self.persist_cache(&cache).await;
+            cache.observed_generation.clone()
+        };
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume deleted".to_string(),
+            }),
+        }))
+    }
+
     async fn start_vm(
         &self,
         req: Request<proto::StartVmRequest>,
@@ -3491,11 +3619,18 @@ mod tests {
     /// populating the class does NOT change the locator default).
     /// `open_options` records each call's options map at the same index
     /// (#513 PR 1: the create handler's sized open — `size_bytes` — is
-    /// pinned there).
+    /// pinned there). #522 PR 1 adds the delete-carrier pins:
+    /// `closes`/`destroys` record the `close_volume`/`destroy_volume`
+    /// calls, and `events` records the interleaved order of opens,
+    /// closes, and destroys so the close→destroy sequence of the
+    /// `delete_volume` handler can be pinned.
     #[derive(Clone, Default)]
     struct StordOpenLog {
         opens: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
         open_options: Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
+        closes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        destroys: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[derive(Default)]
@@ -3545,6 +3680,11 @@ mod tests {
                     .map(|b| b.locator.clone())
                     .unwrap_or_default(),
             ));
+            self.opens
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("open:{}", inner.volume_id));
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::OpenVolumeResponse {
                     result: Some(chv_stord_api::chv_stord_api::Result {
@@ -3583,9 +3723,57 @@ mod tests {
 
         async fn close_volume(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
+            req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            // #522 PR 1: record the close so the delete-carrier tests
+            // can pin the close→destroy ordering and the handle the
+            // agent threaded (the cached handle, not a fabricated one).
+            let inner = req.into_inner();
+            self.opens
+                .closes
+                .lock()
+                .unwrap()
+                .push((inner.volume_id.clone(), inner.attachment_handle.clone()));
+            self.opens
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", inner.volume_id));
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn destroy_volume(
+            &self,
+            req: Request<chv_stord_api::chv_stord_api::DestroyVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            // #522 PR 1: record the destroy so the delete-carrier tests
+            // can pin the DP4 carrier locator and class the agent
+            // threaded, and the close→destroy ordering.
+            let inner = req.into_inner();
+            let (class, locator) = inner
+                .backend
+                .as_ref()
+                .map(|b| (b.backend_class.clone(), b.locator.clone()))
+                .unwrap_or_default();
+            self.opens.destroys.lock().unwrap().push((
+                inner.volume_id.clone(),
+                class.clone(),
+                locator.clone(),
+            ));
+            self.opens
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("destroy:{}", inner.volume_id));
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
 
         async fn get_volume_health(
@@ -3718,6 +3906,16 @@ mod tests {
                 error_code: "".to_string(),
                 human_summary: "".to_string(),
             }))
+        }
+
+        // #522 PR 1: not driven by the cleanup tests (VM delete stops
+        // at close, by design — the reclaim primitive is the
+        // delete-volume carrier's, not the VM-delete path's).
+        async fn destroy_volume(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DestroyVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
         }
 
         async fn get_volume_health(
@@ -4631,6 +4829,147 @@ mod tests {
         );
     }
 
+    fn delete_volume_request(volume_id: &str, backend_class: &str) -> proto::DeleteVolumeRequest {
+        proto::DeleteVolumeRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            volume_id: volume_id.to_string(),
+            backend_class: backend_class.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_volume_closes_destroys_and_evicts() {
+        // #522 PR 1 pin (DP2/DP3/DP4): the delete handler's contract
+        // sequence is close → destroy → evict. The cached handle is
+        // closed FIRST (stord's destroy refuses while a session is
+        // open — the agent is the cooperative caller); the destroy
+        // carries the DP4 CARRIER locator byte-identical to the create
+        // handler's shaping (the relative `{volume_id}.img` for local,
+        // the `/dev/mapper/{vg}-{vid}` dm-path token for LVM — a
+        // revert to the attach path's bare-id default must fail this
+        // test, the #379 PR 1 red/green discipline); the cache entry
+        // is evicted and the ack carries the observed generation.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        // Seed cached handles exactly the create handler would have
+        // (the A10 discipline), then delete both volumes.
+        {
+            let mut cache = server.cache.lock().await;
+            cache
+                .volume_handles
+                .insert("vol-del-lvm".to_string(), "handle-lvm".to_string());
+            cache
+                .volume_handles
+                .insert("vol-del-bare".to_string(), "handle-bare".to_string());
+        }
+        for (vid, class) in [("vol-del-lvm", "lvm"), ("vol-del-bare", "")] {
+            let resp = proto::lifecycle_service_server::LifecycleService::delete_volume(
+                &server,
+                Request::new(delete_volume_request(vid, class)),
+            )
+            .await;
+            assert!(
+                resp.is_ok(),
+                "delete of {vid} must succeed: {:?}",
+                resp.err()
+            );
+        }
+
+        // The interleaved order: every close precedes its destroy.
+        assert_eq!(
+            opens.events.lock().unwrap().as_slice(),
+            [
+                "close:vol-del-lvm".to_string(),
+                "destroy:vol-del-lvm".to_string(),
+                "close:vol-del-bare".to_string(),
+                "destroy:vol-del-bare".to_string(),
+            ],
+            "the handler must close the cached handle before destroying"
+        );
+        // The closes thread the CACHED handles (not fabricated ones).
+        assert_eq!(
+            opens.closes.lock().unwrap().as_slice(),
+            [
+                ("vol-del-lvm".to_string(), "handle-lvm".to_string()),
+                ("vol-del-bare".to_string(), "handle-bare".to_string()),
+            ]
+        );
+        // The destroys carry the DP4 carrier locators: the LVM-class
+        // delete the dm-path token (default VG), the NULL-class delete
+        // the relative `{volume_id}.img` — never the attach path's
+        // bare `{volume_id}` (#533).
+        assert_eq!(
+            opens.destroys.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-del-lvm".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-del-lvm".to_string(),
+                ),
+                (
+                    "vol-del-bare".to_string(),
+                    "local".to_string(),
+                    "vol-del-bare.img".to_string(),
+                ),
+            ],
+            "the destroy locator must be byte-identical to the create carrier's"
+        );
+        // The cache entries are evicted (a stale handle must never
+        // outlive the backing store it names).
+        let cache = server.cache.lock().await;
+        assert!(!cache.volume_handles.contains_key("vol-del-lvm"));
+        assert!(!cache.volume_handles.contains_key("vol-del-bare"));
+    }
+
+    #[tokio::test]
+    async fn delete_volume_without_a_cached_handle_skips_the_close() {
+        // A volume whose open's ack was lost (or whose create dispatch
+        // never landed) has no cached handle: the close is skipped —
+        // stord's own session table is the authority — and the destroy
+        // still runs (idempotent by contract, so a redriven delete of
+        // an already-gone volume re-acks).
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_volume(
+            &server,
+            Request::new(delete_volume_request("vol-uncached", "")),
+        )
+        .await;
+        assert!(
+            resp.is_ok(),
+            "an uncached delete must succeed: {:?}",
+            resp.err()
+        );
+        assert_eq!(
+            opens.events.lock().unwrap().as_slice(),
+            ["destroy:vol-uncached".to_string()],
+            "no close may happen without a cached handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_volume_rejects_unsafe_volume_ids() {
+        // The volume id becomes a path component of the destroy
+        // locator; a traversal id is a REMOVAL traversal — rejected at
+        // the node boundary before any stord RPC.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_volume(
+            &server,
+            Request::new(delete_volume_request("../../escape", "")),
+        )
+        .await;
+        assert_eq!(
+            resp.expect_err("traversal id must be rejected").code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(
+            opens.events.lock().unwrap().is_empty(),
+            "no stord RPC may happen for an unsafe volume id"
+        );
+    }
+
     #[tokio::test]
     async fn create_volume_parses_the_cp_spec_json_shape() {
         // #513 PR 1 contract pair (agent half; the CP half is
@@ -5280,10 +5619,21 @@ mod tests {
             Request::new(proto::CreateVolumeRequest::default()),
         )
         .await;
+        // #522 DP10: the volume-delete carrier joins the same set —
+        // the destroy is a legacy-path stord side effect, and on a
+        // core-managed node the single writer is Core (the refusal
+        // takes the operation terminal via the orchestrator's
+        // Unimplemented fast-fail, no retry).
+        let delete_vol = proto::lifecycle_service_server::LifecycleService::delete_volume(
+            &server,
+            Request::new(proto::DeleteVolumeRequest::default()),
+        )
+        .await;
         for (name, result) in [
             ("resize_volume", resize),
             ("snapshot_volume", snap_vol),
             ("create_volume", create_vol),
+            ("delete_volume", delete_vol),
         ] {
             assert_eq!(
                 result.unwrap_err().code(),

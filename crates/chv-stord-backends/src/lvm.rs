@@ -422,6 +422,54 @@ impl StorageBackend for LVMBackend {
         Ok(())
     }
 
+    /// #522 (DP3/DP4): destroy the LV if it exists, `lvremove -y`
+    /// (command shaping mirrors `delete_snapshot` above). Idempotent
+    /// by contract: an absent LV is `Ok(())` — a replayed delete never
+    /// manufactures a failure on the already-reclaimed extents. The
+    /// lvremove targets `{vg}/{volume_id}` (the create carrier's LV,
+    /// provisioned by the sized open of `create_receiving_volume`),
+    /// NOT the `-snap-` suffixed snapshot LVs and NOT any
+    /// `/dev/mapper` token string parsing — the dm-path locator the
+    /// agent threads is allowlist input at the stord boundary; this
+    /// backend resolves the LV from its own configured VG and the
+    /// (sanitized) volume id.
+    async fn destroy(&self, volume_id: &str, locator: &BackendLocator) -> Result<(), ChvError> {
+        if locator.backend_class != "lvm" {
+            return Err(ChvError::BackendUnavailable {
+                backend: locator.backend_class.clone(),
+                reason: "LVM backend only handles lvm class".to_string(),
+            });
+        }
+        // sanitize_id runs inside volume_path: a traversal id must be
+        // rejected on a REMOVAL path more than anywhere else.
+        let path = self.volume_path(volume_id)?;
+        if !path.exists() {
+            // Idempotent (DP3): no LV, nothing to reclaim.
+            info!(
+                volume_id,
+                path = %path.display(),
+                "logical volume already absent; destroy is a no-op"
+            );
+            return Ok(());
+        }
+        let out = Command::new("lvremove")
+            .args(["-y", &format!("{}/{}", self.vg_name, volume_id)])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "lvremove".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("lvremove failed: {}", String::from_utf8_lossy(&out.stderr)),
+            });
+        }
+        info!(volume_id, path = %path.display(), "destroyed LVM logical volume");
+        Ok(())
+    }
+
     async fn set_device_policy(
         &self,
         volume_id: &str,
@@ -1070,5 +1118,63 @@ mod tests {
         let backend = LVMBackend::new("vg0".to_string()).expect("valid vg");
         let path = backend.volume_path("vol-1").expect("valid volume id");
         assert_eq!(path.to_string_lossy(), "/dev/vg0/vol-1");
+    }
+
+    // ============================================================
+    // #522 PR 1 (DP3) — the destroy primitive, LVM semantics
+    // ============================================================
+
+    fn lvm_carrier_locator() -> BackendLocator {
+        // The create carrier's DP4 locator shape: the dm-path token
+        // the agent threads (the LV itself resolves from the backend's
+        // own VG + the sanitized volume id, not from this string).
+        BackendLocator {
+            backend_class: "lvm".to_string(),
+            locator: "/dev/mapper/vg0-vol-del".to_string(),
+            options: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn lvm_backend_destroy_is_idempotent_on_an_absent_lv() {
+        // #522 DP3: an absent LV is Ok(()) — the idempotency contract.
+        // This also proves the exists-gate: `lvremove` against a
+        // missing LV fails loudly, so a passing absent-case means no
+        // command was attempted (the command-shaping leg of the
+        // contract is pinned root-gated, in lvm_real.rs).
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        backend
+            .destroy("vol-absent", &lvm_carrier_locator())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lvm_backend_destroy_rejects_unsafe_volume_ids() {
+        // The volume id becomes the LV name in the `lvremove` argument
+        // (`{vg}/{volume_id}`); a traversal id is rejected by
+        // sanitize_id BEFORE any command runs — the removal path's
+        // traversal guard is more load-bearing than the create one.
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let res = backend
+            .destroy("../../escape", &lvm_carrier_locator())
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn lvm_backend_destroy_rejects_wrong_class() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let res = backend
+            .destroy(
+                "vol-1",
+                &BackendLocator {
+                    backend_class: "local".to_string(),
+                    locator: "vol-1.img".to_string(),
+                    options: Default::default(),
+                },
+            )
+            .await;
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 }

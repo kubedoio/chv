@@ -8,10 +8,11 @@ use chv_nwd_api::chv_nwd_api::{
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
-    DeleteSnapshotRequest, DetachVolumeFromVmRequest, DevicePolicy, GetDiskMigrationStatusRequest,
-    ListVolumeSessionsRequest, OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest,
-    ResizeVolumeRequest, RestoreSnapshotRequest, ResumeDiskMigrationRequest,
-    SetDevicePolicyRequest, TriggerDiskMigrationRequest, VolumeHealthRequest,
+    DeleteSnapshotRequest, DestroyVolumeRequest, DetachVolumeFromVmRequest, DevicePolicy,
+    GetDiskMigrationStatusRequest, ListVolumeSessionsRequest, OpenVolumeRequest,
+    PrepareCloneRequest, PrepareSnapshotRequest, ResizeVolumeRequest, RestoreSnapshotRequest,
+    ResumeDiskMigrationRequest, SetDevicePolicyRequest, TriggerDiskMigrationRequest,
+    VolumeHealthRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -244,6 +245,64 @@ impl StordClient {
                 backend: "stord".to_string(),
                 reason: e.to_string(),
             })?;
+        Ok(())
+    }
+
+    /// #522 PR 1 (DP3): dispatch the stord destroy primitive. The
+    /// locator is the CREATE carrier's (DP4 — `{volume_id}.img` /
+    /// `/dev/mapper/{vg}-{vid}`), and stord refuses while a session is
+    /// open, so the cooperative caller closes first (the agent's
+    /// `delete_volume` node-RPC handler does exactly that). Idempotent
+    /// by stord's contract: an already-gone backing store is a
+    /// success, never an error.
+    pub async fn destroy_volume(
+        &mut self,
+        volume_id: &str,
+        backend_class: &str,
+        locator: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = DestroyVolumeRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            backend: Some(chv_stord_api::chv_stord_api::BackendLocator {
+                backend_class: backend_class.to_string(),
+                locator: locator.to_string(),
+                options: Default::default(),
+            }),
+        };
+        let span = tracing::info_span!("destroy_volume", operation_id = operation_id.unwrap_or(""));
+        let resp = self
+            .inner
+            .destroy_volume(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        // The stord rpc returns the bare `Result` message (not a
+        // wrapper): a non-ok status is the destroy's refusal (session
+        // open, unimplemented class, allowlist) — surface it loudly.
+        if !resp.status.eq_ignore_ascii_case("ok")
+            && !resp.status.eq_ignore_ascii_case("0")
+            && !resp.status.is_empty()
+        {
+            return Err(ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: format!(
+                    "stord destroy_volume failed (code {}): {}",
+                    resp.error_code, resp.human_summary
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -1386,6 +1445,14 @@ mod tests {
         async fn close_volume(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        // #522 PR 1: the daemon-client suite's mock does not drive the
+        // destroy primitive (its coverage is the connect/open paths).
+        async fn destroy_volume(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DestroyVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }

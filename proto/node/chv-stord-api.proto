@@ -104,6 +104,29 @@ message DeleteSnapshotRequest {
   string snapshot_name = 3;
 }
 
+// #522 (DP3, PR 1 of the decomposition): the physical reclaim primitive
+// — the first data-destroying RPC in the stord API. Destroys the
+// volume's backing store at the CARRIER locator (the create/open
+// carrier's locator, DP4: `{volume_id}.img` relative under stord's
+// runtime dir for local, the `/dev/mapper/{vg}-{vid}` dm-path token
+// for LVM — never the attach path's stray bare-id file, tracked in
+// #533). IDEMPOTENT BY CONTRACT: destroying a volume whose backing
+// store is already gone is a SUCCESS (`ok`), never an error — PR 2's
+// accept-time story (crash-redrive, operator retry, a create dispatch
+// that never landed) depends on a replayed delete not failing on the
+// absent artifact. The handler REFUSES while any open session exists
+// for the volume (close first — the agent's DeleteVolume node RPC is
+// the cooperative close-then-destroy caller). Per-backend semantics:
+// local unlinks if present; LVM `lvremove -y` if the LV exists; the
+// iscsi/ceph classes refuse loudly (they are unqualified even at
+// open, #379 §8). Dead-but-live with this PR: no producer calls it
+// until the BFF route lands (PR 2).
+message DestroyVolumeRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  BackendLocator backend = 3;
+}
+
 message SetDevicePolicyRequest {
   Meta meta = 1;
   string volume_id = 2;
@@ -191,6 +214,7 @@ service StorageService {
   rpc PrepareClone(PrepareCloneRequest) returns (Result);
   rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Result);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Result);
+  rpc DestroyVolume(DestroyVolumeRequest) returns (Result);
   rpc SetDevicePolicy(SetDevicePolicyRequest) returns (Result);
   rpc GetVolumeHealth(VolumeHealthRequest) returns (VolumeHealthResponse);
   rpc ListVolumeSessions(ListVolumeSessionsRequest) returns (ListVolumeSessionsResponse);

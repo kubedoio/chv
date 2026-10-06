@@ -1027,6 +1027,28 @@ impl Orchestrator {
                     )
                     .await
             }
+            // #522 PR 1 (DP2): the volume-delete dispatch arm —
+            // dead-but-live: no producer journals a `DeleteVolume`
+            // operation until the BFF route lands (PR 2), and the arm
+            // MUST precede it (an unknown operation_type is actively
+            // Failed below — the accepted-then-failed UX #378 was
+            // filed to kill). Simpler than create's arm: no capacity
+            // refusal, no placement check (a delete reclaims, it does
+            // not place); the class resolves in the claim query (the
+            // attach arm's discipline) so the agent can shape the DP4
+            // carrier locator; NULL emits the empty string.
+            "DeleteVolume" => {
+                client
+                    .delete_volume(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                        row.volume_storage_class.as_deref(),
+                    )
+                    .await
+            }
             "StartNetwork" => {
                 client
                     .start_network(
@@ -2636,6 +2658,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-att", agent.clone());
@@ -2739,6 +2763,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-cr", agent.clone());
@@ -2835,6 +2861,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-cr2", agent.clone());
@@ -2910,6 +2938,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::unimplemented(
                 "create_volume is unsupported in core-managed mode",
             ),
@@ -2954,6 +2984,201 @@ mod tests {
             "exactly one agent dispatch across all ticks"
         );
         let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-cr-cm").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// #522 PR 1 (DP2): the `DeleteVolume` dispatch arm resolves the
+    /// volume's class in the claim query (the attach arm's discipline)
+    /// and dispatches the carrier RPC — a class-carrying volume's
+    /// delete threads the class so the agent can shape the DP4 carrier
+    /// locator; a NULL-class volume's delete threads the EMPTY string
+    /// (never a materialized `"local"`). Dead-but-live: no producer
+    /// journals a `DeleteVolume` operation until the BFF route lands
+    /// (PR 2) — the rows here are seeded directly, exactly as the
+    /// create arm's test does.
+    #[tokio::test]
+    async fn delete_volume_dispatch_carries_volume_and_class() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-dl").await;
+        // A delete reclaims storage; it does not place any — the
+        // schedulability gate is deliberately NOT joined (the
+        // create arm's placement discipline does not apply).
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+             VALUES ('vol-dl-lvm', 'node-dl', 'Vol vol-dl-lvm', 1073741824, 'lvm'), \
+                     ('vol-dl-bare', 'node-dl', 'Vol vol-dl-bare', 536870912, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed volumes");
+        for (op_id, volume_id) in [("op-dl-cls", "vol-dl-lvm"), ("op-dl-bare", "vol-dl-bare")] {
+            sqlx::query(
+                "INSERT INTO operations \
+                 (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+                  desired_generation, requested_at, updated_at) \
+                 VALUES (?, ?, 'Volume', ?, 'DeleteVolume', 'Accepted', 1, \
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(op_id)
+            .bind(format!("idem-{op_id}"))
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed delete-volume op");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-dl", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let calls = agent.delete_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "both delete ops dispatched: {calls:?}");
+        let call_for = |volume_id: &str| {
+            calls
+                .iter()
+                .find(|c| c.volume_id == volume_id)
+                .unwrap_or_else(|| panic!("no delete dispatch for {volume_id}: {calls:?}"))
+        };
+        // The dispatch targets the volume's node and resource id, and
+        // threads the class through the #511 wire-key discipline (NULL
+        // emits the empty string, never "local").
+        assert_eq!(call_for("vol-dl-lvm").node_id, "node-dl");
+        assert_eq!(call_for("vol-dl-lvm").volume_id, "vol-dl-lvm");
+        assert_eq!(call_for("vol-dl-lvm").backend_class, "lvm");
+        assert_eq!(
+            call_for("vol-dl-bare").backend_class,
+            "",
+            "a NULL-class volume's delete must carry the empty class — no materialized \"local\""
+        );
+
+        // Both ops converged on the OK ack.
+        for op_id in ["op-dl-cls", "op-dl-bare"] {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                    .bind(op_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("op status");
+            assert_eq!(status, "Succeeded", "{op_id} must converge");
+        }
+    }
+
+    /// #522 DP10 (the CP half of the core-managed posture): an agent
+    /// refusing the delete with gRPC `Unimplemented` (the fail-closed
+    /// core-managed gate) takes the operation terminal on the FIRST
+    /// dispatch — `Failed`/`UNSUPPORTED_BY_AGENT` carrying the agent's
+    /// refusal text, zero retries — the #378 §7 fast-fail machinery,
+    /// pinned on the new arm (the create arm's twin).
+    #[tokio::test]
+    async fn delete_volume_dispatch_refusal_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-dl2").await;
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes) \
+             VALUES ('vol-dl-cm', 'node-dl2', 'Vol vol-dl-cm', 1024)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed volume");
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, requested_at, updated_at) \
+             VALUES ('op-dl-cm', 'idem-op-dl-cm', 'Volume', 'vol-dl-cm', 'DeleteVolume', \
+              'Accepted', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed delete op");
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::unimplemented(
+                "delete_volume is unsupported in core-managed mode",
+            ),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-dl2", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-dl-cm").await;
+        assert_eq!(
+            status, "Failed",
+            "Unimplemented is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delete_volume is unsupported in core-managed mode"),
+            "the agent's refusal text must ride the error message: {error_message:?}"
+        );
+        assert_eq!(retry_count, 0, "no retry may be scheduled");
+        assert_eq!(next_retry_at, None, "mark_for_retry must never run");
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+
+        // Further ticks must not resurrect the terminal row or re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        assert_eq!(
+            agent.delete_calls.lock().unwrap().len(),
+            1,
+            "exactly one agent dispatch across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-dl-cm").await;
         assert_eq!(status, "Failed", "the terminal row stays terminal");
         assert_eq!(retry_count, 0);
         assert_eq!(next_retry_at, None);
@@ -3645,6 +3870,12 @@ mod tests {
         /// refusal (the core-managed posture).
         create_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::CreateVolumeRequest>>>,
         create_status: tonic::Status,
+        /// #522 PR 1: every DeleteVolume request, answered with
+        /// `delete_status` (OK by default) so tests can pin the
+        /// volume_id/class the CP threaded — and the terminal
+        /// fast-fail on a refusal (the core-managed posture).
+        delete_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::DeleteVolumeRequest>>>,
+        delete_status: tonic::Status,
     }
 
     #[tonic::async_trait]
@@ -3718,6 +3949,31 @@ mod tests {
             _request: tonic::Request<proto::DeleteVmRequest>,
         ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn delete_volume(
+            &self,
+            request: tonic::Request<proto::DeleteVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            let inner = request.into_inner();
+            let op_id = inner
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.delete_calls.lock().unwrap().push(inner);
+            if self.delete_status.code() != tonic::Code::Ok {
+                return Err(self.delete_status.clone());
+            }
+            Ok(tonic::Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: op_id,
+                    status: "ok".to_string(),
+                    node_observed_generation: "1".to_string(),
+                    error_code: "".to_string(),
+                    human_summary: "volume deleted".to_string(),
+                }),
+            }))
         }
 
         async fn resize_vm(
@@ -4076,6 +4332,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
@@ -4169,6 +4427,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
@@ -4254,6 +4514,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
@@ -4505,6 +4767,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
@@ -4607,6 +4871,8 @@ mod tests {
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());

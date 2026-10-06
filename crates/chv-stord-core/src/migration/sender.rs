@@ -962,6 +962,18 @@ mod tests {
             Ok(())
         }
 
+        // #522 DP3: the sender tests never destroy; state the refusal
+        // so the mock stays an honest trait implementation.
+        async fn destroy(
+            &self,
+            _volume_id: &str,
+            _locator: &BackendLocator,
+        ) -> Result<(), ChvError> {
+            Err(ChvError::Unimplemented {
+                reason: "destroy is not needed for sender tests".to_string(),
+            })
+        }
+
         async fn set_device_policy(
             &self,
             _volume_id: &str,

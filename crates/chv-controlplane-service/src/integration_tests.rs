@@ -1533,6 +1533,15 @@ mod fabric_dispatch {
 
     #[tonic::async_trait]
     impl proto::lifecycle_service_server::LifecycleService for MockFabricAgent {
+        // #522 PR 1: the fabric-agent mock does not drive the volume
+        // delete carrier (its coverage is the overlay fan-out).
+        async fn delete_volume(
+            &self,
+            _request: tonic::Request<proto::DeleteVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
         async fn update_overlay(
             &self,
             request: tonic::Request<proto::UpdateOverlayRequest>,

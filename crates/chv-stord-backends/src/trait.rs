@@ -128,6 +128,34 @@ pub trait StorageBackend: Send + Sync + 'static {
         snapshot_name: &str,
     ) -> Result<(), ChvError>;
 
+    /// #522 (DP3): physically destroy a volume's backing store.
+    ///
+    /// The first data-destroying primitive in the backend trait — the
+    /// reclaim half of the volume-delete design. Two contract rules:
+    ///
+    /// - **Idempotent by contract:** destroying a volume whose backing
+    ///   store is already gone is `Ok(())`, never an error. Crash-redrive,
+    ///   operator retry, and a create dispatch that never landed must all
+    ///   be able to replay a delete without manufacturing a failure on
+    ///   the absent artifact (PR 2's accept-time story depends on it).
+    /// - **Locator discipline (DP4):** the `locator` is the CREATE
+    ///   carrier's (`{volume_id}.img` relative for local, the
+    ///   `/dev/mapper/{vg}-{vid}` dm-path token for LVM) — the destroy
+    ///   must target exactly what create provisioned. The attach path's
+    ///   stray bare-id file is deliberately NOT chased (#533).
+    ///
+    /// Per-backend semantics: local unlinks if present (absent = Ok);
+    /// LVM runs `lvremove -y` if the LV exists (absent = Ok); iscsi and
+    /// ceph refuse loudly with `InvalidArgument` — those classes are
+    /// unqualified even at open (#379 §8), so a destroy that silently
+    /// no-opped would tombstone the row and reclaim nothing (the exact
+    /// silent-leak failure class this primitive exists to kill).
+    ///
+    /// Sessions are the stord handler's guard, not the backend's: the
+    /// caller (stord's `destroy_volume` handler) refuses while an open
+    /// session exists for the volume.
+    async fn destroy(&self, volume_id: &str, locator: &BackendLocator) -> Result<(), ChvError>;
+
     async fn set_device_policy(
         &self,
         volume_id: &str,
@@ -294,6 +322,10 @@ impl StorageBackend for Box<dyn StorageBackend> {
         (**self)
             .delete_snapshot(volume_id, handle, snapshot_name)
             .await
+    }
+
+    async fn destroy(&self, volume_id: &str, locator: &BackendLocator) -> Result<(), ChvError> {
+        (**self).destroy(volume_id, locator).await
     }
 
     async fn set_device_policy(
