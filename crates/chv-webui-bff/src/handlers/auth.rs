@@ -114,8 +114,10 @@ struct UserRow {
 /// - `HttpOnly` — script-immune; the UI cannot read it.
 /// - `Path=/` — sent for the whole BFF surface.
 /// - `SameSite=Strict` — the cookie never rides cross-site requests,
-///   which (together with the csrf_middleware's application/json
-///   requirement for non-GET) is the CSRF posture for this staged flow.
+///   which (together with the csrf_middleware's un-forgeable-request-shape
+///   requirement for non-GET — `application/json`, or a non-empty
+///   `x-csrf-token` header on multipart routes, #496) is the CSRF
+///   posture for this staged flow.
 /// - `Max-Age=<token ttl>` — the cookie dies with the JWT.
 /// - `Secure` — controlled by the `CHV_COOKIE_SECURE` env var (default
 ///   off); enable it when the BFF sits behind TLS.

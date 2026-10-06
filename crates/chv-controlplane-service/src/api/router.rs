@@ -49,8 +49,10 @@ pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceM
     // router (not the BFF's /v1 surface) for the stage-1 UI, they accept
     // the `chv_session` session cookie as a credential — so they get the
     // same CSRF middleware the BFF surface runs: non-GET requests must
-    // carry `Content-Type: application/json`, which cross-site HTML forms
-    // cannot send (review finding: these routes previously had no CSRF
+    // carry an un-forgeable request shape — `Content-Type:
+    // application/json`, or (multipart routes, #496) a non-empty
+    // `x-csrf-token` header — neither of which cross-site HTML forms
+    // can produce (review finding: these routes previously had no CSRF
     // protection at all).
     let legacy_backup_routes = Router::new()
         .route(

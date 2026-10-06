@@ -24,14 +24,18 @@
 //!   not become public);
 //! - an admin can still mutate any volume (admin path unchanged).
 //!
-//! NOTE on the import test: `POST /v1/vms/import` is multipart, but the
-//! global CSRF middleware rejects every non-JSON content type
-//! (`csrf_middleware.rs`: "Content-Type must be application/json"), so the
-//! route currently 415s before the handler runs. The ownership behavior
-//! under test lives in the handler, so the import test invokes
-//! `imports::import_vm` directly with a parsed `Multipart` — the authz
-//! consequence is still asserted through the real router (the mutate call
-//! below goes through `require_volume_owner`).
+//! NOTE on the import test: `POST /v1/vms/import` is multipart, and the
+//! global CSRF middleware only admits `application/json` plus
+//! `multipart/form-data` with a non-empty `x-csrf-token` header (#496;
+//! `csrf_middleware.rs`). The router-driven path — multipart POST
+//! through `bff_router`, CSRF-enforced — is pinned end-to-end by
+//! `tests/csrf_multipart_import.rs`. This test keeps the direct
+//! `imports::import_vm` invocation deliberately: what is under test
+//! here is the handler's ownership journaling, and constructing the
+//! `Multipart` + `BearerToken` by hand states those preconditions
+//! without coupling the ownership assertions to the CSRF-layer harness
+//! (the authz consequence is still asserted through the real router —
+//! the mutate call below goes through `require_volume_owner`).
 
 use std::sync::{Arc, Mutex};
 

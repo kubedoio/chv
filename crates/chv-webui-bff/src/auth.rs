@@ -273,11 +273,13 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
         // - An invalid cookie JWT is a hard 401 — we never silently fall
         //   back to an anonymous request.
         // - Cookie auth is NOT restricted to non-mutating methods: the
-        //   csrf_middleware already requires `application/json` content-type
-        //   for every non-GET (cross-site HTML forms cannot send that
-        //   without a CORS preflight) and SameSite=Strict blocks the cookie
-        //   from being sent on cross-site requests at all. That reasoning
-        //   is the documented CSRF posture for this staged flow.
+        //   csrf_middleware requires an un-forgeable request shape for
+        //   every non-GET — `application/json` content-type or (multipart
+        //   routes, #496) a non-empty `x-csrf-token` header, neither of
+        //   which a cross-site HTML form can produce without a CORS
+        //   preflight — and SameSite=Strict blocks the cookie from being
+        //   sent on cross-site requests at all. That reasoning is the
+        //   documented CSRF posture for this staged flow.
         let auth = match auth_header {
             Some(header) => header,
             None => {
