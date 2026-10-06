@@ -3785,9 +3785,23 @@ mod tests {
 
         async fn detach_volume_from_vm(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::DetachVolumeFromVmRequest>,
+            req: Request<chv_stord_api::chv_stord_api::DetachVolumeFromVmRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            // #533: ok (not unimplemented) so the attach→detach→delete
+            // lifecycle test can drive the detach between the open and
+            // the destroy — recorded in the event log to pin the
+            // interleaving.
+            let inner = req.into_inner();
+            self.opens
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("detach:{}", inner.volume_id));
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
 
         async fn resize_volume(
@@ -4633,6 +4647,53 @@ mod tests {
             ],
             "the NULL-class empty-object payload must open with the local defaults, not error"
         );
+
+        // #533 (the #513 design's DP2 locator guard): the CP producer's
+        // exact bytes for a STANDALONE volume (`volume_kind = 'data'`,
+        // NULL class) are `{"locator":"{volume_id}.img"}` — the create
+        // carrier's relative locator. The A4 parser must thread it to
+        // the stord open so the attach lands on the file the #513
+        // create carrier minted, NOT a create-on-open second file at
+        // the bare-id default (`vol-att-std`) — the stray the #522
+        // delete's DP4 destroy deliberately never chases. Red/green:
+        // reverting the producer (or the parser's explicit-locator arm)
+        // fails this leg with the bare `vol-att-std` locator.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(attach("vol-att-std", br#"{"locator":"vol-att-std.img"}"#)),
+        )
+        .await;
+        assert!(
+            resp.is_ok(),
+            "the CP producer's standalone bytes must parse and open at the carrier locator: {:?}",
+            resp.err()
+        );
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-att-cls".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-att-cls".to_string(),
+                ),
+                (
+                    "vol-att-bare".to_string(),
+                    "local".to_string(),
+                    "vol-att-bare".to_string(),
+                ),
+                (
+                    "vol-att-null".to_string(),
+                    "local".to_string(),
+                    "vol-att-null".to_string(),
+                ),
+                (
+                    "vol-att-std".to_string(),
+                    "local".to_string(),
+                    "vol-att-std.img".to_string(),
+                ),
+            ],
+            "a standalone volume's attach must open at the create carrier's `{{volume_id}}.img` locator, never the bare-id default"
+        );
     }
 
     /// Shared harness for the #513 create-volume handler tests: an
@@ -4920,6 +4981,126 @@ mod tests {
         let cache = server.cache.lock().await;
         assert!(!cache.volume_handles.contains_key("vol-del-lvm"));
         assert!(!cache.volume_handles.contains_key("vol-del-bare"));
+    }
+
+    /// #533 end-to-end (the #522 DP4 interaction): create → attach →
+    /// detach → delete of ONE standalone volume, asserting every open
+    /// and the destroy name the SAME carrier locator — the relative
+    /// `{volume_id}.img`. The attach's spec_json is the CP producer's
+    /// exact standalone bytes (`{"locator":"{volume_id}.img"}`), so the
+    /// attach open lands on the file the create carrier minted; the
+    /// #522 delete's destroy then reclaims exactly that file — no
+    /// bare-id second file is ever minted at any step (the pre-#533
+    /// attach opened at the bare `vol-e2e`, double-minting and leaving
+    /// the stray the destroy deliberately never chases). Red/green:
+    /// reverting the CP producer or the parser's explicit-locator arm
+    /// fails the opens assertion with the bare-id locator.
+    ///
+    /// Scope note (review): this test drives the REAL agent handlers
+    /// against the recording mock stord with a hard-coded CP-shaped
+    /// attach spec — the CP producer that emits those bytes is not in
+    /// this test's loop (its bytes are pinned separately at the
+    /// producer/orchestrator/BFF tiers; the coverage composes). The
+    /// assertion tier is the agent→stord RPC boundary, not the
+    /// filesystem.
+    #[tokio::test]
+    async fn standalone_volume_attach_then_detach_then_delete_reclaims_one_file() {
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        // 1. The #513 create carrier mints the backing file at the
+        //    relative `{volume_id}.img` (a sized open).
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "vol-e2e",
+                br#"{"size_bytes":1073741824}"#,
+            )),
+        )
+        .await;
+        assert!(resp.is_ok(), "create must succeed: {:?}", resp.err());
+
+        // 2. The attach (the CP dispatch's standalone spec bytes) must
+        //    open the SAME file — the carrier locator, not the bare id.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(proto::AttachVolumeRequest {
+                meta: Some(test_meta("1")),
+                node_id: "node-1".to_string(),
+                volume: Some(proto::VolumeMutationSpec {
+                    volume_id: "vol-e2e".to_string(),
+                    vm_id: "vm-e2e".to_string(),
+                    volume_spec_json: br#"{"locator":"vol-e2e.img"}"#.to_vec(),
+                }),
+            }),
+        )
+        .await;
+        assert!(resp.is_ok(), "attach must succeed: {:?}", resp.err());
+
+        // 3. Detach (no re-open — the cached handle is closed).
+        let resp = proto::lifecycle_service_server::LifecycleService::detach_volume(
+            &server,
+            Request::new(proto::DetachVolumeRequest {
+                meta: Some(test_meta("1")),
+                node_id: "node-1".to_string(),
+                vm_id: "vm-e2e".to_string(),
+                volume_id: "vol-e2e".to_string(),
+                force: false,
+            }),
+        )
+        .await;
+        assert!(resp.is_ok(), "detach must succeed: {:?}", resp.err());
+
+        // 4. The #522 delete destroys at the carrier locator.
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_volume(
+            &server,
+            Request::new(delete_volume_request("vol-e2e", "")),
+        )
+        .await;
+        assert!(resp.is_ok(), "delete must succeed: {:?}", resp.err());
+
+        // Every open (the create's sized open AND the attach's
+        // option-less open) names the carrier locator — the attach
+        // never mints the bare-id second file.
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-e2e".to_string(),
+                    "local".to_string(),
+                    "vol-e2e.img".to_string(),
+                ),
+                (
+                    "vol-e2e".to_string(),
+                    "local".to_string(),
+                    "vol-e2e.img".to_string(),
+                ),
+            ],
+            "the create and the attach must open the SAME carrier-locator file — never the bare-id default"
+        );
+        // The destroy targets that same carrier locator: exactly one
+        // file named, one file reclaimed.
+        assert_eq!(
+            opens.destroys.lock().unwrap().as_slice(),
+            [(
+                "vol-e2e".to_string(),
+                "local".to_string(),
+                "vol-e2e.img".to_string(),
+            )],
+            "the delete must destroy the carrier locator the opens used — the reclaim is clean"
+        );
+        // The full interleaving: create-open, attach-open, detach,
+        // close, destroy.
+        assert_eq!(
+            opens.events.lock().unwrap().as_slice(),
+            [
+                "open:vol-e2e".to_string(),
+                "open:vol-e2e".to_string(),
+                "detach:vol-e2e".to_string(),
+                "close:vol-e2e".to_string(),
+                "destroy:vol-e2e".to_string(),
+            ],
+            "the attached-then-detached lifecycle must interleave open→open→detach→close→destroy"
+        );
     }
 
     #[tokio::test]

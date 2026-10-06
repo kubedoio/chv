@@ -32,6 +32,12 @@ struct VolumeLookupRow {
     /// #379 PR 2 (A9): the volume's storage class (NULL = local), riding
     /// the attach mutation's `volume_spec_json`.
     storage_class: Option<String>,
+    /// #533: the volume's kind (NULL = embedded/boot/pre-#513 lineage;
+    /// `'data'` = the #513 standalone stamp), riding the attach
+    /// mutation's `volume_spec_json` so a standalone volume's open
+    /// locator is the create carrier's `{volume_id}.img` — the same
+    /// discriminator the #522 delete's kind gate rides.
+    volume_kind: Option<String>,
 }
 
 impl ControlPlaneMutationService {
@@ -409,7 +415,8 @@ impl MutationService for ControlPlaneMutationService {
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
                 v.capacity_bytes as size_bytes,
-                v.storage_class as storage_class
+                v.storage_class as storage_class,
+                v.volume_kind as volume_kind
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -440,9 +447,15 @@ impl MutationService for ControlPlaneMutationService {
                             // NULL-class volume (PR 3 correction — parses
                             // at the agent's A4 seam, still key-free),
                             // `{"backend_class": …}` when the volume
-                            // carries a class.
+                            // carries a class. #533: the volume's KIND
+                            // rides it too, so a standalone ('data')
+                            // volume's attach opens at the #513 create
+                            // carrier's `{volume_id}.img` locator — not
+                            // the A4 bare-id default's second file.
                             volume_spec_json: crate::node_client::volume_attach_spec_json(
+                                &volume_id,
                                 row.storage_class.as_deref(),
+                                row.volume_kind.as_deref(),
                             ),
                         }),
                     })
@@ -500,7 +513,8 @@ impl MutationService for ControlPlaneMutationService {
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
                 v.capacity_bytes as size_bytes,
-                v.storage_class as storage_class
+                v.storage_class as storage_class,
+                v.volume_kind as volume_kind
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -548,7 +562,8 @@ impl MutationService for ControlPlaneMutationService {
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
                 v.capacity_bytes as size_bytes,
-                v.storage_class as storage_class
+                v.storage_class as storage_class,
+                v.volume_kind as volume_kind
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -596,7 +611,8 @@ impl MutationService for ControlPlaneMutationService {
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
                 v.capacity_bytes as size_bytes,
-                v.storage_class as storage_class
+                v.storage_class as storage_class,
+                v.volume_kind as volume_kind
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -644,7 +660,8 @@ impl MutationService for ControlPlaneMutationService {
                 v.node_id as node_id,
                 vds.attached_vm_id as vm_id,
                 v.capacity_bytes as size_bytes,
-                v.storage_class as storage_class
+                v.storage_class as storage_class,
+                v.volume_kind as volume_kind
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = ?
@@ -756,18 +773,21 @@ mod tests {
     /// that they fail the agent's A4 JSON parse (EOF on empty input);
     /// with DP5 attach dispatch real, the NULL-class leg must reach the
     /// open, so it is now the empty JSON object — no keys, no
-    /// materialized `"local"`, the agent's B5 defaults apply.
+    /// materialized `"local"`, the agent's B5 defaults apply. (#533
+    /// added the standalone locator key on top — pinned in
+    /// `volume_attach_spec_json_shapes_the_standalone_carrier_locator`
+    /// and here for the embedded legs it must not disturb.)
     #[test]
     fn volume_attach_spec_json_carries_only_the_class() {
         assert_eq!(
-            volume_attach_spec_json(Some("lvm")),
+            volume_attach_spec_json("vol-a9", Some("lvm"), None),
             br#"{"backend_class":"lvm"}"#.to_vec(),
-            "a class-carrying volume produces exactly the backend_class key"
+            "a class-carrying embedded volume produces exactly the backend_class key"
         );
         assert_eq!(
-            volume_attach_spec_json(None),
+            volume_attach_spec_json("vol-a9", None, None),
             b"{}".to_vec(),
-            "a NULL class emits the empty JSON object so the agent's A4 parse succeeds and takes the defaults"
+            "a NULL-class embedded volume emits the empty JSON object so the agent's A4 parse succeeds and takes the defaults"
         );
     }
 
@@ -1014,7 +1034,13 @@ mod tests {
     /// #379 PR 2 (A9): the BFF attach mutation populates
     /// `volume_spec_json` with the volume's parsed class — the same
     /// producer shape as the orchestrator's A8 dispatch — and emits the
-    /// key-free `{}` for a NULL-class volume (PR 3 correction).
+    /// key-free `{}` for a NULL-class volume (PR 3 correction). #533
+    /// adds the standalone leg: a `volume_kind = 'data'` volume's
+    /// attach mutation carries the #513 create carrier's relative
+    /// `{volume_id}.img` locator, so the BFF accept path and the
+    /// orchestrator dispatch agree on the locator (the trait boundary
+    /// production uses — the BFF's inline payload and the A8 dispatch
+    /// are the same producer).
     #[tokio::test]
     async fn mutate_volume_attach_populates_spec_json_with_the_class() {
         let pool = chv_controlplane_store::test_util::create_test_pool().await;
@@ -1049,6 +1075,24 @@ mod tests {
             .await
             .unwrap();
         }
+        // #533: a standalone 'data' volume in the #513 route's own row
+        // shape (NULL class, kind stamped) — the volume whose attach
+        // used to mint the stray bare-id file.
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind) \
+             VALUES ('vol-a9-std', 'node-a9', 'vol-a9-std', 1024, 'data')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO volume_desired_state \
+             (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+             VALUES ('vol-a9-std', 1, 'Pending', NULL, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let attach_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let service = ControlPlaneMutationService::new(
@@ -1058,14 +1102,14 @@ mod tests {
             }),
         );
 
-        for volume_id in ["vol-a9-lvm", "vol-a9-null"] {
+        for volume_id in ["vol-a9-lvm", "vol-a9-null", "vol-a9-std"] {
             service
                 .mutate_volume(
                     volume_id.to_string(),
                     "attach".to_string(),
                     false,
                     None,
-                    None,
+                    Some("vm-a9".to_string()),
                     "test-user".to_string(),
                 )
                 .await
@@ -1073,7 +1117,7 @@ mod tests {
         }
 
         let calls = attach_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2, "both attach mutations relayed: {calls:?}");
+        assert_eq!(calls.len(), 3, "all attach mutations relayed: {calls:?}");
         let spec_json_for = |volume_id: &str| {
             calls
                 .iter()
@@ -1093,6 +1137,11 @@ mod tests {
             spec_json_for("vol-a9-null"),
             b"{}".to_vec(),
             "a NULL-class volume must carry the empty JSON object (PR 3 correction: parseable at A4, key-free)"
+        );
+        assert_eq!(
+            spec_json_for("vol-a9-std"),
+            br#"{"locator":"vol-a9-std.img"}"#.to_vec(),
+            "a standalone ('data') volume's attach mutation must carry the create carrier's relative locator (#533)"
         );
     }
 

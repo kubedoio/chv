@@ -2674,7 +2674,7 @@ mod tests {
     /// pin the backend class the agent threads into its opens (#379 PR 1).
     #[derive(Clone, Default)]
     struct StordOpenLog {
-        opens: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        opens: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     }
 
     struct MockStordOk {
@@ -2698,13 +2698,21 @@ mod tests {
             let inner = req.into_inner();
             stord_operation_id(inner.meta.clone())?;
             // #379 PR 1: record the backend class the agent threaded into
-            // this open so the class-plumbing tests can pin it.
+            // this open so the class-plumbing tests can pin it. #533 adds
+            // the locator for the same reason: the A1 vm-nested path and
+            // the A2 re-attach shape are pinned so the standalone-attach
+            // fix cannot silently move an embedded disk's file.
             self.opens.opens.lock().unwrap().push((
                 inner.volume_id.clone(),
                 inner
                     .backend
                     .as_ref()
                     .map(|b| b.backend_class.clone())
+                    .unwrap_or_default(),
+                inner
+                    .backend
+                    .as_ref()
+                    .map(|b| b.locator.clone())
                     .unwrap_or_default(),
             ));
             Ok(Response::new(
@@ -3278,10 +3286,28 @@ mod tests {
         assert_eq!(
             recorded,
             vec![
-                ("vol-1".to_string(), "lvm".to_string()),
-                ("vol-2".to_string(), "local".to_string()),
+                (
+                    "vol-1".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-1".to_string(),
+                ),
+                (
+                    "vol-2".to_string(),
+                    "local".to_string(),
+                    // #533 (the no-regression pin): an embedded disk's
+                    // open keeps A1's vm-dir-nested locator
+                    // `{runtime_dir}/vms/{vm_id}/{volume_id}.img` — the
+                    // standalone-attach fix must never move an embedded
+                    // disk's file.
+                    dir.path()
+                        .join("vms")
+                        .join("vm-1")
+                        .join("vol-2.img")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
             ],
-            "A1 must thread the disk spec's backend_class, defaulting to local when absent"
+            "A1 must thread the disk spec's backend_class (defaulting to local when absent) and keep the vm-dir-nested locator"
         );
     }
 
@@ -3323,10 +3349,23 @@ mod tests {
         assert_eq!(
             recorded,
             vec![
-                ("vol-1".to_string(), "lvm".to_string()),
-                ("vol-2".to_string(), "local".to_string()),
+                (
+                    "vol-1".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-1".to_string(),
+                ),
+                (
+                    "vol-2".to_string(),
+                    "local".to_string(),
+                    // #533: the A2 re-attach (an agent restart with
+                    // cached handles) already opens the RELATIVE
+                    // `{volume_id}.img` — the carrier shape the
+                    // standalone-attach fix aligns the A4 path with, so
+                    // every open site now names the same file.
+                    "vol-2.img".to_string(),
+                ),
             ],
-            "A2 must thread the disk spec's backend_class, defaulting to local when absent"
+            "A2 must thread the disk spec's backend_class (defaulting to local when absent) and keep the relative `{{volume_id}}.img` re-attach locator"
         );
     }
 

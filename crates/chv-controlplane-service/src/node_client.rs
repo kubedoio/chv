@@ -656,6 +656,7 @@ impl NodeClient {
         operation_id: &str,
         requested_by: Option<&str>,
         backend_class: Option<&str>,
+        volume_kind: Option<&str>,
     ) -> Result<proto::AckResponse, ChvError> {
         let req = proto::AttachVolumeRequest {
             meta: Some(proto::RequestMeta {
@@ -670,8 +671,11 @@ impl NodeClient {
                 volume_id: volume_id.to_string(),
                 vm_id: vm_id.to_string(),
                 // #379 PR 2 (A8): the volume's class rides the attach
-                // dispatch — see [`volume_attach_spec_json`].
-                volume_spec_json: volume_attach_spec_json(backend_class),
+                // dispatch — see [`volume_attach_spec_json`]. #533: the
+                // volume's KIND rides it too, so a standalone volume's
+                // attach opens at the #513 create carrier's locator
+                // instead of the bare-id default's second file.
+                volume_spec_json: volume_attach_spec_json(volume_id, backend_class, volume_kind),
             }),
         };
         let method = "attach_volume";
@@ -1511,7 +1515,8 @@ fn now_unix_ms() -> i64 {
 }
 
 /// Build the `AttachVolume` RPC's `volume_spec_json` payload (#379 PR 2,
-/// the A8/A9 shared producer; NULL-class bytes corrected in PR 3).
+/// the A8/A9 shared producer; NULL-class bytes corrected in PR 3; the
+/// #533 standalone locator key added on top).
 ///
 /// The agent's attach handler (A4) parses `backend_class` and `locator`
 /// out of this JSON, defaulting both. PR 2 populated ONLY
@@ -1536,16 +1541,41 @@ fn now_unix_ms() -> i64 {
 /// object: still no `backend_class` key, still no `"local"` string
 /// materialized — the agent's B5 default resolves it, and A4's explicit
 /// `locator` key remains absent.
-pub(crate) fn volume_attach_spec_json(storage_class: Option<&str>) -> Vec<u8> {
-    match storage_class {
-        Some(class) => serde_json::to_vec(&serde_json::json!({ "backend_class": class }))
-            // Infallible for a string-valued object; an empty fallback
-            // would merely mean the agent's default path.
-            .unwrap_or_default(),
-        // `{}` (not empty bytes): parses at A4, carries no keys, and the
-        // agent's defaults apply — see the PR 3 correction above.
-        None => b"{}".to_vec(),
+///
+/// **#533 (the #513 design's DP2 locator guard, §8):** a STANDALONE
+/// volume (`volume_kind = 'data'` — the #513 DP8 stamp, the same
+/// discriminator the #522 delete's kind gate rides) now carries the
+/// CARRIER's relative `{volume_id}.img` locator, because the A4
+/// parser's non-LVM default is the bare volume id — an option-less
+/// create-on-open at `runtime_dir/{volume_id}` that mints a SECOND
+/// default-size file and permanently orphans the file the #513 create
+/// carrier minted (and that the #522 delete's DP4 destroy targets
+/// exactly, by design). LVM is the one class that keeps NO locator
+/// key: the agent's LVM default already shapes the carrier's
+/// `/dev/mapper/{vg}-{vid}` dm-path token, and an explicit `.img`
+/// locator would be the wrong shape for that open. Every embedded
+/// volume (NULL kind — all pre-#513 lineage, boot disks, imports,
+/// templates) keeps the pre-#533 bytes byte-exactly: no locator key,
+/// the A4 bare-id default, the vm-nested A1 path untouched.
+pub(crate) fn volume_attach_spec_json(
+    volume_id: &str,
+    storage_class: Option<&str>,
+    volume_kind: Option<&str>,
+) -> Vec<u8> {
+    let standalone = volume_kind == Some("data");
+    let mut payload = serde_json::Map::new();
+    if let Some(class) = storage_class {
+        payload.insert("backend_class".to_string(), serde_json::json!(class));
     }
+    if standalone && storage_class != Some("lvm") {
+        payload.insert(
+            "locator".to_string(),
+            serde_json::json!(format!("{}.img", volume_id)),
+        );
+    }
+    // Infallible for these string-valued keys; an empty fallback would
+    // merely mean the agent's default path.
+    serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_default()
 }
 
 /// Build the `CreateVolume` RPC's `volume_spec_json` payload (#513 PR 1,
@@ -1610,11 +1640,64 @@ mod tests {
             br#"{"backend_class":"lvm","size_bytes":1073741824}"#.to_vec(),
             "a class-carrying create adds exactly the backend_class key"
         );
-        // The attach producer is unchanged beside the new one.
-        assert_eq!(volume_attach_spec_json(None), b"{}".to_vec());
+        // The attach producer's embedded legs are unchanged beside the
+        // new one (re-pinned here so the #533 change cannot drift them).
+        assert_eq!(volume_attach_spec_json("vol-x", None, None), b"{}".to_vec());
         assert_eq!(
-            volume_attach_spec_json(Some("lvm")),
+            volume_attach_spec_json("vol-x", Some("lvm"), None),
             br#"{"backend_class":"lvm"}"#.to_vec()
+        );
+    }
+
+    /// #533 (the #513 design's DP2 locator guard): the attach producer
+    /// shapes a STANDALONE volume's (`volume_kind = 'data'`, the #513
+    /// DP8 stamp / the #522 delete gate's discriminator) open locator
+    /// as the create carrier's relative `{volume_id}.img` — the A4
+    /// parser's bare-id default would create-on-open a second
+    /// default-size file at `runtime_dir/{volume_id}` and orphan the
+    /// carrier-minted one. LVM keeps no locator key (the agent's LVM
+    /// default already shapes the carrier's dm-path token); embedded
+    /// volumes (NULL kind) keep the pre-#533 bytes byte-exactly.
+    #[test]
+    fn volume_attach_spec_json_shapes_the_standalone_carrier_locator() {
+        // Standalone + NULL class (the #513 route's own row shape):
+        // exactly the locator key — no backend_class, no "local".
+        assert_eq!(
+            volume_attach_spec_json("vol-std", None, Some("data")),
+            br#"{"locator":"vol-std.img"}"#.to_vec(),
+            "a standalone NULL-class attach carries exactly the carrier locator key"
+        );
+        // Standalone + LVM: no locator key — the agent's LVM default
+        // shapes the carrier's dm-path token itself.
+        assert_eq!(
+            volume_attach_spec_json("vol-std", Some("lvm"), Some("data")),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "a standalone LVM attach keeps the class-only shape (the agent's LVM default is the carrier locator)"
+        );
+        // Standalone + a non-LVM class: the class key AND the locator.
+        assert_eq!(
+            volume_attach_spec_json("vol-std", Some("ceph"), Some("data")),
+            br#"{"backend_class":"ceph","locator":"vol-std.img"}"#.to_vec(),
+            "a standalone class-carrying attach adds the carrier locator beside the class"
+        );
+        // Embedded (NULL kind): byte-exact pre-#533 legs — the A4
+        // bare-id default applies, the A1 vm-nested path is untouched.
+        assert_eq!(
+            volume_attach_spec_json("vol-emb", None, None),
+            b"{}".to_vec(),
+            "an embedded NULL-class attach stays the empty object"
+        );
+        assert_eq!(
+            volume_attach_spec_json("vol-emb", Some("lvm"), None),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "an embedded LVM attach stays the class-only shape"
+        );
+        // A non-'data' kind value (none exists in production today) is
+        // NOT standalone: only the DP8 stamp discriminates.
+        assert_eq!(
+            volume_attach_spec_json("vol-disk", None, Some("disk")),
+            b"{}".to_vec(),
+            "a non-'data' kind keeps the embedded shape (the DP8 stamp is the discriminator)"
         );
     }
 }
