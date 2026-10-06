@@ -13,6 +13,7 @@ use chv_agent_core::{
     projection::ProjectingCoreRuntime,
     reconcile::{apply_core_create_states, Reconciler},
     state_machine::NodeState,
+    stord_backend::StordBackendInfo,
     supervisor::DaemonSupervisor,
     telemetry::TelemetryReporter,
     vm_runtime::VmRuntime,
@@ -175,6 +176,7 @@ async fn start_core_managed(
     adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
     cache: &Arc<tokio::sync::Mutex<NodeCache>>,
     cache_path: PathBuf,
+    stord_backend: &StordBackendInfo,
 ) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
     let paths = cellhv_core_startup::StartupPaths {
         node_cache: config.cache_path.clone(),
@@ -241,6 +243,9 @@ async fn start_core_managed(
             config.runtime_dir.clone(),
         )
         .with_network_usage(network_usage_lookup(config))
+        // #379 DP5: LVM-class opens locate against the operator's VG
+        // (the same stord-config source as the reported backend class).
+        .with_lvm_volume_group(stord_backend.volume_group())
         // #405: delete-time side-effect fallback drain. The in-memory
         // handle map dies with the process; without this, a delete of a
         // VM created before an agent restart leaks its host taps and
@@ -277,6 +282,7 @@ async fn start_core_managed(
 
 async fn start_core_native(
     config: &AgentConfig,
+    stord_backend: &StordBackendInfo,
 ) -> Result<
     (
         cellhv_core_runtime_owner::CoreRuntimeOwner,
@@ -316,7 +322,10 @@ async fn start_core_native(
             resources,
             config.runtime_dir.clone(),
         )
-        .with_network_usage(network_usage_lookup(config)),
+        .with_network_usage(network_usage_lookup(config))
+        // #379 DP5: LVM-class opens locate against the operator's VG
+        // (the same stord-config source as the reported backend class).
+        .with_lvm_volume_group(stord_backend.volume_group()),
     );
     Ok((
         cellhv_core_runtime_owner::CoreRuntimeOwner::start(
@@ -336,10 +345,13 @@ async fn start_core_native(
     ))
 }
 
-async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_core_native(
+    config: &AgentConfig,
+    stord_backend: &StordBackendInfo,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
-    let (owner, process_adapter) = start_core_native(config).await?;
+    let (owner, process_adapter) = start_core_native(config, stord_backend).await?;
     info!(socket = %owner.socket_path().display(), "core-native authority ready");
     let mut fatality_check = tokio::time::interval(Duration::from_millis(500));
     fatality_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -606,6 +618,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     init_logger(&config.log_level)?;
 
+    // The agent's view of the node's stord backend (#379 DP4/DP5): learned
+    // from the operator's stord.toml via the #385 stord_config_path key —
+    // the same file the supervisor parses for respawn validation — so it
+    // is available BEFORE the supervisor starts stord. Absent path (the
+    // config default) or an unusable file means local; the supervisor's
+    // own stord class validation remains the enforcement boundary.
+    // Computed before every authority-mode branch: the inventory reporter,
+    // the AgentServer/Reconciler, AND the core runtimes (native and
+    // managed) all consume it.
+    let stord_backend =
+        StordBackendInfo::from_stord_config_path(config.stord_config_path.as_deref());
+
     // Security-mode gate (production-readiness prompt 03, workstream A;
     // mirrors the control plane's `validate_security_mode` from #233/PR #253):
     // `CHV_ALLOW_INSECURE=1` relaxes the enrolled-agent mTLS credential
@@ -636,7 +660,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if config.authority_mode == AgentAuthorityMode::CoreNative {
-        return run_core_native(&config).await;
+        return run_core_native(&config, &stord_backend).await;
     }
 
     let mut cache = load_or_initialize_cache(&config).await;
@@ -651,12 +675,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(|_| "unknown".to_string())
                         .trim()
                         .to_string();
-                    let reporter = InventoryReporter::with_storage_base_dir(
-                        &cache.node_id,
-                        &hostname,
-                        &config.storage_base_dir,
-                    )
-                    .with_authority_mode(config.authority_mode.clone());
+                    let reporter = InventoryReporter::new(&cache.node_id, &hostname)
+                        .with_stord_backend(stord_backend.clone())
+                        .with_authority_mode(config.authority_mode.clone());
                     // Best-effort fabric identity (ADR-021): nwd may not be
                     // up yet during enrollment; the empty identity is
                     // reported then and re-sent on the periodic inventory
@@ -841,20 +862,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut core_owner = None;
     if config.authority_mode == AgentAuthorityMode::CoreManaged {
-        let owner =
-            match start_core_managed(&config, adapter.clone(), &cache, config.cache_path.clone())
-                .await
-            {
-                Ok(owner) => owner,
-                Err(e) => {
-                    // Adoption above already attached live consoles: exit via
-                    // the same clean-close discipline as the graceful paths
-                    // so an early-startup failure cannot freeze a running
-                    // guest.
-                    process_adapter.drain_and_close_consoles().await;
-                    return Err(e);
-                }
-            };
+        let owner = match start_core_managed(
+            &config,
+            adapter.clone(),
+            &cache,
+            config.cache_path.clone(),
+            &stord_backend,
+        )
+        .await
+        {
+            Ok(owner) => owner,
+            Err(e) => {
+                // Adoption above already attached live consoles: exit via
+                // the same clean-close discipline as the graceful paths
+                // so an early-startup failure cannot freeze a running
+                // guest.
+                process_adapter.drain_and_close_consoles().await;
+                return Err(e);
+            }
+        };
         core_owner = Some(owner);
     }
 
@@ -865,7 +891,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.nwd_socket.clone(),
         Some(config.cache_path.clone()),
         config.runtime_dir.clone(),
-    );
+    )
+    .with_stord_backend(stord_backend.clone());
     if let Some(owner) = &core_owner {
         agent_server = agent_server.with_core_authority(owner.authority());
     }
@@ -936,16 +963,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // after Core execution). Legacy mode keeps the full mutation surface.
     let mut reconciler = match config.authority_mode {
         // Core-managed: observe-only Reconciler (no mutation surface at all).
-        AgentAuthorityMode::CoreManaged => {
-            Reconciler::new_observe_only(
-                cache.clone(),
-                vm_runtime.clone(),
-                config.stord_socket.clone(),
-                config.nwd_socket.clone(),
-                migration_registry,
-            )
-            .await
-        }
+        AgentAuthorityMode::CoreManaged => Reconciler::new_observe_only(
+            cache.clone(),
+            vm_runtime.clone(),
+            config.stord_socket.clone(),
+            config.nwd_socket.clone(),
+            migration_registry,
+        )
+        .await
+        .with_stord_backend(stord_backend.clone()),
         // Legacy: the full legacy provider-mutation surface (explicit opt-in).
         AgentAuthorityMode::Legacy => {
             warn!(
@@ -962,6 +988,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 migration_registry,
             )
             .await
+            .with_stord_backend(stord_backend.clone())
         }
         // CoreNative returns in run_core_native() well before this point; a
         // future variant here becomes a compile error instead of silently
@@ -1007,9 +1034,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .trim()
         .to_string();
     let node_id = cache.lock().await.node_id.clone();
-    let inventory_reporter =
-        InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir)
-            .with_authority_mode(config.authority_mode.clone());
+    let inventory_reporter = InventoryReporter::new(&node_id, hostname)
+        .with_stord_backend(stord_backend.clone())
+        .with_authority_mode(config.authority_mode.clone());
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
     let mut consecutive_reconcile_failures: u32 = 0;
@@ -1637,8 +1664,12 @@ mod tests {
     async fn core_native_http_create_survives_restart_and_excludes_second_instance() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
-        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
-        assert!(start_core_native(&config).await.is_err());
+        let (owner, _process_adapter) = start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .unwrap();
+        assert!(start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .is_err());
         let body = serde_json::json!({"request_id":"create-1","definition":{
             "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
             "compute":{"vcpus":1,"memory_bytes":1048576},"storage":[],"networks":[],
@@ -1651,7 +1682,9 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 202"), "{response}");
         owner.shutdown().await.unwrap();
 
-        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .unwrap();
         let response = unix_http(
             &config,
             "GET /v1/vms HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1667,7 +1700,9 @@ mod tests {
     async fn core_native_concurrent_identical_creates_commit_once() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
-        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .unwrap();
         let body = serde_json::json!({"request_id":"create-1","definition":{
             "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
             "compute":{"vcpus":1,"memory_bytes":1048576},"storage":[],"networks":[],
@@ -1733,7 +1768,9 @@ mod tests {
         std::fs::write(&config.cache_path, b"{}").unwrap();
         std::fs::set_permissions(&config.cache_path, std::fs::Permissions::from_mode(0o600))
             .unwrap();
-        assert!(start_core_native(&config).await.is_err());
+        assert!(start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .is_err());
         assert!(!config.core_store_path.exists());
         assert!(!config.core_api_socket_path.exists());
     }
@@ -1743,7 +1780,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = core_config(&directory);
         config.node_id = "  \t ".to_owned();
-        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .unwrap();
         let response = unix_http(
             &config,
             "GET /v1/host HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1763,9 +1802,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
         std::fs::write(&config.core_api_socket_path, b"occupied").unwrap();
-        assert!(start_core_native(&config).await.is_err());
+        assert!(start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .is_err());
         std::fs::remove_file(&config.core_api_socket_path).unwrap();
-        let (owner, _process_adapter) = start_core_native(&config).await.unwrap();
+        let (owner, _process_adapter) = start_core_native(&config, &StordBackendInfo::default())
+            .await
+            .unwrap();
         owner.shutdown().await.unwrap();
     }
 

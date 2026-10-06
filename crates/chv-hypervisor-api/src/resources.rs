@@ -52,6 +52,70 @@ pub fn is_known_backend_class(class: &str) -> bool {
     BACKEND_CLASSES.contains(&class)
 }
 
+/// The default LVM volume group name (#379 DP5): mirrors `chv-stord`'s
+/// own `lvm_volume_group` default (`cmd/chv-stord/src/main.rs` and
+/// `chv-config`'s `StordConfig`) so the agent's LVM locator shaping and
+/// the daemon's backend derivation agree when no operator key is set.
+pub const DEFAULT_LVM_VOLUME_GROUP: &str = "chv-vg";
+
+/// The standard install's `device_allowlist` (#379 DP5): the patterns
+/// `scripts/install.sh` writes into `stord.toml`. The LVM locator
+/// convention ([`lvm_locator`]) is shaped so this posture admits it.
+pub const STANDARD_DEVICE_ALLOWLIST: &[&str] = &["/dev/dm-*", "/dev/mapper/*"];
+
+/// The #379 DP5 LVM locator convention: a
+/// `/dev/mapper/{vg}-{vid}`-shaped dm-path token.
+///
+/// The LVM backend *ignores* the locator (it derives the device from the
+/// sanitized volume id as `/dev/{vg}/{vid}`); the locator's only role is
+/// the `device_allowlist` check at the stord open boundary, which gates
+/// the raw locator string for `lvm`-class opens. The standard install's
+/// [`STANDARD_DEVICE_ALLOWLIST`] therefore admits this shape while it
+/// would deny the bare volume id. `is_safe_id` on the volume id (the
+/// agent boundary, re-sanitized in the backend) keeps the LV-name
+/// component safe; the VG comes from the same operator config source as
+/// the node's reported backend class (DP4).
+pub fn lvm_locator(volume_group: &str, volume_id: &str) -> String {
+    format!("/dev/mapper/{volume_group}-{volume_id}")
+}
+
+/// Normalize a storage-class token for comparison (#379 DP4, per DP3's
+/// vocabulary): the local aliases (`local-file`/`localdisk`, which
+/// pre-#379 inventory probes and the stord boundary emit) fold to the
+/// canonical `local`; `NULL`/empty (the volume-model default) is
+/// `local` on the request side. Everything else compares verbatim.
+pub fn normalize_storage_class(class: &str) -> &str {
+    let class = class.trim();
+    match class {
+        "" | "local" | "local-file" | "localdisk" => DEFAULT_BACKEND_CLASS,
+        other => other,
+    }
+}
+
+/// The #379 DP4 accept-time capability predicate: does a node
+/// advertising `advertised` storage classes serve a volume requesting
+/// `requested` (`None` = NULL = local)?
+///
+/// Fail-open discipline (the #495 `ensure_*` shape): an EMPTY advertised
+/// list cannot support a rejection — a node whose inventory never
+/// landed, or a pre-#379 agent reporting an empty probe, keeps accepting
+/// exactly as before — so that case returns `None` and callers accept.
+/// `Some(false)` is the definite mismatch (reject with 400); `Some(true)`
+/// is the definite match. Advertised tokens are normalized with
+/// [`normalize_storage_class`] so legacy `localdisk` reports compare as
+/// `local`.
+pub fn node_offers_storage_class(advertised: &[String], requested: Option<&str>) -> Option<bool> {
+    if advertised.is_empty() {
+        return None;
+    }
+    let requested = normalize_storage_class(requested.unwrap_or(DEFAULT_BACKEND_CLASS));
+    Some(
+        advertised
+            .iter()
+            .any(|class| normalize_storage_class(class) == requested),
+    )
+}
+
 /// Returns the per-VM runtime directory for the given VM.
 /// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
 ///
@@ -449,6 +513,75 @@ mod tests {
         }
         assert_eq!(DEFAULT_BACKEND_CLASS, "local");
         assert!(BACKEND_CLASSES.contains(&DEFAULT_BACKEND_CLASS));
+    }
+
+    /// #379 DP5: the LVM locator convention is a `/dev/mapper/{vg}-{vid}`
+    /// dm-path token that the standard install's device allowlist admits
+    /// (the exact patterns `install.sh` writes), while the bare volume id
+    /// — the alternative the design rejected — is denied by it.
+    #[test]
+    fn lvm_locator_matches_the_standard_device_allowlist() {
+        let locator = lvm_locator("chv-vg", "vol-1");
+        assert_eq!(locator, "/dev/mapper/chv-vg-vol-1");
+        // The standard fixture is prefix-glob style (stord's
+        // matches_device_pattern: a trailing-* pattern matches on the
+        // prefix), so the honest agent-tier fixture is the prefix check.
+        let admitted = STANDARD_DEVICE_ALLOWLIST
+            .iter()
+            .any(|pattern| locator.starts_with(pattern.trim_end_matches('*')));
+        assert!(
+            admitted,
+            "the DP5 locator must pass the standard device_allowlist: {locator}"
+        );
+        // The rejected alternative: a bare volume id matches neither
+        // pattern.
+        let bare = "vol-1";
+        let bare_admitted = STANDARD_DEVICE_ALLOWLIST
+            .iter()
+            .any(|pattern| bare.starts_with(pattern.trim_end_matches('*')));
+        assert!(
+            !bare_admitted,
+            "a bare volume id must NOT pass the standard device_allowlist"
+        );
+    }
+
+    /// #379 DP4: the accept-time capability predicate — definite
+    /// match/mismatch and the fail-open shapes.
+    #[test]
+    fn node_offers_storage_class_compares_with_normalization() {
+        use super::node_offers_storage_class;
+        let lvm = vec!["lvm".to_string()];
+        let local = vec!["local".to_string()];
+        let legacy_probe = vec!["localdisk".to_string(), "nfs".to_string()];
+        // Definite matches.
+        assert_eq!(node_offers_storage_class(&lvm, Some("lvm")), Some(true));
+        assert_eq!(node_offers_storage_class(&local, None), Some(true));
+        assert_eq!(
+            node_offers_storage_class(&legacy_probe, Some("local")),
+            Some(true),
+            "a legacy localdisk probe report serves a local-class volume"
+        );
+        // Definite mismatches (NULL = local: an lvm-only node cannot
+        // serve a class-less volume — stord is single-backend).
+        assert_eq!(node_offers_storage_class(&lvm, None), Some(false));
+        assert_eq!(node_offers_storage_class(&lvm, Some("local")), Some(false));
+        assert_eq!(node_offers_storage_class(&local, Some("lvm")), Some(false));
+        assert_eq!(node_offers_storage_class(&local, Some("ceph")), Some(false));
+        // Fail-open: an empty/never-reported list never rejects.
+        assert_eq!(node_offers_storage_class(&[], Some("lvm")), None);
+        assert_eq!(node_offers_storage_class(&[], None), None);
+    }
+
+    /// #379 DP3/DP4: normalization folds the local aliases and the
+    /// empty/NULL request into the canonical `local`.
+    #[test]
+    fn normalize_storage_class_folds_local_aliases() {
+        use super::normalize_storage_class;
+        for class in ["", " ", "local", "local-file", "localdisk"] {
+            assert_eq!(normalize_storage_class(class), "local");
+        }
+        assert_eq!(normalize_storage_class("lvm"), "lvm");
+        assert_eq!(normalize_storage_class("ceph"), "ceph");
     }
 
     #[tokio::test]

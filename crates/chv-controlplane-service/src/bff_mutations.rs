@@ -436,10 +436,11 @@ impl MutationService for ControlPlaneMutationService {
                             // #379 PR 2 (A9): the volume's class rides the
                             // attach mutation — the same producer shape as
                             // the orchestrator's A8 dispatch
-                            // (`volume_attach_spec_json`): empty for a
-                            // NULL-class volume (byte-exact with the
-                            // pre-#379 mutation), `{"backend_class": …}`
-                            // when the volume carries a class.
+                            // (`volume_attach_spec_json`): `{}` for a
+                            // NULL-class volume (PR 3 correction — parses
+                            // at the agent's A4 seam, still key-free),
+                            // `{"backend_class": …}` when the volume
+                            // carries a class.
                             volume_spec_json: crate::node_client::volume_attach_spec_json(
                                 row.storage_class.as_deref(),
                             ),
@@ -750,9 +751,12 @@ mod tests {
 
     /// #379 PR 2 (A8/A9 shared producer): the attach spec_json is
     /// `{"backend_class": …}` — and ONLY that key — when the volume
-    /// carries a class, and EMPTY bytes when it does not (NULL = local,
-    /// byte-exact with the pre-#379 dispatch; the locator convention is
-    /// DP5 / PR 3).
+    /// carries a class. A NULL class emits `{}` (PR 3 correction,
+    /// disclosed): PR 2 kept the pre-#379 empty bytes but also disclosed
+    /// that they fail the agent's A4 JSON parse (EOF on empty input);
+    /// with DP5 attach dispatch real, the NULL-class leg must reach the
+    /// open, so it is now the empty JSON object — no keys, no
+    /// materialized `"local"`, the agent's B5 defaults apply.
     #[test]
     fn volume_attach_spec_json_carries_only_the_class() {
         assert_eq!(
@@ -762,8 +766,8 @@ mod tests {
         );
         assert_eq!(
             volume_attach_spec_json(None),
-            Vec::<u8>::new(),
-            "a NULL class keeps the empty payload (byte-exact pre-#379)"
+            b"{}".to_vec(),
+            "a NULL class emits the empty JSON object so the agent's A4 parse succeeds and takes the defaults"
         );
     }
 
@@ -1009,8 +1013,8 @@ mod tests {
 
     /// #379 PR 2 (A9): the BFF attach mutation populates
     /// `volume_spec_json` with the volume's parsed class — the same
-    /// producer shape as the orchestrator's A8 dispatch — and keeps it
-    /// EMPTY for a NULL-class volume.
+    /// producer shape as the orchestrator's A8 dispatch — and emits the
+    /// key-free `{}` for a NULL-class volume (PR 3 correction).
     #[tokio::test]
     async fn mutate_volume_attach_populates_spec_json_with_the_class() {
         let pool = chv_controlplane_store::test_util::create_test_pool().await;
@@ -1086,10 +1090,97 @@ mod tests {
             "the attach mutation must carry the parsed class (A9)"
         );
         assert_eq!(
-            spec_json_for("vol-a9-null").len(),
-            0,
-            "a NULL-class volume must keep the empty spec_json (byte-exact pre-#379)"
+            spec_json_for("vol-a9-null"),
+            b"{}".to_vec(),
+            "a NULL-class volume must carry the empty JSON object (PR 3 correction: parseable at A4, key-free)"
         );
+    }
+
+    /// #379 DP4 BFF surface: a storage-class the volume's node does not
+    /// offer rejects at the lifecycle's accept time (before journaling)
+    /// and surfaces at the BFF tier as `BffError::BadRequest` — HTTP
+    /// 400, the same `map_ack` contract as the #495 mode rejections —
+    /// instead of a 200-accepted operation that burns dispatch retries.
+    /// Drives the REAL lifecycle service (not RecordingLifecycle) so the
+    /// whole accept-time path is exercised.
+    #[tokio::test]
+    async fn mutate_volume_attach_maps_storage_class_rejection_to_bad_request() {
+        use crate::lifecycle::LifecycleServiceImplementation;
+
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        sqlx::query(
+            "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-dp4-bff', 'host', 'host')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The node reports a local-only stord (PR 3's inventory: the
+        // REAL backend class); the volume carries ceph.
+        sqlx::query(
+            "INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes) \
+             VALUES ('node-dp4-bff', 'x86_64', 1, 1024, '[\"local\"]')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+             VALUES ('vol-dp4-bff', 'node-dp4-bff', 'vol-dp4-bff', 1024, 'ceph')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO volume_desired_state \
+             (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+             VALUES ('vol-dp4-bff', 1, 'Pending', NULL, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let service = ControlPlaneMutationService::new(
+            pool.clone(),
+            std::sync::Arc::new(LifecycleServiceImplementation::new(
+                chv_controlplane_store::NodeRepository::new(pool.clone()),
+                chv_controlplane_store::OperationRepository::new(pool.clone()),
+                chv_controlplane_store::EventRepository::new(pool.clone()),
+                chv_controlplane_store::DesiredStateRepository::new(pool.clone()),
+            )),
+        );
+
+        match service
+            .mutate_volume(
+                "vol-dp4-bff".to_string(),
+                "attach".to_string(),
+                false,
+                None,
+                Some("vm-dp4-bff".to_string()),
+                "test-user".to_string(),
+            )
+            .await
+        {
+            Err(BffError::BadRequest(msg)) => {
+                assert!(
+                    msg.contains("does not offer storage class ceph"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected bad-request, got {other:?}"),
+        }
+        // The rejection journaled nothing.
+        let ops: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ops, 0, "a rejected attach must not journal an operation");
+        let attached: Option<String> = sqlx::query_scalar(
+            "SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = 'vol-dp4-bff'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(attached, None, "no attachment intent may be written");
     }
 
     /// #384: the clone race loser surfaces as `Conflict` at the BFF

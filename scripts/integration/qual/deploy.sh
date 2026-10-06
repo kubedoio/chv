@@ -421,6 +421,12 @@ bootstrap_token_path = "${agent_dir}/bootstrap-token"
 # stord.toml below (volume locators + the seed-image dir).
 stord_path_allowlist = ["${agent_dir}", "${stord_dir}", "${images_dir}"]
 
+# #385/#379: respawn from the operator's own stord.toml (below) instead
+# of the generated config, so the backend_type / allowlist keys survive a
+# respawn; the agent also parses this file to learn the node's real
+# backend class (inventory + LVM locator shaping, #379 DP4/DP5).
+stord_config_path = "${TEST_DIR}/stord.toml"
+
 tls_cert_path = "${certs_dir}/enroll-client.crt"
 tls_key_path = "${certs_dir}/enroll-client.key"
 ca_cert_path = "${certs_dir}/ca.crt"
@@ -432,6 +438,11 @@ socket_path = "${stord_dir}/api.sock"
 runtime_dir = "${stord_dir}"
 log_level = "${LOG_LEVEL}"
 path_allowlist = ["${agent_dir}", "${stord_dir}", "${images_dir}"]
+# #379 DP5: the standard device allowlist — dm-path tokens only, which
+# the LVM locator convention (/dev/mapper/{vg}-{vid}) is shaped to pass.
+# The check only fires for lvm/block-class opens, so the default local
+# class is unaffected (Leg F keeps passing under this posture).
+device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 EOF
 
 # --- nwd.toml ---

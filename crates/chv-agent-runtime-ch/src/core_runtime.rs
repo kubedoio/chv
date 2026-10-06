@@ -165,6 +165,13 @@ pub struct CloudHypervisorCoreRuntime {
     /// field, threaded through the Core definition) is the only
     /// class-changing input.
     default_backend_class: String,
+    /// The LVM volume group LVM-class opens are located against (#379
+    /// DP5): shapes the `/dev/mapper/{vg}-{vid}` dm-path locator the
+    /// standard `device_allowlist` admits. Defaults to stord's own
+    /// `chv-vg`; the agent wires the operator's configured group via
+    /// [`Self::with_lvm_volume_group`] (the same stord-config source as
+    /// the node's reported backend class, DP4).
+    lvm_volume_group: String,
 }
 
 impl CloudHypervisorCoreRuntime {
@@ -181,6 +188,7 @@ impl CloudHypervisorCoreRuntime {
             side_effects: Mutex::new(HashMap::new()),
             observed_attachments: Arc::new(NoObservedAttachments),
             default_backend_class: chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS.to_string(),
+            lvm_volume_group: chv_hypervisor_api::resources::DEFAULT_LVM_VOLUME_GROUP.to_string(),
         }
     }
 
@@ -209,6 +217,15 @@ impl CloudHypervisorCoreRuntime {
     /// absent-field fallback.
     pub fn with_default_backend_class(mut self, backend_class: impl Into<String>) -> Self {
         self.default_backend_class = backend_class.into();
+        self
+    }
+
+    /// Set the LVM volume group LVM-class opens are located against
+    /// (#379 DP5). The agent passes the operator's stord-config value so
+    /// the dm-path locator and the backend's own `/dev/{vg}/{vid}`
+    /// derivation agree.
+    pub fn with_lvm_volume_group(mut self, volume_group: impl Into<String>) -> Self {
+        self.lvm_volume_group = volume_group.into();
         self
     }
 
@@ -403,7 +420,30 @@ impl CloudHypervisorCoreRuntime {
         opened: &mut Vec<(String, String, bool)>,
     ) -> Result<(), ChvError> {
         let volume_id = storage.storage_ref.as_str();
-        let locator = vm_dir.join(format!("{volume_id}.img"));
+        // #379 PR 2 (A3): the per-attachment class from the Core
+        // definition (A7), falling back to the runtime's node-level
+        // default — absent stays absent here, so a definition without
+        // the field (every pre-#379 journal entry) opens exactly as
+        // before.
+        let backend_class = storage
+            .backend_class
+            .as_deref()
+            .unwrap_or(&self.default_backend_class);
+        // #379 DP5: class-dependent locator shaping — an LVM-class open
+        // carries a /dev/mapper/{vg}-{vid} dm-path token the standard
+        // device_allowlist admits (the LVM backend ignores the locator
+        // and derives /dev/{vg}/{vid} itself); every other class keeps
+        // the historical {volume_id}.img under the VM dir. Same
+        // convention as the legacy open sites (reconcile.rs A1/A2,
+        // agent_server.rs A4/A10).
+        let locator = if backend_class == "lvm" {
+            chv_hypervisor_api::resources::lvm_locator(&self.lvm_volume_group, volume_id)
+        } else {
+            vm_dir
+                .join(format!("{volume_id}.img"))
+                .to_string_lossy()
+                .into_owned()
+        };
         // Provisioning hints from the Core definition (mirroring the legacy
         // reconcile path): size and seed apply on first open; stord ignores
         // them for an already-provisioned volume.
@@ -423,16 +463,8 @@ impl CloudHypervisorCoreRuntime {
             .resources
             .open_volume(
                 volume_id,
-                // #379 PR 2 (A3): the per-attachment class from the Core
-                // definition (A7), falling back to the runtime's
-                // node-level default — absent stays absent here, so a
-                // definition without the field (every pre-#379 journal
-                // entry) opens exactly as before.
-                storage
-                    .backend_class
-                    .as_deref()
-                    .unwrap_or(&self.default_backend_class),
-                &locator.to_string_lossy(),
+                backend_class,
+                &locator,
                 open_options,
                 Some(op_id),
             )

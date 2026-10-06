@@ -126,14 +126,30 @@ fn harness(fail_on: Option<&str>) -> Harness {
 /// class overridden (#379 PR 1), so tests can pin that the configured
 /// class value — not an inline literal — reaches the storage controller.
 fn harness_with_backend_class(backend_class: &str) -> Harness {
+    harness_with(|rt| rt.with_default_backend_class(backend_class))
+}
+
+/// Same as [`harness`] but with the runtime's LVM volume group overridden
+/// (#379 PR 3, DP5), so tests can pin that the operator's configured
+/// group — not the default — shapes the dm-path locator of LVM-class
+/// opens. The node-level default backend class stays "local"; tests drive
+/// the LVM arm via the per-attachment class.
+fn harness_with_lvm(volume_group: &str) -> Harness {
+    harness_with(|rt| rt.with_lvm_volume_group(volume_group))
+}
+
+fn harness_with(
+    configure: impl FnOnce(CloudHypervisorCoreRuntime) -> CloudHypervisorCoreRuntime,
+) -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime_dir = dir.path().join("runtime");
     let adapter = Arc::new(MockCloudHypervisorAdapter::default());
     let controller = Arc::new(MockHostResourceController::new());
-    let runtime = Arc::new(
-        CloudHypervisorCoreRuntime::new(adapter.clone(), controller.clone(), runtime_dir.clone())
-            .with_default_backend_class(backend_class),
-    );
+    let runtime = Arc::new(configure(CloudHypervisorCoreRuntime::new(
+        adapter.clone(),
+        controller.clone(),
+        runtime_dir.clone(),
+    )));
     Harness {
         _dir: dir,
         runtime_dir,
@@ -331,6 +347,43 @@ async fn create_vm_volume_opens_thread_the_attachment_backend_class() {
         opens[1].1, "local",
         "a class-less attachment keeps the runtime default"
     );
+}
+
+#[tokio::test]
+async fn create_vm_lvm_opens_carry_the_dm_path_locator() {
+    // #379 PR 3 pin (A3 / DP5), red/green: an LVM-class volume open must
+    // carry the `/dev/mapper/{vg}-{vid}` dm-path locator (shaped from the
+    // runtime's configured volume group) instead of the historical
+    // `{volume_id}.img` under the VM dir — the device_allowlist on an LVM
+    // node admits the dm-path token and denies the VM-dir path. Reverting
+    // the A3 locator branch to the always-img form fails this test.
+    let h = harness_with_lvm("qual-vg");
+    let vm_id = "vm-lvm-loc";
+    let mut def = definition(vm_id, 2, 0);
+    def.storage[1].backend_class = Some("lvm".to_string());
+    let command = MutationCommand::CreateVm { definition: def };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-lvm-loc",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    let locators = h.controller.open_locators.lock().expect("locators lock");
+    assert_eq!(locators.len(), 2, "two opens: {locators:?}");
+    assert_eq!(
+        locators[0].1,
+        vm_dir_path(&h, vm_id).join("vol-0.img").to_string_lossy(),
+        "a local-class open keeps the historical VM-dir .img locator"
+    );
+    assert_eq!(
+        locators[1].1, "/dev/mapper/qual-vg-vol-1",
+        "an lvm-class open must carry the dm-path locator shaped from the configured VG"
+    );
+    drop(locators);
 }
 
 #[tokio::test]

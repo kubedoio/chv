@@ -38,6 +38,11 @@ pub struct MockHostResourceController {
     /// can assert provisioning hints (size/seed) and the threaded backend
     /// class reached the storage layer.
     pub open_options: Arc<Mutex<Vec<RecordedOpenOptions>>>,
+    /// Locator argument of each `open_volume` call as `(volume_id,
+    /// locator)`, in call order, so tests can pin the #379 DP5
+    /// class-dependent locator shaping (the LVM dm-path token vs the
+    /// historical `{volume_id}.img` under the VM dir).
+    pub open_locators: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl MockHostResourceController {
@@ -51,6 +56,7 @@ impl MockHostResourceController {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_next: Arc::new(Mutex::new(Some(fail_on.to_string()))),
             open_options: Arc::new(Mutex::new(Vec::new())),
+            open_locators: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -83,7 +89,7 @@ impl HostResourceController for MockHostResourceController {
         &self,
         volume_id: &str,
         backend_class: &str,
-        _locator: &str,
+        locator: &str,
         options: HashMap<String, String>,
         _operation_id: Option<&str>,
     ) -> Result<(String, String, String), ChvError> {
@@ -94,6 +100,10 @@ impl HostResourceController for MockHostResourceController {
             backend_class.to_string(),
             options,
         ));
+        self.open_locators
+            .lock()
+            .unwrap()
+            .push((volume_id.to_string(), locator.to_string()));
         Ok((
             volume_id.to_string(),
             format!("handle-{volume_id}"),

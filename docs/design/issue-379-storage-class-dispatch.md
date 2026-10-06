@@ -12,12 +12,13 @@ recorded as a design decision in
 
 **Status:** FINAL — investigation + maintainer decision (§5.1, 2026-10-05):
 all recommendations adopted, landed as the three-PR decomposition (§4).
-PR 1 (agent class plumbing) ships with this change; PR 2 (CP carry) and
-PR 3 (LVM enablement) follow. Evidence cited `file:line` at main
-`94e97b65` (verified `git rev-parse HEAD`). This issue was sequenced
-after #385 (stord respawn config fidelity, merged as #506) precisely so
-the control-plane dispatch is not built on a respawn path that silently
-reverts backend selection — see §2.6.
+PR 1 (agent class plumbing, #510) and PR 2 (CP carry, #511) are merged;
+PR 3 (LVM enablement — DP2/DP4/DP5/DP7, this change) closes the
+sequence. Evidence cited `file:line` at main `94e97b65` (verified
+`git rev-parse HEAD`). This issue was sequenced after #385 (stord
+respawn config fidelity, merged as #506) precisely so the control-plane
+dispatch is not built on a respawn path that silently reverts backend
+selection — see §2.6.
 
 ---
 
@@ -91,7 +92,7 @@ claims themselves remain accurate.
 | A5 | CP VM-spec disk model | `crates/chv-controlplane-service/src/orchestrator.rs:1907-1913` (`AgentDiskSpec`) | Carries `volume_id`/`read_only`/`size_bytes` only; built at `:1570-1584` from a query that selects `volume_id, read_only, capacity_bytes` only (`:1527-1544`) — the class never leaves the store |
 | A6 | Agent disk-spec model | `crates/chv-agent-core/src/spec.rs:31-38` (`DiskSpec`) | No class field (serde-tolerant: unknown fields are ignored, so an additive field is backward-compatible) |
 | A7 | Core definition model | `crates/cellhv-core-types/src/lib.rs:354-365` (`StorageAttachmentRef`) | `attachment_id`/`storage_ref`/`read_only`/`size_bytes`/`seed_from` — no class; Core cannot express "this disk is LVM" |
-| A8 | CP→agent attach dispatch, empty spec | `crates/chv-controlplane-service/src/node_client.rs:649-671` (`volume_spec_json: vec![]` at `:670`) | The AttachVolume RPC's `VolumeMutationSpec.volume_spec_json` is always empty — A4's parser always takes the defaults |
+| A8 | CP→agent attach dispatch, empty spec | `crates/chv-controlplane-service/src/node_client.rs:649-671` (`volume_spec_json: vec![]` at `:670`) | The AttachVolume RPC's `VolumeMutationSpec.volume_spec_json` is always empty — A4's parser always takes the defaults *(corrected below, 2026-10-05)* |
 | A9 | BFF attach mutation, empty spec | `crates/chv-controlplane-service/src/bff_mutations.rs:422-433` (`:432`) | Same: the BFF's `mutate_volume(action="attach")` sends `volume_spec_json: vec![]` |
 | A10 | Agent `CreateVm` RPC, legacy branch | `crates/chv-agent-core/src/agent_server.rs:1001-1120` (open at `:1097`) | `create_vm`'s non-core branch opens every disk with the literal `"local"` and a `{volume_id}.img` locator — a fifth class-writing open site. Not reachable from the current control plane (verified: `node_client::create_vm` (`node_client.rs:369`) has no production caller; the CP drives VM create through the gateway → desired-state persist → the A1/A2 reconcile fan-out, and core-managed nodes go through the authority → A3), so functionally a dead RPC today — but it is a live class-writing open that PR 1's plumbing must cover (or explicitly freeze), and it is the surface DP6's recommended `CreateVolume` RPC will mirror |
 
@@ -135,6 +136,20 @@ and the fragment path already round-trips a class end-to-end
 (`VolumeSpec.storage_class`, `crates/chv-controlplane-types/src/fragment.rs:42-55`,
 applied at `crates/chv-controlplane-service/src/reconcile.rs:478`) —
 there is simply no producer.
+
+**Census correction (2026-10-05, PR 3).** The A8 row's "A4's parser
+always takes the defaults" was inaccurate at the letter, and PR 2's
+merge notes disclosed the discrepancy: `serde_json::from_slice` on the
+producer's **empty** `volume_spec_json` is an EOF *error*, not a
+defaults-taking parse — the NULL-class attach spec never parsed at A4
+(the dispatch worked only because the failure was never exercised with
+a non-default class in mind). PR 2 preserved the empty bytes
+byte-exactly (deliberately: PR boundaries don't change wire formats);
+PR 3 fixes the producer to emit `b"{}"` — a spec that parses and takes
+every default, which is what this census row always described. The
+A4/A9 contract-pair tests pin the new shape, and the CHANGELOG
+discloses the wire-format change (an empty-byte spec is now `{"…"}`
+rather than empty).
 
 ### 2.2 stord is single-backend per daemon — the locator class is a check, not a router
 
