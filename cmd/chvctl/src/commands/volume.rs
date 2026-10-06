@@ -39,9 +39,18 @@ pub async fn execute(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            // `attached_to` was a phantom column — the BFF serves
+            // `attached_vm_id`/`attached_vm_name` (#372 DP10/§2.7(a)).
             output::print_list(
                 &items,
-                &["volume_id", "name", "size", "status", "attached_to"],
+                &[
+                    "volume_id",
+                    "name",
+                    "size",
+                    "status",
+                    "attached_vm_id",
+                    "attached_vm_name",
+                ],
                 format,
             );
         }

@@ -29,6 +29,19 @@ pub enum VmCommands {
         /// Network to attach
         #[arg(long)]
         network: Option<String>,
+        /// Placement node (defaults to the most recently enrolled node)
+        #[arg(long)]
+        node: Option<String>,
+        /// Boot volume storage class (local, iscsi, ceph, lvm) — validated
+        /// against the same shared vocabulary the BFF checks (#372 DP9)
+        #[arg(long)]
+        storage_class: Option<String>,
+        /// Boot volume size in GiB (#372 DP9)
+        #[arg(long)]
+        disk_size_gb: Option<i64>,
+        /// Cloud-init userdata, or `@file` to read it from a file (#372 DP9)
+        #[arg(long)]
+        cloud_init: Option<String>,
     },
     /// Start a virtual machine
     Start {
@@ -102,11 +115,17 @@ pub async fn execute(
             memory,
             image,
             network,
+            node,
+            storage_class,
+            disk_size_gb,
+            cloud_init,
         } => {
             // Field names follow the BFF create_vm contract: cpu_count,
             // memory_bytes, image_ref, network_id (the legacy "cpu"/"memory"/
             // "image"/"network" spellings are not read by the handler and
             // were silently ignored, always creating a default-spec VM).
+            // The #372 DP9 flags (node_id, storage_class, volume_size_gb,
+            // cloud_init_userdata) map to the same handler's fields.
             let mut body = json!({ "name": name });
             if let Some(c) = cpu {
                 body["cpu_count"] = json!(c);
@@ -119,6 +138,37 @@ pub async fn execute(
             }
             if let Some(n) = network {
                 body["network_id"] = json!(n);
+            }
+            if let Some(n) = node {
+                body["node_id"] = json!(n);
+            }
+            if let Some(class) = storage_class {
+                // Trim before validating AND before sending (review round
+                // 1, parity with the BFF): the BFF trims the class before
+                // its vocabulary check, so an untrimmed client-side
+                // compare would over-reject (e.g. a shell tab-completion
+                // trailing space) — same vocabulary, same rules both
+                // sides.
+                let class = class.trim();
+                validate_storage_class(class)?;
+                body["storage_class"] = json!(class);
+            }
+            if let Some(gb) = disk_size_gb {
+                // Mirror the BFF's full 1..=64-TiB bound (vms.rs's
+                // MAX_VOLUME_SIZE_GB — BFF-local, hence mirrored here with
+                // a cross-reference rather than imported) so the client
+                // rejects with the same rule the server enforces (review
+                // round 1); the server check stays authoritative.
+                const MAX_VOLUME_SIZE_GB: i64 = 64 * 1024;
+                if gb <= 0 || gb > MAX_VOLUME_SIZE_GB {
+                    return Err(CliError::Parse(format!(
+                        "invalid --disk-size-gb {gb}: must be between 1 and {MAX_VOLUME_SIZE_GB} GiB (64 TiB)"
+                    )));
+                }
+                body["volume_size_gb"] = json!(gb);
+            }
+            if let Some(userdata) = cloud_init {
+                body["cloud_init_userdata"] = json!(resolve_cloud_init_userdata(&userdata)?);
             }
             let resp = client.post("/v1/vms/create", &body).await?;
             println!("VM created successfully.");
@@ -173,6 +223,33 @@ pub async fn execute(
     Ok(())
 }
 
+/// Validate `--storage-class` against the single shared DP3 vocabulary
+/// (`chv_hypervisor_api::resources::BACKEND_CLASSES` — the same list the
+/// BFF's create handler validates against, #372 DP9/#379). Rejecting
+/// client-side keeps a typo from becoming a server round trip, but the
+/// BFF check remains authoritative.
+pub(crate) fn validate_storage_class(class: &str) -> Result<(), CliError> {
+    if chv_hypervisor_api::resources::is_known_backend_class(class) {
+        Ok(())
+    } else {
+        Err(CliError::Parse(format!(
+            "unknown storage_class {class:?}: must be one of {}",
+            chv_hypervisor_api::resources::BACKEND_CLASSES.join(", ")
+        )))
+    }
+}
+
+/// Resolve `--cloud-init <userdata-or-@file>`: a leading `@` reads the
+/// userdata from the file, anything else is the userdata itself (#372
+/// DP9 — the same convention curl uses).
+pub(crate) fn resolve_cloud_init_userdata(input: &str) -> Result<String, CliError> {
+    match input.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| CliError::Io(format!("failed to read cloud-init file {path:?}: {e}"))),
+        None => Ok(input.to_string()),
+    }
+}
+
 /// Parse a human size ("512M", "2G", "1.5GiB", "4096") into bytes.
 ///
 /// Suffixes are binary (K/M/G/T = KiB/MiB/GiB/TiB, base 1024), matching the
@@ -214,7 +291,7 @@ pub(crate) fn parse_size_bytes(input: &str) -> Result<i64, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_size_bytes;
+    use super::{parse_size_bytes, resolve_cloud_init_userdata, validate_storage_class};
 
     #[test]
     fn parses_plain_bytes() {
@@ -248,5 +325,46 @@ mod tests {
         assert!(parse_size_bytes("12X").is_err());
         assert!(parse_size_bytes("-2G").is_err());
         assert!(parse_size_bytes("abc").is_err());
+    }
+
+    #[test]
+    fn storage_class_validation_matches_the_shared_vocabulary() {
+        // The DP3 list the BFF validates against — every entry accepts.
+        for class in chv_hypervisor_api::resources::BACKEND_CLASSES {
+            assert!(validate_storage_class(class).is_ok(), "{class} must accept");
+        }
+        // Unknown classes reject client-side instead of a server 400…
+        assert!(validate_storage_class("bogus").is_err());
+        // …including the stord-boundary-only local aliases the BFF
+        // rejects (#379: "local-file"/"localdisk" never accept here).
+        assert!(validate_storage_class("localdisk").is_err());
+        assert!(validate_storage_class("local-file").is_err());
+        assert!(validate_storage_class("").is_err());
+    }
+
+    #[test]
+    fn cloud_init_userdata_passes_through_verbatim() {
+        assert_eq!(
+            resolve_cloud_init_userdata("#cloud-config\n").unwrap(),
+            "#cloud-config\n"
+        );
+    }
+
+    #[test]
+    fn cloud_init_at_file_reads_the_file() {
+        let dir = tempfile::tempdir().expect("cloud-init tempdir");
+        let path = dir.path().join("user-data");
+        std::fs::write(&path, "#cloud-config\nhostname: vm-1\n").expect("write user-data");
+        let at_input = format!("@{}", path.display());
+        assert_eq!(
+            resolve_cloud_init_userdata(&at_input).unwrap(),
+            "#cloud-config\nhostname: vm-1\n"
+        );
+    }
+
+    #[test]
+    fn cloud_init_at_missing_file_is_a_loud_error() {
+        let err = resolve_cloud_init_userdata("@/nonexistent/chvctl/user-data").unwrap_err();
+        assert!(err.to_string().contains("cloud-init file"));
     }
 }

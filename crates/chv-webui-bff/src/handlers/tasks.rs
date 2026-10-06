@@ -144,6 +144,60 @@ pub async fn list_tasks(
     })))
 }
 
+pub async fn get_task(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    // The house /get convention (vms/get, nodes/get, volumes/get,
+    // networks/get — #372 DP6): 400 on a missing id, 404 on an unknown
+    // one, and the payload nested under a single top-level key
+    // (`detail`, the networks/get spelling). The item shape is
+    // byte-identical to list_tasks' items — the same keys
+    // `chvctl task list` prints — so a poller and a lister render the
+    // same row.
+    let task_id = payload
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing task_id".into()))?;
+
+    let row = sqlx::query_as::<_, TaskRow>(
+        r#"
+        SELECT
+            operation_id AS task_id,
+            status,
+            operation_type AS operation,
+            resource_kind,
+            resource_id,
+            requested_by AS actor,
+            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
+            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms
+        FROM operations
+        WHERE operation_id = ?
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to get task: {}", e)))?;
+
+    match row {
+        Some(r) => Ok(Json(json!({
+            "detail": {
+                "task_id": r.task_id,
+                "status": r.status,
+                "operation": r.operation,
+                "resource_kind": r.resource_kind,
+                "resource_id": r.resource_id.unwrap_or_default(),
+                "actor": r.actor.unwrap_or_default(),
+                "started_unix_ms": r.started_unix_ms,
+                "finished_unix_ms": r.finished_unix_ms,
+            }
+        }))),
+        None => Err(BffError::NotFound(format!("task {} not found", task_id))),
+    }
+}
+
 pub async fn stream_tasks(
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,

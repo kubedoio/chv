@@ -49,20 +49,27 @@
 //!   forwarding, and display columns all match the BFF today.
 //! - PINNED-BROKEN rows: known drift, pinned as it behaves TODAY with a
 //!   TODO referencing the design §2 section and the PR that flips the
-//!   row (PR 2 live fixes, PR 3 removals, PR 4 migrate reads). The
-//!   harness must pass at main — red-where-known means asserting the
-//!   current broken behavior, not failing.
+//!   row (PR 3 removals, PR 4 migrate reads). The harness must pass at
+//!   main — red-where-known means asserting the current broken
+//!   behavior, not failing.
 //!
-//! Pinned-broken rows in this file:
-//! - `user delete` — 400 `missing user_id` (§2.1) → PR 2;
+//! PR 2 (this change, the #372 live-path fixes) flipped the fixable red
+//! pins green and added the DP9 rows:
+//! - `user delete` now sends `user_id` (§2.1/DP2) — green, end-to-end;
+//! - `task watch` polls the new `POST /v1/tasks/get` (§2.5/DP6) and the
+//!   row asserts COMPLETION of a seeded terminal task;
+//! - `network create --vlan` — the flag is removed (§2.6/DP7); the row
+//!   is now a CLI-arg-level assertion that `--vlan` no longer parses;
+//! - the four display-drift rows (§2.7(a)/DP10) assert the corrected
+//!   columns PRESENT;
+//! - new DP9 rows pin `vm create --node/--storage-class/
+//!   --disk-size-gb/--cloud-init` (green on a local-reporting node, and
+//!   the unoffered-class 400 with zero journaled rows).
+//!
+//! Pinned-broken rows remaining in this file:
 //! - `storage` group — 404 on all four subcommands (§2.2) → PR 3;
-//! - `migrate` group — 404 on all four subcommands (§2.3) → PR 2/3/4;
-//! - `backup` group — 404 on both subcommands (§2.4) → PR 3;
-//! - `task watch` — hangs forever (§2.5) → PR 2 (timeout + poll pin);
-//! - `network create --vlan` — `vlan` silently dropped (§2.6) → PR 2;
-//! - display columns: `task list` (`type`, `created_at`), `network
-//!   list` (`cidr`, `vlan`, `status`), `volume list` (`attached_to`),
-//!   `image list` (`format`) — §2.7(a) → PR 2.
+//! - `migrate` group — 404 on all four subcommands (§2.3) → PR 3/4;
+//! - `backup` group — 404 on both subcommands (§2.4) → PR 3.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +90,7 @@ use chvctl::commands::{
     auth, backup, health, image, migrate, network, node, storage, task, user, vm, volume,
 };
 use chvctl::output::OutputFormat;
+use clap::Parser as _;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -276,8 +284,9 @@ struct Harness {
     pool: sqlx::SqlitePool,
     jwt_secret: String,
     mutations: Arc<RecordingMutations>,
-    /// Number of POST /v1/tasks requests the server has served — the
-    /// `task watch` row's poll-hit assertion (design §2.5).
+    /// Number of `POST /v1/tasks/get` requests the server has served —
+    /// the `task watch` row's poll-hit assertion (design §2.5/DP6: the
+    /// fixed command polls the single-task get route).
     task_polls: Arc<AtomicUsize>,
 }
 
@@ -305,7 +314,7 @@ impl Harness {
         let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
             let counter = counter.clone();
             async move {
-                if req.uri().path() == "/v1/tasks" {
+                if req.uri().path() == "/v1/tasks/get" {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }
                 next.run(req).await
@@ -378,6 +387,41 @@ impl Harness {
         .execute(&self.pool)
         .await
         .expect("seed node");
+    }
+
+    /// An enrolled node plus an inventory row advertising exactly these
+    /// storage classes — the JSON array of strings the inventory paths
+    /// write (the `vm_create_storage_class.rs` seeding shape). #516's
+    /// create-side capability check is live, so the DP9 rows exercise
+    /// BOTH directions against a reporting node.
+    async fn seed_node_with_storage_classes(&self, node_id: &str, classes: &[&str]) {
+        sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, 'h', 'h')")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .expect("seed node");
+        sqlx::query(
+            "INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes) \
+             VALUES (?, 'x86_64', 1, 1024, ?)",
+        )
+        .bind(node_id)
+        .bind(serde_json::to_string(classes).unwrap())
+        .execute(&self.pool)
+        .await
+        .expect("seed node inventory");
+    }
+
+    /// A user row (no token) — a `user delete` victim.
+    async fn seed_user(&self, user_id: &str, username: &str) {
+        sqlx::query(
+            "INSERT INTO users (user_id, username, password_hash, role, must_change_password) \
+             VALUES (?, ?, 'x', 'viewer', 0)",
+        )
+        .bind(user_id)
+        .bind(username)
+        .execute(&self.pool)
+        .await
+        .expect("seed user");
     }
 
     /// A VM owned by the seeded operator (`u-operator`), on node `n-1`.
@@ -528,23 +572,6 @@ fn assert_columns_present(items: &[Value], columns: &[&str]) {
     }
 }
 
-/// The pinned-broken form of the display-drift guard: chvctl prints
-/// these columns but the BFF does not serve them, so the column renders
-/// empty. Asserting the ABSENCE pins today's drift; PR 2 (DP10) flips
-/// these rows to `assert_columns_present`.
-fn assert_columns_absent(items: &[Value], columns: &[&str]) {
-    assert!(!items.is_empty(), "expected at least one item");
-    for (i, item) in items.iter().enumerate() {
-        for col in columns {
-            assert!(
-                item.get(*col).is_none(),
-                "item {i} unexpectedly serves column {col:?} — the pinned-broken drift \
-                 assumption no longer holds; flip this row to assert_columns_present"
-            );
-        }
-    }
-}
-
 /// Assert a command failed with exactly the given API status (the
 /// pinned-broken rows' 400/404 pins).
 fn assert_api_error(result: Result<(), CliError>, status: u16) {
@@ -654,9 +681,9 @@ async fn vm_get_row() {
 /// `chvctl vm create` — GREEN. Field names (`name`, `cpu_count`,
 /// `memory_bytes`, `image_ref`, `network_id`) are the BFF create_vm
 /// contract; the create needs an enrolled node (the handler's
-/// default-placement rule). §2.7(b) records the capability gap (no
+/// default-placement rule). §2.7(b) recorded the capability gap (no
 /// `--node`/`--storage-class`/`--disk-size-gb`/`--cloud-init` flags) —
-/// those land in PR 2 (DP9) with their own rows.
+/// the DP9 flags landed with their own rows below.
 #[tokio::test]
 async fn vm_create_row() {
     let h = Harness::start().await;
@@ -672,6 +699,10 @@ async fn vm_create_row() {
             memory: Some("512M".to_string()),
             image: Some("default".to_string()),
             network: Some("default".to_string()),
+            node: None,
+            storage_class: None,
+            disk_size_gb: None,
+            cloud_init: None,
         },
         &OutputFormat::Json,
     )
@@ -702,7 +733,140 @@ async fn vm_create_row() {
     );
     // `image_ref`/`network_id` are also optional-with-default but are not
     // served by vm list (only cpu/memory are); they stay name-probed here
-    // — the PR-2 flags (DP9) add their own rows with shape assertions.
+    // — the DP9 flags add their own rows with shape assertions below.
+}
+
+/// `chvctl vm create --node --storage-class --disk-size-gb --cloud-init`
+/// — GREEN (#372 DP9, design §2.7(b)). The flags map to the BFF
+/// create_vm contract fields `node_id`/`storage_class`/`volume_size_gb`/
+/// `cloud_init_userdata`; the node's inventory advertises `["local"]`,
+/// so #516's create-side capability check accepts the offered class.
+/// Shape probes mirror the base row: a BFF-side rename of any of the
+/// four field names would silently default it and fail the round-trip
+/// assertions below.
+#[tokio::test]
+async fn vm_create_storage_class_row() {
+    let h = Harness::start().await;
+    h.seed_node_with_storage_classes("n-local", &["local"])
+        .await;
+    let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
+
+    vm::execute(
+        &client,
+        vm::VmCommands::Create {
+            name: "contract-vm-local".to_string(),
+            cpu: Some(1),
+            memory: Some("512M".to_string()),
+            image: Some("default".to_string()),
+            network: Some("default".to_string()),
+            node: Some("n-local".to_string()),
+            storage_class: Some("local".to_string()),
+            disk_size_gb: Some(5),
+            cloud_init: Some("#cloud-config\n".to_string()),
+        },
+        &OutputFormat::Json,
+    )
+    .await
+    .expect("chvctl vm create --storage-class local against POST /v1/vms/create");
+
+    // `node_id` round-trips through vm list.
+    let items = list_items(&client, "/v1/vms").await;
+    let vm = items
+        .iter()
+        .find(|i| i.get("name").and_then(Value::as_str) == Some("contract-vm-local"))
+        .expect("created VM is visible in vm list");
+    assert_eq!(
+        vm.get("node_id").and_then(Value::as_str),
+        Some("n-local"),
+        "node_id must round-trip — a BFF rename would fall back to default placement"
+    );
+    // `storage_class`/`volume_size_gb`/`cloud_init_userdata` are not
+    // served by vm list — assert the journaled rows directly (the
+    // create tx writes volumes + vm_desired_state).
+    let class: Option<String> = sqlx::query_scalar(
+        "SELECT storage_class FROM volumes WHERE display_name = 'contract-vm-local-disk'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("boot volume row");
+    assert_eq!(
+        class.as_deref(),
+        Some("local"),
+        "storage_class must round-trip onto the boot volume"
+    );
+    let capacity: Option<i64> = sqlx::query_scalar(
+        "SELECT capacity_bytes FROM volumes WHERE display_name = 'contract-vm-local-disk'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("boot volume capacity");
+    assert_eq!(
+        capacity,
+        Some(5 * 1024 * 1024 * 1024),
+        "volume_size_gb must round-trip (5 GiB)"
+    );
+    let userdata: Option<String> = sqlx::query_scalar(
+        "SELECT cloud_init_userdata FROM vm_desired_state \
+         WHERE vm_id = (SELECT vm_id FROM vms WHERE display_name = 'contract-vm-local')",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("vm desired state row");
+    assert_eq!(
+        userdata.as_deref(),
+        Some("#cloud-config\n"),
+        "cloud_init_userdata must round-trip"
+    );
+}
+
+/// `chvctl vm create --storage-class lvm` on a node that reports only
+/// `["local"]` — the DP9 REJECTION row, mirroring the BFF-tier
+/// `vm_create_storage_class.rs` tests at the contract tier: #516's
+/// create-side capability check rejects the unoffered class with 400
+/// BEFORE the create transaction, so nothing is journaled.
+#[tokio::test]
+async fn vm_create_storage_class_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_node_with_storage_classes("n-local", &["local"])
+        .await;
+    let token = h.seed_jwt_as("operator").await;
+
+    // `lvm` is a valid DP3 vocabulary class, so it passes chvctl's
+    // client-side check and the rejection comes from the BFF.
+    let result = vm::execute(
+        &h.client(Some(token)),
+        vm::VmCommands::Create {
+            name: "contract-vm-lvm".to_string(),
+            cpu: Some(1),
+            memory: Some("512M".to_string()),
+            image: Some("default".to_string()),
+            network: Some("default".to_string()),
+            node: Some("n-local".to_string()),
+            storage_class: Some("lvm".to_string()),
+            disk_size_gb: Some(5),
+            cloud_init: None,
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    assert_api_error(result, 400);
+
+    // A rejected create journals nothing (every table the create tx
+    // writes — the `vm_create_storage_class.rs` discipline).
+    for table in [
+        "vms",
+        "vm_desired_state",
+        "volumes",
+        "volume_desired_state",
+        "operations",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a rejected create must not journal {table}");
+    }
 }
 
 /// `chvctl vm start` — GREEN; forwarded to the mutation service.
@@ -937,10 +1101,10 @@ async fn node_maintenance_exit_row() {
 // Rows — image (route/field GREEN; `image list` display-pinned)
 // ---------------------------------------------------------------------------
 
-/// `chvctl image list` — route/fields GREEN; display PINNED-BROKEN:
-/// chvctl prints `format`, which no item serves (design §2.7(a));
-/// PR 2 (DP10) corrects the column and flips this to
-/// `assert_columns_present`.
+/// `chvctl image list` — GREEN. Columns are the keys the BFF serves
+/// (#372 DP10/§2.7(a)): the phantom `format` column was dropped —
+/// chvctl's list and the BFF's items now agree on
+/// image_id/name/size/status.
 #[tokio::test]
 async fn image_list_row() {
     let h = Harness::start().await;
@@ -954,14 +1118,11 @@ async fn image_list_row() {
 
     let items = list_items(&client, "/v1/images").await;
     assert_columns_present(&items, &["image_id", "name", "size", "status"]);
-    // TODO(#372 PR 2, design §2.7(a)/DP10): `format` is a phantom column —
-    // the BFF's list items never serve it, so the column renders empty.
-    assert_columns_absent(&items, &["format"]);
 }
 
-/// `chvctl image import` — GREEN. `source_url` is the BFF contract key;
-/// the redundant dual-key `url` send (design §2.1 residual / DP10) is
-//  dropped in PR 2 — the server alias stays either way.
+/// `chvctl image import` — GREEN. `source_url` is the BFF import
+/// contract key; the redundant dual-key `url` send (design §2.1
+/// residual / DP10) is dropped — the server alias stays server-side.
 #[tokio::test]
 async fn image_import_row() {
     let h = Harness::start().await;
@@ -1003,9 +1164,9 @@ async fn image_delete_row() {
 // Rows — volume (route/field GREEN; `volume list` display-pinned)
 // ---------------------------------------------------------------------------
 
-/// `chvctl volume list` — route/fields GREEN; display PINNED-BROKEN:
-/// chvctl prints `attached_to`, which no item serves (design §2.7(a));
-/// PR 2 (DP10) corrects the column.
+/// `chvctl volume list` — GREEN. Columns are the keys the BFF serves
+/// (#372 DP10/§2.7(a)): the phantom `attached_to` column was replaced
+/// by the real `attached_vm_id`/`attached_vm_name` pair.
 #[tokio::test]
 async fn volume_list_row() {
     let h = Harness::start().await;
@@ -1019,10 +1180,17 @@ async fn volume_list_row() {
         .expect("chvctl volume list against POST /v1/volumes");
 
     let items = list_items(&client, "/v1/volumes").await;
-    assert_columns_present(&items, &["volume_id", "name", "size", "status"]);
-    // TODO(#372 PR 2, design §2.7(a)/DP10): `attached_to` is a phantom
-    // column — the BFF serves `attached_vm_id`/`attached_vm_name`.
-    assert_columns_absent(&items, &["attached_to"]);
+    assert_columns_present(
+        &items,
+        &[
+            "volume_id",
+            "name",
+            "size",
+            "status",
+            "attached_vm_id",
+            "attached_vm_name",
+        ],
+    );
 }
 
 /// `chvctl volume snapshot` — GREEN; `snapshot_name` field name (#373's
@@ -1073,9 +1241,9 @@ async fn volume_clone_row() {
 // Rows — network (route/field GREEN; list display-pinned; --vlan pinned)
 // ---------------------------------------------------------------------------
 
-/// `chvctl network list` — route/fields GREEN; display PINNED-BROKEN:
-/// chvctl prints `cidr`, `vlan`, and `status`, which no item serves
-/// (design §2.7(a)); PR 2 (DP10) corrects the columns.
+/// `chvctl network list` — GREEN. Columns are the keys the BFF serves
+/// (#372 DP10/§2.7(a)): the phantom `cidr`/`vlan`/`status` columns were
+/// replaced by the real scope/health/exposure/ipam_mode/is_default.
 #[tokio::test]
 async fn network_list_row() {
     let h = Harness::start().await;
@@ -1089,10 +1257,18 @@ async fn network_list_row() {
         .expect("chvctl network list against POST /v1/networks");
 
     let items = list_items(&client, "/v1/networks").await;
-    assert_columns_present(&items, &["network_id", "name"]);
-    // TODO(#372 PR 2, design §2.7(a)/DP10): `cidr`, `vlan`, `status` are
-    // phantom columns — the BFF serves scope/health/dhcp_enabled/etc.
-    assert_columns_absent(&items, &["cidr", "vlan", "status"]);
+    assert_columns_present(
+        &items,
+        &[
+            "network_id",
+            "name",
+            "scope",
+            "health",
+            "exposure",
+            "ipam_mode",
+            "is_default",
+        ],
+    );
 }
 
 /// `chvctl network create` (no --vlan) — GREEN.
@@ -1107,7 +1283,6 @@ async fn network_create_row() {
         network::NetworkCommands::Create {
             name: "contract-net".to_string(),
             cidr: "10.60.0.0/24".to_string(),
-            vlan: None,
         },
         &OutputFormat::Json,
     )
@@ -1146,35 +1321,48 @@ async fn network_create_row() {
     );
 }
 
-/// `chvctl network create --vlan` — PINNED-BROKEN (design §2.6/DP7): the
-/// BFF's create_network reads no `vlan` key — the flag is silently
-/// dropped with no error, and the capability does not exist at any
-/// layer. The row pins today's behavior (the request still succeeds —
-/// accepted-but-ignored); PR 2 removes the flag and this row becomes a
-/// rejection/absence assertion.
+/// `chvctl network create --vlan` — the flag is REMOVED (#372 DP7,
+/// design §2.6): the capability does not exist at any layer (no
+/// `vlan_id` column, no BFF field, no UI field) and the flag was
+/// silently dropped by the server — a flag that does nothing is the
+/// exact failure mode #372 names. #517 tracks the real implementation.
+/// The pre-PR-2 row pinned the silent drop (request accepted, `vlan`
+/// read by nothing); with the field gone from the `Create` variant the
+/// row is now a CLI-arg-level assertion — clap rejects `--vlan` as an
+/// unknown argument, so the flag cannot silently do nothing ever again.
 #[tokio::test]
-async fn network_create_vlan_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-    let client = h.client(Some(token));
+async fn network_create_vlan_flag_removed_row() {
+    // A tiny parser over the real `NetworkCommands` subcommand enum —
+    // the same clap derive the binary mounts, driven at the arg level.
+    #[derive(clap::Parser)]
+    struct NetworkCli {
+        #[command(subcommand)]
+        command: network::NetworkCommands,
+    }
 
-    network::execute(
-        &client,
-        network::NetworkCommands::Create {
-            name: "contract-vlan-net".to_string(),
-            cidr: "10.61.0.0/24".to_string(),
-            vlan: Some(42),
-        },
-        &OutputFormat::Json,
-    )
-    .await
-    // TODO(#372 PR 2, design §2.6/DP7): the request succeeding IS the
-    // drift pin — `vlan` is read by nothing (no table column, no UI
-    // field) and silently dropped.
-    .expect("chvctl network create --vlan is accepted (and the vlan silently dropped)");
+    // The flag no longer parses: clap errors on the unknown argument.
+    // (The parser wraps `NetworkCommands` directly, so argv starts at
+    // the `create` subcommand.)
+    let rejected = NetworkCli::try_parse_from([
+        "chvctl",
+        "create",
+        "contract-vlan-net",
+        "--cidr",
+        "10.61.0.0/24",
+        "--vlan",
+        "42",
+    ]);
+    assert!(
+        rejected.is_err(),
+        "--vlan must not parse — the flag was removed (#372 DP7); got {rejected:?}",
+        rejected = rejected.err().map(|e| e.to_string())
+    );
 
-    let items = list_items(&client, "/v1/networks").await;
-    assert_columns_absent(&items, &["vlan"]);
+    // And the create without it still parses (the green wire row is
+    // `network_create_row` above).
+    let accepted =
+        NetworkCli::try_parse_from(["chvctl", "create", "contract-net", "--cidr", "10.60.0.0/24"]);
+    assert!(accepted.is_ok(), "--vlan-free create must still parse");
 }
 
 /// `chvctl network delete` — GREEN.
@@ -1200,9 +1388,9 @@ async fn network_delete_row() {
 // Rows — task (list display-pinned; watch hang-pinned)
 // ---------------------------------------------------------------------------
 
-/// `chvctl task list` — route/fields GREEN; display PINNED-BROKEN:
-/// chvctl prints `type` and `created_at`, which no item serves (design
-/// §2.7(a)); PR 2 (DP10) corrects the columns.
+/// `chvctl task list` — GREEN. Columns are the keys the BFF serves
+/// (#372 DP10/§2.7(a)): the phantom `type`/`created_at` columns were
+/// replaced by the real `operation` and `started_unix_ms`.
 #[tokio::test]
 async fn task_list_row() {
     let h = Harness::start().await;
@@ -1215,53 +1403,57 @@ async fn task_list_row() {
         .expect("chvctl task list against POST /v1/tasks");
 
     let items = list_items(&client, "/v1/tasks").await;
-    assert_columns_present(&items, &["task_id", "status", "resource_id"]);
-    // TODO(#372 PR 2, design §2.7(a)/DP10): `type` and `created_at` are
-    // phantom columns — the BFF serves `operation` and
-    // `started_unix_ms`/`finished_unix_ms`.
-    assert_columns_absent(&items, &["type", "created_at"]);
+    assert_columns_present(
+        &items,
+        &[
+            "task_id",
+            "status",
+            "operation",
+            "resource_id",
+            "started_unix_ms",
+        ],
+    );
 }
 
-/// `chvctl task watch` — PINNED-BROKEN (design §2.5/DP6): the command
-/// polls `POST /v1/tasks` with `{"task_id": ...}`, but the handler reads
-/// only pagination filters (the key is ignored) and the response has no
-/// top-level `status` — so the loop prints `Status: unknown` every 2 s
-/// forever. The row wraps the command in a timeout and pins BOTH the
-/// hang and the fact that at least one poll hit the endpoint. PR 2 (new
-/// `POST /v1/tasks/get` + vocabulary fix + poll cap) flips this row to a
-/// completion assertion.
+/// `chvctl task watch` — GREEN since the DP6 fix (design §2.5): the
+/// command polls the new `POST /v1/tasks/get` (the house /get
+/// convention), matches the REAL status vocabulary (capitalized
+/// `Succeeded`/`Failed`/… — `OperationStatus`, never the old lowercase
+/// `completed`), and is bounded by `--timeout` (default 15 min). The
+/// pre-PR-2 row pinned the HANG (the command polled the list route,
+/// whose handler ignores `task_id`, and looped forever printing
+/// `Status: unknown`); the row now asserts COMPLETION: a seeded
+/// terminal task (`Succeeded`) makes the command exit with success,
+/// and the poll middleware counted the polls that reached the route.
 #[tokio::test]
 async fn task_watch_row() {
     let h = Harness::start().await;
+    h.seed_operation("op-watch").await;
     let token = h.seed_jwt_as("operator").await;
     let client = h.client(Some(token));
 
-    let started = std::time::Instant::now();
+    // The timeout wrapper stays (a regression to a hang must still fail
+    // the row loudly) — but it must NOT fire: the command completes.
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
+        std::time::Duration::from_secs(30),
         task::execute(
             &client,
             task::TaskCommands::Watch {
-                task_id: "op-none".to_string(),
+                task_id: "op-watch".to_string(),
+                // A short, explicit cap — well above one poll+print
+                // cycle, far below the row's outer wrapper.
+                timeout: 20,
             },
             &OutputFormat::Json,
         ),
     )
     .await;
 
-    // TODO(#372 PR 2, design §2.5/DP6): the timeout firing IS the drift
-    // pin — `watch` never terminates today.
-    assert!(
-        result.is_err(),
-        "pre-fix `task watch` must hang (design §2.5); it returned {result:?}"
-    );
-    assert!(
-        started.elapsed() >= std::time::Duration::from_secs(5),
-        "the command hung (polled and slept), it did not fail fast"
-    );
+    let inner = result.expect("task watch must complete, not hang (design §2.5/DP6)");
+    inner.expect("watching a Succeeded task exits with success");
     assert!(
         h.task_polls.load(Ordering::SeqCst) >= 1,
-        "at least one poll reached POST /v1/tasks"
+        "at least one poll reached POST /v1/tasks/get"
     );
 }
 
@@ -1270,7 +1462,8 @@ async fn task_watch_row() {
 // ---------------------------------------------------------------------------
 
 /// `chvctl user list` — GREEN (admin tier). Columns match
-/// `handlers/users.rs`.
+/// `handlers/users.rs` — `user_id` is included so the delete
+/// contract's key is discoverable (#372 DP2).
 #[tokio::test]
 async fn user_list_row() {
     let h = Harness::start().await;
@@ -1282,7 +1475,7 @@ async fn user_list_row() {
         .expect("chvctl user list against POST /v1/users");
 
     let items = list_items(&client, "/v1/users").await;
-    assert_columns_present(&items, &["username", "role", "created_at"]);
+    assert_columns_present(&items, &["user_id", "username", "role", "created_at"]);
 }
 
 /// `chvctl user create` — GREEN (admin tier).
@@ -1304,26 +1497,38 @@ async fn user_create_row() {
     .expect("chvctl user create against POST /v1/users/create");
 }
 
-/// `chvctl user delete` — PINNED-BROKEN (design §2.1/DP2): chvctl sends
-/// `{"username": ...}` where the BFF requires `user_id`, so every
-/// invocation 400s with `missing user_id` — the command has never
-/// worked. The row pins today's exact behavior; PR 2 changes the
-/// positional arg to `user_id` and flips this row to `Ok(())`.
+/// `chvctl user delete` — GREEN since the DP2 fix (design §2.1): the
+/// positional arg is `user_id` and the body carries `user_id`, the
+/// field the BFF's delete handler requires (the pre-PR-2 command sent
+/// `username`, which the handler rejected with 400 `missing user_id`
+/// on every invocation — the command had never worked, so there was no
+/// compat surface to break). The row asserts the delete actually works
+/// end-to-end: seed a user, delete by user_id, verify it is gone from
+/// the user list.
 #[tokio::test]
 async fn user_delete_row() {
     let h = Harness::start().await;
+    h.seed_user("u-victim", "victim").await;
     let token = h.seed_jwt_as("admin").await;
+    let client = h.client(Some(token));
 
-    let result = user::execute(
-        &h.client(Some(token)),
+    user::execute(
+        &client,
         user::UserCommands::Delete {
-            username: "contract-user".to_string(),
+            user_id: "u-victim".to_string(),
         },
         &OutputFormat::Json,
     )
-    .await;
-    // TODO(#372 PR 2, design §2.1/DP2): the 400 IS the drift pin.
-    assert_api_error(result, 400);
+    .await
+    .expect("chvctl user delete against POST /v1/users/delete");
+
+    let items = list_items(&client, "/v1/users").await;
+    assert!(
+        !items
+            .iter()
+            .any(|i| i.get("user_id").and_then(Value::as_str) == Some("u-victim")),
+        "deleted user must be gone from the user list"
+    );
 }
 
 // ---------------------------------------------------------------------------

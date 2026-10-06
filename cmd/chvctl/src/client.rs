@@ -5,9 +5,15 @@ use std::fmt;
 #[derive(Debug)]
 pub enum CliError {
     Http(String),
-    Api { status: u16, message: String },
+    Api {
+        status: u16,
+        message: String,
+    },
     Parse(String),
     Io(String),
+    /// A watched task reached a non-successful terminal status or the
+    /// watch timed out (#372 DP6) — the API call itself succeeded.
+    Task(String),
 }
 
 impl fmt::Display for CliError {
@@ -19,6 +25,7 @@ impl fmt::Display for CliError {
             }
             CliError::Parse(msg) => write!(f, "Parse error: {msg}"),
             CliError::Io(msg) => write!(f, "I/O error: {msg}"),
+            CliError::Task(msg) => write!(f, "Task error: {msg}"),
         }
     }
 }
