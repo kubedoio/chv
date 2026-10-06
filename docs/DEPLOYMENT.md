@@ -374,6 +374,13 @@ ca_cert_path = "/etc/chv/certs/ca.crt"
 # a minimal generated config. Omitted = historical generated respawn.
 stord_config_path = "/etc/chv/stord.toml"
 
+# nwd respawn config fidelity (#504): same pass-through for the network
+# daemon — point the supervisor at the operator's nwd.toml so a
+# respawned nwd keeps every operator key (the [overlay], [ebpf] and
+# [fabric] blocks) instead of a minimal generated config. Omitted =
+# historical generated respawn.
+nwd_config_path = "/etc/chv/nwd.toml"
+
 # Guest-liveness (boot) watchdog — OPT-IN, disabled when omitted.
 # Detects a guest frozen mid-boot (the cloud-hypervisor serial-manager
 # defect, present at both the former v43.0 pin and the current v53.0 pin

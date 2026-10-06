@@ -487,6 +487,22 @@ pub struct AgentConfig {
     /// `chv-stord` group).
     #[serde(default)]
     pub stord_config_path: Option<PathBuf>,
+    /// Operator's `nwd.toml`, passed through verbatim when the
+    /// supervisor must respawn nwd (#504, mirroring #385's stord
+    /// pass-through): the respawned daemon is exec'd with this file
+    /// instead of a supervisor-generated config, so every operator
+    /// key (`metrics_bind`, the `[overlay]`, `[ebpf]` and `[fabric]`
+    /// blocks, and future keys) survives respawn. The supervisor
+    /// validates only that the file parses and its `socket_path`
+    /// matches [`AgentConfig::nwd_socket`] — on any mismatch or
+    /// read/parse failure it falls back to today's generated config
+    /// with a loud warn (never worse than status quo). `None`
+    /// (default) keeps the historical generated-config respawn
+    /// byte-exactly. Requires the agent user to be able to read the
+    /// file (the standard install grants this: nwd.toml is owned
+    /// `root:chv 0640`).
+    #[serde(default)]
+    pub nwd_config_path: Option<PathBuf>,
     #[serde(default = "default_console_bind")]
     pub console_bind: String,
     #[serde(default = "default_agent_jwt_secret")]
@@ -599,6 +615,7 @@ impl Default for AgentConfig {
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
             stord_path_allowlist: vec![],
             stord_config_path: None,
+            nwd_config_path: None,
             console_bind: default_console_bind(),
             jwt_secret: default_agent_jwt_secret(),
             watchdog: BootWatchdogAgentConfig::default(),
@@ -882,6 +899,38 @@ jwt_secret = "0123456789abcdef0123456789abcdef"
         assert_eq!(
             cfg.stord_config_path,
             Some(PathBuf::from("/etc/chv/stord.toml"))
+        );
+    }
+
+    #[test]
+    fn agent_nwd_config_path_defaults_none_and_parses() {
+        // #504: nwd_config_path is an explicit opt-in — absent means
+        // today's generated-config respawn, byte-exactly (mirrors the
+        // #385 stord_config_path contract).
+        let base = r#"
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/var/lib/chv/agent"
+log_level = "info"
+control_plane_addr = "https://localhost:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = "test-node"
+jwt_secret = "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg = load_agent_config_from_str(base).expect("parse without key");
+        assert_eq!(cfg.nwd_config_path, None);
+
+        let cfg = load_agent_config_from_str(&format!(
+            "{base}\nnwd_config_path = \"/etc/chv/nwd.toml\"\n"
+        ))
+        .expect("parse with key");
+        assert_eq!(
+            cfg.nwd_config_path,
+            Some(PathBuf::from("/etc/chv/nwd.toml"))
         );
     }
 

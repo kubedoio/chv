@@ -363,6 +363,25 @@ operator config (create/widen the `runtime_dir`, repair the backend or TLS
 material). The health check is never wedged: the agent keeps reporting stord
 unhealthy and keeps retrying under the throttle while the file is broken.
 
+The same contract applies to `nwd_config_path` (#504 respawn config fidelity,
+the nwd twin of #385): with the key set in `/etc/chv/agent.toml`, the agent's
+supervisor respawns a dead nwd with the operator's `nwd.toml` verbatim — every
+operator key survives the respawn. An agent log line `nwd_config_path unusable
+for respawn; falling back to the supervisor-generated config` means the file was
+unreadable, malformed, or its `socket_path` did not match the agent's
+`nwd_socket`: the respawned daemon then runs the minimal generated config and
+any operator keys — the `[overlay]`, `[ebpf]` and `[fabric]` blocks,
+`metrics_bind`, a custom `log_level` — are NOT in effect until the file is
+fixed. The agent user must be able to read the file (the standard install
+ships `nwd.toml` as `root:chv 0640`, so this holds out of the box);
+hand-managed deployments should set `nwd_config_path` to their `nwd.toml` to
+get the pass-through behavior. A config that passes validation but fails at
+daemon startup (e.g. a `[fabric]` block whose provider cannot initialize, or an
+unwritable `runtime_dir`) crash-loops on the operator path under the restart
+throttle, exactly as stord does above — same posture as systemd
+`Restart=on-failure` with the same file, same remedy: fix the operator config.
+The health check is never wedged.
+
 ### LVM Storage Nodes (#379)
 
 A node serves LVM volumes when its stord runs `backend_type = "lvm"`. The
