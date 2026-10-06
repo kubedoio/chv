@@ -1180,3 +1180,208 @@ async fn get_fabric_peers_for_network_returns_peers_in_node_id_order() {
     // Sanity: the join picked up every participant exactly once.
     assert_eq!(peers.len(), nodes.len());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// #522 (review S1) — the delete tombstone vs. the mutation-verb patches
+// ─────────────────────────────────────────────────────────────────────
+
+/// Seed a volume with a `volume_desired_state` row in the given shape.
+/// The tombstone case is `('Deleting'`, a small integer generation) —
+/// exactly what the BFF delete route's one-tx journal writes.
+async fn seed_vds_volume(pool: &StorePool, volume_id: &str, generation: i64, status: Option<&str>) {
+    sqlx::query(
+        "INSERT INTO volumes (volume_id, display_name, capacity_bytes) VALUES ($1, $1, 1024)",
+    )
+    .bind(volume_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(volume_id)
+    .bind(generation)
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn vds_shape(pool: &StorePool, volume_id: &str) -> (i64, Option<String>, Option<String>) {
+    sqlx::query_as(
+        "SELECT desired_generation, desired_status, attached_vm_id \
+         FROM volume_desired_state WHERE volume_id = $1",
+    )
+    .bind(volume_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The wall-clock-milliseconds generation the control plane mints —
+/// the shape that always beat the tombstone's small integer before the
+/// SQL guard landed (the S1 race).
+const CP_WALL_CLOCK_GENERATION: i64 = 1_769_000_000_000;
+
+#[tokio::test]
+async fn volume_attachment_patch_refuses_to_journal_over_a_deleting_tombstone() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_vds_volume(&pool, "vol-s1-attach", 2, Some("Deleting")).await;
+    sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ($1, $1)")
+        .bind("vm-s1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for attached_vm_id in [Some("vm-s1"), None] {
+        let err = repo
+            .set_volume_attachment(&VolumeAttachmentPatchInput {
+                volume_id: ResourceId::new("vol-s1-attach").unwrap(),
+                desired_generation: Generation::new(CP_WALL_CLOCK_GENERATION as u64),
+                desired_status: None,
+                requested_by: Some("test".into()),
+                updated_by: None,
+                attached_vm_id: attached_vm_id.map(|id| ResourceId::new(id).unwrap()),
+                requested_unix_ms: CP_WALL_CLOCK_GENERATION,
+            })
+            .await
+            .expect_err("an attach/detach patch over a tombstone must fail");
+        assert!(
+            matches!(err, StoreError::Conflict { .. }),
+            "the refusal must be the loud Conflict, got: {err:?}"
+        );
+        assert_eq!(
+            vds_shape(&pool, "vol-s1-attach").await,
+            (2, Some("Deleting".into()), None),
+            "the tombstone must survive the refused patch byte-for-byte"
+        );
+    }
+}
+
+#[tokio::test]
+async fn volume_resize_patch_refuses_to_journal_over_a_deleting_tombstone() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_vds_volume(&pool, "vol-s1-resize", 2, Some("Deleting")).await;
+
+    let err = repo
+        .set_volume_resize(&VolumeResizePatchInput {
+            volume_id: ResourceId::new("vol-s1-resize").unwrap(),
+            desired_generation: Generation::new(CP_WALL_CLOCK_GENERATION as u64),
+            desired_status: None,
+            requested_by: Some("test".into()),
+            updated_by: None,
+            resize_to_bytes: Some(2_048),
+            requested_unix_ms: CP_WALL_CLOCK_GENERATION,
+        })
+        .await
+        .expect_err("a resize patch over a tombstone must fail");
+    assert!(
+        matches!(err, StoreError::Conflict { .. }),
+        "the refusal must be the loud Conflict, got: {err:?}"
+    );
+    assert_eq!(
+        vds_shape(&pool, "vol-s1-resize").await,
+        (2, Some("Deleting".into()), None),
+        "the tombstone must survive the refused patch byte-for-byte"
+    );
+}
+
+#[tokio::test]
+async fn volume_snapshot_patch_refuses_to_journal_over_a_deleting_tombstone() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_vds_volume(&pool, "vol-s1-snap", 2, Some("Deleting")).await;
+
+    let err = repo
+        .set_volume_snapshot(&VolumeSnapshotPatchInput {
+            volume_id: ResourceId::new("vol-s1-snap").unwrap(),
+            desired_generation: Generation::new(CP_WALL_CLOCK_GENERATION as u64),
+            desired_status: None,
+            requested_by: Some("test".into()),
+            updated_by: None,
+            snapshot_op: Some("create".into()),
+            snapshot_name: Some("snap".into()),
+            requested_unix_ms: CP_WALL_CLOCK_GENERATION,
+        })
+        .await
+        .expect_err("a snapshot patch over a tombstone must fail");
+    assert!(
+        matches!(err, StoreError::Conflict { .. }),
+        "the refusal must be the loud Conflict, got: {err:?}"
+    );
+    assert_eq!(
+        vds_shape(&pool, "vol-s1-snap").await,
+        (2, Some("Deleting".into()), None),
+        "the tombstone must survive the refused patch byte-for-byte"
+    );
+}
+
+#[tokio::test]
+async fn volume_patches_still_apply_to_a_live_volume() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_vds_volume(&pool, "vol-s1-live", 1, None).await;
+    sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES ($1, $1)")
+        .bind("vm-live")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    repo.set_volume_attachment(&VolumeAttachmentPatchInput {
+        volume_id: ResourceId::new("vol-s1-live").unwrap(),
+        desired_generation: Generation::new(2),
+        desired_status: None,
+        requested_by: Some("test".into()),
+        updated_by: None,
+        attached_vm_id: Some(ResourceId::new("vm-live").unwrap()),
+        requested_unix_ms: 2_000,
+    })
+    .await
+    .expect("a patch on a live (non-tombstoned) volume must still apply");
+
+    assert_eq!(
+        vds_shape(&pool, "vol-s1-live").await,
+        (2, None, Some("vm-live".into())),
+        "the control case must journal exactly as before the guard"
+    );
+}
+
+#[tokio::test]
+async fn volume_patch_stale_generation_is_still_the_stale_generation_error() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    // NOT tombstoned — a live volume whose row generation outranks the
+    // incoming patch. The disambiguation must keep this the pre-existing
+    // StaleGeneration refusal, not misreport it as a delete conflict.
+    seed_vds_volume(&pool, "vol-s1-stale", 100, Some("Active")).await;
+
+    let err = repo
+        .set_volume_attachment(&VolumeAttachmentPatchInput {
+            volume_id: ResourceId::new("vol-s1-stale").unwrap(),
+            desired_generation: Generation::new(50),
+            desired_status: None,
+            requested_by: Some("test".into()),
+            updated_by: None,
+            attached_vm_id: None,
+            requested_unix_ms: 50_000,
+        })
+        .await
+        .expect_err("a stale-generation patch must still fail");
+    assert!(
+        matches!(err, StoreError::StaleGeneration { .. }),
+        "the stale-generation semantic must be unchanged, got: {err:?}"
+    );
+    assert_eq!(
+        vds_shape(&pool, "vol-s1-stale").await,
+        (100, Some("Active".into()), None),
+        "the refused stale patch must not touch the row"
+    );
+}

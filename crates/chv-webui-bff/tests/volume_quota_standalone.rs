@@ -25,7 +25,13 @@
 //!   accrues once to A (owner) and once to B (the VM's requester);
 //! - **the meters** — `/v1/usage` and `/v1/quotas/:user_id/usage` (and
 //!   `/v1/quotas/check`) include standalone volume bytes, matching
-//!   enforcement.
+//!   enforcement;
+//! - **#522 DP9 release** — a `'Deleting'` volume stops accruing for
+//!   the owner AND the attacher the moment the tombstone is journaled
+//!   (driven through the real `POST /v1/volumes/delete` route), on
+//!   every read path: enforcement, both usage meters, and the
+//!   quota-check meter; plus the predicate's LEFT-JOIN safety (a
+//!   volume with no VDS row still accrues via ownership).
 
 use std::sync::Arc;
 
@@ -580,5 +586,153 @@ async fn usage_meters_include_standalone_volume_bytes() {
             .and_then(|v| v.as_i64()),
         Some(2),
         "the quota-check meter must include standalone volumes: {body}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// (e) #522 DP9 — a 'Deleting' volume stops accruing (the release)
+// ─────────────────────────────────────────────────────────────────────
+
+/// POST /v1/volumes/delete as the operator `sub` (the #522 PR 2 route).
+async fn delete_as(state: &AppState, sub: &str, volume_id: &str) -> (StatusCode, Value) {
+    let token = token_for(state, sub, "operator");
+    post(
+        state,
+        &token,
+        "/v1/volumes/delete",
+        &format!(r#"{{"volume_id":"{volume_id}"}}"#),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_deleting_volume_stops_accruing_for_owner_and_attacher() {
+    // The one place the volume tombstone (DP1) needs a quota predicate
+    // (DP9): a tombstoned volume's capacity stops counting the moment
+    // the delete is journaled, releasing the owner's AND the attacher's
+    // accrual at once — they read the same canonical query. Driven
+    // through the real delete route, on every read path: enforcement,
+    // both usage meters, and the quota-check meter.
+    let state = build_state().await;
+    seed_node(&state, "n-1").await;
+    // Bob's VM is 'Deleting' — the DP5 refinement that makes a volume
+    // attached to a deleted VM deletable (its attachment still accrues
+    // to Bob until the volume's own tombstone lands).
+    seed_vm(&state, "vm-bob", "u-bob").await;
+    sqlx::query("UPDATE vm_desired_state SET desired_status = 'Deleting' WHERE vm_id = 'vm-bob'")
+        .execute(&state.pool)
+        .await
+        .expect("tombstone bob's vm");
+    // 1 GiB owned by u-alice, attached to u-bob's VM, kind 'data' (the
+    // DP6 gate) — the cross-user shape of test (c).
+    seed_volume(&state, "vol-cross", "u-alice", GIB, Some("vm-bob")).await;
+    sqlx::query("UPDATE volumes SET volume_kind = 'data' WHERE volume_id = 'vol-cross'")
+        .execute(&state.pool)
+        .await
+        .expect("stamp data kind");
+    seed_storage_quota(&state, "u-alice", GIB).await;
+    seed_storage_quota(&state, "u-bob", 2 * GIB).await;
+
+    let admin = token_for(&state, "u-admin", "admin");
+    for user in ["u-alice", "u-bob"] {
+        let (status, body) = post(&state, &admin, &format!("/v1/quotas/{user}/usage"), "{}").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(
+            body.pointer("/usage/disk_gb").and_then(|v| v.as_i64()),
+            Some(1),
+            "{user} accrues the volume before the delete: {body}"
+        );
+    }
+
+    // Enforcement sees it too: alice is at her 1 GiB cap, so one more
+    // byte is a 422.
+    let (status, _) = create_as(
+        &state,
+        "u-alice",
+        r#"{"name":"vol-nope","node_id":"n-1","capacity_bytes":1024}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the live volume must bind alice's quota before the delete"
+    );
+
+    // The delete (by the owner) journals the tombstone.
+    let (status, body) = delete_as(&state, "u-alice", "vol-cross").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // Both meters drop to zero — the owner's AND the attacher's
+    // accrual release at once, through the one predicate.
+    for user in ["u-alice", "u-bob"] {
+        let (status, body) = post(&state, &admin, &format!("/v1/quotas/{user}/usage"), "{}").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(
+            body.pointer("/usage/disk_gb").and_then(|v| v.as_i64()),
+            Some(0),
+            "{user}'s meter must drop after the tombstone: {body}"
+        );
+    }
+
+    // The self-usage meter and the quota-check meter agree.
+    let alice = token_for(&state, "u-alice", "operator");
+    let (status, body) = post(&state, &alice, "/v1/usage", "{}").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body.pointer("/usage/disk_gb").and_then(|v| v.as_i64()),
+        Some(0),
+        "the self-usage meter must drop after the tombstone: {body}"
+    );
+    let (status, body) = post(&state, &alice, "/v1/quotas/check", "{}").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body.pointer("/current_usage/disk_gb")
+            .and_then(|v| v.as_i64()),
+        Some(0),
+        "the quota-check meter must drop after the tombstone: {body}"
+    );
+
+    // And enforcement releases with them: the same 1 GiB create alice
+    // was refused now fits (exactly — her cap is 1 GiB).
+    let (status, body) = create_as(
+        &state,
+        "u-alice",
+        r#"{"name":"vol-after","node_id":"n-1","capacity_bytes":1073741824}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the deleted volume's capacity must no longer bind alice's quota: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_volume_with_no_vds_row_still_accrues_via_ownership() {
+    // The DP9 predicate is LEFT-JOIN-safe (the `networks.rs` liveness
+    // discipline, byte-exactly): `vd.desired_status` is NULL for a
+    // volume with no `volume_desired_state` row, and the predicate's
+    // IS-NULL arm keeps today's semantics for orphan rows — ownership
+    // still accrues. A naive `!= 'Deleting'` alone would silently drop
+    // every orphan row from the count.
+    let state = build_state().await;
+    seed_node(&state, "n-1").await;
+    seed_storage_quota(&state, "u-alice", 2 * GIB).await;
+    sqlx::query(
+        "INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, updated_at) \
+         VALUES ('vol-orphan', 'n-1', 'vol-orphan', 'u-alice', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+    )
+    .bind(GIB)
+    .execute(&state.pool)
+    .await
+    .expect("insert orphan volume (no VDS row)");
+
+    let admin = token_for(&state, "u-admin", "admin");
+    let (status, body) = post(&state, &admin, "/v1/quotas/u-alice/usage", "{}").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body.pointer("/usage/disk_gb").and_then(|v| v.as_i64()),
+        Some(1),
+        "an orphan (VDS-less) volume must still accrue via ownership: {body}"
     );
 }

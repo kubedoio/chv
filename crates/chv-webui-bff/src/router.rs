@@ -317,6 +317,12 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/volumes/delete-snapshot",
             post(crate::handlers::volumes::delete_volume_snapshot),
         )
+        // #522 PR 2: the volume-delete route — the first producer of
+        // the PR 1 DeleteVolume dispatch carrier (#534).
+        .route(
+            "/v1/volumes/delete",
+            post(crate::handlers::volumes::delete_volume),
+        )
         .route(
             "/v1/volumes/clone",
             post(crate::handlers::volumes::clone_volume),
