@@ -21,6 +21,9 @@ export type OverviewTask = {
 	resource_id: string;
 	operation: string;
 	started_unix_ms: number;
+	/** #502: the journaled terminal-failure cause — null until a failure records it. */
+	error_code?: string | null;
+	error_message?: string | null;
 };
 
 export type OverviewModel = {
@@ -94,7 +97,9 @@ export function toOverviewModel(res: OverviewResponse): OverviewModel {
 			resource_kind: task.resource_kind,
 			resource_id: task.resource_id,
 			operation: task.operation,
-			started_unix_ms: task.started_unix_ms
+			started_unix_ms: task.started_unix_ms,
+			error_code: task.error_code ?? null,
+			error_message: task.error_message ?? null
 		})),
 		state: 'ready'
 	};
@@ -157,6 +162,9 @@ export interface RecentTaskViewModel {
 	resource_id: string;
 	started_at: string;
 	tone: ShellTone;
+	/** #502: the journaled terminal-failure cause — null until a failure records it. */
+	error_code?: string | null;
+	error_message?: string | null;
 }
 
 export function formatRecentTasks(tasks: OverviewTask[]): RecentTaskViewModel[] {
@@ -173,7 +181,11 @@ export function formatRecentTasks(tasks: OverviewTask[]): RecentTaskViewModel[] 
 				hour: '2-digit',
 				minute: '2-digit'
 			}),
-			tone: meta.tone as ShellTone
+			tone: meta.tone as ShellTone,
+			// #502: the journaled terminal-failure cause, passed through
+			// for TaskTimeline's cause rendering (never fabricated).
+			error_code: t.error_code ?? null,
+			error_message: t.error_message ?? null
 		};
 	});
 }

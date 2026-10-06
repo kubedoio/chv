@@ -10,7 +10,8 @@
 	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
-	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import { getTaskStatusMeta, normalizeTaskStatus } from '$lib/webui/tasks';
+	import { getTaskFailureCause } from '$lib/webui/task-failure';
 	import type { PageData } from './$types';
 	import { History, User, Activity, Clock, ShieldAlert } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
@@ -84,7 +85,12 @@
 		})
 	);
 
-	const failedTasks = $derived(items.filter(t => t.status === 'failed').slice(0, 3));
+	// The BFF serializes statuses capitalized ("Failed"); normalize
+	// before comparing (review SF-1 — the raw 'failed' compare never
+	// matched, so the rail never populated).
+	const failedTasks = $derived(
+		items.filter(t => normalizeTaskStatus(t.status) === 'failed').slice(0, 3)
+	);
 </script>
 
 <div class="inventory-page">
@@ -181,12 +187,25 @@
 					<p class="empty-hint">No operational failures in the current window.</p>
 				{:else}
 					<ul class="attention-list">
-						{#each failedTasks as task}
+						{#each failedTasks as task (task.task_id)}
+						{@const failure = getTaskFailureCause(task)}
 							<li>
 								<div class="attention-card">
 									<div class="attention-card__main">
 										<span class="res-name">{task.operation}</span>
-										<span class="res-issue">Failure Registry: {task.task_id.split('-')[0]}</span>
+										<span class="res-issue">
+											{#if failure?.code}
+												<!-- #502: the journaled terminal-failure code, as a
+													label beside the sibling status chips. -->
+												<span class="failure-code" data-testid="task-failure-code">{failure.code}</span>
+											{/if}
+											Failure Registry: {task.task_id.split('-')[0]}
+										</span>
+										{#if failure?.message}
+											<!-- #502: the agents' verbatim refusal text — rendered
+												as-is, it IS the diagnostic. -->
+											<span class="failure-message" data-testid="task-failure-message" title={failure.message}>{failure.message}</span>
+										{/if}
 									</div>
 								</div>
 							</li>
@@ -222,5 +241,33 @@
 		gap: 0.35rem;
 		font-size: var(--text-xs);
 		color: var(--shell-text-muted);
+	}
+
+	/* #502: the surfaced terminal-failure cause in the Failed
+	   Operations rail — the code as a small label, the refusal text
+	   verbatim, clamped to keep one row per failure. */
+	.failure-code {
+		display: inline-block;
+		margin-right: 0.35rem;
+		padding: 0.05rem 0.35rem;
+		border: 1px solid var(--status-failed-border);
+		border-radius: 9999px;
+		background: var(--status-failed-bg);
+		color: var(--status-failed-text);
+		font-size: var(--text-xs);
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+
+	.failure-message {
+		display: block;
+		margin-top: 0.25rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 </style>

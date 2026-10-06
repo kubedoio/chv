@@ -51,7 +51,7 @@
 //!   TODO referencing the design §2 section and the PR that flips the
 //!   row. The harness must pass at main — red-where-known means
 //!   asserting the current broken behavior, not failing. After PR 4
-//!   there are NONE left: every row in this file is green (42 rows),
+//!   there are NONE left: every row in this file is green (43 rows),
 //!   which is the campaign's terminal state — any future drift fails
 //!   the suite outright instead of needing a new pin.
 //!
@@ -112,6 +112,15 @@
 //! the flag's clap-required-ness). The suite goes 39 → 42 rows, still
 //! zero pinned-broken — an unpinned new command is the exact #372
 //! failure mode DP9 exists to prevent.
+//!
+//! #502 (terminal-failure cause surfacing) added the
+//! `task_watch_failure_cause_row` (42 → 43 rows): the BFF's
+//! task-carrying responses gained the journaled
+//! `error_code`/`error_message` pair (NULL until a failure records
+//! them), `chvctl task watch` prints the cause of a terminally-failed
+//! task, and the row pins both halves — the /v1/tasks/get detail
+//! carries the seeded cause verbatim, and the watch command exits
+//! non-zero on the terminal failure it now explains.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -538,13 +547,33 @@ impl Harness {
         .expect("seed image");
     }
 
+    /// Seed one operation row (the `list_tasks` seeding shape) — the row
+    /// `task watch` polls for.
     async fn seed_operation(&self, operation_id: &str) {
+        self.seed_operation_ext(operation_id, "Succeeded", None, None)
+            .await;
+    }
+
+    /// The #502 shape: an operation row in an arbitrary status, optionally
+    /// carrying the journaled terminal-failure cause
+    /// (`error_code`/`error_message`, the #498/#500 fast-fail columns the
+    /// BFF now surfaces).
+    async fn seed_operation_ext(
+        &self,
+        operation_id: &str,
+        status: &str,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) {
         sqlx::query(
-            "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, requested_at, created_at, updated_at) \
-             VALUES (?, ?, 'vm', 'vm-1', 'CreateVm', 'Succeeded', 'u-operator', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, error_code, error_message, requested_at, created_at, updated_at) \
+             VALUES (?, ?, 'vm', 'vm-1', 'CreateVm', ?, 'u-operator', ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )
         .bind(operation_id)
         .bind(format!("contract-{operation_id}"))
+        .bind(status)
+        .bind(error_code)
+        .bind(error_message)
         .execute(&self.pool)
         .await
         .expect("seed operation");
@@ -1707,6 +1736,20 @@ async fn task_list_row() {
             "started_unix_ms",
         ],
     );
+    // #502: the terminal-failure cause pair is part of the list item
+    // shape now — NULL for this row's seeded Succeeded op (the key
+    // must exist; the value must not be fabricated), same drift
+    // discipline as the display columns above.
+    for item in &items {
+        assert!(
+            item.get("error_code").is_some() && item["error_code"].is_null(),
+            "task list items must carry error_code (NULL until a failure records it)"
+        );
+        assert!(
+            item.get("error_message").is_some() && item["error_message"].is_null(),
+            "task list items must carry error_message (NULL until a failure records it)"
+        );
+    }
 }
 
 /// `chvctl task watch` — GREEN since the DP6 fix (design §2.5): the
@@ -1748,6 +1791,91 @@ async fn task_watch_row() {
     assert!(
         h.task_polls.load(Ordering::SeqCst) >= 1,
         "at least one poll reached POST /v1/tasks/get"
+    );
+}
+
+/// `chvctl task watch` on a terminally-FAILED task — GREEN (#502). The
+/// BFF's `/v1/tasks/get` detail now carries the journaled
+/// terminal-failure cause (`error_code`/`error_message`, the
+/// #498/#500 fast-fail columns — NULL until a failure records them),
+/// and the watch command prints it (`Cause: <code> — <message>`)
+/// before its non-zero exit, so the operator waiting on a failed op
+/// sees WHY it failed instead of a bare `Failed`. The row pins both
+/// halves end-to-end: the detail fetched through the same client
+/// carries the seeded cause verbatim, `task::failure_cause` (the exact
+/// formatter the command prints through) renders it, and the command
+/// still exits non-zero on the terminal status (the #372 DP6
+/// semantics, unchanged).
+#[tokio::test]
+async fn task_watch_failure_cause_row() {
+    let h = Harness::start().await;
+    h.seed_operation_ext(
+        "op-watch-failed",
+        "Failed",
+        Some("UNSUPPORTED_BY_AGENT"),
+        Some("snapshot_volume is unsupported in core-managed mode"),
+    )
+    .await;
+    let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        task::execute(
+            &client,
+            task::TaskCommands::Watch {
+                task_id: "op-watch-failed".to_string(),
+                timeout: 20,
+            },
+            &OutputFormat::Json,
+        ),
+    )
+    .await;
+
+    let inner = result.expect("task watch must complete, not hang");
+    // The #372 DP6 exit semantics are unchanged: a terminal failure
+    // exits non-zero — the cause line is added context, not a softened
+    // exit.
+    match inner {
+        Err(CliError::Task(msg)) => assert!(
+            msg.contains("Failed"),
+            "the non-zero exit must still name the terminal status: {msg}"
+        ),
+        other => panic!("expected the terminal-failure non-zero exit, got {other:?}"),
+    }
+    assert!(
+        h.task_polls.load(Ordering::SeqCst) >= 1,
+        "at least one poll reached POST /v1/tasks/get"
+    );
+
+    // The row the command printed, re-fetched through the same client
+    // (the harness's display-drift discipline): the detail carries the
+    // seeded cause verbatim, and the exact formatter the command
+    // prints through renders it.
+    let detail = client
+        .post(
+            "/v1/tasks/get",
+            &serde_json::json!({ "task_id": "op-watch-failed" }),
+        )
+        .await
+        .expect("task detail through the harness server")
+        .get("detail")
+        .cloned()
+        .expect("tasks/get nests the payload under \"detail\"");
+    assert_eq!(
+        detail.get("error_code").and_then(Value::as_str),
+        Some("UNSUPPORTED_BY_AGENT"),
+        "the journaled error_code must surface verbatim — never fabricated"
+    );
+    assert_eq!(
+        detail.get("error_message").and_then(Value::as_str),
+        Some("snapshot_volume is unsupported in core-managed mode"),
+        "the agents' refusal text must surface verbatim"
+    );
+    assert_eq!(
+        task::failure_cause(&detail).as_deref(),
+        Some("UNSUPPORTED_BY_AGENT — snapshot_volume is unsupported in core-managed mode"),
+        "the watch command's cause line must render code + refusal text"
     );
 }
 

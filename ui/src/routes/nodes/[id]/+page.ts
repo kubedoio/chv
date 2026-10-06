@@ -33,7 +33,15 @@ export type NodeDetailModel = {
 		cpu: string;
 		memory: string;
 	}[];
-	recent_tasks: { task_id: string; status: string; summary: string; operation: string; started_unix_ms: number }[];
+	recent_tasks: {
+		task_id: string;
+		status: string;
+		summary: string;
+		operation: string;
+		started_unix_ms: number;
+		error_code?: string | null;
+		error_message?: string | null;
+	}[];
 	configuration: Array<{ label: string; value: string }>;
 };
 

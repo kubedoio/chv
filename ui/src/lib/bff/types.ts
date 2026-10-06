@@ -30,6 +30,9 @@ export type RecentTask = {
 	resource_id: string;
 	operation: string;
 	started_unix_ms: number;
+	/** #502: the journaled terminal-failure cause — null until a failure records it. */
+	error_code?: string | null;
+	error_message?: string | null;
 };
 
 export type OverviewResponse = {
@@ -90,6 +93,9 @@ export type RelatedTask = {
 	summary: string;
 	operation: string;
 	started_unix_ms: number;
+	/** #502: the journaled terminal-failure cause — null until a failure records it. */
+	error_code?: string | null;
+	error_message?: string | null;
 };
 
 export type NodeSummary = {
@@ -458,6 +464,9 @@ export type TaskListItem = {
 	started_unix_ms: number;
 	finished_unix_ms?: number;
 	failure_summary?: string;
+	/** #502: the journaled terminal-failure cause — null until a failure records it. */
+	error_code?: string | null;
+	error_message?: string | null;
 };
 
 export type ListTasksResponse = {
