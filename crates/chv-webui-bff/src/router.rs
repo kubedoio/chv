@@ -295,6 +295,12 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/images/delete",
             post(crate::handlers::images::delete_image),
         )
+        // #513 PR 2: the standalone volume-create route — the first
+        // production producer of the PR 1 CreateVolume carrier.
+        .route(
+            "/v1/volumes/create",
+            post(crate::handlers::volumes::create_volume),
+        )
         .route(
             "/v1/volumes/mutate",
             post(crate::handlers::volumes::mutate_volume),
