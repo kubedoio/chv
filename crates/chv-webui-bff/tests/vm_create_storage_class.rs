@@ -17,7 +17,14 @@
 //!   identically);
 //! - an unknown class string is rejected with HTTP 400 at accept time
 //!   (validated against the single shared DP3 vocabulary in
-//!   `chv-hypervisor-api`, never a local copy) and creates nothing.
+//!   `chv-hypervisor-api`, never a local copy) and creates nothing;
+//!   and — the #512 second-pass follow-up, the node-capability
+//!   dimension — the requested class (classless = NULL = local) must
+//!   be offered by the placement node's advertised
+//!   `node_inventory.storage_classes` (`NodeRepository::node_storage_class_rejection`,
+//!   the same shared composition the lifecycle RPC uses), rejecting
+//!   with 400 before any row is journaled and failing OPEN on a node
+//!   that never reported classes.
 
 use std::sync::Arc;
 
@@ -209,6 +216,45 @@ async fn seed_node(state: &AppState) {
     .expect("seed node");
 }
 
+/// Seed one enrolled node plus an inventory row advertising exactly
+/// these storage classes — the JSON array of strings the inventory
+/// paths write (`NodeRepository`'s reader parses the same column).
+async fn seed_node_with_storage_classes(state: &AppState, node_id: &str, classes: &[&str]) {
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, 'h', 'h')")
+        .bind(node_id)
+        .execute(&state.pool)
+        .await
+        .expect("seed node");
+    sqlx::query(
+        "INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes) \
+         VALUES (?, 'x86_64', 1, 1024, ?)",
+    )
+    .bind(node_id)
+    .bind(serde_json::to_string(classes).unwrap())
+    .execute(&state.pool)
+    .await
+    .expect("seed node inventory");
+}
+
+/// Count the rows a create would have journaled — every table the
+/// create tx writes. A rejected create must leave all of them at zero
+/// (the attach-side DP4 test's journaling-nothing pattern).
+async fn assert_create_journaled_nothing(state: &AppState) {
+    for (table, label) in [
+        ("vms", "vms"),
+        ("vm_desired_state", "vm desired state"),
+        ("volumes", "volumes"),
+        ("volume_desired_state", "volume desired state"),
+        ("operations", "operations"),
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a rejected create must not journal {label}");
+    }
+}
+
 async fn post_with_token(
     state: AppState,
     path: &str,
@@ -372,4 +418,157 @@ async fn vm_create_rejects_unknown_storage_class_with_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// #379 DP4, #512 second-pass follow-up: the node-capability dimension
+// on the production create surface. The check is the SAME shared
+// composition the lifecycle RPC uses
+// (`NodeRepository::node_storage_class_rejection`), fired before the
+// create transaction — mirroring the attach-side path's reachable 400.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn vm_create_accepts_class_the_node_offers() {
+    // A definite match: an LVM-reporting node accepts an LVM-class
+    // create (and persists the class on the boot volume).
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node_with_storage_classes(&state, "n-lvm", &["lvm"]).await;
+
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-offer","node_id":"n-lvm","image_ref":"/tmp/x.img","storage_class":"lvm"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "vm create body: {body}");
+    assert_eq!(
+        volume_class(&state, "vm-offer").await.as_deref(),
+        Some("lvm"),
+        "an offered class must persist to volumes.storage_class"
+    );
+
+    // Classless (NULL = local) on a local-reporting node accepts —
+    // local-only creates are unchanged.
+    seed_node_with_storage_classes(&state, "n-local", &["local"]).await;
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-bare-local","node_id":"n-local","image_ref":"/tmp/x.img"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "vm create body: {body}");
+    assert_eq!(
+        volume_class(&state, "vm-bare-local").await,
+        None,
+        "a classless create on a local node must keep storing NULL"
+    );
+}
+
+#[tokio::test]
+async fn vm_create_rejects_class_the_node_does_not_offer() {
+    // The definite mismatch: a local-only node must not accept an
+    // LVM-class create — 400 BEFORE the transaction, so nothing is
+    // journaled (the attach-side DP4 test's assertion pattern).
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node_with_storage_classes(&state, "n-local", &["local"]).await;
+
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-nope","node_id":"n-local","image_ref":"/tmp/x.img","storage_class":"lvm"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a class the node does not offer must reject: {body}"
+    );
+    let body = body.to_string();
+    assert!(
+        body.contains("n-local does not offer storage class lvm"),
+        "the rejection must name the node and class: {body}"
+    );
+    assert_create_journaled_nothing(&state).await;
+}
+
+#[tokio::test]
+async fn vm_create_rejects_classless_disk_on_lvm_only_node() {
+    // Classless = local (the lifecycle-side semantics): an LVM-only
+    // node does not offer it, so the default create shape rejects —
+    // the exact case that used to 200 and fail only at the agent's
+    // stord open.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node_with_storage_classes(&state, "n-lvm", &["lvm"]).await;
+
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-bare-lvm","node_id":"n-lvm","image_ref":"/tmp/x.img"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a classless create on an LVM-only node must reject: {body}"
+    );
+    let body = body.to_string();
+    assert!(
+        body.contains("n-lvm does not offer storage class local"),
+        "the rejection must name the defaulted class: {body}"
+    );
+    assert_create_journaled_nothing(&state).await;
+}
+
+#[tokio::test]
+async fn vm_create_fails_open_on_unreported_storage_classes() {
+    // The fail-open discipline, byte-exactly the lifecycle-side
+    // semantics: a node that never reported classes (no inventory row,
+    // or an inventory row with an EMPTY list) must keep accepting ANY
+    // class — an unreported node never rejects; stord's class
+    // validation at the open remains the backstop.
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+
+    // No inventory row at all (never reported / pre-#379 agent).
+    seed_node(&state).await;
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-noreport","image_ref":"/tmp/x.img","storage_class":"lvm"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "vm create body: {body}");
+
+    // An inventory row whose storage_classes list is empty.
+    seed_node_with_storage_classes(&state, "n-empty", &[]).await;
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-empty","node_id":"n-empty","image_ref":"/tmp/x.img","storage_class":"ceph"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "vm create body: {body}");
+}
+
+#[tokio::test]
+async fn vm_create_capability_check_normalizes_legacy_localdisk_report() {
+    // DP3 normalization at the shared predicate: a pre-#379 agent's
+    // `localdisk` probe report compares as `local`, so a classless
+    // create on such a node still matches (the lifecycle-side test's
+    // edge, now pinned on the production create surface too).
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node_with_storage_classes(&state, "n-legacy", &["localdisk"]).await;
+
+    let (status, body) = create_vm(
+        &state,
+        &token,
+        r#"{"name":"vm-legacy","node_id":"n-legacy","image_ref":"/tmp/x.img"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "vm create body: {body}");
 }

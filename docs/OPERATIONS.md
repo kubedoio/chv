@@ -416,7 +416,9 @@ but never removes the LV — reclaim capacity with
 reports the real backend class (from the parsed `stord_config_path`), and the
 control plane rejects a VM create or volume attach requesting a class the node
 does not offer (`400`, before any intent is journaled). A NULL/absent class
-still means `local` everywhere.
+still means `local` everywhere. A node that has not reported classes (no
+inventory yet, or a pre-#379 agent) is never rejected by this check — the
+agent's volume open and stord's own backend validation remain the enforcement.
 
 | Check | Command |
 |-------|---------|

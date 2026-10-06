@@ -386,6 +386,50 @@ impl NodeRepository {
             .unwrap_or_default())
     }
 
+    /// The #379 DP4 accept-time node-capability check, as ONE shared
+    /// composition so its two callers cannot drift: the node's
+    /// advertised classes ([`Self::get_storage_classes`]) must cover
+    /// `requested` (`None` = classless = `local`), compared through the
+    /// shared DP3-normalizing predicate
+    /// (`chv_hypervisor_api::resources::node_offers_storage_class`).
+    ///
+    /// Returns `Ok(None)` to ACCEPT — a definite match, or the fail-open
+    /// edge: a node that never reported classes (empty list) must never
+    /// reject (the agent's open and stord's own backend validation
+    /// remain the enforcement backstop). Returns `Ok(Some(reason))` only
+    /// on the definite mismatch; the caller maps the reason to its own
+    /// 400 shape. Callers must invoke this BEFORE any journaling: a
+    /// rejection leaves no rows behind.
+    ///
+    /// Both accept-time surfaces live on this one implementation: the
+    /// lifecycle service's RPC surface (`ensure_node_offers_storage_class`)
+    /// and the BFF's `POST /v1/vms` create handler — the production
+    /// create path, wired in the #512 second-pass follow-up (the RPC
+    /// surface has no production caller, so the BFF must not re-derive
+    /// the decision).
+    pub async fn node_storage_class_rejection(
+        &self,
+        node_id: &NodeId,
+        requested: Option<&str>,
+        surface: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let advertised = self.get_storage_classes(node_id).await?;
+        Ok(
+            match chv_hypervisor_api::resources::node_offers_storage_class(&advertised, requested) {
+                Some(false) => Some(format!(
+                    "node {} does not offer storage class {} (advertised: {}) for {}",
+                    node_id,
+                    requested.unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS),
+                    advertised.join(", "),
+                    surface,
+                )),
+                // Some(true): definite match. None: the node never
+                // reported classes — fail OPEN (see above).
+                Some(true) | None => None,
+            },
+        )
+    }
+
     pub async fn append_version(&self, input: &NodeVersionInput) -> Result<(), StoreError> {
         sqlx::query(INSERT_NODE_VERSION_SQL)
             .bind(input.node_id.as_str())

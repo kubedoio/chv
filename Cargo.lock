@@ -908,6 +908,7 @@ dependencies = [
  "chrono",
  "chv-common",
  "chv-controlplane-types",
+ "chv-hypervisor-api",
  "hex",
  "metrics",
  "rand 0.10.3",
