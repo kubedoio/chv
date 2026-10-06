@@ -577,3 +577,40 @@ async fn lvm_real_health_reflects_existence() {
     assert_eq!(unhealthy.status, "unhealthy");
     assert!(unhealthy.last_error.contains("path does not exist"));
 }
+
+/// #522 PR 1 (DP3): the destroy primitive against real LVM — the
+/// reclaim actually runs `lvremove -y` on the carrier's LV, the LV
+/// device node is gone afterwards, and a SECOND destroy of the
+/// already-absent LV is `Ok(())` (the idempotency contract PR 2's
+/// crash-redrive/retry story depends on — a replayed delete must never
+/// manufacture a failure on the reclaimed extents).
+#[tokio::test]
+#[ignore = "root-gated real-LVM test; requires CHV_LVM_TEST_VG (harness)"]
+async fn lvm_real_destroy_removes_the_lv_and_is_idempotent() {
+    let vid = "m45rt-destroy1";
+    // Provision out-of-band and deliberately let the guard's best-effort
+    // lvremove find nothing (the destroy under test must have removed
+    // the LV already) — the no-residue assertion is the test's own.
+    let guard = provision_lv(vid, 32);
+    let backend = backend();
+
+    assert!(lv_path(vid).exists(), "precondition: LV exists");
+    backend
+        .destroy(vid, &locator())
+        .await
+        .expect("destroy of a present LV");
+    assert!(
+        !lv_path(vid).exists(),
+        "the LV device node must be gone after destroy"
+    );
+
+    // Idempotent: the absent case is a success, and no command runs
+    // (the exists-gate in the implementation).
+    backend
+        .destroy(vid, &locator())
+        .await
+        .expect("destroy of an absent LV is Ok (idempotency contract)");
+    assert!(!lv_path(vid).exists());
+
+    drop(guard);
+}

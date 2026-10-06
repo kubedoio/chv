@@ -480,6 +480,21 @@ impl StorageBackend for CephRbdBackend {
         Ok(())
     }
 
+    /// #522 (DP3): refuse loudly — the ceph class is unqualified even
+    /// at open (#379 §8), so a volume-delete dispatch reaching this
+    /// backend must fail visibly, not silently no-op (a silent
+    /// "success" would tombstone the row and reclaim nothing — the
+    /// exact leak this primitive exists to kill).
+    async fn destroy(&self, _volume_id: &str, _locator: &BackendLocator) -> Result<(), ChvError> {
+        Err(ChvError::InvalidArgument {
+            field: "backend_class".to_string(),
+            reason: "volume destroy is not implemented for the ceph backend \
+                     (the class is unqualified for standalone provisioning; \
+                     refusing loudly instead of reclaiming nothing)"
+                .to_string(),
+        })
+    }
+
     async fn set_device_policy(
         &self,
         volume_id: &str,
@@ -1035,5 +1050,39 @@ mod tests {
             .snapshot_and_clear_dirty_bitmap("vol-1", handle)
             .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    // ============================================================
+    // #522 PR 1 (DP3) — the destroy primitive refuses loudly
+    // ============================================================
+
+    #[tokio::test]
+    async fn ceph_backend_destroy_refuses_loudly() {
+        // #522 DP3: the class is unqualified even at open (#379 §8);
+        // a destroy reaching this backend must fail visibly with
+        // InvalidArgument — a silent no-op would tombstone the volume
+        // row and reclaim nothing (the exact silent-leak failure
+        // class the primitive exists to kill).
+        let backend = CephRbdBackend::new(test_config()).unwrap();
+        let res = backend
+            .destroy(
+                "vol-1",
+                &BackendLocator {
+                    backend_class: "ceph".to_string(),
+                    locator: "ignored".to_string(),
+                    options: Default::default(),
+                },
+            )
+            .await;
+        match res {
+            Err(ChvError::InvalidArgument { field, reason }) => {
+                assert_eq!(field, "backend_class");
+                assert!(
+                    reason.contains("not implemented"),
+                    "the refusal must be explicit: {reason}"
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
     }
 }

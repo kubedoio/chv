@@ -750,6 +750,56 @@ impl NodeClient {
         result
     }
 
+    /// #522 PR 1 (DP2): dispatch the volume-delete carrier. Dead-but-
+    /// live with this PR — the only future caller is the
+    /// orchestrator's `"DeleteVolume"` arm, and no producer journals
+    /// that operation type until the BFF route lands (PR 2). The
+    /// volume's class rides the dispatch (resolved in the claim query
+    /// like the attach arm's) so the agent can shape the DP4 carrier
+    /// locator; a NULL class emits the empty string, never a
+    /// materialized `"local"` (the #511 wire-key discipline). No size
+    /// rides a delete, and the destroy is idempotent by stord's
+    /// contract, so a redriven dispatch re-acks.
+    pub async fn delete_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+        backend_class: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::DeleteVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume_id: volume_id.to_string(),
+            backend_class: backend_class.unwrap_or("").to_string(),
+        };
+        let method = "delete_volume";
+        let span = tracing::info_span!("delete_volume", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .delete_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
     /// Relays the operator's terminal resolution of a restart-interrupted
     /// (`InspectRequired`) operation to the owning agent's core journal.
     /// Pure relay: the agent validates disposition/note and owns the

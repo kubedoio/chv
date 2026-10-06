@@ -371,6 +371,22 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         ))
     }
 
+    /// #522 (DP1, adopted): the volume delete journals BFF-direct
+    /// (mirroring `POST /v1/vms/delete`), NOT through a CP lifecycle
+    /// RPC — the adopted design's tombstone transaction belongs to the
+    /// BFF route (PR 2). The node RPC of the same name (the #522 PR 1
+    /// dispatch carrier the orchestrator dispatches to agents) is a
+    /// different surface; this CP-side shim stays closed.
+    async fn delete_volume(
+        &self,
+        _request: Request<proto::DeleteVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_volume is not served by the control plane lifecycle; the volume delete \
+             journals via the BFF (#522)",
+        ))
+    }
+
     async fn start_vm(
         &self,
         request: Request<proto::StartVmRequest>,

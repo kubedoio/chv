@@ -1003,6 +1003,95 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         Ok(Response::new(Self::ok_result()))
     }
 
+    /// #522 (DP3): the stord destroy primitive's API half — the first
+    /// data-destroying RPC in this service. Session-checked and
+    /// idempotent: the handler REFUSES while any open session exists
+    /// for the volume (the agent's `DeleteVolume` node RPC is the
+    /// cooperative close-then-destroy caller; this is the defense for
+    /// every other caller), then delegates to
+    /// [`StorageBackend::destroy`], whose contract makes an
+    /// already-gone backing store a SUCCESS (crash-redrive and
+    /// operator retry must be able to replay a delete — PR 2's
+    /// accept-time story depends on it). The allowlist checks mirror
+    /// `open_volume`'s exactly: a removal path deserves the same
+    /// API-boundary hardening a write path gets, if not more.
+    async fn destroy_volume(
+        &self,
+        request: Request<proto::DestroyVolumeRequest>,
+    ) -> Result<Response<proto::Result>, Status> {
+        self.metrics.increment_counter("stord_destroy_volume_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+
+        if req.volume_id.is_empty() {
+            return Ok(Response::new(
+                ChvError::InvalidArgument {
+                    field: "volume_id".to_string(),
+                    reason: "volume_id must not be empty".to_string(),
+                }
+                .to_proto_result(),
+            ));
+        }
+
+        // Session refusal (DP3): a volume with an open stord session is
+        // not destroyable — a raw destroy under a live session would
+        // strand the persisted session row and yank the backing store
+        // out from under an attached VM. Close first.
+        if self
+            .sessions
+            .list()
+            .iter()
+            .any(|s| s.volume_id == req.volume_id)
+        {
+            return Ok(Response::new(
+                ChvError::InvalidArgument {
+                    field: "volume_id".to_string(),
+                    reason: format!(
+                        "an open session exists for volume {}; close it before destroying",
+                        req.volume_id
+                    ),
+                }
+                .to_proto_result(),
+            ));
+        }
+
+        let locator = match Self::map_backend_locator(req.backend) {
+            Ok(l) => l,
+            Err(e) => return Ok(Response::new(e.to_proto_result())),
+        };
+
+        if let Err(e) = self.check_allowlist(&locator.backend_class) {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        // Same class-conditional allowlist split as open_volume: the
+        // path allowlist only means anything for filesystem locators,
+        // the device allowlist for lvm/block ones.
+        if matches!(
+            locator.backend_class.as_str(),
+            "local" | "local-file" | "localdisk"
+        ) {
+            if let Err(e) = self.check_path_allowlist(&locator.locator) {
+                return Ok(Response::new(e.to_proto_result()));
+            }
+        }
+        if locator.backend_class == "lvm" || locator.backend_class == "block" {
+            if let Err(e) = self.check_device_allowlist(&locator.locator) {
+                return Ok(Response::new(e.to_proto_result()));
+            }
+        }
+
+        if let Err(e) = self.backend.destroy(&req.volume_id, &locator).await {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
+    }
+
     async fn set_device_policy(
         &self,
         request: Request<proto::SetDevicePolicyRequest>,
@@ -1472,5 +1561,128 @@ mod tests {
         let svc = make_service(dir.path(), vec![allowed.clone()]);
         let locator = allowed.join("vol.img");
         assert!(svc.check_path_allowlist(locator.to_str().unwrap()).is_ok());
+    }
+
+    // ============================================================
+    // #522 PR 1 (DP3) — the destroy primitive's API half
+    // ============================================================
+
+    fn destroy_request(volume_id: &str, locator: &str) -> proto::DestroyVolumeRequest {
+        proto::DestroyVolumeRequest {
+            meta: Some(proto::Meta {
+                operation_id: "op-destroy".to_string(),
+                request_unix_ms: 0,
+            }),
+            volume_id: volume_id.to_string(),
+            backend: Some(proto::BackendLocator {
+                backend_class: "local".to_string(),
+                locator: locator.to_string(),
+                options: Default::default(),
+            }),
+        }
+    }
+
+    fn result_fields(res: &proto::Result) -> (String, String, String) {
+        (
+            res.status.clone(),
+            res.error_code.clone(),
+            res.human_summary.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn destroy_volume_removes_the_file_and_is_idempotent() {
+        // #522 DP3: with no open session, the destroy removes the
+        // backing file at the carrier locator and replays as a SUCCESS
+        // on the absent artifact (the idempotency contract PR 2's
+        // crash-redrive story depends on).
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().to_path_buf()]);
+        let img = dir.path().join("vol-del.img");
+        std::fs::write(&img, b"payload").unwrap();
+
+        let resp = proto::storage_service_server::StorageService::destroy_volume(
+            &svc,
+            Request::new(destroy_request("vol-del", "vol-del.img")),
+        )
+        .await
+        .unwrap();
+        let (status, code, _) = result_fields(&resp.into_inner());
+        assert!(
+            status.eq_ignore_ascii_case("ok"),
+            "first destroy: {status} {code}"
+        );
+        assert!(!img.exists(), "the backing file must be unlinked");
+
+        let resp = proto::storage_service_server::StorageService::destroy_volume(
+            &svc,
+            Request::new(destroy_request("vol-del", "vol-del.img")),
+        )
+        .await
+        .unwrap();
+        let (status, code, summary) = result_fields(&resp.into_inner());
+        assert!(
+            status.eq_ignore_ascii_case("ok"),
+            "replayed destroy must succeed: {status} {code} {summary}"
+        );
+        assert!(!img.exists());
+    }
+
+    #[tokio::test]
+    async fn destroy_volume_refuses_while_a_session_is_open() {
+        // #522 DP3: an open stord session blocks the destroy — the
+        // agent is the cooperative close-then-destroy caller; stord is
+        // the defense for every other caller. The backing file must
+        // survive the refusal.
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().to_path_buf()]);
+        let img = dir.path().join("vol-open.img");
+        std::fs::write(&img, b"payload").unwrap();
+        svc.sessions().upsert(Session {
+            volume_id: "vol-open".to_string(),
+            vm_id: None,
+            attachment_handle: "local-vol-open-vol-open.img".to_string(),
+            export_kind: "raw".to_string(),
+            export_path: img.to_string_lossy().to_string(),
+            runtime_status: "open".to_string(),
+        });
+
+        let resp = proto::storage_service_server::StorageService::destroy_volume(
+            &svc,
+            Request::new(destroy_request("vol-open", "vol-open.img")),
+        )
+        .await
+        .unwrap();
+        let inner = resp.into_inner();
+        let (status, _, summary) = result_fields(&inner);
+        assert_ne!(status, "ok", "an open session must refuse the destroy");
+        assert!(
+            summary.contains("close it before destroying"),
+            "the refusal must name the close-first path: {summary}"
+        );
+        assert!(
+            img.exists(),
+            "the backing file must survive a refused destroy"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_volume_rejects_a_locator_outside_the_path_allowlist() {
+        // The removal path runs the same allowlist hardening the open
+        // path runs — a traversal locator on a destroy is worse than
+        // on a write.
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let svc = make_service(dir.path(), vec![allowed]);
+
+        let resp = proto::storage_service_server::StorageService::destroy_volume(
+            &svc,
+            Request::new(destroy_request("vol-x", "../escape.img")),
+        )
+        .await
+        .unwrap();
+        let (status, _, _) = result_fields(&resp.into_inner());
+        assert_ne!(status, "ok", "a traversal locator must be refused");
     }
 }

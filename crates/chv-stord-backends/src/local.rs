@@ -387,6 +387,58 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
+    /// #522 (DP3/DP4): destroy the backing file at the CARRIER locator.
+    ///
+    /// The locator is the create carrier's relative `{volume_id}.img`
+    /// (resolved against this backend's runtime dir exactly like
+    /// `open`), so the destroy targets byte-identically what create
+    /// provisioned. Idempotent by contract: an absent file (or a
+    /// missing parent — the same `NotFound` errno) is `Ok(())`, never
+    /// an error, so a replayed delete never manufactures a failure on
+    /// the already-reclaimed artifact. The attach path's stray
+    /// bare-`{volume_id}` file (#533) is deliberately NOT chased —
+    /// folding it would hard-code the attach surface's bug into the
+    /// reclaim contract.
+    async fn destroy(&self, volume_id: &str, locator: &BackendLocator) -> Result<(), ChvError> {
+        if locator.backend_class != "local"
+            && locator.backend_class != "local-file"
+            && locator.backend_class != "localdisk"
+        {
+            return Err(ChvError::BackendUnavailable {
+                backend: locator.backend_class.clone(),
+                reason: "local backend only handles local class".to_string(),
+            });
+        }
+        let path = self.resolve_path(locator);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {
+                info!(volume_id, path = %path.display(), "destroyed local volume file");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Idempotent (DP3): the backing store is already gone —
+                // a replayed delete is a success, not an error.
+                info!(
+                    volume_id,
+                    path = %path.display(),
+                    "local volume file already absent; destroy is a no-op"
+                );
+            }
+            Err(e) => {
+                return Err(ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to destroy volume file: {}", e),
+                });
+            }
+        }
+        // A destroy leaves no open handle behind by contract (stord
+        // refuses while a session exists), but drop any dirty tracker
+        // keyed on this volume's handle shape anyway so a stale tracker
+        // can never outlive the backing file.
+        let handle = format!("local-{}-{}", volume_id, locator.locator);
+        self.dirty_trackers.write().await.remove(&handle);
+        Ok(())
+    }
+
     async fn attach(
         &self,
         volume_id: &str,
@@ -1882,5 +1934,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bitmap, vec![0b0000_0001, 0b0000_0001]);
+    }
+
+    // ============================================================
+    // #522 PR 1 (DP3/DP4) — the destroy primitive, local semantics
+    // ============================================================
+
+    fn carrier_locator(name: &str) -> BackendLocator {
+        // The create carrier's DP4 locator shape: the RELATIVE
+        // `{volume_id}.img` resolved against the backend's runtime dir.
+        BackendLocator {
+            backend_class: "local".to_string(),
+            locator: format!("{}.img", name),
+            options: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_backend_destroy_removes_the_file_and_is_idempotent() {
+        // #522 DP3: destroy unlinks the backing file at the carrier
+        // locator, and a destroy of an ALREADY-GONE file is Ok(()) —
+        // the idempotency contract PR 2's crash-redrive/retry story
+        // depends on (a replayed delete must never manufacture a
+        // failure on the absent artifact).
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let img = dir.path().join("vol-del.img");
+        std::fs::write(&img, b"payload").unwrap();
+
+        backend
+            .destroy("vol-del", &carrier_locator("vol-del"))
+            .await
+            .unwrap();
+        assert!(!img.exists(), "the backing file must be unlinked");
+
+        // Idempotent: the absent case is a success, not NotFound.
+        backend
+            .destroy("vol-del", &carrier_locator("vol-del"))
+            .await
+            .unwrap();
+        assert!(!img.exists());
+    }
+
+    #[tokio::test]
+    async fn local_backend_destroy_leaves_the_bare_id_stray_file_alone() {
+        // #522 DP4 (the #533 disclosure): a standalone local volume
+        // that was ever attached carries a SECOND stray file at
+        // `runtime_dir/{volume_id}` (the attach path's bare-id default,
+        // create-on-open at the sparse default size). The destroy
+        // targets the CARRIER locator only — chasing the stray file
+        // would hard-code the attach surface's bug into the reclaim
+        // contract. The stray file is #533's to fix; this pins that
+        // destroy does not widen.
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let stray = dir.path().join("vol-del");
+        std::fs::write(&stray, b"stray attach-path artifact").unwrap();
+
+        backend
+            .destroy("vol-del", &carrier_locator("vol-del"))
+            .await
+            .unwrap();
+        assert!(
+            stray.exists(),
+            "the bare-id stray file (#533) must survive the destroy"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_backend_destroy_rejects_wrong_class() {
+        // The class gate mirrors open's: a local backend must not act
+        // on a foreign class's locator (the removal path deserves the
+        // same boundary the write path has).
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let res = backend
+            .destroy(
+                "vol-1",
+                &BackendLocator {
+                    backend_class: "lvm".to_string(),
+                    locator: "vol-1.img".to_string(),
+                    options: Default::default(),
+                },
+            )
+            .await;
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 }

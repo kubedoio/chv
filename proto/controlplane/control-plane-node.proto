@@ -216,6 +216,28 @@ message CreateVolumeRequest {
   VolumeMutationSpec volume = 3;
 }
 
+// #522 (DP2, PR 1 of the decomposition): the standalone volume-delete
+// dispatch carrier, the consumer of the stord `DestroyVolume`
+// primitive (DP3). Mirrors DeleteVmRequest's shape (meta + node_id +
+// the resource id) — no mutation spec, no size rides a delete; the
+// volume's class resolves in the orchestrator's claim query like the
+// attach arm's and rides `backend_class` so the agent can shape the
+// DP4 carrier locator byte-identically to its create handler (the
+// dm-path token for LVM, `{volume_id}.img` for local). Empty
+// `backend_class` = local = the NULL-class discipline (never
+// materialized as the string "local"). The agent handler closes any
+// cached stord handle, destroys the backing store, and evicts its
+// cache entry; it fails closed with `unimplemented` in core-managed
+// mode (DP10, the #378/#495 single-writer posture). Dead-but-live
+// with this PR: no producer journals a `DeleteVolume` operation until
+// the BFF route lands (PR 2).
+message DeleteVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  string backend_class = 4;
+}
+
 message StartVmRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -500,6 +522,7 @@ service LifecycleService {
   // (create-on-open), not the attach path's option-less open, and fails
   // closed in core-managed mode like its sibling legacy volume RPCs.
   rpc CreateVolume(CreateVolumeRequest) returns (AckResponse);
+  rpc DeleteVolume(DeleteVolumeRequest) returns (AckResponse);
   rpc StartVm(StartVmRequest) returns (AckResponse);
   rpc StopVm(StopVmRequest) returns (AckResponse);
   rpc RebootVm(RebootVmRequest) returns (AckResponse);

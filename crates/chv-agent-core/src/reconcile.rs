@@ -2732,6 +2732,14 @@ mod tests {
                 human_summary: "".to_string(),
             }))
         }
+        // #522 PR 1: the reconcile suite does not drive the destroy
+        // primitive (reconcile never unlinks, by design).
+        async fn destroy_volume(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DestroyVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
         async fn get_volume_health(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::VolumeHealthRequest>,
