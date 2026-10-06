@@ -29,6 +29,7 @@ spellings the binary never accepted.
 - `chvctl vm delete <vm_id>` — Delete a VM
 - `chvctl vm migrate <vm_id> --to <node_id>` — Live-migrate a VM
 - `chvctl vm resize <vm_id> [--cpu <n>] [--memory <size>]` — Resize VM resources
+- `chvctl vm import <name> --file <path>` — Import a VM from a qcow2 disk image (`POST /v1/vms/import`, the route's first in-tree client). The file is uploaded as a multipart form (a `name` field and the image as the `file` part); the server validates the qcow2 magic and rejects a non-qcow2 file with a 400 naming it. The request carries a non-empty `x-csrf-token` header — the BFF's CSRF layer requires it on multipart (JSON mutations satisfy the same layer by content type alone; the header value is a fixed marker, not a verified secret, because the platform has no CSRF token model). The response carries the server-minted VM `id`, the `name`, a `Pending` desired state, and the node-side `disk_path` the image landed at — no `task_id` (unlike the volume create/delete responses); the journaled `CreateVm` operation is observable through `task list`. The imported VM, its `-disk` volume, and the operation are stamped with the importing operator as owner, and the VM appears in `vm list` immediately
 
 ### Nodes
 - `chvctl node list` — List compute nodes
