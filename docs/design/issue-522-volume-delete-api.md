@@ -544,7 +544,16 @@ attach bug's artifact into the reclaim contract.
 a loud 400 naming the detach-first path (mirroring #513 DP4's
 mutate-attach stance: `detach it via POST /v1/volumes/mutate with
 action 'detach' first`) — checked inside the `BEGIN IMMEDIATE` tx so a
-concurrent attach cannot slip in. One tree-suggested refinement: an
+~~concurrent attach cannot slip in~~ [Corrected 2026-10-06, #535:] the
+BFF tx only serializes the delete's own guard-read/tombstone-write
+window — an attach whose CP-side journal lands AFTER the delete
+commits could still overwrite the tombstone, because the CP mints
+wall-clock-millisecond generations and the UPSERTs' generation guard
+never blocks a late mutation against the tombstone's small integer.
+The route-PR review folded the real backstop: the three mutation-verb
+patch UPSERTs (attach/detach, resize, snapshot) now refuse to journal
+over `desired_status = 'Deleting'` at the SQL level, mapping the block
+to a loud Conflict (409 through `map_ack`, the #384 precedent). One tree-suggested refinement: an
 attachment to a VM whose `vm_desired_state.desired_status =
 'Deleting'` does NOT count as attached (the VM-delete story tombstones
 the VM rows and never clears volume VDS `attached_vm_id`, §2.2 —
@@ -814,7 +823,16 @@ clippy/fmt; `cd ui && npm run build` for PR 4.
 5. **The sibling-verb `'Deleting'` guard (DP8) is one PR 2 predicate
    away from complete** — if review drops it, an attach raced against
    a delete can create-on-open a fresh file behind the tombstone.
-   Pinned by a PR 2 test.
+   Pinned by a PR 2 test. [Corrected 2026-10-06, #535:] "one predicate
+   away from complete" was optimistic — the BFF predicate is a
+   non-transactional pre-check, and the CP's mutation journaling had
+   no `'Deleting'` gate, so a concurrent attach landing after the
+   delete's commit could still overwrite the tombstone (review S1).
+   The folded backstop: the mutation-verb patch UPSERTs refuse
+   `'Deleting'` rows at the SQL level (see DP5's correction); the
+   in-flight guard also gained `RetryPending` (review S2 — a create
+   in dispatch backoff would otherwise re-provision behind the
+   tombstone on retry).
 6. **No pre-#513 volume is deletable (DP6)** — every volume created
    before #513 is embedded lineage with NULL kind; operators cleaning
    legacy residue still have no sweep. Flagged as scope reality, not

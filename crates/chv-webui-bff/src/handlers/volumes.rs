@@ -521,6 +521,8 @@ pub async fn mutate_volume(
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
+    // #522 DP8: a 'Deleting' volume is terminal for volume verbs.
+    require_volume_not_deleting(&mut conn, &volume_id).await?;
 
     let action = payload
         .get("action")
@@ -571,6 +573,8 @@ pub async fn snapshot_volume(
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
+    // #522 DP8: a 'Deleting' volume is terminal for volume verbs.
+    require_volume_not_deleting(&mut conn, &volume_id).await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -610,6 +614,8 @@ pub async fn restore_volume_snapshot(
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
+    // #522 DP8: a 'Deleting' volume is terminal for volume verbs.
+    require_volume_not_deleting(&mut conn, &volume_id).await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -649,6 +655,8 @@ pub async fn delete_volume_snapshot(
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
+    // #522 DP8: a 'Deleting' volume is terminal for volume verbs.
+    require_volume_not_deleting(&mut conn, &volume_id).await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -694,6 +702,10 @@ pub async fn clone_volume(
         claims.role == "admin",
     )
     .await?;
+    // #522 DP8: a 'Deleting' volume is terminal for volume verbs — the
+    // clone SOURCE is the volume whose backing store the destroy
+    // removes, so a clone replayed against it is refused.
+    require_volume_not_deleting(&mut conn, &source_volume_id).await?;
     let target_volume_id = payload
         .get("target_volume_id")
         .and_then(|v| v.as_str())
@@ -713,6 +725,376 @@ pub async fn clone_volume(
         "volume_id": response.volume_id,
         "summary": response.summary,
     })))
+}
+
+/// #522 PR 2 (the adopted design's DP1/DP5–DP10): the volume-delete
+/// route — the first producer of the PR 1 `DeleteVolume` dispatch
+/// carrier (#534). The platform's first data-destroying operator
+/// surface: after the first accepted delete, operator-visible
+/// `lvs`/directory output on the node SHRINKS — real LVs and files are
+/// destroyed, irreversibly, by design (the CONTRIBUTING high-risk
+/// disclosure; the design doc §7 carries it too).
+///
+/// Journaling is BFF-direct, mirroring `POST /v1/vms/delete` (DP1): one
+/// `BEGIN IMMEDIATE` transaction writing the TOMBSTONE — `UPDATE
+/// volume_desired_state SET desired_status = 'Deleting',
+/// desired_generation + 1` (the `vms.rs` delete statement,
+/// volume-shaped) — plus an `Accepted` `DeleteVolume` operation
+/// (idempotency key `delete-volume-{volume_id}`) that the PR 1
+/// orchestrator arm claims and dispatches as the agent's
+/// close→destroy→evict. **The `volumes` row is NOT deleted** — three
+/// tree facts force the tombstone (the design's DP1): the
+/// orchestrator's claim query resolves the dispatch class from the
+/// `volumes` row, clone replay assumes "volume rows are never deleted",
+/// and the task surfaces join `operations.resource_id` against living
+/// rows.
+///
+/// Guard order, every rejection journaling zero rows: operator tier;
+/// `volume_id` required; existence → 404; DP10 core-managed rejection
+/// BEFORE the transaction (the create route's #378 mirror — the destroy
+/// is a legacy-path stord side effect, and on a core-managed node the
+/// single writer is Core); then `BEGIN IMMEDIATE`, and inside it:
+/// ownership (`require_volume_owner`, the #386/#481 gate), the #406
+/// idempotent replay (a retried delete replays the recorded outcome
+/// BEFORE any guard or mutation can refuse it — the guards below would
+/// otherwise 409 against the delete's own in-flight operation), DP6
+/// kind gate (`volume_kind = 'data'` only — the gate is also the
+/// locator gate: an embedded disk's vm-dir-nested path is one the
+/// carrier locator would miss, so a delete would tombstone the row and
+/// reclaim nothing), DP5 attached guard (a non-NULL `attached_vm_id`
+/// rejects naming the mutate-detach path, no force flag — with the
+/// design's refinement that an attachment to a VM whose own
+/// `desired_status` is 'Deleting' does NOT count, the `networks.rs`
+/// liveness predicate: without it a volume whose VM was deleted could
+/// never be deleted, because VM delete never clears volume VDS
+/// `attached_vm_id`), and DP7's reference guards (an in-flight
+/// operation → 409, a transient condition; an enabled backup schedule
+/// naming the volume → 400 naming the schedule, or the worker would
+/// keep minting jobs against a destroyed volume).
+///
+/// DP9's quota release is implicit: the tombstone's `'Deleting'`
+/// desired_status drops the volume out of the canonical
+/// `storage_usage_bytes` count (one predicate on the #525/#526 query —
+/// see `quotas.rs`), releasing the owner's AND the attacher's accrual
+/// at once, at accept time.
+pub async fn delete_volume(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+
+    let volume_id = payload
+        .get("volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
+        .to_string();
+
+    let requested_by = claims.sub.clone();
+
+    // Existence + placement read (the delete_vm shape): a missing
+    // volume is a 404 before anything else. The kind read here is
+    // only for the response summary; the DP6 gate itself re-reads the
+    // row inside the transaction below.
+    let volume: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT node_id, display_name FROM volumes WHERE volume_id = ?")
+            .bind(&volume_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check volume existence: {}", e)))?;
+
+    let Some((node_id, display_name)) = volume else {
+        return Err(BffError::NotFound(format!(
+            "volume {} not found",
+            volume_id
+        )));
+    };
+
+    // DP10 (#378 mirror): reject at accept on core-managed nodes — the
+    // same authority-mode resolution the create surface uses
+    // (`get_authority_mode`, compared against
+    // `AUTHORITY_MODE_CORE_MANAGED`, fail-open on every other value —
+    // an unreported node never rejects here; the agent handler's
+    // fail-closed `unimplemented` remains the enforcement). The destroy
+    // is a legacy-path stord side effect; on a core-managed node the
+    // single writer is Core. Before the transaction, so a rejection
+    // journals nothing.
+    if let Some(node_str) = node_id.as_deref() {
+        if let Ok(node) = chv_controlplane_types::domain::NodeId::new(node_str.to_string()) {
+            let mode = state.node_repo.get_authority_mode(&node).await?;
+            if mode.as_deref() == Some(chv_controlplane_store::AUTHORITY_MODE_CORE_MANAGED) {
+                tracing::warn!(%volume_id, node = %node_str, "delete_volume: rejecting delete on core-managed node");
+                return Err(BffError::BadRequest(
+                    "volume delete is not supported on core-managed nodes".into(),
+                ));
+            }
+        }
+    }
+
+    // BEGIN IMMEDIATE (the delete_vm discipline): acquire SQLite's
+    // RESERVED lock at tx start, serializing concurrent writers — a
+    // concurrent attach cannot slip between the DP5 read and the
+    // tombstone write, and the #406 check-then-insert pair on the
+    // idempotency key is race-free against a concurrent delete.
+    let mut tx = state
+        .pool
+        .begin_with("BEGIN IMMEDIATE;")
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    // Ownership inside the transaction (the #386/#481 gate — delete is
+    // the most consequential caller `require_volume_owner` has).
+    require_volume_owner(&mut tx, &volume_id, &claims.sub, claims.role == "admin").await?;
+
+    // #406: idempotent retry, BEFORE the guards — the DP7 in-flight
+    // check below would otherwise 409 against this delete's own
+    // recorded operation, and the DP5 check would see the attachment
+    // the first (accepted) delete already governs. A hit replays the
+    // original outcome (200 with the recorded task_id and status)
+    // without re-running the tombstone or bumping the generation.
+    let idempotency_key = format!("delete-volume-{}", volume_id);
+    if let Some(recorded) =
+        crate::handlers::operations::find_recorded_operation(&mut tx, &idempotency_key).await?
+    {
+        tracing::info!(
+            %volume_id,
+            operation_id = %recorded.operation_id,
+            status = %recorded.status,
+            "delete_volume: idempotent retry of a recorded delete; replaying original outcome"
+        );
+        return Ok(Json(json!({
+            "accepted": true,
+            "task_id": recorded.operation_id,
+            "volume_id": volume_id,
+            "recorded_status": recorded.status,
+            "summary": format!("Deleting volume '{}'", display_name),
+            "next_refresh_path": format!("/api/v1/tasks/{}", recorded.operation_id),
+        })));
+    }
+
+    // One in-tx read feeding both row-state guards. DP6 first (the
+    // cheap immutable gate), then DP5 (the racy one this tx exists to
+    // close). LEFT-JOINed: a volume with no VDS row (no reachable
+    // producer mints one) reads NULL kind and NULL attachment and is
+    // refused by DP6 below — the fail-closed direction on a removal
+    // path.
+    let (volume_kind, attached_vm_id): (Option<String>, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT v.volume_kind, vd.attached_vm_id
+        FROM volumes v
+        LEFT JOIN volume_desired_state vd ON v.volume_id = vd.volume_id
+        WHERE v.volume_id = ?
+        "#,
+    )
+    .bind(&volume_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to read volume guards: {}", e)))?;
+
+    // DP6: only standalone `volume_kind = 'data'` volumes are
+    // deletable. NULL-kind = every VM-embedded/boot disk (and every
+    // pre-#513 volume) — refusing loudly is also the locator gate: an
+    // embedded local disk lives at the vm-dir-nested path the carrier
+    // locator would MISS, so accepting it would tombstone the row and
+    // reclaim nothing (the silent-leak failure class this design
+    // exists to kill). Clones inherit the source's kind, so the
+    // #513-era standalone lineage is deletable end-to-end.
+    if volume_kind.as_deref() != Some("data") {
+        tracing::warn!(%volume_id, kind = ?volume_kind, "delete_volume: rejecting non-data volume kind");
+        return Err(BffError::BadRequest(format!(
+            "volume {} is not a standalone data volume (volume_kind is {}): boot disks and \
+             VM-embedded volumes are managed by their VM's lifecycle — delete the VM, or detach \
+             and reclassify the volume first",
+            volume_id,
+            volume_kind.as_deref().unwrap_or("unset")
+        )));
+    }
+
+    // DP5: an attached volume rejects at accept, naming the
+    // detach-first path — no force flag in v1 (force-on-delete is
+    // data-loss-plus-live-disk in one key). Refinement: an attachment
+    // to a VM whose own desired_status is 'Deleting' does NOT count as
+    // attached (the `networks.rs` liveness predicate, byte-exactly) —
+    // VM delete tombstones the VM rows and never clears volume VDS
+    // `attached_vm_id`, so without this a volume whose VM was deleted
+    // could never be deleted. A dangling attached_vm_id (no VDS row
+    // for the VM) is treated as attached — fail-closed on the removal
+    // path.
+    if let Some(attached_vm_id) = attached_vm_id {
+        let vm_status: Option<String> =
+            sqlx::query_scalar("SELECT desired_status FROM vm_desired_state WHERE vm_id = ?")
+                .bind(&attached_vm_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    BffError::Internal(format!("failed to read attaching VM status: {}", e))
+                })?;
+        if vm_status.as_deref() != Some("Deleting") {
+            tracing::warn!(%volume_id, %attached_vm_id, "delete_volume: rejecting delete of an attached volume");
+            return Err(BffError::BadRequest(format!(
+                "volume {} is attached to VM {}: detach it via POST /v1/volumes/mutate with \
+                 action 'detach' and vm_id first (there is no force delete)",
+                volume_id, attached_vm_id
+            )));
+        }
+    }
+
+    // DP7(i): an in-flight operation on the volume rejects with 409 —
+    // a transient condition, not a validation error. Covers the
+    // Pending-with-in-flight-create case (a volume whose CreateVolume
+    // never dispatched) and RetryPending backoff (review S2: a create
+    // sitting in dispatch backoff must block the delete too — its
+    // retry would otherwise re-dispatch and open-with-size a fresh
+    // backing file on the now-'Deleting' volume, leaking storage the
+    // delete's destroy already reclaimed). The #406 replay above has
+    // already returned for this delete's own recorded operation.
+    let in_flight: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT operation_id FROM operations
+        WHERE resource_kind = 'volume' AND resource_id = ? AND status IN ('Accepted', 'Running', 'RetryPending')
+        LIMIT 1
+        "#,
+    )
+    .bind(&volume_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check in-flight operations: {}", e)))?;
+    if let Some(operation_id) = in_flight {
+        tracing::warn!(%volume_id, %operation_id, "delete_volume: rejecting delete with an operation in flight");
+        return Err(BffError::Conflict(format!(
+            "volume {} has an in-flight operation ({}); wait for it to reach a terminal state \
+             before deleting",
+            volume_id, operation_id
+        )));
+    }
+
+    // DP7(ii): an enabled backup schedule naming the volume rejects
+    // with a 400 naming the schedule — `backup_schedules.volume_id` is
+    // a plain TEXT reference with no FK, and the worker would keep
+    // claiming the schedule into jobs against a destroyed volume.
+    // What happens to schedules on deleted volumes long-term is a
+    // follow-up judgment (the design's §8); the guard is the accept-
+    // time half.
+    let scheduled: Option<String> = sqlx::query_scalar(
+        "SELECT schedule_id FROM backup_schedules WHERE volume_id = ? AND enabled = 1 LIMIT 1",
+    )
+    .bind(&volume_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check backup schedules: {}", e)))?;
+    if let Some(schedule_id) = scheduled {
+        tracing::warn!(%volume_id, %schedule_id, "delete_volume: rejecting delete of a scheduled volume");
+        return Err(BffError::BadRequest(format!(
+            "volume {} is covered by enabled backup schedule {}: disable or delete the schedule \
+             first (PATCH or DELETE /v1/backups/schedules/{})",
+            volume_id, schedule_id, schedule_id
+        )));
+    }
+
+    // DP1: the tombstone — the `vms.rs` delete statement, volume-
+    // shaped. The `volumes` row is deliberately untouched (claim-time
+    // class resolution and clone replay depend on living rows).
+    sqlx::query(
+        r#"
+        UPDATE volume_desired_state
+        SET desired_status = 'Deleting', desired_generation = desired_generation + 1, updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE volume_id = ?
+        "#,
+    )
+    .bind(&requested_by)
+    .bind(&volume_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to update volume_desired_state: {}", e)))?;
+
+    let new_generation: i64 = sqlx::query_scalar(
+        "SELECT desired_generation FROM volume_desired_state WHERE volume_id = ?",
+    )
+    .bind(&volume_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
+
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
+    // The Accepted operation the PR 1 arm dispatches. resource_kind
+    // 'volume' (lowercase) — the BFF's volume display surfaces read
+    // that exact spelling, and the orchestrator's claim query resolves
+    // the node by resource_id regardless of kind.
+    let insert_operation = sqlx::query(
+        r#"
+        INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+        VALUES (?, ?, 'volume', ?, 'DeleteVolume', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&operation_id)
+    .bind(&idempotency_key)
+    .bind(&volume_id)
+    .bind(&requested_by)
+    .bind(new_generation)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = insert_operation {
+        // #406: an idempotency-key collision here must never surface as
+        // an opaque 500 — fail closed with a 409 naming the condition
+        // (and the tx rolls back, so the tombstone is not re-executed).
+        return Err(crate::handlers::operations::map_operation_insert_error(
+            &mut tx,
+            &idempotency_key,
+            e,
+        )
+        .await);
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+
+    tracing::info!(%volume_id, %operation_id, "delete_volume: transaction committed successfully");
+    // The tombstone changes the volume list/detail rows and the
+    // overview's storage accounting (DP9) — the #524 create-route
+    // invalidation set.
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
+    Ok(Json(json!({
+        "accepted": true,
+        "task_id": operation_id,
+        "volume_id": volume_id,
+        "summary": format!("Deleting volume '{}'", display_name),
+        "next_refresh_path": format!("/api/v1/tasks/{}", operation_id),
+    })))
+}
+
+/// #522 DP8: `'Deleting'` is terminal for volume verbs — once a delete
+/// is journaled, the sibling mutation surfaces (mutate / snapshot /
+/// restore-snapshot / delete-snapshot / clone) refuse the volume. The
+/// one-predicate guard exists for a race the delete itself
+/// manufactures: an attach accepted against a volume being deleted
+/// would create-on-open a fresh default-size file behind the tombstone
+/// (the #533 stray-file failure class). 409, not 400: the request is
+/// well-formed and the volume row still exists — the resource's state
+/// conflicts with the verb (the in-flight guard's transient 409 is the
+/// sibling convention; this one is terminal, and the message says so).
+pub(crate) async fn require_volume_not_deleting(
+    conn: &mut sqlx::SqliteConnection,
+    volume_id: &str,
+) -> Result<(), BffError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT desired_status FROM volume_desired_state WHERE volume_id = ?")
+            .bind(volume_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| {
+                BffError::Internal(format!("failed to check volume desired status: {}", e))
+            })?;
+    if status.as_deref() == Some("Deleting") {
+        return Err(BffError::Conflict(format!(
+            "volume {} is being deleted: a delete is terminal for volume verbs — mutate, \
+             snapshot, restore-snapshot, delete-snapshot and clone refuse a 'Deleting' volume",
+            volume_id
+        )));
+    }
+    Ok(())
 }
 
 /// Check if the user is the owner of a volume or an admin.

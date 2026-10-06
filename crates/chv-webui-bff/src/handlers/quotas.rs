@@ -278,7 +278,19 @@ pub async fn delete_quota(
 ///
 ///   * U owns it (`volumes.owner_id = U`), OR
 ///   * it is attached to a VM U requested (`attached_vm_id` →
-///     `vm_desired_state.requested_by = U`).
+///     `vm_desired_state.requested_by = U`);
+///
+///   * AND (#522 DP9) its volume desired state is not `'Deleting'` —
+///     a tombstoned volume's capacity stops counting the moment the
+///     delete is journaled, releasing the owner's AND the attacher's
+///     accrual at once (they read this same query). This is the one
+///     place the volume tombstone deliberately differs from the VM
+///     tombstone, whose counts keep accruing: storage quota is the
+///     scarce resource #525/#526 existed to make honest. The
+///     predicate is LEFT-JOIN-safe (the `networks.rs` liveness
+///     discipline): a volume with no `volume_desired_state` row still
+///     accrues via ownership, matching the pre-#522 semantics for
+///     orphan rows.
 ///
 /// **No double-counting:** a volume matching both conditions counts
 /// exactly once for U. The joins are 1:1 from `volumes`
@@ -314,8 +326,8 @@ where
            FROM volumes v
            LEFT JOIN volume_desired_state vd ON v.volume_id = vd.volume_id
            LEFT JOIN vm_desired_state vds ON vd.attached_vm_id = vds.vm_id
-           WHERE v.owner_id = ?
-              OR vds.requested_by = ?"#,
+           WHERE (v.owner_id = ? OR vds.requested_by = ?)
+             AND (vd.desired_status IS NULL OR vd.desired_status != 'Deleting')"#,
     )
     .bind(user_id)
     .bind(user_id)

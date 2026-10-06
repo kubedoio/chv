@@ -333,6 +333,13 @@ ON CONFLICT (volume_id) DO UPDATE SET
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
+  -- #522 (review S1): never journal over a delete tombstone. The
+  -- generations the control plane mints are wall-clock milliseconds,
+  -- so the generation guard alone would always let a late-arriving
+  -- attach/detach overwrite desired_status 'Deleting' and re-attach a
+  -- volume whose backing the delete is concurrently reclaiming. IS
+  -- NOT is NULL-safe: a NULL-status row passes the guard.
+  AND volume_desired_state.desired_status IS NOT 'Deleting'
 "#;
 
 const PATCH_NETWORK_STATUS_SQL: &str = r#"
@@ -394,6 +401,12 @@ ON CONFLICT (volume_id) DO UPDATE SET
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
+  -- #522 (review S1): never journal over a delete tombstone (see
+  -- PATCH_VOLUME_ATTACHMENT_SQL). The generation guard alone would
+  -- always let a late-arriving resize overwrite desired_status
+  -- 'Deleting' on a volume whose backing the delete is concurrently
+  -- reclaiming.
+  AND volume_desired_state.desired_status IS NOT 'Deleting'
 "#;
 
 const PATCH_VOLUME_SNAPSHOT_SQL: &str = r#"
@@ -429,6 +442,12 @@ ON CONFLICT (volume_id) DO UPDATE SET
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
+  -- #522 (review S1): never journal over a delete tombstone (see
+  -- PATCH_VOLUME_ATTACHMENT_SQL). The generation guard alone would
+  -- always let a late-arriving snapshot overwrite desired_status
+  -- 'Deleting' on a volume whose backing the delete is concurrently
+  -- reclaiming.
+  AND volume_desired_state.desired_status IS NOT 'Deleting'
 "#;
 
 /// Read a volume's `volumes`-table summary (#380): the clone path uses it
@@ -666,6 +685,51 @@ impl DesiredStateRepository {
         Ok(())
     }
 
+    /// #522 (review S1): disambiguate a blocked volume-desired-state
+    /// patch UPSERT. The conflict arms of the three mutation-verb
+    /// patches (attach/detach, resize, snapshot) refuse to journal
+    /// over a `'Deleting'` tombstone at the SQL level; this helper
+    /// turns that block into a loud [`StoreError::Conflict`] (gRPC
+    /// ALREADY_EXISTS / HTTP 409 through the BFF's `map_ack`, the
+    /// #384 precedent) instead of the pre-existing stale-generation
+    /// refusal, so a client racing a delete sees *why* the mutation
+    /// was refused. The wall-clock generations the control plane
+    /// mints would otherwise always beat the tombstone's small
+    /// integer, letting a late-arriving mutation re-attach (or
+    /// re-flag) a volume whose backing the delete is concurrently
+    /// reclaiming.
+    ///
+    /// The general [`Self::upsert_volume`] path (agent-fragment
+    /// reconcile) needs no such guard: the tombstone writes
+    /// `desired_generation + 1` over the row's current maximum, and
+    /// the delete's agent handler evicts the volume from its cache,
+    /// so any fragment still in flight carries a generation the
+    /// existing `<=` guard already refuses.
+    async fn refuse_volume_patch_if_deleting(
+        &self,
+        volume_id: &ResourceId,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        let status: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT desired_status FROM volume_desired_state WHERE volume_id = $1",
+        )
+        .bind(volume_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        if matches!(&status, Some(Some(status)) if status == "Deleting") {
+            return Err(StoreError::Conflict {
+                entity: "volume",
+                id: volume_id.to_string(),
+                reason: "volume is deleting; the mutation verb was refused",
+            });
+        }
+        Err(StoreError::StaleGeneration {
+            entity: "volume",
+            id: volume_id.to_string(),
+            incoming: generation,
+        })
+    }
+
     pub async fn set_volume_attachment(
         &self,
         input: &VolumeAttachmentPatchInput,
@@ -700,11 +764,12 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "volume",
-                id: input.volume_id.to_string(),
-                incoming: generation,
-            });
+            // #522 (review S1): a 'Deleting' tombstone blocks the
+            // conflict arm (see the SQL) — refuse loudly instead of
+            // reporting a stale generation.
+            return self
+                .refuse_volume_patch_if_deleting(&input.volume_id, generation)
+                .await;
         }
         Ok(())
     }
@@ -734,11 +799,12 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "volume",
-                id: input.volume_id.to_string(),
-                incoming: generation,
-            });
+            // #522 (review S1): a 'Deleting' tombstone blocks the
+            // conflict arm (see the SQL) — refuse loudly instead of
+            // reporting a stale generation.
+            return self
+                .refuse_volume_patch_if_deleting(&input.volume_id, generation)
+                .await;
         }
         Ok(())
     }
@@ -769,11 +835,12 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "volume",
-                id: input.volume_id.to_string(),
-                incoming: generation,
-            });
+            // #522 (review S1): a 'Deleting' tombstone blocks the
+            // conflict arm (see the SQL) — refuse loudly instead of
+            // reporting a stale generation.
+            return self
+                .refuse_volume_patch_if_deleting(&input.volume_id, generation)
+                .await;
         }
         Ok(())
     }
