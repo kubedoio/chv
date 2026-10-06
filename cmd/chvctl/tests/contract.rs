@@ -51,7 +51,7 @@
 //!   TODO referencing the design §2 section and the PR that flips the
 //!   row. The harness must pass at main — red-where-known means
 //!   asserting the current broken behavior, not failing. After PR 4
-//!   there are NONE left: every row in this file is green (43 rows),
+//!   there are NONE left: every row in this file is green (46 rows),
 //!   which is the campaign's terminal state — any future drift fails
 //!   the suite outright instead of needing a new pin.
 //!
@@ -121,6 +121,23 @@
 //! task, and the row pins both halves — the /v1/tasks/get detail
 //! carries the seeded cause verbatim, and the watch command exits
 //! non-zero on the terminal failure it now explains.
+//!
+//! #522 PR 3 (the volume-delete CLI, DP11 of the adopted design) added
+//! the `volume delete` rows (43 → 46 rows, still zero pinned-broken):
+//! a green delete on a seeded standalone `volume_kind = 'data'`
+//! volume (the command's `{"volume_id"}` body against POST
+//! /v1/volumes/delete, the journaled tombstone — `volume_desired_
+//! state` flipped to 'Deleting' with the generation bump and the
+//! owner stamped as `updated_by`, the `volumes` row retained (DP1),
+//! and the Accepted `DeleteVolume` operation keyed
+//! `delete-volume-{volume_id}` — plus the five-key response shape
+//! pinned through the #406 idempotent re-post and the failed-task
+//! story: the accepted task, flipped to a terminal failure with a
+//! recorded cause, surfaces that cause through `task watch` and
+//! exits non-zero, the #530 discipline), the attached-volume 400
+//! (the loud detach-first message the CLI surfaces verbatim, zero
+//! journaling), and the in-flight-operation 409 (the loud message
+//! naming the in-flight operation id, zero journaling).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -509,6 +526,60 @@ impl Harness {
         .execute(&self.pool)
         .await
         .expect("seed volume");
+    }
+
+    /// A DELETABLE standalone volume (the #522 delete-route suite's
+    /// `seed_data_volume` shape, contract-tier): `volume_kind = 'data'`
+    /// (DP6's gate), owned by the seeded operator, on node `n-1`, with
+    /// an `Active` desired state at generation 1 — optionally attached
+    /// to a VM (DP5's guard input; the caller seeds the VM and its
+    /// desired state, an `Active` VM making the attachment count).
+    async fn seed_data_volume(&self, volume_id: &str, attached_vm_id: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, volume_kind, updated_at) \
+             VALUES (?, 'n-1', ?, 'u-operator', 1073741824, 'data', strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+        )
+        .bind(volume_id)
+        .bind(volume_id)
+        .execute(&self.pool)
+        .await
+        .expect("seed data volume");
+        sqlx::query(
+            "INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_by, attached_vm_id) \
+             VALUES (?, 1, 'Active', 'u-operator', ?)",
+        )
+        .bind(volume_id)
+        .bind(attached_vm_id)
+        .execute(&self.pool)
+        .await
+        .expect("seed data volume desired state");
+    }
+
+    /// An operation row for a volume with an explicit status (the #522
+    /// delete-route suite's `seed_volume_operation` shape, DP7's
+    /// in-flight guard input). `operation_type` is caller-chosen so the
+    /// row can be an in-flight `CreateVolume` (the volume whose create
+    /// never dispatched — the DP7 case the in-flight guard exists to
+    /// cover).
+    async fn seed_volume_operation(
+        &self,
+        operation_id: &str,
+        volume_id: &str,
+        operation_type: &str,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by) \
+             VALUES (?, ?, 'volume', ?, ?, ?, 'u-operator')",
+        )
+        .bind(operation_id)
+        .bind(format!("seed-{operation_id}"))
+        .bind(volume_id)
+        .bind(operation_type)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .expect("seed volume operation");
     }
 
     /// A bridge network owned by the seeded operator, with a desired-state
@@ -1558,6 +1629,332 @@ async fn volume_create_requires_node_row() {
             .unwrap();
         assert_eq!(count, 0, "a rejected create must not journal {table}");
     }
+}
+
+/// `chvctl volume delete <volume_id>` — GREEN (#522 DP11, PR 3 of the
+/// adopted decomposition). The command's request shape is the route's
+/// whole contract: verb-POST `/v1/volumes/delete` with the single
+/// `{"volume_id"}` body (the DP11 shape, `vm delete`'s twin) — a
+/// renamed field or path 400s/404s through the command's own wire
+/// path, which is what makes the row discriminating against pre-PR
+/// code (there was no `Delete` arm to drive). The journaled row shapes
+/// are asserted directly (the `volume_delete_route.rs` discipline,
+/// contract-tier — this delete is BFF-direct journaling, DP1): the
+/// tombstone, the retained `volumes` row, and the Accepted
+/// `DeleteVolume` operation keyed `delete-volume-{volume_id}`. The
+/// response's five keys are pinned through the #406 idempotent
+/// re-post (the command only prints; the row re-drives the exact body
+/// the command sent and inspects the replayed outcome), and the
+/// failed-task story is pinned end-to-end: the accepted task flipped
+/// to a terminal failure with a recorded cause surfaces that cause
+/// through `task watch` (#530) with the unchanged non-zero exit.
+#[tokio::test]
+async fn volume_delete_row() {
+    let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_data_volume("vol-del", None).await;
+    let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
+
+    volume::execute(
+        &client,
+        volume::VolumeCommands::Delete {
+            volume_id: "vol-del".to_string(),
+        },
+        &OutputFormat::Json,
+    )
+    .await
+    .expect("chvctl volume delete against POST /v1/volumes/delete");
+
+    // The tombstone (DP1): desired_status flipped to 'Deleting', the
+    // generation bumped 1 → 2, the operator stamped as updated_by.
+    let vds: (i64, String, String) = sqlx::query_as(
+        "SELECT desired_generation, desired_status, updated_by FROM volume_desired_state WHERE volume_id = ?",
+    )
+    .bind("vol-del")
+    .fetch_one(&h.pool)
+    .await
+    .expect("volume desired state row");
+    assert_eq!(
+        vds.0, 2,
+        "the tombstone must bump the generation exactly once"
+    );
+    assert_eq!(vds.1, "Deleting", "the tombstone must journal 'Deleting'");
+    assert_eq!(
+        vds.2, "u-operator",
+        "the tombstone must stamp the requester as updated_by"
+    );
+
+    // The `volumes` row is RETAINED (DP1 — claim-time class resolution
+    // and clone replay depend on living rows; the tombstone is the
+    // only delete).
+    let volumes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM volumes WHERE volume_id = 'vol-del'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(volumes, 1, "a delete must not remove the volumes row");
+
+    // The Accepted DeleteVolume operation (the PR 1 dispatch carrier's
+    // producer) with the design's idempotency key.
+    let op: (String, String, String, String) = sqlx::query_as(
+        "SELECT operation_id, operation_type, status, idempotency_key FROM operations WHERE resource_kind = 'volume' AND resource_id = ?",
+    )
+    .bind("vol-del")
+    .fetch_one(&h.pool)
+    .await
+    .expect("operation row");
+    let (operation_id, operation_type, operation_status, idempotency_key) = op;
+    assert_eq!(operation_type, "DeleteVolume");
+    assert_eq!(operation_status, "Accepted");
+    assert_eq!(idempotency_key, "delete-volume-vol-del");
+
+    // The response shape (the create route's five keys) — pinned
+    // through the #406 idempotent re-post of the exact body the
+    // command sent: a retried delete replays the recorded outcome,
+    // which is the response the command prints on a retry (and the
+    // same five keys the fresh accept carries).
+    let retry = client
+        .post(
+            "/v1/volumes/delete",
+            &serde_json::json!({ "volume_id": "vol-del" }),
+        )
+        .await
+        .expect("idempotent re-post of the delete through the harness server");
+    assert_eq!(
+        retry.get("accepted").and_then(Value::as_bool),
+        Some(true),
+        "the delete response must carry accepted"
+    );
+    assert_eq!(
+        retry.get("task_id").and_then(Value::as_str),
+        Some(operation_id.as_str()),
+        "the delete response must carry the journaled operation as task_id"
+    );
+    assert_eq!(
+        retry.get("volume_id").and_then(Value::as_str),
+        Some("vol-del"),
+        "the delete response must round-trip volume_id"
+    );
+    assert!(
+        retry
+            .get("summary")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty()),
+        "the delete response must carry a summary"
+    );
+    assert_eq!(
+        retry.get("next_refresh_path").and_then(Value::as_str),
+        Some(format!("/api/v1/tasks/{operation_id}").as_str()),
+        "the delete response must carry the task's next_refresh_path"
+    );
+    // The replay re-journals nothing: still exactly one DeleteVolume
+    // operation, still one tombstone (generation 2, not 3).
+    let delete_ops: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operations WHERE operation_type = 'DeleteVolume' AND resource_id = 'vol-del'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(delete_ops, 1, "an idempotent retry must not re-journal");
+
+    // The failed-task story (#530, the DP11 taskwatch ergonomics): the
+    // accepted task flipped to a terminal failure with a journaled
+    // cause — the shape the orchestrator writes on a refused dispatch
+    // — must surface that cause through `chvctl task watch <task_id>`
+    // (the task_id the delete response carried) with the unchanged
+    // non-zero exit.
+    sqlx::query(
+        "UPDATE operations SET status = 'Failed', error_code = ?, error_message = ? WHERE operation_id = ?",
+    )
+    .bind("AGENT_REJECTED")
+    .bind("destroy_volume refused: an open stord session exists for volume vol-del")
+    .bind(&operation_id)
+    .execute(&h.pool)
+    .await
+    .expect("flip the delete operation to a terminal failure");
+    let watch = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        task::execute(
+            &client,
+            task::TaskCommands::Watch {
+                task_id: operation_id.clone(),
+                timeout: 20,
+            },
+            &OutputFormat::Json,
+        ),
+    )
+    .await
+    .expect("task watch must complete, not hang");
+    match watch {
+        Err(CliError::Task(msg)) => assert!(
+            msg.contains("Failed"),
+            "the non-zero exit must still name the terminal status: {msg}"
+        ),
+        other => panic!("expected the terminal-failure non-zero exit, got {other:?}"),
+    }
+    // The cause line the watch prints: the detail fetched through the
+    // same client carries the journaled cause verbatim, and the exact
+    // formatter the command prints through renders it.
+    let detail = client
+        .post(
+            "/v1/tasks/get",
+            &serde_json::json!({ "task_id": operation_id }),
+        )
+        .await
+        .expect("task detail through the harness server")
+        .get("detail")
+        .cloned()
+        .expect("tasks/get nests the payload under \"detail\"");
+    assert_eq!(
+        task::failure_cause(&detail).as_deref(),
+        Some("AGENT_REJECTED — destroy_volume refused: an open stord session exists for volume vol-del"),
+        "the delete's failed task must surface the journaled cause through task watch"
+    );
+}
+
+/// `chvctl volume delete` on an ATTACHED volume — the #522 DP5
+/// REJECTION row, the delete twin of
+/// `volume_create_storage_class_rejection_row`: the CLI has no flags
+/// that could bypass the guard (deliberately — no `--force`, DP5's
+/// letter), so the 400 comes from the BFF's in-tx attached guard and
+/// the row pins the CLI's failure-mode rendering: the loud message —
+/// naming the
+/// detach-first path — surfaces verbatim through the command's error
+/// path, and nothing is journaled (the zero-journal discipline).
+#[tokio::test]
+async fn volume_delete_attached_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_node().await;
+    // An ACTIVE VM — the attachment counts (the DP5 refinement only
+    // spares an attachment to a VM whose own desired_status is
+    // 'Deleting').
+    h.seed_vm("vm-1").await;
+    h.seed_vm_desired_state("vm-1").await;
+    h.seed_data_volume("vol-att", Some("vm-1")).await;
+    let token = h.seed_jwt_as("operator").await;
+
+    let result = volume::execute(
+        &h.client(Some(token)),
+        volume::VolumeCommands::Delete {
+            volume_id: "vol-att".to_string(),
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    match &result {
+        Err(CliError::Api { status, message }) => {
+            assert_eq!(*status, 400, "the attached guard rejects with 400");
+            assert!(
+                message.contains("detach it via POST /v1/volumes/mutate"),
+                "the 400 the CLI surfaces must name the detach-first path loudly: {message}"
+            );
+        }
+        other => panic!("expected the attached-volume 400, got {other:?}"),
+    }
+
+    // A rejected delete journals nothing (every table the delete tx
+    // writes — the `volume_delete_route.rs` discipline): the desired
+    // state is untombstoned at its original generation, the volumes
+    // row is intact, and no DeleteVolume operation exists.
+    let vds: (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, desired_status FROM volume_desired_state WHERE volume_id = 'vol-att'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("volume desired state row");
+    assert_eq!(
+        vds.1.as_deref(),
+        Some("Active"),
+        "a rejected delete must not tombstone the desired state"
+    );
+    assert_eq!(vds.0, 1, "a rejected delete must not bump the generation");
+    let volumes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM volumes WHERE volume_id = 'vol-att'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        volumes, 1,
+        "a rejected delete must not remove the volumes row"
+    );
+    let delete_ops: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operations WHERE operation_type = 'DeleteVolume' AND resource_id = 'vol-att'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        delete_ops, 0,
+        "a rejected delete must not journal a DeleteVolume operation"
+    );
+}
+
+/// `chvctl volume delete` on a volume with an IN-FLIGHT operation —
+/// the #522 DP7(i) rejection row: an `Accepted` `CreateVolume` (the
+/// volume whose create never dispatched, the DP7 case the guard
+/// exists to cover) blocks the delete with a 409 whose loud message
+/// names the in-flight operation id, surfaced verbatim through the
+/// CLI's error path, and nothing is journaled.
+#[tokio::test]
+async fn volume_delete_in_flight_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_data_volume("vol-inflight", None).await;
+    h.seed_volume_operation(
+        "op-create-inflight",
+        "vol-inflight",
+        "CreateVolume",
+        "Accepted",
+    )
+    .await;
+    let token = h.seed_jwt_as("operator").await;
+
+    let result = volume::execute(
+        &h.client(Some(token)),
+        volume::VolumeCommands::Delete {
+            volume_id: "vol-inflight".to_string(),
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    match &result {
+        Err(CliError::Api { status, message }) => {
+            assert_eq!(
+                *status, 409,
+                "the in-flight guard rejects with 409 (a transient condition, not a validation error)"
+            );
+            assert!(
+                message.contains("op-create-inflight"),
+                "the 409 the CLI surfaces must name the in-flight operation loudly: {message}"
+            );
+        }
+        other => panic!("expected the in-flight-operation 409, got {other:?}"),
+    }
+
+    // A rejected delete journals nothing.
+    let vds: (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, desired_status FROM volume_desired_state WHERE volume_id = 'vol-inflight'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("volume desired state row");
+    assert_eq!(
+        vds.1.as_deref(),
+        Some("Active"),
+        "a rejected delete must not tombstone the desired state"
+    );
+    assert_eq!(vds.0, 1, "a rejected delete must not bump the generation");
+    let delete_ops: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operations WHERE operation_type = 'DeleteVolume' AND resource_id = 'vol-inflight'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        delete_ops, 0,
+        "a rejected delete must not journal a DeleteVolume operation"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,11 @@ pub enum VolumeCommands {
         #[arg(long)]
         name: String,
     },
+    /// Delete a standalone data volume
+    Delete {
+        /// Volume identifier
+        volume_id: String,
+    },
 }
 
 pub async fn execute(
@@ -145,6 +150,28 @@ pub async fn execute(
             let body = json!({ "source_volume_id": volume_id, "target_volume_id": name });
             let resp = client.post("/v1/volumes/clone", &body).await?;
             println!("Volume cloned.");
+            output::print_value(&resp, format);
+        }
+        VolumeCommands::Delete { volume_id } => {
+            // #522 DP11: the wire contract is POST /v1/volumes/delete
+            // with the single `volume_id` field — the verb-POST
+            // convention of `vms/delete`, the same body shape as
+            // `vm delete` (`{"vm_id"}`). Deliberately NO --force flag
+            // (DP5: the attached guard is the operator's safety net —
+            // force-on-delete is data-loss-plus-live-disk in one key)
+            // and NO --kind override (DP6: the 'data'-only kind gate
+            // is also the locator gate); an attached or non-data
+            // volume is the server's loud 400, surfaced through the
+            // CLI's existing error path with the message naming the
+            // detach-first / VM-lifecycle path.
+            let body = json!({ "volume_id": volume_id });
+            // The output mirrors `volume create`'s accept-time shape
+            // (`vm delete`'s message): the response is task-carrying —
+            // `task_id` feeds `chvctl task watch`, which prints the
+            // journaled terminal-failure cause (#530) if the
+            // DeleteVolume dispatch fails.
+            let resp = client.post("/v1/volumes/delete", &body).await?;
+            println!("Volume {volume_id} deleted.");
             output::print_value(&resp, format);
         }
     }
