@@ -1006,6 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.runtime_dir.clone(),
         config.stord_path_allowlist.clone(),
         config.stord_config_path.clone(),
+        config.nwd_config_path.clone(),
     );
 
     if let Err(e) = supervisor.start_all().await {

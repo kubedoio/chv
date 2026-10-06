@@ -38,6 +38,16 @@ pub struct DaemonSupervisor {
     /// than status quo). `None` keeps the generated-config respawn
     /// byte-exactly.
     stord_config_path: Option<PathBuf>,
+    /// Operator's nwd.toml, passed through verbatim on respawn (#504,
+    /// mirroring #385's stord pass-through). When `Some`, the supervisor
+    /// validates the file (readable, parses as an NwdConfig, `socket_path`
+    /// matches the supervisor's expected socket) and execs
+    /// `chv-nwd <path>` with it instead of generating a config — every
+    /// operator key (`[overlay]`, `[ebpf]`, `[fabric]`, …) survives
+    /// respawn. On any validation failure: loud warn + today's
+    /// generated-config path (never worse than status quo). `None` keeps
+    /// the generated-config respawn byte-exactly.
+    nwd_config_path: Option<PathBuf>,
     stord_child: Option<Child>,
     nwd_child: Option<Child>,
     stord_last_restart: Option<Instant>,
@@ -45,6 +55,12 @@ pub struct DaemonSupervisor {
 }
 
 impl DaemonSupervisor {
+    // Eight constructor args: one per supervisor-managed daemon surface
+    // (binary, socket, config pass-through) plus the shared runtime dir
+    // and the stord allowlist — same shape as `start_daemon` below,
+    // where the alternative (a builder/args struct) would churn every
+    // call site for no behavioral gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stord_bin: PathBuf,
         nwd_bin: PathBuf,
@@ -53,6 +69,7 @@ impl DaemonSupervisor {
         runtime_dir: PathBuf,
         stord_path_allowlist: Vec<PathBuf>,
         stord_config_path: Option<PathBuf>,
+        nwd_config_path: Option<PathBuf>,
     ) -> Self {
         Self {
             stord_bin,
@@ -62,6 +79,7 @@ impl DaemonSupervisor {
             runtime_dir,
             stord_path_allowlist,
             stord_config_path,
+            nwd_config_path,
             stord_child: None,
             nwd_child: None,
             stord_last_restart: None,
@@ -127,6 +145,29 @@ impl DaemonSupervisor {
     }
 
     pub async fn start_nwd(&mut self) -> Result<(), ChvError> {
+        // #504 pass-through (mirroring #385's stord mechanism): when the
+        // operator pointed the agent at their nwd.toml, respawn execs the
+        // daemon with that file directly (every operator key —
+        // metrics_bind, the [overlay]/[ebpf]/[fabric] blocks, and future
+        // keys — survives by construction; no config is generated). Only
+        // the socket is validated: execing an nwd that listens elsewhere
+        // would wedge the agent's health check forever, so a socket
+        // mismatch — or an unreadable/malformed file — degrades to
+        // today's generated config below with a loud warn (never worse
+        // than status quo).
+        let passthrough_config = self.nwd_config_path.as_ref().and_then(|path| {
+            match validate_passthrough_nwd_config(path, &self.nwd_socket) {
+                Ok(()) => Some(path.clone()),
+                Err(reason) => {
+                    warn!(
+                        config = %path.display(),
+                        reason = %reason,
+                        "nwd_config_path unusable for respawn; falling back to the supervisor-generated config (operator nwd.toml keys will NOT survive this respawn)"
+                    );
+                    None
+                }
+            }
+        });
         start_daemon(
             &self.nwd_bin,
             &self.nwd_socket,
@@ -135,7 +176,7 @@ impl DaemonSupervisor {
             &mut self.nwd_last_restart,
             "chv-nwd",
             "",
-            None,
+            passthrough_config.as_deref(),
         )
         .await
     }
@@ -332,6 +373,45 @@ fn validate_passthrough_stord_config(
     }
 }
 
+/// #504 pass-through validation for the operator's nwd.toml — the
+/// nwd twin of `validate_passthrough_stord_config` above, deliberately
+/// a parallel implementation rather than a shared generic helper: the
+/// only shared body is the socket compare (a handful of lines), while
+/// a generic abstraction (loader closure or a socket-path trait) would
+/// rewire the pinned #385 stord path for no behavioral gain; the
+/// spawn side of the mechanism IS shared (`start_daemon`'s
+/// `config_path` parameter, landed with #385). The file must be
+/// readable, parse as an `NwdConfig`, and listen on exactly the socket
+/// the supervisor expects (its health check connects to
+/// `AgentConfig.nwd_socket` — a respawned daemon bound elsewhere would
+/// wedge that check forever). Anything else is a reason string for the
+/// fallback warn; the caller then takes today's generated-config path.
+fn validate_passthrough_nwd_config(
+    path: &std::path::Path,
+    expected_socket: &std::path::Path,
+) -> Result<(), String> {
+    match chv_config::load_nwd_config(Some(path)) {
+        Ok(cfg) => {
+            // The comparison is exact, unnormalized `Path` equality,
+            // same contract as the stord twin: lexically-equivalent
+            // spellings spuriously fall back + warn — safe (the
+            // fallback is the generated config, never a wedge), and
+            // the mismatch warn below names both paths so the operator
+            // can see and fix the spelling.
+            if cfg.socket_path != expected_socket {
+                Err(format!(
+                    "socket_path mismatch: config listens at {}, agent expects {}",
+                    cfg.socket_path.display(),
+                    expected_socket.display()
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(format!("unreadable or malformed nwd config: {e}")),
+    }
+}
+
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 mod tests {
@@ -400,6 +480,7 @@ mod tests {
             dir.runtime_dir.clone(),
             vec![],
             None,
+            None,
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -421,6 +502,7 @@ mod tests {
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
             vec![],
+            None,
             None,
         );
         supervisor.start_stord().await.unwrap();
@@ -444,6 +526,7 @@ mod tests {
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
             vec![],
+            None,
             None,
         );
         supervisor.start_stord().await.unwrap();
@@ -474,6 +557,7 @@ mod tests {
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
             vec![],
+            None,
             None,
         );
         supervisor.start_stord().await.unwrap();
@@ -528,6 +612,7 @@ mod tests {
             dir.runtime_dir.clone(),
             allowlist.clone(),
             None,
+            None,
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -552,6 +637,7 @@ mod tests {
             PathBuf::from("dummy"),
             dir.runtime_dir.clone(),
             vec![],
+            None,
             None,
         );
         // Drop the socket so start_daemon spawns (the fake is alive but
@@ -749,6 +835,7 @@ mod tests {
             dir.runtime_dir.clone(),
             vec![],
             Some(operator_config.clone()),
+            None,
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -762,7 +849,9 @@ mod tests {
             "respawned stord must be exec'd with the operator config path"
         );
         // No config was generated for stord (the nwd config is still
-        // generated — nwd is out of scope, #504).
+        // generated here — this test leaves nwd_config_path unset,
+        // which keeps the historical generated respawn; #504 covers
+        // the nwd pass-through in its own tests below).
         let generated = dir.runtime_dir.join("chv-stord.toml");
         assert!(
             !generated.exists(),
@@ -840,6 +929,7 @@ mod tests {
                 dir.runtime_dir.clone(),
                 vec![],
                 Some(operator_config.clone()),
+                None,
             );
             supervisor.start_stord().await.unwrap();
 
@@ -937,6 +1027,7 @@ mod tests {
             dir.runtime_dir.clone(),
             vec![],
             Some(operator_config.clone()),
+            None,
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -1007,6 +1098,404 @@ mod tests {
             logs.warnings()
                 .iter()
                 .all(|w| !w.message().contains("stord_config_path unusable")),
+            "a validating config must never trigger the fallback warn, even when the daemon crash-loops"
+        );
+        supervisor.shutdown().await;
+    }
+
+    // ------------------------------------------------------------------
+    // #504: nwd respawn config fidelity via pass-through — the nwd twin
+    // of the #385 stord suite above, mirroring its structure. When the
+    // operator points the agent at their nwd.toml
+    // (`AgentConfig.nwd_config_path`), the supervisor execs
+    // `chv-nwd <operator-path>` directly — no config generated, every
+    // operator key (and every future key) survives respawn by
+    // construction. Any validation failure degrades to today's
+    // generated config with a loud warn.
+    // ------------------------------------------------------------------
+
+    /// Operator-shaped nwd.toml fixture with non-default keys on every
+    /// surface the generated respawn config drops: `log_level`,
+    /// `metrics_bind`, and the `[overlay]`, `[ebpf]` and `[fabric]`
+    /// blocks (the issue-#504 defect: the generated config carries only
+    /// socket_path, runtime_dir and log_level).
+    fn operator_nwd_fixture(root: &std::path::Path, socket: &std::path::Path) -> PathBuf {
+        let path = root.join("operator-nwd.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "socket_path = {}\nruntime_dir = {}\nlog_level = \"debug\"\nmetrics_bind = \"127.0.0.1:9902\"\n\n[overlay]\nnolearning = false\narp_suppress = true\ninner_mtu = \"1400\"\n\n[ebpf]\nprogram_path = \"/opt/chv/ebpf/\"\ndefault_action = \"allow\"\n\n[fabric]\nenabled = true\nstate_dir = \"/var/lib/chv/nwd/fabric\"\nname_prefix = \"kvx\"\nwireguard_port = 65003\nvxlan_port = 4791\ndefault_tenant_mtu = 1360\ndefault_fabric_mtu = 1420\n",
+                toml_quote(&socket.to_string_lossy()),
+                toml_quote(&root.join("operator-nwd-runtime").to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    // Happy path: a valid operator config is exec'd verbatim — argv[1]
+    // is the operator's path, no generated config is written (while
+    // the stord side, whose key is unset here, keeps today's generated
+    // behavior), and no fallback warn fires.
+    #[tokio::test]
+    async fn supervisor_respawn_passes_operator_nwd_config_through() {
+        let dir = fake_daemon_dir();
+        let root = dir._dir.path().to_path_buf();
+        let nwd_socket = root.join("nwd-api.sock");
+        let argv_marker = root.join("nwd-argv.txt");
+        fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+        fake_daemon_script(
+            &dir.nwd_bin,
+            &format!("echo \"$1\" > \"{}\"\nsleep 10", argv_marker.display()),
+        )
+        .await;
+        let operator_config = operator_nwd_fixture(&root, &nwd_socket);
+        // The fixture models a real operator file: it parses as an
+        // NwdConfig with the non-default blocks intact — the same
+        // parse the supervisor's validation performs, so the blocks
+        // below are exactly what survives the respawn.
+        let parsed = chv_config::load_nwd_config(Some(&operator_config)).unwrap();
+        assert!(!parsed.overlay.nolearning);
+        assert!(parsed.overlay.arp_suppress);
+        assert_eq!(parsed.overlay.inner_mtu, "1400");
+        assert_eq!(parsed.ebpf.default_action, "allow");
+        assert_eq!(parsed.ebpf.program_path, PathBuf::from("/opt/chv/ebpf/"));
+        assert!(parsed.fabric.enabled);
+        assert_eq!(parsed.fabric.wireguard_port, 65003);
+        assert_eq!(parsed.log_level, "debug");
+        assert_eq!(parsed.metrics_bind.as_deref(), Some("127.0.0.1:9902"));
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+
+        let mut supervisor = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            nwd_socket,
+            dir.runtime_dir.clone(),
+            vec![],
+            None,
+            Some(operator_config.clone()),
+        );
+        supervisor.start_stord().await.unwrap();
+        supervisor.start_nwd().await.unwrap();
+
+        // The daemon was exec'd with the operator's config, not a
+        // generated one.
+        let recorded = wait_for_recorded_argv(&argv_marker).await;
+        assert_eq!(
+            recorded,
+            operator_config.to_string_lossy().to_string(),
+            "respawned nwd must be exec'd with the operator config path"
+        );
+        // No config was generated for nwd...
+        let generated = dir.runtime_dir.join("chv-nwd.toml");
+        assert!(
+            !generated.exists(),
+            "pass-through respawn must not write a generated nwd config"
+        );
+        // ...while the stord side (key unset) keeps today's generated
+        // behavior — the #385 path is untouched by #504.
+        assert!(
+            dir.runtime_dir.join("chv-stord.toml").exists(),
+            "unset stord_config_path must keep the generated stord respawn"
+        );
+        assert!(supervisor.nwd_child.is_some());
+        // No fallback warn fired.
+        assert!(
+            logs.warnings()
+                .iter()
+                .all(|w| !w.message().contains("nwd_config_path unusable")),
+            "valid operator config must not trigger the fallback warn"
+        );
+        supervisor.shutdown().await;
+    }
+
+    // No key → today's behavior, unchanged: the respawned daemon runs
+    // the supervisor-generated config with the historical shape, and
+    // no fallback warn fires (there is nothing to fall back from).
+    #[tokio::test]
+    async fn supervisor_respawn_without_nwd_config_key_keeps_generated_config() {
+        let dir = fake_daemon_dir();
+        let root = dir._dir.path().to_path_buf();
+        let nwd_socket = root.join("nwd-api.sock");
+        let argv_marker = root.join("nwd-argv.txt");
+        fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+        fake_daemon_script(
+            &dir.nwd_bin,
+            &format!("echo \"$1\" > \"{}\"\nsleep 10", argv_marker.display()),
+        )
+        .await;
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+
+        let mut supervisor = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            nwd_socket.clone(),
+            dir.runtime_dir.clone(),
+            vec![],
+            None,
+            None,
+        );
+        supervisor.start_stord().await.unwrap();
+        supervisor.start_nwd().await.unwrap();
+
+        let generated = dir.runtime_dir.join("chv-nwd.toml");
+        let recorded = wait_for_recorded_argv(&argv_marker).await;
+        assert_eq!(
+            recorded,
+            generated.to_string_lossy().to_string(),
+            "unset nwd_config_path must exec the generated config"
+        );
+        let config = std::fs::read_to_string(&generated).unwrap();
+        assert!(
+            config.contains(&format!(
+                "socket_path = {}",
+                toml_quote(&nwd_socket.to_string_lossy())
+            )),
+            "generated config must carry the expected socket"
+        );
+        assert!(
+            config.contains("log_level = \"info\""),
+            "generated config keeps the historical shape"
+        );
+        assert!(
+            !config.contains("metrics_bind") && !config.contains("[fabric]"),
+            "generated config carries none of the operator-only blocks (the #504 defect, pinned)"
+        );
+        assert!(
+            logs.warnings()
+                .iter()
+                .all(|w| !w.message().contains("nwd_config_path unusable")),
+            "unset key must not warn"
+        );
+        supervisor.shutdown().await;
+    }
+
+    // Fallback legs: missing file / malformed TOML / socket-path
+    // mismatch each produce the loud warn AND today's generated-config
+    // behavior — the respawned daemon runs the generated config, never
+    // worse than the pre-#504 status quo.
+    #[tokio::test]
+    async fn supervisor_falls_back_to_generated_config_when_operator_nwd_config_unusable() {
+        struct Leg {
+            name: &'static str,
+            reason_needle: &'static str,
+            config: Option<String>,
+        }
+        let legs = [
+            // Unset path: the read fails before parsing.
+            Leg {
+                name: "missing file",
+                reason_needle: "unreadable or malformed",
+                config: None,
+            },
+            Leg {
+                name: "malformed TOML",
+                reason_needle: "unreadable or malformed",
+                config: Some("this is not toml {{{".to_string()),
+            },
+            // An nwd listening elsewhere would wedge the agent's health
+            // check forever — the mandatory fallback leg.
+            Leg {
+                name: "socket-path mismatch",
+                reason_needle: "socket_path mismatch",
+                config: Some(
+                    "socket_path = \"/run/elsewhere/nwd.sock\"\nruntime_dir = \"/run/chv/nwd\"\nlog_level = \"info\"\n"
+                        .to_string(),
+                ),
+            },
+        ];
+
+        for leg in legs {
+            let dir = fake_daemon_dir();
+            let root = dir._dir.path().to_path_buf();
+            let nwd_socket = root.join("nwd-api.sock");
+            let argv_marker = root.join("nwd-argv.txt");
+            fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+            fake_daemon_script(
+                &dir.nwd_bin,
+                &format!("echo \"$1\" > \"{}\"\nsleep 10", argv_marker.display()),
+            )
+            .await;
+            let operator_config = root.join("operator-nwd.toml");
+            if let Some(contents) = &leg.config {
+                std::fs::write(&operator_config, contents).unwrap();
+            } // the "missing file" leg never writes it
+
+            let logs = warn_capture::WarnCollector::default();
+            let _subscriber = tracing::subscriber::set_default(logs.clone());
+            let mut supervisor = DaemonSupervisor::new(
+                dir.stord_bin.clone(),
+                dir.nwd_bin.clone(),
+                PathBuf::from("dummy"),
+                nwd_socket.clone(),
+                dir.runtime_dir.clone(),
+                vec![],
+                None,
+                Some(operator_config.clone()),
+            );
+            supervisor.start_nwd().await.unwrap();
+
+            // The loud warn fired with the specific reason.
+            let fallback_warns = logs
+                .warnings()
+                .iter()
+                .filter(|w| w.message().contains("nwd_config_path unusable"))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fallback_warns.len(),
+                1,
+                "leg {:?}: exactly one fallback warn expected",
+                leg.name
+            );
+            let reason = fallback_warns[0].field("reason").unwrap_or("");
+            assert!(
+                reason.contains(leg.reason_needle),
+                "leg {:?}: warn reason {reason:?} must contain {:?}",
+                leg.name,
+                leg.reason_needle
+            );
+
+            // Today's generated-config behavior: the daemon was exec'd
+            // with the supervisor-generated config carrying the expected
+            // socket, and the file has the historical shape.
+            let recorded = wait_for_recorded_argv(&argv_marker).await;
+            let generated = dir.runtime_dir.join("chv-nwd.toml");
+            assert_eq!(
+                recorded,
+                generated.to_string_lossy().to_string(),
+                "leg {:?}: fallback must exec the generated config",
+                leg.name
+            );
+            let config = std::fs::read_to_string(&generated).unwrap();
+            assert!(
+                config.contains(&format!(
+                    "socket_path = {}",
+                    toml_quote(&nwd_socket.to_string_lossy())
+                )),
+                "leg {:?}: generated fallback config must carry the expected socket",
+                leg.name
+            );
+            assert!(
+                config.contains("log_level = \"info\""),
+                "leg {:?}: generated fallback config keeps the historical shape",
+                leg.name
+            );
+            supervisor.shutdown().await;
+        }
+    }
+
+    // #504 residual, pinned (nwd twin of the #385 stord pin): a
+    // pass-through config that VALIDATES (parses, socket matches) but
+    // fails at daemon startup — e.g. an unwritable runtime_dir, or a
+    // [fabric] block whose provider constructor fails on bad material
+    // — crash-loops on the OPERATOR path, never on the generated
+    // fallback: the supervisor re-validates the file (still passes)
+    // and re-execs it under the restart throttle, while the health
+    // check keeps observing the exit (never wedged). Same posture as
+    // systemd Restart=on-failure restarting the same broken file; the
+    // remedy is fixing the operator config, not waiting for a fallback
+    // that never comes.
+    #[tokio::test]
+    async fn supervisor_nwd_passthrough_startup_failure_retries_operator_config_under_throttle() {
+        let dir = fake_daemon_dir();
+        let root = dir._dir.path().to_path_buf();
+        let nwd_socket = root.join("nwd-api.sock");
+        let argv_marker = root.join("nwd-argv.txt");
+        fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+        // A fake nwd modeling "validates but unstartable": it appends
+        // its argv[1] to the marker (so each retry attempt is
+        // countable) and exits immediately — a daemon aborting in its
+        // constructor before binding the socket.
+        fake_daemon_script(
+            &dir.nwd_bin,
+            &format!("echo \"$1\" >> \"{}\"\nexit 1", argv_marker.display()),
+        )
+        .await;
+        let operator_config = operator_nwd_fixture(&root, &nwd_socket);
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+
+        let mut supervisor = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            nwd_socket,
+            dir.runtime_dir.clone(),
+            vec![],
+            None,
+            Some(operator_config.clone()),
+        );
+        supervisor.start_stord().await.unwrap();
+        supervisor.start_nwd().await.unwrap();
+
+        // First attempt: validation passed, so the operator path.
+        let operator_path = operator_config.to_string_lossy().to_string();
+        assert_eq!(
+            wait_for_argv_attempts(&argv_marker, 1).await,
+            vec![operator_path.clone()],
+            "the first spawn must exec the operator config"
+        );
+
+        // The supervisor is NOT wedged: try_wait keeps observing the
+        // exit — the health check reports nwd dead while stord stays
+        // alive, so restart_if_needed keeps making progress.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (stord_ok, nwd_ok) = supervisor.health_check().await;
+            if stord_ok && !nwd_ok {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "health check must keep observing the crashed pass-through nwd within 10s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Within the throttle window the retry is suppressed — no new
+        // argv attempt (same discipline as
+        // supervisor_restart_throttle_prevents_spam).
+        supervisor.nwd_last_restart = Some(Instant::now());
+        supervisor.restart_if_needed().await.unwrap();
+        assert_eq!(
+            argv_attempt_count(&argv_marker),
+            1,
+            "a restart attempt inside the throttle window must not re-exec nwd"
+        );
+
+        // Once the throttle window elapses (reset, as the existing
+        // restart tests do), the retry goes to the OPERATOR path again
+        // — never to a generated config.
+        supervisor.nwd_last_restart = None;
+        supervisor.restart_if_needed().await.unwrap();
+        assert_eq!(
+            wait_for_argv_attempts(&argv_marker, 2).await,
+            vec![operator_path.clone(), operator_path.clone()],
+            "every retry must exec the operator config (no generated fallback)"
+        );
+
+        // No generated nwd config was ever written...
+        let generated = dir.runtime_dir.join("chv-nwd.toml");
+        assert!(
+            !generated.exists(),
+            "a startup-failure crash-loop must never write a generated nwd config"
+        );
+        // ...and the health check still functions across the retries.
+        let (stord_ok, nwd_ok) = supervisor.health_check().await;
+        assert!(!nwd_ok, "the crashed pass-through nwd must stay unhealthy");
+        assert!(stord_ok, "stord must be unaffected by the nwd crash-loop");
+        // No fallback warn fired: the config validates on every retry —
+        // the fallback is validation-scoped, and a startup failure
+        // must not be misreported as a validation failure.
+        assert!(
+            logs.warnings()
+                .iter()
+                .all(|w| !w.message().contains("nwd_config_path unusable")),
             "a validating config must never trigger the fallback warn, even when the daemon crash-loops"
         );
         supervisor.shutdown().await;

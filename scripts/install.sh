@@ -1024,6 +1024,13 @@ stord_path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/st
 # runtime_dir, backend_type, device_allowlist and [migration] survive
 # the respawn. The agent user reads it via the chv-stord group.
 stord_config_path = "${CHV_CONFIG_DIR}/stord.toml"
+
+# #504: nwd respawn config fidelity — same pass-through for nwd: a
+# respawned chv-nwd runs with the operator's nwd.toml below (validated:
+# same socket) instead of a lossy generated config, so the [overlay],
+# [ebpf] and [fabric] blocks survive the respawn. The agent user can
+# read that file (it is installed root:chv 0640 below).
+nwd_config_path = "${CHV_CONFIG_DIR}/nwd.toml"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"

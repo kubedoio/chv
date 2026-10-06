@@ -53,3 +53,15 @@ stord_path_allowlist = ["/var/lib/chv/storage", "/var/lib/chv/agent"]
 # user must be able to read the file (both standard install surfaces
 # grant this via the chv-stord group: install.sh and the .deb postinst).
 stord_config_path = "/etc/chv/stord.toml"
+
+# nwd respawn config fidelity (#504). Same pass-through for the network
+# daemon: point this at the operator's nwd.toml and a supervisor
+# respawn execs chv-nwd with THAT file (validated: its socket_path must
+# match nwd_socket above) instead of generating a minimal config — the
+# [overlay], [ebpf] and [fabric] blocks (and any future key) then
+# survive the respawn. Omitted (default) keeps the historical
+# generated-config respawn; an unreadable/malformed file or a socket
+# mismatch falls back to it with a loud warning. The agent user must be
+# able to read the file (the standard install ships nwd.toml as
+# root:chv 0640).
+nwd_config_path = "/etc/chv/nwd.toml"
