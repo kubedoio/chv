@@ -1,9 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use chvctl::client;
-use chvctl::commands::{
-    auth, backup, health, image, migrate, network, node, storage, task, user, vm, volume,
-};
+use chvctl::commands::{auth, health, image, migrate, network, node, task, user, vm, volume};
 use chvctl::config;
 use chvctl::output::OutputFormat;
 
@@ -64,20 +62,10 @@ enum Commands {
         #[command(subcommand)]
         command: task::TaskCommands,
     },
-    /// Manage backups
-    Backup {
-        #[command(subcommand)]
-        command: backup::BackupCommands,
-    },
     /// Manage users (admin only)
     User {
         #[command(subcommand)]
         command: user::UserCommands,
-    },
-    /// Manage storage pools
-    Storage {
-        #[command(subcommand)]
-        command: storage::StorageCommands,
     },
     /// Manage live migrations
     Migrate {
@@ -116,9 +104,7 @@ async fn main() {
         Commands::Volume { command } => volume::execute(&client, command, &cli.output).await,
         Commands::Network { command } => network::execute(&client, command, &cli.output).await,
         Commands::Task { command } => task::execute(&client, command, &cli.output).await,
-        Commands::Backup { command } => backup::execute(&client, command, &cli.output).await,
         Commands::User { command } => user::execute(&client, command, &cli.output).await,
-        Commands::Storage { command } => storage::execute(&client, command, &cli.output).await,
         Commands::Migrate { command } => migrate::execute(&client, command, &cli.output).await,
         Commands::Health { command } => health::execute(&client, command, &cli.output).await,
         Commands::Version => {

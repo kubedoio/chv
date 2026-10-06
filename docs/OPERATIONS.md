@@ -132,18 +132,25 @@ journalctl -u chv-nwd -f
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
 | `chvctl login` | — | Authenticate and store token |
-| `chvctl vm` | `list`, `show`, `create`, `start`, `stop`, `reboot`, `delete`, `resize` | VM lifecycle management |
-| `chvctl node` | `list`, `show`, `drain`, `maintenance` | Node operations |
-| `chvctl image` | `list`, `show`, `import`, `delete` | Disk image management |
-| `chvctl volume` | `list`, `show`, `create`, `delete` | Storage volumes |
-| `chvctl network` | `list`, `show`, `create`, `delete` | Network management |
-| `chvctl storage` | `list-pools`, `show-pool` | Storage pools |
-| `chvctl task` | `list`, `show` | Task/operation inspection |
-| `chvctl backup` | `list`, `run` | Backup jobs (`show`, `create`, `restore` planned) |
+| `chvctl vm` | `list`, `get`, `create`, `start`, `stop`, `reboot`, `delete`, `migrate`, `resize` | VM lifecycle management |
+| `chvctl node` | `list`, `get`, `drain`, `maintenance` | Node operations |
+| `chvctl image` | `list`, `import`, `delete` | Disk image management |
+| `chvctl volume` | `list`, `snapshot`, `clone` | Storage volumes |
+| `chvctl network` | `list`, `create`, `delete` | Network management |
+| `chvctl task` | `list`, `watch` | Task/operation inspection |
 | `chvctl user` | `list`, `create`, `delete` | User management (admin) |
-| `chvctl migrate` | `start`, `status`, `cancel` | Live migration control |
-| `chvctl health` | `cluster` | Cluster health summary |
+| `chvctl migrate` | `start`, `status`, `cancel`, `list` | Live migration control (currently 404 — repoint pending #372) |
+| `chvctl health` | `check`, `report`, `cluster` | Cluster health |
 | `chvctl version` | — | Show version and build info |
+
+> **Removed groups:** the `chvctl storage` and `chvctl backup` command
+> groups were removed (#372) — every subcommand 404'd against routes
+> that never existed (the `storage_pools` catalog question is tracked in
+> #514; backup execution is a guaranteed-fail no-op, "Backup is not DR").
+> Invoking them now fails at argument parsing with "unrecognized
+> subcommand". The BFF's `/v1/storage-pools` and `/v1/backups/*` routes,
+> the UI's storage/backup pages, and the backup worker are unchanged —
+> the removal is CLI-surface only.
 
 ### Examples
 
@@ -152,7 +159,7 @@ journalctl -u chv-nwd -f
 chvctl vm list
 
 # Show node details
-chvctl node show <NODE_ID>
+chvctl node get <NODE_ID>
 
 # Drain a node for maintenance
 chvctl node drain <NODE_ID>
@@ -160,8 +167,11 @@ chvctl node drain <NODE_ID>
 # Check cluster health
 chvctl health cluster
 
+# Watch a task until it completes
+chvctl task watch <TASK_ID>
+
 # Resize a VM
-chvctl vm resize <VM_ID> --cpu 4 --memory-mb 8192
+chvctl vm resize <VM_ID> --cpu 4 --memory 8G
 ```
 
 ---

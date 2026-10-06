@@ -16,19 +16,17 @@
 
 ## 1. Identify the Backup Job
 
-### Via chvctl
-
-```bash
-chvctl backup list
-```
-
-> **Warning:** `chvctl backup list` queries `/v1/backups` and returns summary fields (`backup_id`, `vm_id`, `label`, `size`, `status`, `created_at`). It does **not** include `job_id`, `destination`, `storage_backend`, `checksum`, or `size_bytes`. To obtain those fields needed for artifact restore, use the API shown below.
-
 ### Via API
 
+> **Note:** the `chvctl backup` command group was removed (#372) — its
+> subcommands 404'd against routes that never existed, and backup
+> execution itself is a guaranteed-fail no-op ("Backup is not DR"). Use
+> the API (or the UI's backup pages, which call the same routes):
+
 ```bash
-curl -s "https://controlplane.example.com/v1/backups/jobs?vm_id=<VM_ID>" \
-  -H "Authorization: Bearer $TOKEN" | jq '.jobs[] | {job_id, status, destination, storage_backend, checksum, size_bytes, completed_at}'
+# Note: job listing is not vm-filtered server-side — filter client-side:
+curl -s "https://controlplane.example.com/v1/backups/jobs" \
+  -H "Authorization: Bearer $TOKEN" | jq '.items[] | select(.vm_id == "<VM_ID>") | {job_id, vm_id, status, target_path, storage_backend, checksum, size_bytes, completed_at}'
 ```
 
 ### Via SQLite (direct DB access)
@@ -43,7 +41,7 @@ sudo sqlite3 "file:/var/lib/chv/controlplane.db?mode=ro" \
 
 Note:
 - `job_id` — the artifact filename will be `{job_id}.backup`
-- `destination` — the remote path (S3 key prefix or NFS mount path)
+- `destination` — the remote path (S3 key prefix or NFS mount path); named `target_path` in the API responses
 - `storage_backend` — `s3`, `nfs`, or `null`
 - `checksum` — SHA256 of the artifact (verify after download)
 
