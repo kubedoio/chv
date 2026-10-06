@@ -1559,6 +1559,16 @@ mod fabric_dispatch {
             Err(tonic::Status::unimplemented(""))
         }
 
+        // #513 PR 1: the dispatch carrier is dead-but-live — no
+        // integration test journals a CreateVolume operation yet (the
+        // BFF route is PR 2).
+        async fn create_volume(
+            &self,
+            _request: tonic::Request<proto::CreateVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
         async fn start_vm(
             &self,
             _request: tonic::Request<proto::StartVmRequest>,

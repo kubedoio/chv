@@ -352,6 +352,25 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Ok(Response::new(resp))
     }
 
+    /// #513 (DP1, adopted): the standalone volume create journals
+    /// BFF-direct (mirroring `POST /v1/vms`), NOT through a CP
+    /// lifecycle RPC — the adopted design rejected the second
+    /// journaling pipeline behind this surface (the lifecycle create
+    /// RPCs have no production caller, per #516's finding). The node
+    /// RPC of the same name (the #513 PR 1 dispatch carrier the
+    /// orchestrator dispatches to agents) is a different surface; this
+    /// CP-side shim stays closed until/unless lifecycle journaling is
+    /// ever adopted for the create.
+    async fn create_volume(
+        &self,
+        _request: Request<proto::CreateVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        Err(Status::unimplemented(
+            "create_volume is not served by the control plane lifecycle; the standalone volume \
+             create journals via the BFF (#513)",
+        ))
+    }
+
     async fn start_vm(
         &self,
         request: Request<proto::StartVmRequest>,

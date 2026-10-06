@@ -199,6 +199,23 @@ message CreateVmRequest {
   VmMutationSpec vm = 3;
 }
 
+// #513 (DP2, PR 1 of the decomposition): the standalone volume-create
+// dispatch carrier. Mirrors CreateVmRequest's shape (meta + node_id + a
+// mutation spec whose JSON carries the provisioning intent): the volume's
+// `volume_spec_json` is `{"size_bytes": N, "backend_class": C?}` — the
+// size is REQUIRED (unlike the attach path's option-less open, the
+// local/LVM create-on-open only provisions on a sized open), and the
+// class key is the documented #511 wire-key seam (the CP-side store name
+// is `storage_class`). The `vm_id` field of the embedded
+// VolumeMutationSpec is unused on this surface (standalone volumes have
+// no VM; DP4 defers attach-at-create). Dead-but-live with this PR: no
+// producer dispatches it until the BFF route lands (PR 2).
+message CreateVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  VolumeMutationSpec volume = 3;
+}
+
 message StartVmRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -478,6 +495,11 @@ service ReconcileService {
 
 service LifecycleService {
   rpc CreateVm(CreateVmRequest) returns (AckResponse);
+  // #513 (DP2, PR 1): standalone volume-create provisioning dispatch.
+  // The handler opens the volume WITH the requested capacity
+  // (create-on-open), not the attach path's option-less open, and fails
+  // closed in core-managed mode like its sibling legacy volume RPCs.
+  rpc CreateVolume(CreateVolumeRequest) returns (AckResponse);
   rpc StartVm(StartVmRequest) returns (AckResponse);
   rpc StopVm(StopVmRequest) returns (AckResponse);
   rpc RebootVm(RebootVmRequest) returns (AckResponse);

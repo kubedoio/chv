@@ -693,6 +693,63 @@ impl NodeClient {
         result
     }
 
+    /// #513 PR 1 (DP2): dispatch the standalone volume-create carrier.
+    /// Dead-but-live with this PR — the only future caller is the
+    /// orchestrator's `"CreateVolume"` arm, and no producer journals
+    /// that operation type until the BFF route lands (PR 2). The
+    /// `volume_spec_json` is built by [`volume_create_spec_json`]: the
+    /// requested capacity (REQUIRED — the agent's open provisions the
+    /// backing store; the attach path's option-less open cannot) plus
+    /// the class through the documented #511 `backend_class` wire-key
+    /// seam (NULL = local = no key materialized).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        size_bytes: u64,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+        backend_class: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::CreateVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume: Some(proto::VolumeMutationSpec {
+                volume_id: volume_id.to_string(),
+                // Standalone volumes have no VM (DP4 defers
+                // attach-at-create); the field is part of the shared
+                // mutation-spec shape, unused here.
+                vm_id: String::new(),
+                volume_spec_json: volume_create_spec_json(size_bytes, backend_class),
+            }),
+        };
+        let method = "create_volume";
+        let span = tracing::info_span!("create_volume", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .create_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
     /// Relays the operator's terminal resolution of a restart-interrupted
     /// (`InspectRequired`) operation to the owning agent's core journal.
     /// Pure relay: the agent validates disposition/note and owns the
@@ -1441,9 +1498,73 @@ pub(crate) fn volume_attach_spec_json(storage_class: Option<&str>) -> Vec<u8> {
     }
 }
 
+/// Build the `CreateVolume` RPC's `volume_spec_json` payload (#513 PR 1,
+/// DP2/DP3 — the dispatch-carrier producer; the agent half of the pin is
+/// `create_volume_parses_the_cp_spec_json_shape` in chv-agent-core).
+///
+/// The agent's create handler parses `size_bytes` and `backend_class`
+/// out of this JSON. The two keys are the whole contract:
+///
+/// - **`size_bytes` is always present** — the load-bearing #513
+///   finding: the local backend's create-on-open only provisions on a
+///   sized open, and an LVM open of an absent LV without a size is
+///   rejected, so a create that dispatches without a size mints a
+///   volume the attach path can never materialize (journal-only is not
+///   viable; design §2.4).
+/// - **NULL class → no `backend_class` key** — the same never-materialize-
+///   `"local"` discipline as [`volume_attach_spec_json`] (the #511
+///   wire-key seam: the CP-side store name is `storage_class`, the
+///   agent-bound key is `backend_class`); the agent's absent-field
+///   default resolves local.
+pub(crate) fn volume_create_spec_json(size_bytes: u64, storage_class: Option<&str>) -> Vec<u8> {
+    match storage_class {
+        Some(class) => serde_json::to_vec(
+            &(serde_json::json!({ "backend_class": class, "size_bytes": size_bytes })),
+        )
+        .unwrap_or_default(),
+        None => {
+            serde_json::to_vec(&serde_json::json!({ "size_bytes": size_bytes })).unwrap_or_default()
+        }
+    }
+}
+
 fn now_iso() -> String {
     // RFC 3339-ish format using current unix millis as a simple timestamp string.
     // Sufficient for fragment updated_at; agent does not parse this field.
     let ms = now_unix_ms();
     format!("{ms}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{volume_attach_spec_json, volume_create_spec_json};
+
+    /// #513 PR 1 (DP2/DP3, the dispatch-carrier producer): the create
+    /// spec_json is `{"size_bytes": N}` — and ONLY that key — for a
+    /// NULL-class volume (the never-materialize-`"local"` discipline
+    /// the attach producer set in #379 PR 3), and adds exactly the
+    /// `backend_class` key for a class-carrying one (the #511 wire-key
+    /// seam). The size key is unconditional: the agent's open cannot
+    /// provision without it (design §2.4, the load-bearing finding).
+    /// The agent half of the contract pair is
+    /// `create_volume_parses_the_cp_spec_json_shape` (chv-agent-core).
+    #[test]
+    fn volume_create_spec_json_carries_size_and_only_the_class_key() {
+        assert_eq!(
+            volume_create_spec_json(1073741824, None),
+            br#"{"size_bytes":1073741824}"#.to_vec(),
+            "a NULL-class create carries exactly the size key — no backend_class, no materialized \"local\""
+        );
+        assert_eq!(
+            volume_create_spec_json(1073741824, Some("lvm")),
+            br#"{"backend_class":"lvm","size_bytes":1073741824}"#.to_vec(),
+            "a class-carrying create adds exactly the backend_class key"
+        );
+        // The attach producer is unchanged beside the new one.
+        assert_eq!(volume_attach_spec_json(None), b"{}".to_vec());
+        assert_eq!(
+            volume_attach_spec_json(Some("lvm")),
+            br#"{"backend_class":"lvm"}"#.to_vec()
+        );
+    }
 }
