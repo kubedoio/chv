@@ -69,6 +69,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		{ key: 'name', label: 'Volume Identity' },
 		{ key: 'attached_vm_name', label: 'Attachment' },
 		{ key: 'node_id', label: 'Placement' },
+		{ key: 'status', label: 'State' },
 		{ key: 'health', label: 'IO Health' },
 		{ key: 'size', label: 'Durable Size', align: 'right' as const },
 		{ key: 'last_task', label: 'Last Seq', align: 'right' as const }
@@ -84,8 +85,25 @@ import Button from '$lib/components/primitives/Button.svelte';
 		}
 	}
 
+	// #522 DP12: the list's State column — the tombstone render. The
+	// BFF already serves `status` via the read COALESCE (desired_status
+	// first, #535), but the list table never displayed it, so a
+	// 'Deleting' volume was invisible on this surface. Vocabulary and
+	// tones mirror the detail page's normalizeTone (with 'pending' for
+	// fresh creates); 'deleting' rides the failed tone, the VM detail
+	// page's vocabulary.
+	function mapStatusTone(status: string): any {
+		const s = status.toLowerCase();
+		if (['attached', 'healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
+		if (['pending', 'warning', 'maintenance', 'attaching', 'detaching', 'resizing', 'available'].includes(s)) return 'warning';
+		if (['degraded', 'offline'].includes(s)) return 'degraded';
+		if (['failed', 'error', 'critical', 'deleting'].includes(s)) return 'failed';
+		return 'unknown';
+	}
+
 	const tableRows = $derived(items.map(item => ({
 		...item,
+		status: { label: item.status, tone: mapStatusTone(item.status) },
 		health: { label: item.health, tone: mapHealthTone(item.health) }
 	})));
 
