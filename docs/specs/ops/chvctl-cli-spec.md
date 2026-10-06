@@ -67,6 +67,18 @@ the platform today and the flag was silently ignored when it existed
 - `chvctl user create <username> --password <password> [--role <admin|operator|viewer>]` — Create a user
 - `chvctl user delete <user_id>` — Delete a user (takes the user id from `user list`, not the username)
 
+### Migrations
+- `chvctl migrate start <vm_id> <target_node>` — Start a live migration. Delegates to the vm-mutate migrate path (`POST /v1/vms/mutate`) — the same route `chvctl vm migrate` drives; the two commands are equivalent entry points. Operator role; the response carries the `task_id` to feed `chvctl task watch`
+- `chvctl migrate status <migration_id>` — Show a migration's phase and progress counters (`GET /v1/migrations/{id}`, viewer tier; unknown ids are a 404)
+- `chvctl migrate cancel <migration_id>` — Request a cooperative cancel of an in-flight migration (`POST /admin/migrations/{id}/cancel` on the control-plane admin surface). **Admin role required** — an operator-role token gets a 403, and the server must be a CP admin endpoint, not a plain BFF bind. The cancel is best-effort: the migration loop observes the flag at a safe point and rolls back; the response's `outcome` distinguishes `requested` from the `already_requested`/`already_terminal` no-ops
+- `chvctl migrate list` — List migrations (`GET /v1/migrations`, viewer tier)
+
+Migration ids come from the control plane's migration machinery
+(`migrate list` / `migrate status`); a migration started via
+`migrate start` or `vm migrate` is tracked as an operation (`task
+list`) and as a row on these read routes once the migration loop
+records it.
+
 ### Health
 - `chvctl health check` — Quick control-plane health check
 - `chvctl health report <node_id>` — Per-node health report
@@ -97,15 +109,27 @@ Invoking either group now fails at argument parsing with
 404 from a route that never existed). Scripts carrying the muscle memory
 must stop calling them; there was never a working invocation to lose.
 
-## Known-broken command group (pending PR 4)
+## Repointed command group (PR 4 of #372)
 
-The `migrate` group still targets BFF routes that do not exist — every
-invocation 404s (#372 §2.3). It is scheduled for repointing in PR 4 of
-the #372 decomposition (`migrate start`/`cancel` repointed, optional
-viewer-tier read routes); do not script against it:
+The `migrate` group was repointed in PR 4 of the #372 decomposition
+(design §2.3/DP4 + DP4b, adopted 2026-10-06) — every subcommand
+previously 404'd against BFF routes that were never registered:
 
-- `chvctl migrate start|status|cancel|list` (use `chvctl vm migrate` to
-  start a migration)
+- `migrate start` now drives the vm-mutate migrate path
+  (`POST /v1/vms/mutate`, wire field `target_node_id`) — the route
+  `chvctl vm migrate` always used; the old `POST /v1/migrations` target
+  never existed.
+- `migrate cancel` now calls the control plane's admin-tier
+  `POST /admin/migrations/{id}/cancel` — admin role required, disclosed
+  above.
+- `migrate status`/`list` read the new viewer-tier
+  `GET /v1/migrations[/{id}]` routes added by the same PR (plain
+  SELECTs over the real `migrations` table; previously no migration
+  read surface existed at the BFF tier).
+
+The subcommand names, arguments, and output conventions are unchanged —
+only the routes behind them. There was never a working invocation to
+lose (every subcommand 404'd from introduction).
 
 ## Global Flags
 

@@ -84,11 +84,23 @@ pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceM
 
     let admin_routes = Router::new()
         .route("/admin/nodes", get(nodes::list_nodes))
-        .route("/admin/nodes/{id}", get(nodes::get_node))
+        // `:id`, not `{id}`: axum 0.7's matchit (0.7.3) has no brace
+        // path-param syntax — a `{id}` spelling registers a LITERAL
+        // segment, so the route can never match any request and every
+        // real id falls through to the CP's NOT_IMPLEMENTED fallback
+        // (a 404 indistinguishable from a missing id). Found while
+        // repointing `chvctl migrate cancel` (#372 DP4, review round);
+        // the sibling `/admin/nodes/{id}` and `/admin/operations/{id}`
+        // carried the identical latent bug and are fixed the same way.
+        // Path contracts, admin tier, and handlers are unchanged —
+        // this only makes the routes resolvable.
+        .route("/admin/nodes/:id", get(nodes::get_node))
         .route("/admin/operations", get(operations::list_operations))
-        .route("/admin/operations/{id}", get(operations::get_operation))
+        .route("/admin/operations/:id", get(operations::get_operation))
         .route(
-            "/admin/migrations/{id}/cancel",
+            // Same `{id}` → `:id` fix as the siblings above (see the
+            // comment there); verified by the #372 PR 4 contract row.
+            "/admin/migrations/:id/cancel",
             post(migrations::cancel_migration),
         )
         .route("/metrics", get(health::metrics_handler))

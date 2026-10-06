@@ -115,6 +115,18 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/tasks/stream",
             axum::routing::get(crate::handlers::tasks::stream_tasks),
         )
+        // Migration read surface (chvctl migrate status/list) — plain
+        // SELECTs over the migrations table (#372 DP4b); the start and
+        // cancel entry points stay on their existing routes (the
+        // vm-mutate migrate action and the CP admin router).
+        .route(
+            "/v1/migrations",
+            get(crate::handlers::migrations::list_migrations),
+        )
+        .route(
+            "/v1/migrations/:migration_id",
+            get(crate::handlers::migrations::get_migration),
+        )
         .route(
             "/v1/clusters",
             post(crate::handlers::clusters::list_clusters),

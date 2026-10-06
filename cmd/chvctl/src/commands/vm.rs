@@ -340,6 +340,17 @@ mod tests {
         assert!(validate_storage_class("localdisk").is_err());
         assert!(validate_storage_class("local-file").is_err());
         assert!(validate_storage_class("").is_err());
+        // Whitespace: the validator itself is EXACT-match — the Create
+        // arm trims the flag value before it reaches here and before it
+        // goes on the wire (parity with the BFF, which also trims
+        // before its vocabulary check), which is what makes that trim
+        // load-bearing. The trim's end-to-end pin is the
+        // vm_create_storage_class_row contract row, which passes
+        // "local " (trailing space) and asserts the journaled boot
+        // volume carries "local" — dropping the arm's trim flips that
+        // row red (this exact-match rejection fires client-side).
+        assert!(validate_storage_class(" lvm").is_err());
+        assert!(validate_storage_class("local ").is_err());
     }
 
     #[test]
