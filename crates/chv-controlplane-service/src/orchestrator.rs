@@ -194,7 +194,8 @@ impl Orchestrator {
                     (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
                 ) AS node_id,
-                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
+                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
+                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
             "#,
         )
         .fetch_all(&self.pool)
@@ -228,7 +229,8 @@ impl Orchestrator {
                     (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
                 ) AS node_id,
-                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
+                (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
+                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
             "#,
         )
         .fetch_all(&self.pool)
@@ -987,6 +989,44 @@ impl Orchestrator {
                     )
                     .await
             }
+            // #513 PR 1 (DP2): the standalone volume-create dispatch
+            // arm. MUST land before the BFF route (PR 2) — an unknown
+            // operation_type is actively Failed below, so a journaled
+            // CreateVolume with no arm would ship the
+            // accepted-then-failed UX #378 was filed to kill. The
+            // capacity and class resolve in the claim query (the
+            // AttachVolume arm's single-round-trip discipline); the
+            // agent's handler opens WITH the size (create-on-open), so
+            // a missing/non-positive capacity is refused here rather
+            // than dispatching an open that can never provision.
+            "CreateVolume" => {
+                let capacity = row.volume_capacity_bytes.unwrap_or(0);
+                if capacity <= 0 {
+                    return Err(ChvError::InvalidArgument {
+                        field: "capacity_bytes".to_string(),
+                        reason: format!(
+                            "CreateVolume dispatch for {} requires a positive capacity_bytes \
+                             on the volume row (resolved: {capacity})",
+                            row.resource_id
+                        ),
+                    });
+                }
+                client
+                    .create_volume(
+                        node_id,
+                        &row.resource_id,
+                        capacity as u64,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                        // The volume's class rides the dispatch through
+                        // the #511 wire-key seam; NULL emits a
+                        // key-free size-only payload (local default at
+                        // the agent).
+                        row.volume_storage_class.as_deref(),
+                    )
+                    .await
+            }
             "StartNetwork" => {
                 client
                     .start_network(
@@ -1409,7 +1449,11 @@ impl Orchestrator {
     fn requires_schedulable_node(operation_type: &str) -> bool {
         matches!(
             operation_type,
-            "create" | "CreateVm" | "MigrateVm" | "ResizeVm"
+            // #513 PR 1: a standalone volume create places new storage
+            // on the node — the same placement discipline as a VM
+            // create (the design's DP3 rationale: silent storage
+            // placement is worse than silent VM placement).
+            "create" | "CreateVm" | "CreateVolume" | "MigrateVm" | "ResizeVm"
         )
     }
 
@@ -1834,6 +1878,12 @@ struct AcceptedOperationRow {
     /// class-less volumes) so the AttachVolume dispatch can carry it in
     /// `volume_spec_json` without a follow-up query.
     volume_storage_class: Option<String>,
+    /// #513 PR 1 (DP2): the volume's capacity, resolved in the same
+    /// claim statement for Volume-kind rows (NULL when the resource is
+    /// not a volume row) so the CreateVolume dispatch can carry the
+    /// provisioning size in `volume_spec_json` without a follow-up
+    /// query — the same single-round-trip discipline as the class.
+    volume_capacity_bytes: Option<i64>,
 }
 
 /// #368 P2 selection: one VM whose desired state still demands it, whose
@@ -1988,7 +2038,8 @@ mod tests {
                 (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
                 (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
             ) AS node_id,
-            (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class
+            (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
+            (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
     "#;
 
     async fn seed_node(pool: &StorePool, node_id: &str) {
@@ -1999,6 +2050,20 @@ mod tests {
             .execute(pool)
             .await
             .expect("insert node");
+    }
+
+    /// #513 PR 1: the CreateVolume dispatch arm joins the placement
+    /// discipline (`requires_schedulable_node`), so its tests seed the
+    /// TenantReady observed state the VM-create paths' nodes carry.
+    async fn seed_node_tenant_ready(pool: &StorePool, node_id: &str) {
+        sqlx::query(
+            "INSERT INTO node_observed_state (node_id, observed_generation, observed_state) \
+             VALUES (?, 1, 'TenantReady')",
+        )
+        .bind(node_id)
+        .execute(pool)
+        .await
+        .expect("insert node observed state");
     }
 
     async fn seed_vm(pool: &StorePool, vm_id: &str, target_node_id: &str) {
@@ -2570,6 +2635,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-att", agent.clone());
 
@@ -2609,6 +2676,287 @@ mod tests {
                     .expect("op status");
             assert_eq!(status, "Succeeded", "{op_id} must converge");
         }
+    }
+
+    /// #513 PR 1 (DP2): the `CreateVolume` dispatch arm resolves the
+    /// volume's capacity AND class in the claim query and dispatches
+    /// the carrier RPC with a provisioning payload —
+    /// `{"backend_class":"lvm","size_bytes":N}` for a class-carrying
+    /// volume, `{"size_bytes":N}` for a NULL-class one (the
+    /// never-materialize-`"local"` discipline; the #511 wire-key seam).
+    /// Dead-but-live: no producer journals a `CreateVolume` operation
+    /// until the BFF route lands (PR 2) — the rows here are seeded
+    /// directly, exactly as the attach arm's test does.
+    #[tokio::test]
+    async fn create_volume_dispatch_carries_size_and_class() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-cr").await;
+        // The create arm places new storage: the node must be schedulable
+        // (the VM-create placement discipline).
+        seed_node_tenant_ready(&pool, "node-cr").await;
+
+        // A class-carrying volume and a NULL-class one, with distinct
+        // capacities the dispatch must carry verbatim.
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, storage_class) \
+             VALUES ('vol-cr-lvm', 'node-cr', 'Vol vol-cr-lvm', 1073741824, 'lvm'), \
+                    ('vol-cr-bare', 'node-cr', 'Vol vol-cr-bare', 536870912, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed volumes");
+        for (op_id, volume_id) in [("op-cr-cls", "vol-cr-lvm"), ("op-cr-bare", "vol-cr-bare")] {
+            sqlx::query(
+                "INSERT INTO operations \
+                 (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+                  desired_generation, requested_at, updated_at) \
+                 VALUES (?, ?, 'Volume', ?, 'CreateVolume', 'Accepted', 1, \
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(op_id)
+            .bind(format!("idem-{op_id}"))
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed create-volume op");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-cr", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let calls = agent.create_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "both create ops dispatched: {calls:?}");
+        let call_for = |volume_id: &str| {
+            calls
+                .iter()
+                .find(|c| c.volume.as_ref().map(|v| v.volume_id.as_str()) == Some(volume_id))
+                .unwrap_or_else(|| panic!("no create dispatch for {volume_id}: {calls:?}"))
+        };
+        assert_eq!(
+            call_for("vol-cr-lvm")
+                .volume
+                .as_ref()
+                .unwrap()
+                .volume_spec_json,
+            br#"{"backend_class":"lvm","size_bytes":1073741824}"#.to_vec(),
+            "a class-carrying volume's create must carry exactly the class and size keys"
+        );
+        assert_eq!(
+            call_for("vol-cr-bare")
+                .volume
+                .as_ref()
+                .unwrap()
+                .volume_spec_json,
+            br#"{"size_bytes":536870912}"#.to_vec(),
+            "a NULL-class volume's create must carry the size only — no materialized \"local\""
+        );
+        // The dispatch targets the volume's node and leaves the unused
+        // vm_id empty (DP4: standalone volumes have no VM).
+        for call in &calls {
+            assert_eq!(call.node_id, "node-cr");
+            assert_eq!(call.volume.as_ref().unwrap().vm_id, "");
+        }
+
+        // Both ops converged on the OK ack.
+        for op_id in ["op-cr-cls", "op-cr-bare"] {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                    .bind(op_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("op status");
+            assert_eq!(status, "Succeeded", "{op_id} must converge");
+        }
+    }
+
+    /// #513 PR 1: the arm refuses to dispatch a create whose volume row
+    /// carries no positive capacity (the agent's open cannot provision
+    /// without a size — the load-bearing §2.4 finding). The refusal is
+    /// an ordinary dispatch error (not terminal-class): the operation
+    /// enters the shared retry arm, byte-exactly like every other
+    /// non-Unimplemented dispatch failure, and no RPC reaches the agent.
+    #[tokio::test]
+    async fn create_volume_dispatch_without_capacity_enters_the_retry_arm() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-cr2").await;
+        seed_node_tenant_ready(&pool, "node-cr2").await;
+        // No volumes row for the resource: the claim resolves
+        // capacity NULL (and node via the vm fallback — seed a VM row so
+        // the dispatch gets past node resolution and fails at the arm).
+        seed_vm(&pool, "vol-cr-missing", "node-cr2").await;
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, requested_at, updated_at) \
+             VALUES ('op-cr-nocap', 'idem-op-cr-nocap', 'Volume', 'vol-cr-missing', \
+              'CreateVolume', 'Accepted', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed capacity-less create op");
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-cr2", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let (status, _, error_message, retry_count, next_retry_at, _) =
+            op_row(&pool, "op-cr-nocap").await;
+        assert_eq!(
+            status, "RetryPending",
+            "a capacity-less create is an ordinary retried dispatch error"
+        );
+        assert_eq!(retry_count, 1);
+        assert!(next_retry_at.is_some(), "the backoff schedule is written");
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("positive capacity_bytes"),
+            "the refusal must name the missing input: {error_message:?}"
+        );
+        assert!(
+            agent.create_calls.lock().unwrap().is_empty(),
+            "no RPC may reach the agent for a capacity-less create"
+        );
+    }
+
+    /// #513 DP7 (the CP half of the core-managed posture): an agent
+    /// refusing the create with gRPC `Unimplemented` (the fail-closed
+    /// core-managed gate) takes the operation terminal on the FIRST
+    /// dispatch — `Failed`/`UNSUPPORTED_BY_AGENT` carrying the agent's
+    /// refusal text, zero retries, no `mark_for_retry` resurrection —
+    /// the #378 §7 fast-fail machinery, pinned on the new arm.
+    #[tokio::test]
+    async fn create_volume_dispatch_refusal_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-cr3").await;
+        seed_node_tenant_ready(&pool, "node-cr3").await;
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes) \
+             VALUES ('vol-cr-cm', 'node-cr3', 'Vol vol-cr-cm', 1024)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed volume");
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, requested_at, updated_at) \
+             VALUES ('op-cr-cm', 'idem-op-cr-cm', 'Volume', 'vol-cr-cm', 'CreateVolume', \
+              'Accepted', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed create op");
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::unimplemented(
+                "create_volume is unsupported in core-managed mode",
+            ),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-cr3", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-cr-cm").await;
+        assert_eq!(
+            status, "Failed",
+            "Unimplemented is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("create_volume is unsupported in core-managed mode"),
+            "the agent's refusal text must ride the error message: {error_message:?}"
+        );
+        assert_eq!(retry_count, 0, "no retry may be scheduled");
+        assert_eq!(next_retry_at, None, "mark_for_retry must never run");
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+
+        // Further ticks must not resurrect the terminal row or re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.create_calls.lock().unwrap().len(),
+            1,
+            "exactly one agent dispatch across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-cr-cm").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
     }
 
     // ============================================================
@@ -3291,6 +3639,12 @@ mod tests {
         /// OK ack so the dispatch converges; tests assert the
         /// `volume_spec_json` the CP threaded.
         attach_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::AttachVolumeRequest>>>,
+        /// #513 PR 1: every CreateVolume request, answered with
+        /// `create_status` (OK by default) so tests can pin the
+        /// size/class the CP threaded — and the terminal fast-fail on a
+        /// refusal (the core-managed posture).
+        create_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::CreateVolumeRequest>>>,
+        create_status: tonic::Status,
     }
 
     #[tonic::async_trait]
@@ -3311,6 +3665,31 @@ mod tests {
             _request: tonic::Request<proto::CreateVmRequest>,
         ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
+        }
+
+        async fn create_volume(
+            &self,
+            request: tonic::Request<proto::CreateVolumeRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            let inner = request.into_inner();
+            let op_id = inner
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.create_calls.lock().unwrap().push(inner);
+            if self.create_status.code() != tonic::Code::Ok {
+                return Err(self.create_status.clone());
+            }
+            Ok(tonic::Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: op_id,
+                    status: "ok".to_string(),
+                    node_observed_generation: "1".to_string(),
+                    error_code: "".to_string(),
+                    human_summary: "volume created".to_string(),
+                }),
+            }))
         }
 
         async fn start_vm(
@@ -3696,6 +4075,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3787,6 +4168,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -3870,6 +4253,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ff", agent.clone());
 
@@ -4119,6 +4504,8 @@ mod tests {
                 overlay_status_by_node,
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());
@@ -4219,6 +4606,8 @@ mod tests {
                 overlay_status_by_node,
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
         spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());

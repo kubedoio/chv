@@ -1465,6 +1465,73 @@ async fn test_create_vm_creates_operation() {
 }
 
 #[tokio::test]
+async fn test_lifecycle_create_volume_shim_stays_closed() {
+    // DP1 (#513, adopted): the standalone volume create journals
+    // BFF-direct — the CP lifecycle shim must answer unimplemented
+    // (naming that decision) and journal NOTHING. Pins the shim so a
+    // future refactor cannot silently open a second journaling
+    // pipeline behind this surface.
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let service = LifecycleServiceImplementation::new(
+        node_repo,
+        operation_repo,
+        event_repo,
+        desired_state_repo,
+    );
+
+    let server = crate::server::LifecycleServer::new(Arc::new(service));
+    use proto::lifecycle_service_server::LifecycleService as _;
+    let result = server
+        .create_volume(tonic::Request::new(proto::CreateVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: "op-shim-1".into(),
+                requested_by: "test-user".into(),
+                target_node_id: "node-shim-1".into(),
+                desired_state_version: "1".into(),
+                request_unix_ms: 1000,
+            }),
+            node_id: "node-shim-1".into(),
+            volume: Some(proto::VolumeMutationSpec {
+                volume_id: "vol-shim-1".into(),
+                vm_id: String::new(),
+                volume_spec_json: br#"{"size_bytes":4096}"#.to_vec(),
+            }),
+        }))
+        .await;
+
+    match result {
+        Err(status) => {
+            assert_eq!(status.code(), tonic::Code::Unimplemented);
+            let msg = status.message();
+            assert!(
+                msg.contains("BFF"),
+                "shim message should name the BFF-direct decision: {msg}"
+            );
+        }
+        Ok(resp) => panic!(
+            "Expected unimplemented from the create_volume shim, got {:?}",
+            resp.into_inner()
+        ),
+    }
+
+    // The shim must not journal anything.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "the create_volume shim must not journal operations"
+    );
+}
+
+#[tokio::test]
 async fn test_duplicate_idempotency_returns_same_operation() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();

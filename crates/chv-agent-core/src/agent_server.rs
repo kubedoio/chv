@@ -1255,6 +1255,129 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    /// #513 PR 1 (DP2/DP5/DP7): the standalone volume-create dispatch
+    /// carrier — `prepare_vm_resources`' open minus the attach. The
+    /// load-bearing finding (design §2.4): the open MUST carry the
+    /// requested capacity, because the local backend's create-on-open
+    /// only provisions on a sized open and an LVM open of an absent LV
+    /// without a size is rejected — this is NOT the attach path's
+    /// option-less open. Dead-but-live with this PR: nothing dispatches
+    /// it until the BFF route lands (PR 2).
+    async fn create_volume(
+        &self,
+        req: Request<proto::CreateVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        // #513 DP7 (the #378/#495 posture): standalone volume
+        // provisioning is a legacy-path stord side effect; on a
+        // core-managed node the single writer is Core, which cannot
+        // express it (its StorageAttachmentRef has no standalone-volume
+        // concept). Fail closed exactly like the sibling legacy volume
+        // RPCs — the orchestrator's Unimplemented fast-fail takes the
+        // refused operation terminal without retry.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "create_volume is unsupported in core-managed mode",
+            ));
+        }
+
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let vol = inner
+            .volume
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing volume"))?;
+        // The volume id becomes a path component of the stord locator
+        // (`{volume_id}.img` under stord's runtime dir for local,
+        // `/dev/mapper/{vg}-{vid}` for LVM): a crafted id (`../..`) is a
+        // write traversal. Reject anything that is not a single safe
+        // component at the node boundary — the prepare_vm_resources
+        // discipline (the control plane is a trusted-but-buggy peer).
+        if !chv_common::is_safe_id(&vol.volume_id) {
+            return Err(Status::invalid_argument(format!(
+                "'{}' is not a safe volume id (must be a single path component)",
+                vol.volume_id
+            )));
+        }
+        {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &vol.volume_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            // lock dropped here
+        }
+        let spec = serde_json::from_slice::<serde_json::Value>(&vol.volume_spec_json)
+            .map_err(|e| Status::invalid_argument(format!("invalid volume spec_json: {}", e)))?;
+        // The size is REQUIRED (not the attach path's optional-everything
+        // parse): a create that opens without a size mints a volume the
+        // attach path can never materialize — the local backend would
+        // fall back to its default sparse size and an absent LVM LV is
+        // refused outright.
+        let size_bytes = spec
+            .get("size_bytes")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                Status::invalid_argument(
+                    "volume spec_json requires a positive integer size_bytes (a standalone \
+                     create must provision its backing store)",
+                )
+            })?;
+        // #510's #379 DP5 class consumption (the attach parser's seam):
+        // absent `backend_class` key → local; the stord backend fails
+        // closed on a class it does not serve.
+        let backend_class = spec
+            .get("backend_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
+        // #379 DP5: class-dependent locator shaping — an LVM-class open
+        // carries a /dev/mapper/{vg}-{vid} dm-path token the standard
+        // device_allowlist admits (VG from the same stord-config source
+        // as the VM path); every other class keeps the legacy CreateVm
+        // branch's `{volume_id}.img` default (relative — the local
+        // backend resolves it under its own runtime dir; a standalone
+        // volume has no VM dir).
+        let locator = if backend_class == "lvm" {
+            chv_hypervisor_api::resources::lvm_locator(
+                self.stord_backend.volume_group(),
+                &vol.volume_id,
+            )
+        } else {
+            format!("{}.img", vol.volume_id)
+        };
+        let mut open_options = std::collections::HashMap::new();
+        open_options.insert("size_bytes".to_string(), size_bytes.to_string());
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+        let (_, handle, _) = stord
+            .open_volume_with_options(
+                &vol.volume_id,
+                backend_class,
+                &locator,
+                open_options,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
+
+        let mut cache = self.cache.lock().await;
+        cache.volume_handles.insert(vol.volume_id.clone(), handle);
+        self.persist_cache(&cache).await;
+        let observed_generation = cache.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume created".to_string(),
+            }),
+        }))
+    }
+
     async fn start_vm(
         &self,
         req: Request<proto::StartVmRequest>,
@@ -3366,9 +3489,13 @@ mod tests {
     /// tests can pin the backend class and locator the agent threads into
     /// its opens (#379 PR 1; the locator joins in PR 2 to pin that
     /// populating the class does NOT change the locator default).
+    /// `open_options` records each call's options map at the same index
+    /// (#513 PR 1: the create handler's sized open — `size_bytes` — is
+    /// pinned there).
     #[derive(Clone, Default)]
     struct StordOpenLog {
         opens: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+        open_options: Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
     }
 
     #[derive(Default)]
@@ -3395,7 +3522,16 @@ mod tests {
             let inner = req.into_inner();
             // #379 PR 1: record the backend class the agent threaded into
             // this open so the class-plumbing tests can pin it; PR 2 adds
-            // the locator for the same reason.
+            // the locator for the same reason. #513 PR 1 adds the options
+            // map (index-aligned with `opens`) so the create handler's
+            // sized open can be pinned.
+            self.opens.open_options.lock().unwrap().push(
+                inner
+                    .backend
+                    .as_ref()
+                    .map(|b| b.options.clone())
+                    .unwrap_or_default(),
+            );
             self.opens.opens.lock().unwrap().push((
                 inner.volume_id.clone(),
                 inner
@@ -4301,6 +4437,242 @@ mod tests {
         );
     }
 
+    /// Shared harness for the #513 create-volume handler tests: an
+    /// `AgentServer` whose stord socket is the recording `MockStord`,
+    /// with the cache in the TenantReady/Connected state the RPC paths
+    /// expect. Returns `(server, opens, dir)` — the tempdir must outlive
+    /// the test body (it owns the mock's UDS path).
+    async fn create_volume_test_server() -> (AgentServer, StordOpenLog, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+        let opens = StordOpenLog::default();
+
+        {
+            let opens = opens.clone();
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockStord { opens },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            socket,
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
+            dir.path().to_path_buf(),
+        );
+        (server, opens, dir)
+    }
+
+    fn create_volume_request(volume_id: &str, spec_json: &[u8]) -> proto::CreateVolumeRequest {
+        proto::CreateVolumeRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            volume: Some(proto::VolumeMutationSpec {
+                volume_id: volume_id.to_string(),
+                vm_id: String::new(),
+                volume_spec_json: spec_json.to_vec(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_volume_opens_with_size_class_and_dp5_locator() {
+        // #513 PR 1 pin (DP2/DP5 — the load-bearing open-with-size): the
+        // create handler opens the volume WITH the requested capacity in
+        // the options map (NOT the attach path's option-less open — a
+        // sizeless open cannot provision: the local backend's
+        // create-on-open only fires on a sized open, and an absent LVM
+        // LV without a size is refused), threads the spec_json's
+        // `backend_class` (absent → local, the #510 B5 seam), and shapes
+        // the DP5 locator per class: LVM carries the
+        // /dev/mapper/{vg}-{vid} dm-path token; local keeps the legacy
+        // CreateVm branch's `{volume_id}.img` default. The CP producer's
+        // exact bytes (pinned CP-side by `volume_create_spec_json`) are
+        // fed verbatim — the agent half of the contract pair.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        // The CP producer's exact bytes for a class-carrying volume.
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "vol-cr-lvm",
+                br#"{"backend_class":"lvm","size_bytes":1073741824}"#,
+            )),
+        )
+        .await;
+        assert!(resp.is_ok(), "create must succeed: {:?}", resp.err());
+
+        // The CP producer's exact bytes for a NULL-class volume: the
+        // size-only payload (no backend_class key, no materialized
+        // "local" — the agent's B5 default resolves it).
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "vol-cr-bare",
+                br#"{"size_bytes":536870912}"#,
+            )),
+        )
+        .await;
+        assert!(resp.is_ok(), "create must succeed: {:?}", resp.err());
+
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-cr-lvm".to_string(),
+                    "lvm".to_string(),
+                    "/dev/mapper/chv-vg-vol-cr-lvm".to_string(),
+                ),
+                (
+                    "vol-cr-bare".to_string(),
+                    "local".to_string(),
+                    "vol-cr-bare.img".to_string(),
+                ),
+            ],
+            "the create open threads the class and shapes the DP5 locator"
+        );
+        let options = opens.open_options.lock().unwrap().clone();
+        assert_eq!(
+            options.len(),
+            2,
+            "every create open carries an options map: {options:?}"
+        );
+        assert_eq!(
+            options[0].get("size_bytes").map(String::as_str),
+            Some("1073741824"),
+            "the LVM-class create open carries the requested capacity"
+        );
+        assert_eq!(
+            options[1].get("size_bytes").map(String::as_str),
+            Some("536870912"),
+            "the NULL-class create open carries the requested capacity — the option the attach path's open never sends"
+        );
+
+        // The open's handle is cached (the A10 create_vm branch's
+        // discipline) so the volume is observable in the node cache.
+        let cache = server.cache.lock().await;
+        assert!(cache.volume_handles.contains_key("vol-cr-lvm"));
+        assert!(cache.volume_handles.contains_key("vol-cr-bare"));
+    }
+
+    #[tokio::test]
+    async fn create_volume_requires_a_positive_size_bytes() {
+        // #513 PR 1 pin (the DP2 contract's hard edge): a spec_json with
+        // no size (or a non-positive one) is rejected with
+        // invalid_argument BEFORE any stord open — a sizeless create
+        // would mint a volume the attach path can never materialize
+        // (journal-only is not viable, design §2.4). The attach RPC's
+        // option-less open is exactly what this handler must not do.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        for (label, spec_json) in [
+            ("no size key", b"{}" as &[u8]),
+            ("zero size", br#"{"size_bytes":0}"#),
+        ] {
+            let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+                &server,
+                Request::new(create_volume_request("vol-cr-nosize", spec_json)),
+            )
+            .await;
+            let err = resp
+                .err()
+                .unwrap_or_else(|| panic!("{label} must be rejected"));
+            assert_eq!(
+                err.code(),
+                tonic::Code::InvalidArgument,
+                "{label} must be an invalid_argument: {err}"
+            );
+        }
+        assert!(
+            opens.opens.lock().unwrap().is_empty(),
+            "no stord open may happen for a sizeless create"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_volume_rejects_unsafe_volume_ids() {
+        // The volume id becomes a path component of the stord locator
+        // (`{volume_id}.img`); a traversal id is rejected at the node
+        // boundary (the prepare_vm_resources discipline) before any
+        // open.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "../../escape",
+                br#"{"size_bytes":1024}"#,
+            )),
+        )
+        .await;
+        assert_eq!(
+            resp.expect_err("traversal id must be rejected").code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(
+            opens.opens.lock().unwrap().is_empty(),
+            "no stord open may happen for an unsafe volume id"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_volume_parses_the_cp_spec_json_shape() {
+        // #513 PR 1 contract pair (agent half; the CP half is
+        // `volume_create_spec_json` in chv-controlplane-service — it
+        // produces exactly `{"backend_class":"lvm","size_bytes":N}` /
+        // `{"size_bytes":N}`, nothing else). Feeding those exact bytes
+        // pins that the handler's parser reads the same keys the
+        // producer writes: class AND size, with the absent class key
+        // taking the local default.
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "vol-cr-contract",
+                br#"{"backend_class":"lvm","size_bytes":2048}"#,
+            )),
+        )
+        .await;
+        assert!(
+            resp.is_ok(),
+            "the CP producer's bytes must parse: {:?}",
+            resp.err()
+        );
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [(
+                "vol-cr-contract".to_string(),
+                "lvm".to_string(),
+                "/dev/mapper/chv-vg-vol-cr-contract".to_string(),
+            )],
+            "the CP-produced spec_json must drive the class and the DP5 LVM locator"
+        );
+        assert_eq!(
+            opens.open_options.lock().unwrap()[0]
+                .get("size_bytes")
+                .map(String::as_str),
+            Some("2048"),
+            "the CP-produced spec_json must drive the sized open"
+        );
+    }
+
     #[tokio::test]
     async fn create_vm_legacy_branch_threads_disk_backend_class_to_stord() {
         // #379 PR 1 pin (A10): the legacy create_vm RPC branch opens every
@@ -4900,7 +5272,19 @@ mod tests {
             Request::new(proto::SnapshotVolumeRequest::default()),
         )
         .await;
-        for (name, result) in [("resize_volume", resize), ("snapshot_volume", snap_vol)] {
+        // #513 DP7: the standalone volume-create carrier joins the
+        // storage-plane fail-closed set (provisioning is a legacy-path
+        // stord side effect behind Core's back).
+        let create_vol = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(proto::CreateVolumeRequest::default()),
+        )
+        .await;
+        for (name, result) in [
+            ("resize_volume", resize),
+            ("snapshot_volume", snap_vol),
+            ("create_volume", create_vol),
+        ] {
             assert_eq!(
                 result.unwrap_err().code(),
                 tonic::Code::Unimplemented,

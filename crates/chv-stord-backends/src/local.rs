@@ -1107,6 +1107,50 @@ mod tests {
         assert!(export.export_path.ends_with("test.img"));
     }
 
+    /// #513 PR 1 (the stord half of the DP2 open-with-size contract):
+    /// a sized open of an absent path provisions the sparse raw volume
+    /// AT the requested capacity — the behavior the standalone
+    /// volume-create carrier depends on (the agent's create handler
+    /// opens with `size_bytes`; a sizeless open would fall back to the
+    /// default sparse size and mint a mis-sized volume). The relative
+    /// locator is the standalone shape (resolved under the backend's
+    /// runtime dir — no VM dir).
+    #[tokio::test]
+    async fn local_backend_create_on_open_materializes_the_requested_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "standalone.img".to_string(),
+            options: std::iter::once(("size_bytes".to_string(), "4096".to_string())).collect(),
+        };
+
+        let export = backend
+            .open("vol-cr-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
+        let path = std::path::PathBuf::from(&export.export_path);
+        assert_eq!(
+            path,
+            dir.path().join("standalone.img"),
+            "a relative locator resolves under the runtime dir"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            4096,
+            "the provisioned sparse file must carry the requested capacity, not the default"
+        );
+
+        // Idempotent re-open at the same size (the retry shape): the
+        // existing file opens as-is, unchanged.
+        let again = backend
+            .open("vol-cr-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(again.attachment_handle, export.attachment_handle);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4096);
+    }
+
     #[tokio::test]
     async fn local_backend_idempotent_open() {
         let dir = tempfile::tempdir().unwrap();
