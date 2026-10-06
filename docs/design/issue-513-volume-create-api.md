@@ -249,9 +249,17 @@ Two carriers exist for that dispatch:
   (`handlers/volumes.rs:429-454`) makes a NULL-owner volume
   **admin-only** — an unstamped create would lock its own creator out
   of mutating it.
-- **Quota:** `enforce_user_quota` (`vms.rs:1549+`) already counts
+- **Quota:** ~~`enforce_user_quota` (`vms.rs:1549+`) already counts
   `SUM(volumes.capacity_bytes)` — a standalone create is the first
-  caller with `vm_count_delta = 0`.
+  caller with `vm_count_delta = 0`.~~ **[Corrected 2026-10-06, #525:]**
+  this census claim was WRONG — the enforcement SUM (and both quota
+  meters) joined through `vm_desired_state` via `attached_vm_id`, so
+  standalone volumes never accrued toward `used`; each create was
+  capped individually but successive creates stacked past the
+  aggregate limit. Found in the PR 2 review, fixed in #525/#526: one
+  canonical `storage_usage_bytes` query (owner ∪ attach, no
+  double-count) read by enforcement and both meters — see the #525
+  CHANGELOG entry for the adopted counting rules.
 - **Display name:** `is_valid_display_name` (`vms.rs:1511`,
   `^[A-Za-z0-9 ._-]{1,64}$` — the name is interpolated into volume
   names/paths, `vms.rs:329-335`).
@@ -480,8 +488,12 @@ unstamped volume is admin-only and locks out its creator,
 capacity_bytes, 0)` inside the transaction (the storage column of the
 quota table is otherwise only reachable through VM creates).
 Disclosure: this makes standalone creates the first direct
-storage-quota consumer — the quota UI's storage meter should count
-them (it sums `volumes.capacity_bytes`, so it will, automatically).
+storage-quota consumer — ~~the quota UI's storage meter should count
+them (it sums `volumes.capacity_bytes`, so it will, automatically).~~
+**[Corrected 2026-10-06, #525:]** the meter did NOT count them (same
+attach-join shape as enforcement — it also over-reported cpu/memory
+via per-volume fan-out); both were fixed in #525/#526 with the
+canonical `storage_usage_bytes` query.
 
 **DP7 — core-managed nodes: reject at accept.** *Recommendation:*
 mirror #378 — the BFF handler rejects a create targeting a

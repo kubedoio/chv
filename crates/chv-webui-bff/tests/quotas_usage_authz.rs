@@ -354,3 +354,86 @@ async fn usage_for_self_via_path_succeeds() {
         "self-via-path must return caller's data: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #525: the storage meter counts standalone volumes, and the cpu/memory
+// sums no longer fan out per attached volume (the pre-#525 shape
+// LEFT-JOINed the volume tables into the per-VM sum query, multiplying
+// a VM's cpu/memory once per attached volume).
+// ---------------------------------------------------------------------------
+
+/// Seed a volume (owner `owner_id`, `capacity_bytes`) attached to
+/// `attached_vm_id` — standalone when the attach target is None.
+async fn seed_volume(
+    state: &AppState,
+    volume_id: &str,
+    owner_id: &str,
+    capacity_bytes: i64,
+    attached_vm_id: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, updated_at) \
+         VALUES (?, 'n-1', ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+    )
+    .bind(volume_id)
+    .bind(volume_id)
+    .bind(owner_id)
+    .bind(capacity_bytes)
+    .execute(&state.pool)
+    .await
+    .expect("insert volume");
+    sqlx::query(
+        "INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_by, attached_vm_id) \
+         VALUES (?, 1, 'Active', ?, ?)",
+    )
+    .bind(volume_id)
+    .bind(owner_id)
+    .bind(attached_vm_id)
+    .execute(&state.pool)
+    .await
+    .expect("insert volume_desired_state");
+}
+
+#[tokio::test]
+async fn usage_meter_counts_standalone_and_does_not_fan_out_per_volume() {
+    let state = build_state().await;
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('n-1', 'h', 'h')")
+        .execute(&state.pool)
+        .await
+        .expect("seed node");
+    // One VM (4 cores, 2 GiB) with TWO attached volumes — the fan-out
+    // shape — plus one standalone volume owned by the same user.
+    seed_vm(&state, "vm-alice-1", "u-alice", 4).await;
+    seed_volume(
+        &state,
+        "vol-a",
+        "u-alice",
+        1024 * 1024 * 1024,
+        Some("vm-alice-1"),
+    )
+    .await;
+    seed_volume(
+        &state,
+        "vol-b",
+        "u-alice",
+        1024 * 1024 * 1024,
+        Some("vm-alice-1"),
+    )
+    .await;
+    seed_volume(&state, "vol-solo", "u-alice", 1024 * 1024 * 1024, None).await;
+
+    let alice = token_for(&state, "u-alice", "operator");
+    let (status, body) = post_with_token(state, "/v1/usage", &alice, "{}").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    assert_eq!(
+        body.pointer("/usage/cpu_cores").and_then(|v| v.as_i64()),
+        Some(4),
+        "a VM with two attached volumes must still count its CPU once (no join fan-out): {body}"
+    );
+    assert_eq!(
+        body.pointer("/usage/disk_gb").and_then(|v| v.as_i64()),
+        Some(3),
+        "the meter must count both attached volumes AND the standalone one: {body}"
+    );
+}

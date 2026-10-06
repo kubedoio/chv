@@ -1585,17 +1585,13 @@ pub(crate) async fn enforce_user_quota(
     let current_cpu = usage_row.0.unwrap_or(0);
     let current_memory = usage_row.1.unwrap_or(0);
 
-    let current_storage: i64 = sqlx::query_scalar(
-        r#"SELECT COALESCE(SUM(v.capacity_bytes), 0)
-           FROM volumes v
-           JOIN volume_desired_state vd ON v.volume_id = vd.volume_id
-           JOIN vm_desired_state vds ON vd.attached_vm_id = vds.vm_id
-           WHERE vds.requested_by = ?"#,
-    )
-    .bind(user_id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to compute storage usage: {}", e)))?;
+    // #525: the storage SUM is the canonical `storage_usage_bytes` rule
+    // (owner OR attached-to-your-VM, counted once) — the same query the
+    // usage meters read, so enforcement and display agree. Pre-#525 this
+    // joined through `vm_desired_state` only, so standalone volumes
+    // (NULL `attached_vm_id`) never accrued toward `used`.
+    let current_storage: i64 =
+        crate::handlers::quotas::storage_usage_bytes(&mut *conn, user_id).await?;
 
     if let Some(max) = quota.0 {
         if vm_count + vm_count_delta > max {
