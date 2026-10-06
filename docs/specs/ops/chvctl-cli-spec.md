@@ -75,15 +75,37 @@ the platform today and the flag was silently ignored when it existed
 ### Version
 - `chvctl version` — Show CLI version, git commit, build date, and release channel
 
-## Known-broken command groups (pending removal)
+## Removed command groups
 
-The `storage`, `migrate`, and `backup` groups target BFF routes that do
-not exist — every invocation 404s (#372 §2.2–2.4). They are scheduled
-for removal; do not script against them:
+Two command groups that could only ever 404 were **removed** (#372 §2.2,
+§2.4; DP3/DP5 of the adopted design) — their target BFF routes never
+existed:
 
-- `chvctl storage list|show|create|delete`
-- `chvctl migrate start|status|cancel|list` (use `chvctl vm migrate` to start a migration)
-- `chvctl backup list|run`
+- `chvctl storage list|show|create|delete` — every subcommand 404'd;
+  the backing `storage_pools` catalog is a phantom surface nothing in
+  provisioning reads or writes (#379 C4; the catalog question is tracked
+  in #514). The BFF's `/v1/storage-pools` routes and the UI's storage
+  pages are unchanged.
+- `chvctl backup list|run` — every subcommand 404'd; even repointed, the
+  live `BackupWorker`'s execute is a guaranteed-fail no-op ("Backup is
+  not DR" per the production-readiness declaration). The BFF's
+  `/v1/backups/*` routes, the UI's backup catalog pages, and the
+  `BackupWorker` scaffold are unchanged.
+
+Invoking either group now fails at argument parsing with
+"unrecognized subcommand" — louder and truthful (the old behavior was a
+404 from a route that never existed). Scripts carrying the muscle memory
+must stop calling them; there was never a working invocation to lose.
+
+## Known-broken command group (pending PR 4)
+
+The `migrate` group still targets BFF routes that do not exist — every
+invocation 404s (#372 §2.3). It is scheduled for repointing in PR 4 of
+the #372 decomposition (`migrate start`/`cancel` repointed, optional
+viewer-tier read routes); do not script against it:
+
+- `chvctl migrate start|status|cancel|list` (use `chvctl vm migrate` to
+  start a migration)
 
 ## Global Flags
 

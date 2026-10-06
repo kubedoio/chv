@@ -210,11 +210,12 @@ BACKEND="s3"
 BUCKET="my-backup-bucket"
 PREFIX="chv/vm-backups"
 
-# Get all successful backup jobs
-jobs=$(curl -s "http://localhost:8080/v1/backups/jobs?status=Succeeded" \
-  -H "Authorization: Bearer $API_TOKEN" | jq -r '.jobs[] | [.job_id, .vm_id, .destination] | @tsv')
+# Get all successful backup jobs (job listing is not status-filtered
+# server-side — filter client-side)
+jobs=$(curl -s "http://localhost:8080/v1/backups/jobs" \
+  -H "Authorization: Bearer $API_TOKEN" | jq -r '.items[] | select(.status == "Succeeded") | [.job_id, .vm_id, .target_path] | @tsv')
 
-while IFS=$'\t' read -r job_id vm_id destination; do
+while IFS=$'\t' read -r job_id vm_id target_path; do
   echo "Restoring VM $vm_id from job $job_id"
   
   # Download artifact
@@ -287,10 +288,10 @@ If you have a volume backup artifact, restore it manually to the `chv-stord` dat
 
 ## 7. Reconfigure Backup Schedules
 
-If the DB was restored, schedules should persist. Verify:
+If the DB was restored, schedules should persist. Verify (the `chvctl backup` group was removed — #372; use the API):
 
 ```bash
-chvctl backup list
+curl -s http://localhost:8080/v1/backups/schedules -H "Authorization: Bearer $TOKEN" | jq '.items[] | {schedule_id, vm_id, enabled}'
 ```
 
 If schedules are missing, recreate them:
@@ -345,16 +346,26 @@ done
 
 ### 8c. Backup Worker Verification
 
+> **Note:** backup execution is currently a guaranteed-fail no-op
+> ("Backup is not DR") — the worker accepts and journals the job, then
+> fails it without producing an artifact. This check verifies the job
+> lifecycle is journaled and observable, not that a backup succeeds.
+
 ```bash
-# Trigger a test backup
-curl -X POST http://localhost:8080/v1/backups/run \
+# Create a test backup job
+JOB_ID=$(curl -X POST http://localhost:8080/v1/backups/jobs \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"vm_id": "<TEST_VM_ID>", "label": "post-dr-test"}' | jq '.job_id'
+  -d '{"vm_id": "<TEST_VM_ID>", "backup_type": "full"}' | jq -r '.job_id')
 
-# Wait and verify it succeeds
-curl -s "http://localhost:8080/v1/backups/jobs/<JOB_ID>" \
-  -H "Authorization: Bearer $TOKEN" | jq '{status, completed_at, checksum}'
+# Trigger execution, then verify the job reaches a terminal state
+curl -X POST "http://localhost:8080/v1/backups/jobs/$JOB_ID/execute" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -s "http://localhost:8080/v1/backups/jobs/$JOB_ID" \
+  -H "Authorization: Bearer $TOKEN" | jq '{status, completed_at, error_message}'
+# Expected: status "Failed" with an error message (execution is a no-op) —
+# the point is that the job is journaled and visible, not that it succeeds.
 ```
 
 ### 8d. Run a Full Backup Cycle

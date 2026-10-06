@@ -253,7 +253,8 @@ chvctl node list | jq '.nodes[] | {node_id, status, last_seen_at}'
 chvctl vm list | wc -l
 
 # 4. Backup schedules still configured
-chvctl backup list
+#    (the `chvctl backup` group was removed — #372; use the API)
+curl -s http://localhost:8080/v1/backups/schedules -H "Authorization: Bearer $TOKEN" | jq '.items[] | {schedule_id, vm_id, enabled}'
 
 # 5. Test a non-destructive operation
 chvctl vm get <TEST_VM_ID>

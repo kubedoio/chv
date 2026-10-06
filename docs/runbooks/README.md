@@ -33,7 +33,7 @@ All runbooks assume:
 | Capability | Status | How to Invoke |
 |------------|--------|---------------|
 | Scheduled VM backups with S3/NFS shipping | ✅ Automated | `POST /v1/backups/schedules` or UI |
-| On-demand VM backup | ✅ Automated | `chvctl backup run <VM_ID>` or UI |
+| On-demand VM backup | ✅ Automated | UI or `POST /v1/backups/jobs/<JOB_ID>/execute` (the `chvctl backup` group was removed — #372) |
 | Retention enforcement (count + days) | ✅ Automated | Configured per schedule |
 | VM snapshot restore (local) | ✅ Automated | UI: Default Cloud → Hosts → Instances → `<VM_NAME>` → Snapshots → Restore |
 | Volume snapshot restore (local/Ceph) | ✅ Automated | API `POST /v1/volumes/restore-snapshot` |

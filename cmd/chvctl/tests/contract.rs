@@ -49,12 +49,12 @@
 //!   forwarding, and display columns all match the BFF today.
 //! - PINNED-BROKEN rows: known drift, pinned as it behaves TODAY with a
 //!   TODO referencing the design §2 section and the PR that flips the
-//!   row (PR 3 removals, PR 4 migrate reads). The harness must pass at
+//!   row (PR 4 migrate reads). The harness must pass at
 //!   main — red-where-known means asserting the current broken
 //!   behavior, not failing.
 //!
-//! PR 2 (this change, the #372 live-path fixes) flipped the fixable red
-//! pins green and added the DP9 rows:
+//! PR 2 (the #372 live-path fixes) flipped the fixable red pins green
+//! and added the DP9 rows:
 //! - `user delete` now sends `user_id` (§2.1/DP2) — green, end-to-end;
 //! - `task watch` polls the new `POST /v1/tasks/get` (§2.5/DP6) and the
 //!   row asserts COMPLETION of a seeded terminal task;
@@ -66,10 +66,21 @@
 //!   --disk-size-gb/--cloud-init` (green on a local-reporting node, and
 //!   the unoffered-class 400 with zero journaled rows).
 //!
+//! PR 3 (this change, the #372 dead-group removals) removed the
+//! `storage` and `backup` command groups (design §2.2/DP3 and §2.4/DP5):
+//! every subcommand 404'd on routes that do not exist, and the removals
+//! are CLI-surface only — the BFF's `/v1/storage-pools` and
+//! `/v1/backups/*` routes stay (the UI's storage and backup catalog
+//! pages call them), and the BackupWorker scaffold is untouched CP
+//! machinery. Their 6 rows (storage ×4, backup ×2) left this file with
+//! the groups; `chvctl storage ...` / `chvctl backup ...` now fail at
+//! argument parsing with "unrecognized subcommand" — truthful (design
+//! residual risk 2).
+//!
 //! Pinned-broken rows remaining in this file:
-//! - `storage` group — 404 on all four subcommands (§2.2) → PR 3;
-//! - `migrate` group — 404 on all four subcommands (§2.3) → PR 3/4;
-//! - `backup` group — 404 on both subcommands (§2.4) → PR 3.
+//! - `migrate` group — 404 on all four subcommands (§2.3) → PR 4
+//!   (repoint start/cancel + the optional viewer-tier read routes; the
+//!   rows stay red-pinned and untouched here).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -86,9 +97,7 @@ use chv_controlplane_store::{
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
 use chvctl::client::{BffClient, CliError};
-use chvctl::commands::{
-    auth, backup, health, image, migrate, network, node, storage, task, user, vm, volume,
-};
+use chvctl::commands::{auth, health, image, migrate, network, node, task, user, vm, volume};
 use chvctl::output::OutputFormat;
 use clap::Parser as _;
 use serde_json::Value;
@@ -1532,91 +1541,6 @@ async fn user_delete_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Rows — storage group (all 404-pinned; design §2.2/DP3 → removal PR 3)
-// ---------------------------------------------------------------------------
-
-/// `chvctl storage list` — PINNED-BROKEN (design §2.2/DP3): chvctl calls
-/// `GET /v1/storage/pools`; the BFF serves `POST /v1/storage-pools` (and
-/// the storage_pools catalog is a phantom surface — #379 C4). PR 3
-/// removes the group.
-#[tokio::test]
-async fn storage_list_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = storage::execute(
-        &h.client(Some(token)),
-        storage::StorageCommands::List,
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.2/DP3): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-/// `chvctl storage show` — PINNED-BROKEN (design §2.2/DP3): no per-pool
-/// get route exists anywhere. PR 3 removes the group.
-#[tokio::test]
-async fn storage_show_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = storage::execute(
-        &h.client(Some(token)),
-        storage::StorageCommands::Show {
-            pool_id: "pool-1".to_string(),
-        },
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.2/DP3): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-/// `chvctl storage create` — PINNED-BROKEN (design §2.2/DP3): chvctl
-/// calls `POST /v1/storage/pools` with `{name, backend, path}`; the BFF
-/// serves `POST /v1/storage-pools/create` reading
-/// `{name, node_id, pool_type|backend_class, ...}` — path, method, and
-/// field names all drift. PR 3 removes the group.
-#[tokio::test]
-async fn storage_create_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = storage::execute(
-        &h.client(Some(token)),
-        storage::StorageCommands::Create {
-            name: "contract-pool".to_string(),
-            backend: "local".to_string(),
-            path: Some("/var/lib/chv/pools".to_string()),
-        },
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.2/DP3): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-/// `chvctl storage delete` — PINNED-BROKEN (design §2.2/DP3): no delete
-/// route exists anywhere. PR 3 removes the group.
-#[tokio::test]
-async fn storage_delete_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = storage::execute(
-        &h.client(Some(token)),
-        storage::StorageCommands::Delete {
-            pool_id: "pool-1".to_string(),
-        },
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.2/DP3): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-// ---------------------------------------------------------------------------
 // Rows — migrate group (all 404-pinned; design §2.3/DP4)
 // ---------------------------------------------------------------------------
 
@@ -1644,8 +1568,8 @@ async fn migrate_start_row() {
 }
 
 /// `chvctl migrate status` — PINNED-BROKEN (design §2.3/DP4): no
-/// migration read route exists. PR 3 removes the subcommand (PR 4
-/// optionally adds viewer-tier read routes).
+/// migration read route exists. PR 4 repoints the subcommand
+/// (viewer-tier read routes optional per DP4b).
 #[tokio::test]
 async fn migrate_status_row() {
     let h = Harness::start().await;
@@ -1659,7 +1583,7 @@ async fn migrate_status_row() {
         &OutputFormat::Json,
     )
     .await;
-    // TODO(#372 PR 3/PR 4, design §2.3/DP4): the 404 IS the drift pin.
+    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin.
     assert_api_error(result, 404);
 }
 
@@ -1687,8 +1611,8 @@ async fn migrate_cancel_row() {
 }
 
 /// `chvctl migrate list` — PINNED-BROKEN (design §2.3/DP4): no migration
-/// list route exists. PR 3 removes the subcommand (PR 4 optionally adds
-/// the viewer-tier read route).
+/// list route exists. PR 4 repoints the subcommand (viewer-tier list
+/// route optional per DP4b).
 #[tokio::test]
 async fn migrate_list_row() {
     let h = Harness::start().await;
@@ -1700,52 +1624,7 @@ async fn migrate_list_row() {
         &OutputFormat::Json,
     )
     .await;
-    // TODO(#372 PR 3/PR 4, design §2.3/DP4): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-// ---------------------------------------------------------------------------
-// Rows — backup group (both 404-pinned; design §2.4/DP5 → removal PR 3)
-// ---------------------------------------------------------------------------
-
-/// `chvctl backup list` — PINNED-BROKEN (design §2.4/DP5): chvctl calls
-/// `GET /v1/backups`; the BFF serves `GET /v1/backups/jobs|schedules|
-/// restores`. PR 3 removes the group.
-#[tokio::test]
-async fn backup_list_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = backup::execute(
-        &h.client(Some(token)),
-        backup::BackupCommands::List,
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.4/DP5): the 404 IS the drift pin.
-    assert_api_error(result, 404);
-}
-
-/// `chvctl backup run` — PINNED-BROKEN (design §2.4/DP5): chvctl calls
-/// `POST /v1/backups/run` with `{vm_id, label?}`; the BFF serves
-/// `POST /v1/backups/jobs/:job_id/execute` — and even repointed, the
-/// live worker's execute is a guaranteed-fail no-op ("Backup is not
-/// DR"). PR 3 removes the group.
-#[tokio::test]
-async fn backup_run_row() {
-    let h = Harness::start().await;
-    let token = h.seed_jwt_as("operator").await;
-
-    let result = backup::execute(
-        &h.client(Some(token)),
-        backup::BackupCommands::Run {
-            vm_id: "vm-1".to_string(),
-            label: Some("nightly".to_string()),
-        },
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 3, design §2.4/DP5): the 404 IS the drift pin.
+    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin.
     assert_api_error(result, 404);
 }
 

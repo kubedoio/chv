@@ -57,18 +57,11 @@ Note the `snapshot_id` you want to restore.
 3. Find the target snapshot and click **Restore**
 4. Confirm the warning: the current VM state will be replaced
 
-### Via chvctl
-
-> **Note:** `chvctl backup restore` is not yet implemented. Use the API directly:
-
-```bash
-curl -X POST https://controlplane.example.com/v1/vms/snapshots/restore \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"vm_id": "<VM_ID>", "snapshot_id": "<SNAPSHOT_ID>"}'
-```
-
 ### Via API
+
+> **Note:** there is no chvctl path — the `chvctl backup` group was
+> removed (#372; its subcommands 404'd against routes that never
+> existed). Use the API directly:
 
 ```bash
 curl -X POST https://controlplane.example.com/v1/vms/snapshots/restore \
