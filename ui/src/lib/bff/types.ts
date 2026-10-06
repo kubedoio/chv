@@ -337,6 +337,23 @@ export type MutateVolumeResponse = {
 	summary: string;
 };
 
+// #522 DP12 (PR 4): the delete-surface contract — exactly one key,
+// mirroring the route's body (`POST /v1/volumes/delete`, #535). DP5's
+// no-force stance is structural: a `force` flag exists nowhere in this
+// type, so the UI cannot express it (the attached guard's 400 names
+// the detach path); DP6's kind gate is server-side only, same story.
+export type DeleteVolumeRequest = {
+	volume_id: string;
+};
+
+export type DeleteVolumeResponse = {
+	accepted: boolean;
+	task_id: string;
+	volume_id: string;
+	summary: string;
+	next_refresh_path: string;
+};
+
 // #513 DP3: the create-surface contract. `capacity_bytes` is i64 on the
 // wire (1 ..= 64 TiB); `storage_class` is optional (absent/blank = the
 // node's default, local). The reserved keys `attached_vm_id` and

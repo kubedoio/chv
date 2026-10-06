@@ -4,7 +4,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken } from '$lib/api/client';
-	import { mutateVolume } from '$lib/bff/volumes';
+	import { deleteVolume, mutateVolume } from '$lib/bff/volumes';
+	import { buildDeleteConfirmText, buildDeleteVolumePayload } from '$lib/webui/volume-delete';
 	import { listVms } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast.svelte';
 	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
@@ -18,7 +19,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import Modal from '$lib/components/primitives/Modal.svelte';
 	import FormField from '$lib/components/shared/FormField.svelte';
 	import Input from '$lib/components/primitives/TextInput.svelte';
-	import { Link2, Unlink, Maximize2, Database, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
+	import { Link2, Unlink, Maximize2, Database, Box, Activity, Info, AlertTriangle, Trash2 } from 'lucide-svelte';
+	import { goto } from '$app/navigation';
 
 	let { data }: { data: PageData } = $props();
 
@@ -42,7 +44,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 		if (['attached', 'healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
 		if (['warning', 'maintenance', 'attaching', 'detaching', 'resizing', 'available'].includes(s)) return 'warning';
 		if (['degraded', 'offline'].includes(s)) return 'degraded';
-		if (['failed', 'error', 'critical'].includes(s)) return 'failed';
+		// 'deleting' rides the failed tone, mirroring the VM detail
+		// page's vocabulary (the #522 tombstone render — the read path
+		// COALESCEs desired_status first, so a tombstoned volume
+		// surfaces as 'Deleting' with zero extra work).
+		if (['failed', 'error', 'critical', 'deleting'].includes(s)) return 'failed';
 		return 'unknown';
 	}
 
@@ -165,6 +171,42 @@ import Button from '$lib/components/primitives/Button.svelte';
 		}
 	}
 
+	// #522 DP12: the delete confirm action. Posts the one-key contract
+	// through the BFF client tier, refreshes the volumes cache with the
+	// VM-delete sibling's options (the tombstone flips the list/detail
+	// status to 'Deleting' through the existing read COALESCE), then
+	// navigates to the volumes list — the volume's rows persist (DP1),
+	// but the operator's next surface after accepting a delete is the
+	// list, not the tombstoned detail page. The task lands in the
+	// Recent Activity TaskTimeline; a failed dispatch renders its
+	// journaled cause there (#530) with zero extra work.
+	async function executeDelete() {
+		confirmingAction = null;
+		pendingAction = 'delete';
+		const token = getStoredToken() ?? undefined;
+		const volume_id = detail.summary.volume_id;
+		try {
+			await mutateWithRefresh(
+				() => deleteVolume(buildDeleteVolumePayload(volume_id), token),
+				{
+					patterns: ['volumes:'],
+					detailId: volume_id,
+					delayMs: 2000,
+					successMessage: `Volume ${volume_id} delete accepted`,
+					// Deliberately no errorMessage override: the delete's
+					// 400/409 guards carry the loud reason (detach-first,
+					// the in-flight op) — omitting the generic string lets
+					// mutateWithRefresh surface the BFF's message verbatim.
+				}
+			);
+			await goto('/volumes');
+		} catch (err) {
+			// Error already toasted by mutateWithRefresh
+		} finally {
+			pendingAction = null;
+		}
+	}
+
 	const postureProps = $derived([
 		{ label: 'Status', value: detail.summary.status, tone: normalizeTone(detail.summary.status) as any },
 		{ label: 'Health', value: detail.summary.health, tone: normalizeTone(detail.summary.health) as any },
@@ -205,7 +247,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 			{#snippet actions()}
 				<div class="header-actions">
 					<ActionStrip>
-						{#if confirmingAction}
+						{#if confirmingAction === 'delete'}
+							<!-- #522 DP12: the delete confirm — the page's existing
+							     Confirm/Cancel pattern, with copy naming the volume,
+							     its size, and the irreversibility (the design's words). -->
+							<div class="confirm-group">
+								<span class="confirm-text">{buildDeleteConfirmText(detail.summary.name, detail.summary.size)}</span>
+								<Button variant="danger" size="sm" disabled={pendingAction !== null} onclick={executeDelete}>Confirm</Button>
+								<Button variant="secondary" size="sm" onclick={() => confirmingAction = null}>Cancel</Button>
+							</div>
+						{:else if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
 								<Button variant="danger" size="sm" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
@@ -223,6 +274,24 @@ import Button from '$lib/components/primitives/Button.svelte';
 							<Button variant="secondary" size="sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize')}>
 								<Maximize2 size={14} />
 								{pendingAction === 'resize' ? 'Resizing...' : 'Resize'}
+							</Button>
+							<!-- #522 DP12: detail-page-only danger Delete. Disabled while
+							     attached — the DP5 mirror made visible (the guard's 400 names
+							     the detach path; the tooltip says the same before the round
+							     trip). No list-row delete exists, by design. -->
+							<Button
+								variant="danger"
+								size="sm"
+								disabled={!!detail.summary.attached_vm_id || pendingAction !== null}
+								title={detail.summary.attached_vm_id
+									? 'Volume is attached — detach it before deleting'
+									: pendingAction === 'delete'
+										? 'Deleting'
+										: 'Delete volume'}
+								onclick={() => handleActionClick('delete', true)}
+							>
+								<Trash2 size={14} />
+								{pendingAction === 'delete' ? 'Deleting...' : 'Delete'}
 							</Button>
 						{/if}
 					</ActionStrip>
@@ -348,6 +417,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	.confirm-group {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 0.5rem;
 		background: var(--color-danger-light);
 		padding: 0.25rem 0.5rem;
