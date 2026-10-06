@@ -10,11 +10,23 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
+	import CreateVolumeModal from '$lib/components/volumes/CreateVolumeModal.svelte';
+	import { getStoredRole } from '$lib/api/client';
 	import { Plus, Database, Activity, HardDrive, ShieldAlert } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
+
+	let modalOpen = $state(false);
+
+	// The create route is operator-or-admin tier
+	// (`require_operator_or_admin` on POST /v1/volumes/create) — the
+	// affordance is hidden for viewers, mirroring the route's own
+	// tier (unlike the quotas page's stricter admin-only gate for
+	// its write surface). Client-side hiding is cosmetic; the server
+	// enforces the tier.
+	let canAllocate = $state(['operator', 'admin'].includes(getStoredRole() ?? ''));
 
 	const model = $derived(data.volumes);
 	const items = $derived(model.items);
@@ -55,7 +67,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	const columns = [
 		{ key: 'name', label: 'Volume Identity' },
-		{ key: 'backend', label: 'Storage Driver' },
 		{ key: 'attached_vm_name', label: 'Attachment' },
 		{ key: 'node_id', label: 'Placement' },
 		{ key: 'health', label: 'IO Health' },
@@ -75,7 +86,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	const tableRows = $derived(items.map(item => ({
 		...item,
-		backend: item.backend || 'LOCAL_LVM',
 		health: { label: item.health, tone: mapHealthTone(item.health) }
 	})));
 
@@ -86,10 +96,12 @@ import Button from '$lib/components/primitives/Button.svelte';
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<Button variant="primary">
-				<Plus size={14} />
-				Allocate Block
-			</Button>
+			{#if canAllocate}
+				<Button variant="primary" onclick={() => (modalOpen = true)}>
+					<Plus size={14} />
+					Allocate Block
+				</Button>
+			{/if}
 		{/snippet}
 	</PageHeaderWithAction>
 
@@ -190,6 +202,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 		</aside>
 	</main>
 </div>
+
+<CreateVolumeModal
+	bind:open={modalOpen}
+	onSuccess={() => {}}
+/>
 
 <style>
 	.inventory-page {
