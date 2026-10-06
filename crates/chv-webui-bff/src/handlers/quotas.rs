@@ -269,6 +269,61 @@ pub async fn delete_quota(
     })))
 }
 
+/// A user's aggregate storage usage in bytes — the canonical #525
+/// "sum of `capacity_bytes`" that both the enforcement check
+/// (`vms.rs::enforce_user_quota`) and the usage meters below read, so
+/// display matches enforcement byte-for-byte.
+///
+/// Counting rule: a volume accrues toward user U's storage usage iff
+///
+///   * U owns it (`volumes.owner_id = U`), OR
+///   * it is attached to a VM U requested (`attached_vm_id` →
+///     `vm_desired_state.requested_by = U`).
+///
+/// **No double-counting:** a volume matching both conditions counts
+/// exactly once for U. The joins are 1:1 from `volumes`
+/// (`volume_desired_state.volume_id` and `vm_desired_state.vm_id` are
+/// both primary keys), so each volume yields at most one row and the OR
+/// predicate cannot sum its capacity twice. **Schema invariant, load-
+/// bearing:** this property rests entirely on those migration-layer
+/// PKs (0001, preserved through the 0031 rewrite) — if either table
+/// ever gains a second row per key (e.g. versioned desired state),
+/// this query SILENTLY double-sums for an owner matching both
+/// predicates. A change to either table's key structure must
+/// re-derive this query (and the no-double-count test in
+/// volume_quota_standalone.rs).
+///
+/// **Cross-user rule:** a volume owned by A attached to B's VM accrues
+/// once to A (the owner — the user whose create consumed the capacity)
+/// and once to B (the requester whose VM footprint carries it).
+/// Ownership and attachment are independent quota claims; the pre-#525
+/// query already charged attached volumes to the VM's requester
+/// regardless of owner, and the fix adds ownership alongside it rather
+/// than replacing it. A volume with no `owner_id` (pre-#386 legacy rows)
+/// keeps accruing only via attachment, exactly as before.
+///
+/// Pre-#525 this shape joined through `vm_desired_state` only, so a
+/// standalone volume (NULL `attached_vm_id`) never joined and never
+/// accrued — the enforcement gap this helper exists to close (#525).
+pub(crate) async fn storage_usage_bytes<'e, E>(executor: E, user_id: &str) -> Result<i64, BffError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar(
+        r#"SELECT COALESCE(SUM(v.capacity_bytes), 0)
+           FROM volumes v
+           LEFT JOIN volume_desired_state vd ON v.volume_id = vd.volume_id
+           LEFT JOIN vm_desired_state vds ON vd.attached_vm_id = vds.vm_id
+           WHERE v.owner_id = ?
+              OR vds.requested_by = ?"#,
+    )
+    .bind(user_id)
+    .bind(user_id)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to compute storage usage: {}", e)))
+}
+
 /// Compute the `{user_id, usage, quota}` JSON shape for a single user.
 ///
 /// Shared by the two `get_*_usage` handlers below so the SQL paths stay in one
@@ -286,15 +341,16 @@ async fn compute_usage_payload(state: &AppState, user_id: &str) -> Result<Value,
     .await
     .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
 
-    // Sum CPU and memory for user's VMs
-    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>)>(
+    // Sum CPU and memory for user's VMs. Storage is computed separately
+    // via `storage_usage_bytes` (the #525 rule): the pre-#525 shape
+    // LEFT-JOINed the volume tables into this query, which both missed
+    // standalone volumes and multiplied the per-VM sums once per
+    // attached volume (a two-volume VM double-counted its CPU).
+    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
         r#"SELECT
              COALESCE(SUM(vds.cpu_count), 0),
-             COALESCE(SUM(vds.memory_bytes), 0),
-             COALESCE(SUM(vol.capacity_bytes), 0)
+             COALESCE(SUM(vds.memory_bytes), 0)
            FROM vm_desired_state vds
-           LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
-           LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
            WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
@@ -304,7 +360,7 @@ async fn compute_usage_payload(state: &AppState, user_id: &str) -> Result<Value,
 
     let cpu_cores = usage_row.0.unwrap_or(0);
     let memory_bytes = usage_row.1.unwrap_or(0);
-    let storage_bytes = usage_row.2.unwrap_or(0);
+    let storage_bytes = storage_usage_bytes(&state.pool, user_id).await?;
 
     // Fetch quota
     let quota_row = sqlx::query_as::<_, QuotaRow>(
@@ -435,14 +491,16 @@ pub async fn check_quota(
     .await
     .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
 
-    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>)>(
+    // Sum CPU and memory for user's VMs. Storage is computed separately
+    // via `storage_usage_bytes` (the #525 rule): the pre-#525 shape
+    // LEFT-JOINed the volume tables into this query, which both missed
+    // standalone volumes and multiplied the per-VM sums once per
+    // attached volume (a two-volume VM double-counted its CPU).
+    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
         r#"SELECT
              COALESCE(SUM(vds.cpu_count), 0),
-             COALESCE(SUM(vds.memory_bytes), 0),
-             COALESCE(SUM(vol.capacity_bytes), 0)
+             COALESCE(SUM(vds.memory_bytes), 0)
            FROM vm_desired_state vds
-           LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
-           LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
            WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
@@ -452,7 +510,7 @@ pub async fn check_quota(
 
     let current_cpu = usage_row.0.unwrap_or(0);
     let current_memory = usage_row.1.unwrap_or(0);
-    let current_storage = usage_row.2.unwrap_or(0);
+    let current_storage = storage_usage_bytes(&state.pool, user_id).await?;
 
     let mut violations = Vec::new();
 
