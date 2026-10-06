@@ -154,12 +154,18 @@ pub async fn execute(
                 body["storage_class"] = json!(class);
             }
             if let Some(gb) = disk_size_gb {
-                // Mirror the BFF's full 1..=64-TiB bound (vms.rs's
-                // MAX_VOLUME_SIZE_GB — BFF-local, hence mirrored here with
-                // a cross-reference rather than imported) so the client
-                // rejects with the same rule the server enforces (review
-                // round 1); the server check stays authoritative.
-                const MAX_VOLUME_SIZE_GB: i64 = 64 * 1024;
+                // Mirror the BFF's full 1..=64-TiB bound so the client
+                // rejects with the same rule the server enforces
+                // (review round 1); the server check stays
+                // authoritative. The ceiling is the single shared
+                // constant (`chv_hypervisor_api::resources::
+                // MAX_VOLUME_BYTES` — the shared-vocabulary home
+                // chvctl already imports for the class list, per the
+                // #513 PR 3 consolidation; previously a local literal),
+                // derived here into the GiB units this flag and the
+                // BFF's `volume_size_gb` field use.
+                const MAX_VOLUME_SIZE_GB: i64 =
+                    chv_hypervisor_api::resources::MAX_VOLUME_BYTES / 1024 / 1024 / 1024;
                 if gb <= 0 || gb > MAX_VOLUME_SIZE_GB {
                     return Err(CliError::Parse(format!(
                         "invalid --disk-size-gb {gb}: must be between 1 and {MAX_VOLUME_SIZE_GB} GiB (64 TiB)"

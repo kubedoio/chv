@@ -212,10 +212,14 @@ pub async fn get_volume(
     }
 }
 
-/// The DP3 capacity ceiling: 64 TiB, the same bound `POST /v1/vms`
-/// enforces through `MAX_VOLUME_SIZE_GB` (`handlers/vms.rs`) — stated
-/// here in bytes because this surface takes `capacity_bytes` directly.
-const MAX_VOLUME_BYTES: i64 = 64 * 1024 * 1024 * 1024 * 1024;
+/// The DP3 capacity ceiling: 64 TiB — now the single shared constant
+/// (`chv_hypervisor_api::resources::MAX_VOLUME_BYTES`, beside
+/// `BACKEND_CLASSES` in the shared-vocabulary home; the #513 PR 3
+/// consolidation — previously a BFF-local literal here). The
+/// GiB-denominated create surfaces (`handlers/vms.rs`,
+/// `handlers/templates.rs`) derive their `MAX_VOLUME_SIZE_GB` from the
+/// same definition.
+const MAX_VOLUME_BYTES: i64 = chv_hypervisor_api::resources::MAX_VOLUME_BYTES;
 
 /// #513 PR 2 (the adopted design's DP1/DP3–DP8): the standalone
 /// volume-create route — the first production producer of the PR 1

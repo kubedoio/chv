@@ -52,6 +52,19 @@ pub fn is_known_backend_class(class: &str) -> bool {
     BACKEND_CLASSES.contains(&class)
 }
 
+/// The volume-capacity ceiling every create surface enforces (#513
+/// PR 3 consolidation): 64 TiB, in BYTES. This is the single shared
+/// definition — the same constant-of-record discipline as
+/// [`BACKEND_CLASSES`] above it — stated in bytes because the
+/// standalone volume-create contract is bytes-denominated
+/// (`capacity_bytes`, `POST /v1/volumes/create`); the GiB-denominated
+/// surfaces (`volume_size_gb` in the BFF's VM-create and
+/// template-create handlers, chvctl's `--disk-size-gb` mirror) derive
+/// their `MAX_VOLUME_SIZE_GB` from this value. The value is the
+/// historical literal on every site (64 TiB everywhere) — the
+/// consolidation de-duplicated the definition, not the bound.
+pub const MAX_VOLUME_BYTES: i64 = 64 * 1024 * 1024 * 1024 * 1024;
+
 /// The default LVM volume group name (#379 DP5): mirrors `chv-stord`'s
 /// own `lvm_volume_group` default (`cmd/chv-stord/src/main.rs` and
 /// `chv-config`'s `StordConfig`) so the agent's LVM locator shaping and
@@ -513,6 +526,17 @@ mod tests {
         }
         assert_eq!(DEFAULT_BACKEND_CLASS, "local");
         assert!(BACKEND_CLASSES.contains(&DEFAULT_BACKEND_CLASS));
+    }
+
+    /// #513 PR 3: the single shared capacity ceiling is 64 TiB in
+    /// bytes, and the GiB derivation every `volume_size_gb` site
+    /// computes from it is the historical `64 * 1024` GiB literal —
+    /// the consolidation must be byte-identical on both scales.
+    #[test]
+    fn volume_capacity_ceiling_is_64_tib_on_both_scales() {
+        assert_eq!(MAX_VOLUME_BYTES, 64 * 1024 * 1024 * 1024 * 1024);
+        assert_eq!(MAX_VOLUME_BYTES / 1024 / 1024 / 1024, 64 * 1024);
+        assert_eq!(MAX_VOLUME_BYTES % (1024 * 1024 * 1024), 0);
     }
 
     /// #379 DP5: the LVM locator convention is a `/dev/mapper/{vg}-{vid}`

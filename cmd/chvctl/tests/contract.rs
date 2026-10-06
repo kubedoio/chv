@@ -51,7 +51,7 @@
 //!   TODO referencing the design §2 section and the PR that flips the
 //!   row. The harness must pass at main — red-where-known means
 //!   asserting the current broken behavior, not failing. After PR 4
-//!   there are NONE left: every row in this file is green (39 rows),
+//!   there are NONE left: every row in this file is green (42 rows),
 //!   which is the campaign's terminal state — any future drift fails
 //!   the suite outright instead of needing a new pin.
 //!
@@ -100,6 +100,18 @@
 //! and could never match, so the pre-fix row 404'd against the CP's
 //! own fallback. Now `:id`; the two new read routes are additive and
 //! viewer-tier.
+//!
+//! #513 PR 3 (the volume-create CLI, DP9 of the adopted design) added
+//! the `volume create` rows: a green create on a node whose inventory
+//! reports `["local"]` (route, field names, and the journaled row
+//! shapes — owner stamping, the bytes-denominated capacity, the
+//! trimmed class, the 'data' kind, the standalone Pending desired
+//! state, and the Accepted `CreateVolume` operation keyed
+//! `create-volume-{volume_id}`), the unoffered-class 400 with zero
+//! journaled rows, and the blank-node 400 (the server-side half of
+//! the flag's clap-required-ness). The suite goes 39 → 42 rows, still
+//! zero pinned-broken — an unpinned new command is the exact #372
+//! failure mode DP9 exists to prevent.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1313,6 +1325,210 @@ async fn volume_clone_row() {
     .await
     .expect("chvctl volume clone against POST /v1/volumes/clone");
     h.mutations.assert_recorded("clone_volume:vol-1:vol-2");
+}
+
+/// `chvctl volume create <name> --node --size [--storage-class]` —
+/// GREEN (#513 DP9, PR 3 of the adopted decomposition). The flags map
+/// to the BFF volume-create contract fields `name`/`node_id`/
+/// `capacity_bytes`/`storage_class`; the node's inventory advertises
+/// `["local"]`, so the accept-time capability check accepts the
+/// offered class. The `--size` input is bytes-denominated ("1G" =
+/// 1073741824 — deliberately unlike `vm create`'s GiB-valued
+/// `--disk-size-gb`), and the `--storage-class` input deliberately
+/// carries a trailing space: the Create arm trims the flag value
+/// before validating and before sending (the #519 discipline, parity
+/// with `vm create --storage-class` and the BFF's trim-before-check),
+/// and this row is that trim's end-to-end pin — dropping the arm's
+/// trim flips this row red client-side. The journaled row shapes are
+/// asserted directly (the BFF suite's `volume_create_route.rs`
+/// discipline, contract-tier): this create is BFF-direct journaling
+/// (DP1), not a mutation-service forward.
+#[tokio::test]
+async fn volume_create_row() {
+    let h = Harness::start().await;
+    h.seed_node_with_storage_classes("n-local", &["local"])
+        .await;
+    let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
+
+    volume::execute(
+        &client,
+        volume::VolumeCommands::Create {
+            name: "contract-vol".to_string(),
+            node: "n-local".to_string(),
+            size: "1G".to_string(),
+            // Trailing whitespace ON PURPOSE — see the doc comment: the
+            // trimmed value ("local") is what must reach the wire and
+            // the journaled volume row.
+            storage_class: Some("local ".to_string()),
+        },
+        &OutputFormat::Json,
+    )
+    .await
+    .expect("chvctl volume create against POST /v1/volumes/create");
+
+    // The volume actually landed (route + field names accepted
+    // end-to-end) with its server-minted volume_id — the id the
+    // create response carries, re-fetched through the list route.
+    let items = list_items(&client, "/v1/volumes").await;
+    let vol = items
+        .iter()
+        .find(|i| i.get("name").and_then(Value::as_str) == Some("contract-vol"))
+        .expect("created volume is visible in volume list");
+    let volume_id = vol
+        .get("volume_id")
+        .and_then(Value::as_str)
+        .expect("volume list serves volume_id")
+        .to_string();
+    assert!(
+        !volume_id.is_empty(),
+        "the volume id is server-minted, never client-supplied"
+    );
+    assert_eq!(
+        vol.get("node_id").and_then(Value::as_str),
+        Some("n-local"),
+        "node_id must round-trip — a BFF rename would 400 as missing"
+    );
+
+    // volumes row: owner stamped with claims.sub (the #386 lesson — an
+    // unstamped volume is admin-only via require_volume_owner), the
+    // bytes-denominated capacity verbatim, the TRIMMED class (the
+    // trim pin), and volume_kind 'data' (DP8).
+    let volume: (String, i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT owner_id, capacity_bytes, storage_class, volume_kind FROM volumes WHERE volume_id = ?",
+    )
+    .bind(&volume_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("volume row");
+    assert_eq!(
+        volume.0, "u-operator",
+        "owner_id must be stamped with claims.sub (the #386 lesson)"
+    );
+    assert_eq!(
+        volume.1, 1073741824,
+        "capacity_bytes must round-trip (1G = 1073741824 bytes, the bytes-denominated contract)"
+    );
+    assert_eq!(
+        volume.2.as_deref(),
+        Some("local"),
+        "the trimmed storage_class must round-trip onto the volume row"
+    );
+    assert_eq!(
+        volume.3.as_deref(),
+        Some("data"),
+        "volume_kind must be stamped 'data' (DP8)"
+    );
+
+    // volume_desired_state row: born standalone — Pending, NULL
+    // attached_vm_id (DP4), requested by the creator.
+    let vds: (String, Option<String>, String) = sqlx::query_as(
+        "SELECT desired_status, attached_vm_id, requested_by FROM volume_desired_state WHERE volume_id = ?",
+    )
+    .bind(&volume_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("volume desired state row");
+    assert_eq!(
+        vds.0, "Pending",
+        "a fresh create journals a Pending desired state"
+    );
+    assert_eq!(
+        vds.1, None,
+        "attached_vm_id must be NULL — v1 creates standalone volumes"
+    );
+    assert_eq!(vds.2, "u-operator");
+
+    // operations row: the Accepted CreateVolume operation (the PR 1
+    // dispatch carrier's producer) with the design's idempotency key.
+    let op: (String, String, String) = sqlx::query_as(
+        "SELECT operation_type, status, idempotency_key FROM operations WHERE resource_id = ? AND resource_kind = 'volume'",
+    )
+    .bind(&volume_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("operation row");
+    assert_eq!(op.0, "CreateVolume");
+    assert_eq!(op.1, "Accepted");
+    assert_eq!(op.2, format!("create-volume-{volume_id}"));
+}
+
+/// `chvctl volume create --storage-class lvm` on a node that reports
+/// only `["local"]` — the #513 DP5 REJECTION row, the volume twin of
+/// `vm_create_storage_class_rejection_row`: `lvm` is a valid shared
+/// vocabulary class, so it passes chvctl's client-side check and the
+/// 400 comes from the BFF's node-capability check
+/// (`node_storage_class_rejection`, the #516 composition) BEFORE the
+/// create transaction — nothing is journaled.
+#[tokio::test]
+async fn volume_create_storage_class_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_node_with_storage_classes("n-local", &["local"])
+        .await;
+    let token = h.seed_jwt_as("operator").await;
+
+    let result = volume::execute(
+        &h.client(Some(token)),
+        volume::VolumeCommands::Create {
+            name: "contract-vol-lvm".to_string(),
+            node: "n-local".to_string(),
+            size: "1G".to_string(),
+            storage_class: Some("lvm".to_string()),
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    assert_api_error(result, 400);
+
+    // A rejected create journals nothing (every table the create tx
+    // writes — the `volume_create_route.rs` discipline).
+    for table in ["volumes", "volume_desired_state", "operations"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a rejected create must not journal {table}");
+    }
+}
+
+/// `chvctl volume create` with a blank `--node` — the #513 DP3
+/// required-node 400. The flag itself is clap-required (a node-less
+/// invocation fails at argument parsing, so the CLI never sends a
+/// node-less create), which is why this row pins the SERVER-side half
+/// through the blank value the flag can still carry: the BFF trims
+/// `node_id` and rejects empty with 400 `missing node_id` — there is
+/// no first-enrolled-node default for storage placement (silent
+/// placement of storage is worse than silent placement of a VM).
+#[tokio::test]
+async fn volume_create_requires_node_row() {
+    let h = Harness::start().await;
+    h.seed_node().await;
+    let token = h.seed_jwt_as("operator").await;
+
+    let result = volume::execute(
+        &h.client(Some(token)),
+        volume::VolumeCommands::Create {
+            name: "contract-vol-nonode".to_string(),
+            // Whitespace ON PURPOSE — the BFF trims and rejects; an
+            // untrimmed-but-nonempty id would instead journal (and
+            // fail at dispatch), which is a different row's story.
+            node: "   ".to_string(),
+            size: "1G".to_string(),
+            storage_class: None,
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    assert_api_error(result, 400);
+
+    // The 400 fires before the transaction — nothing is journaled.
+    for table in ["volumes", "volume_desired_state", "operations"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a rejected create must not journal {table}");
+    }
 }
 
 // ---------------------------------------------------------------------------

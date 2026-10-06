@@ -11,9 +11,14 @@ use chv_common::hypervisor::HypervisorOverrides;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Sanity ceilings for user-supplied sizes (see S2 overflow hardening):
-/// memory ≤ 1 TiB, volume size ≤ 64 TiB.
+/// memory ≤ 1 TiB, volume size ≤ 64 TiB. The volume ceiling derives
+/// from the single shared constant
+/// (`chv_hypervisor_api::resources::MAX_VOLUME_BYTES` — the #513 PR 3
+/// consolidation; previously a BFF-local `64 * 1024` literal), stated
+/// here in the GiB units this handler's `volume_size_gb` field uses.
 const MAX_MEMORY_BYTES: i64 = 1024 * 1024 * 1024 * 1024;
-const MAX_VOLUME_SIZE_GB: i64 = 64 * 1024;
+const MAX_VOLUME_SIZE_GB: i64 =
+    chv_hypervisor_api::resources::MAX_VOLUME_BYTES / 1024 / 1024 / 1024;
 
 pub async fn list_vms(
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
