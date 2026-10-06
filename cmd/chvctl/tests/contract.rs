@@ -44,14 +44,16 @@
 //!   either chvctl's columns or the BFF's response shape drift, the row
 //!   fails.
 //!
-//! Row taxonomy at main (design §2 is the authority):
+//! Row taxonomy (design §2 is the authority):
 //! - GREEN rows: the command's route, method, field names, mutation
-//!   forwarding, and display columns all match the BFF today.
+//!   forwarding, and display columns all match the BFF.
 //! - PINNED-BROKEN rows: known drift, pinned as it behaves TODAY with a
 //!   TODO referencing the design §2 section and the PR that flips the
-//!   row (PR 4 migrate reads). The harness must pass at
-//!   main — red-where-known means asserting the current broken
-//!   behavior, not failing.
+//!   row. The harness must pass at main — red-where-known means
+//!   asserting the current broken behavior, not failing. After PR 4
+//!   there are NONE left: every row in this file is green (39 rows),
+//!   which is the campaign's terminal state — any future drift fails
+//!   the suite outright instead of needing a new pin.
 //!
 //! PR 2 (the #372 live-path fixes) flipped the fixable red pins green
 //! and added the DP9 rows:
@@ -66,7 +68,7 @@
 //!   --disk-size-gb/--cloud-init` (green on a local-reporting node, and
 //!   the unoffered-class 400 with zero journaled rows).
 //!
-//! PR 3 (this change, the #372 dead-group removals) removed the
+//! PR 3 (landed, #520 — the #372 dead-group removals) removed the
 //! `storage` and `backup` command groups (design §2.2/DP3 and §2.4/DP5):
 //! every subcommand 404'd on routes that do not exist, and the removals
 //! are CLI-surface only — the BFF's `/v1/storage-pools` and
@@ -77,10 +79,27 @@
 //! argument parsing with "unrecognized subcommand" — truthful (design
 //! residual risk 2).
 //!
-//! Pinned-broken rows remaining in this file:
-//! - `migrate` group — 404 on all four subcommands (§2.3) → PR 4
-//!   (repoint start/cancel + the optional viewer-tier read routes; the
-//!   rows stay red-pinned and untouched here).
+//! PR 4 (this change, the campaign's final PR) repointed the `migrate`
+//! group (design §2.3/DP4 + DP4b) — the last four red pins, all green
+//! now, zero pinned-broken rows remain:
+//! - `migrate start` sends the vm-mutate migrate body
+//!   (`POST /v1/vms/mutate`, `target_node_id` — the path `vm migrate`
+//!   already drove; the old `POST /v1/migrations` route never existed);
+//! - `migrate cancel` calls the CP admin-tier
+//!   `POST /admin/migrations/{id}/cancel` (admin token; the harness has
+//!   served `admin_router` for exactly this row since PR 1);
+//! - `migrate status`/`list` read the new viewer-tier
+//!   `GET /v1/migrations[/{id}]` routes (DP4b, pinned server-side by
+//!   `crates/chv-webui-bff/tests/migrations_read_routes.rs`).
+//!
+//! The vm-mutate path is consumed unchanged; the admin router is
+//! consumed with ONE registration fix this row forced (see the
+//! `api/router.rs` comment): the cancel route was spelled
+//! `/admin/migrations/{id}/cancel`, and axum 0.7's matchit has no brace
+//! path-param syntax — the route registered a literal `{id}` segment
+//! and could never match, so the pre-fix row 404'd against the CP's
+//! own fallback. Now `:id`; the two new read routes are additive and
+//! viewer-tier.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -518,6 +537,34 @@ impl Harness {
         .await
         .expect("seed operation");
     }
+
+    /// A migration row for the migrate status/cancel/list rows (the
+    /// `0038_migration_operations.sql` shape): VM `vm-1` moving `n-1`
+    /// → `n-2`, referencing its own operation row. `phase` must be
+    /// NON-terminal for the cancel row (`request_migration_cancel`
+    /// answers `AlreadyTerminal` — still a 2xx, but the row asserts
+    /// the flag actually landed).
+    async fn seed_migration(&self, migration_id: &str, phase: &str) {
+        sqlx::query(
+            "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, requested_at, created_at, updated_at) \
+             VALUES (?, ?, 'vm', 'vm-1', 'MigrateVm', 'Running', 'u-operator', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(format!("op-{migration_id}"))
+        .bind(format!("contract-{migration_id}"))
+        .execute(&self.pool)
+        .await
+        .expect("seed migration operation");
+        sqlx::query(
+            "INSERT INTO migrations (migration_id, operation_id, vm_id, source_node_id, destination_node_id, phase, bytes_transferred, total_bytes, convergence_round, dirty_blocks_remaining) \
+             VALUES (?, ?, 'vm-1', 'n-1', 'n-2', ?, 500, 1000, 2, 7)",
+        )
+        .bind(migration_id)
+        .bind(format!("op-{migration_id}"))
+        .bind(phase)
+        .execute(&self.pool)
+        .await
+        .expect("seed migration");
+    }
 }
 
 /// The BFF test-suite `AppState` builder (`tests/volume_snapshot_clone.rs`
@@ -555,6 +602,19 @@ fn build_state(pool: sqlx::SqlitePool, mutations: Arc<RecordingMutations>) -> Ap
 async fn list_items(client: &BffClient, path: &str) -> Vec<Value> {
     let resp = client
         .post(path, &serde_json::json!({}))
+        .await
+        .expect("list request through the harness server");
+    resp.get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The GET form of [`list_items`] — for the REST-shaped read routes
+/// (`GET /v1/migrations`, #372 DP4b).
+async fn get_items(client: &BffClient, path: &str) -> Vec<Value> {
+    let resp = client
+        .get(path)
         .await
         .expect("list request through the harness server");
     resp.get("items")
@@ -752,7 +812,13 @@ async fn vm_create_row() {
 /// so #516's create-side capability check accepts the offered class.
 /// Shape probes mirror the base row: a BFF-side rename of any of the
 /// four field names would silently default it and fail the round-trip
-/// assertions below.
+/// assertions below. The `--storage-class` input deliberately carries a
+/// trailing space: the Create arm trims the flag value before
+/// validating and before sending (parity with the BFF's own
+/// trim-before-check — e.g. a shell tab-completion trailing space), and
+/// this row is the trim's end-to-end pin — dropping the arm's trim
+/// flips this row red (the exact-match client-side validator rejects
+/// the untrimmed value; #519 second-pass review NIT).
 #[tokio::test]
 async fn vm_create_storage_class_row() {
     let h = Harness::start().await;
@@ -770,7 +836,10 @@ async fn vm_create_storage_class_row() {
             image: Some("default".to_string()),
             network: Some("default".to_string()),
             node: Some("n-local".to_string()),
-            storage_class: Some("local".to_string()),
+            // Trailing whitespace ON PURPOSE — see the doc comment: the
+            // trimmed value ("local") is what must reach the wire and
+            // the journaled boot volume.
+            storage_class: Some("local ".to_string()),
             disk_size_gb: Some(5),
             cloud_init: Some("#cloud-config\n".to_string()),
         },
@@ -1541,20 +1610,25 @@ async fn user_delete_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Rows — migrate group (all 404-pinned; design §2.3/DP4)
+// Rows — migrate group (all GREEN since the PR 4 repoint; design
+// §2.3/DP4 + DP4b)
 // ---------------------------------------------------------------------------
 
-/// `chvctl migrate start` — PINNED-BROKEN (design §2.3/DP4): chvctl
-/// calls `POST /v1/migrations` with `{vm_id, target_node}`; the real
-/// entry point is the vm-mutate migrate action (`target_node_id`) that
-/// `chvctl vm migrate` already drives. PR 4 repoints the command and
-/// flips this row (PR 3 removes it if the repoint is declined).
+/// `chvctl migrate start` — GREEN since the PR 4 repoint (design
+/// §2.3/DP4): the command drives the vm-mutate migrate path —
+/// `POST /v1/vms/mutate` with `{vm_id, action:"migrate",
+/// target_node_id}` — the exact path `chvctl vm migrate` already drove
+/// (the pre-fix command called `POST /v1/migrations` with
+/// `{vm_id, target_node}`, a route and field that never existed).
+/// Forwarded to the mutation service like `vm migrate`.
 #[tokio::test]
 async fn migrate_start_row() {
     let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_vm("vm-1").await;
     let token = h.seed_jwt_as("operator").await;
 
-    let result = migrate::execute(
+    migrate::execute(
         &h.client(Some(token)),
         migrate::MigrateCommands::Start {
             vm_id: "vm-1".to_string(),
@@ -1562,70 +1636,120 @@ async fn migrate_start_row() {
         },
         &OutputFormat::Json,
     )
-    .await;
-    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin.
-    assert_api_error(result, 404);
+    .await
+    .expect("chvctl migrate start against POST /v1/vms/mutate");
+    h.mutations.assert_recorded("migrate_vm:vm-1:n-2");
 }
 
-/// `chvctl migrate status` — PINNED-BROKEN (design §2.3/DP4): no
-/// migration read route exists. PR 4 repoints the subcommand
-/// (viewer-tier read routes optional per DP4b).
+/// `chvctl migrate status` — GREEN since the PR 4 repoint (design
+/// §2.3/DP4b): the command's `GET /v1/migrations/{id}` target finally
+/// exists as a viewer-tier read route over the real `migrations`
+/// table (pinned server-side by
+/// `crates/chv-webui-bff/tests/migrations_read_routes.rs`).
 #[tokio::test]
 async fn migrate_status_row() {
     let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_vm("vm-1").await;
+    h.seed_migration("mig-1", "PreCopyDisk").await;
     let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
 
-    let result = migrate::execute(
-        &h.client(Some(token)),
+    migrate::execute(
+        &client,
         migrate::MigrateCommands::Status {
             migration_id: "mig-1".to_string(),
         },
         &OutputFormat::Json,
     )
-    .await;
-    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin.
-    assert_api_error(result, 404);
+    .await
+    .expect("chvctl migrate status against GET /v1/migrations/{id}");
+
+    // The row the command printed, re-fetched through the same client:
+    // the migrations table's own column names.
+    let resp = client
+        .get("/v1/migrations/mig-1")
+        .await
+        .expect("migration detail through the harness server");
+    assert_eq!(
+        resp.get("migration_id").and_then(Value::as_str),
+        Some("mig-1")
+    );
+    assert_eq!(
+        resp.get("phase").and_then(Value::as_str),
+        Some("PreCopyDisk")
+    );
 }
 
-/// `chvctl migrate cancel` — PINNED-BROKEN (design §2.3/DP4): chvctl
-/// calls `POST /v1/migrations/{id}/cancel`; the real route is
-/// `POST /admin/migrations/{id}/cancel` on the CP admin router (admin
-/// tier) — which this harness deliberately serves, so the repointed row
-/// in PR 4 flips green without harness changes.
+/// `chvctl migrate cancel` — GREEN since the PR 4 repoint (design
+/// §2.3/DP4): the command calls the CP admin-tier
+/// `POST /admin/migrations/{id}/cancel` — which this harness has
+/// served since PR 1 for exactly this row — with an admin token (an
+/// operator token would 403). The cancel is cooperative and
+/// best-effort; the row asserts it actually landed: the flag column
+/// the migration loop polls is set on the seeded (non-terminal)
+/// migration.
 #[tokio::test]
 async fn migrate_cancel_row() {
     let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_vm("vm-1").await;
+    h.seed_migration("mig-1", "PreCopyDisk").await;
     let token = h.seed_jwt_as("admin").await;
 
-    let result = migrate::execute(
+    migrate::execute(
         &h.client(Some(token)),
         migrate::MigrateCommands::Cancel {
             migration_id: "mig-1".to_string(),
         },
         &OutputFormat::Json,
     )
-    .await;
-    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin — the
-    // cancel capability exists on /admin/migrations/{id}/cancel.
-    assert_api_error(result, 404);
+    .await
+    .expect("chvctl migrate cancel against POST /admin/migrations/{id}/cancel");
+
+    let flagged: Option<String> = sqlx::query_scalar(
+        "SELECT cancel_requested_at FROM migrations WHERE migration_id = 'mig-1'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("seeded migration row");
+    assert!(
+        flagged.is_some(),
+        "the cancel request must set the flag the migration loop polls"
+    );
 }
 
-/// `chvctl migrate list` — PINNED-BROKEN (design §2.3/DP4): no migration
-/// list route exists. PR 4 repoints the subcommand (viewer-tier list
-/// route optional per DP4b).
+/// `chvctl migrate list` — GREEN since the PR 4 repoint (design
+/// §2.3/DP4b): the viewer-tier `GET /v1/migrations` list route; the
+/// columns are the migrations table's own names (the pre-fix command
+/// read a `migrations` key the BFF never served and printed phantom
+/// `source_node`/`target_node`/`status`/`progress` columns).
 #[tokio::test]
 async fn migrate_list_row() {
     let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_vm("vm-1").await;
+    h.seed_migration("mig-1", "PreCopyDisk").await;
+    h.seed_migration("mig-2", "ConvergingDisk").await;
     let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
 
-    let result = migrate::execute(
-        &h.client(Some(token)),
-        migrate::MigrateCommands::List,
-        &OutputFormat::Json,
-    )
-    .await;
-    // TODO(#372 PR 4, design §2.3/DP4): the 404 IS the drift pin.
-    assert_api_error(result, 404);
+    migrate::execute(&client, migrate::MigrateCommands::List, &OutputFormat::Json)
+        .await
+        .expect("chvctl migrate list against GET /v1/migrations");
+
+    let items = get_items(&client, "/v1/migrations").await;
+    assert_columns_present(
+        &items,
+        &[
+            "migration_id",
+            "vm_id",
+            "source_node_id",
+            "destination_node_id",
+            "phase",
+            "cancel_requested",
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------

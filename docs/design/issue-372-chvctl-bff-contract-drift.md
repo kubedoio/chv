@@ -145,6 +145,13 @@ would be a broken capability with real state behind it, not a phantom.
 
 ### 2.5 `task watch` — polls a list endpoint that cannot answer; hangs forever
 
+> **Superseded (2026-10-06, PR 2 / #519):** the findings in this
+> section describe the pre-fix command and are retained as the
+> historical record. `task watch` now polls the new
+> `POST /v1/tasks/get` (the house `/get` convention), matches the real
+> capitalized status vocabulary, and is bounded by `--timeout`
+> (default 15 min) — see DP6 below and the §5.1 decision record.
+
 chvctl (`cmd/chvctl/src/commands/task.rs:37-59`) polls `POST /v1/tasks`
 with `{"task_id": ...}` (:41), reads a top-level `status` (:43-46), exits
 on `"completed"|"failed"|"cancelled"` (:50-51). The handler

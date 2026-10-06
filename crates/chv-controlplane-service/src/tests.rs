@@ -266,6 +266,93 @@ async fn test_admin_node_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Assert the handler's own 404 body, not the router fallback's
+    // NOT_IMPLEMENTED shape: before the `{id}` → `:id` fix the route
+    // never matched and this test passed vacuously via the fallback —
+    // the body shape is what distinguishes them.
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "not found");
+}
+
+#[tokio::test]
+async fn test_admin_node_get_by_id_resolves() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-http', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = crate::api::router::admin_router(
+        test_app_state(pool),
+        crate::convergence_metrics::new_shared(),
+    );
+
+    let token = test_admin_token();
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/admin/nodes/node-http")
+                .header("authorization", format!("Bearer {}", token))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Pins the route registration: with the old `{id}` brace spelling
+    // (a literal segment under matchit 0.7.3) this request fell through
+    // to the NOT_IMPLEMENTED fallback and 404'd.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["node"]["node_id"], "node-http");
+}
+
+#[tokio::test]
+async fn test_admin_operation_get_by_id_resolves() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query(
+        "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-http', 'idem-op-http', 'node', 'node-http', 'Test', 'Pending', strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = crate::api::router::admin_router(
+        test_app_state(pool),
+        crate::convergence_metrics::new_shared(),
+    );
+
+    let token = test_admin_token();
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/admin/operations/op-http")
+                .header("authorization", format!("Bearer {}", token))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Same registration pin as the node sibling above.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["operation"]["operation_id"], "op-http");
 }
 
 #[tokio::test]

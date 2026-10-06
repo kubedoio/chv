@@ -139,7 +139,7 @@ journalctl -u chv-nwd -f
 | `chvctl network` | `list`, `create`, `delete` | Network management |
 | `chvctl task` | `list`, `watch` | Task/operation inspection |
 | `chvctl user` | `list`, `create`, `delete` | User management (admin) |
-| `chvctl migrate` | `start`, `status`, `cancel`, `list` | Live migration control (currently 404 — repoint pending #372) |
+| `chvctl migrate` | `start`, `status`, `cancel`, `list` | Live migration control (start via the vm-mutate path; cancel is admin-tier; status/list on the viewer-tier migration read routes — #372) |
 | `chvctl health` | `check`, `report`, `cluster` | Cluster health |
 | `chvctl version` | — | Show version and build info |
 
