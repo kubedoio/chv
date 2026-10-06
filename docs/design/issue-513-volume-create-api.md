@@ -537,11 +537,18 @@ must not regress by shipping an unpinned new command.
 **DP10 — UI: wire the dead button; fix the phantom column.**
 *Recommendation:* the "Allocate Block" button (`+page.svelte:87-93`)
 grows a create modal (name, node, size, storage class) posting to the
-new route via `mutateWithRefresh()`; the same PR fixes the "Storage
+new route via `mutateWithRefresh()`; ~~the same PR fixes the "Storage
 Driver" column to read the served field (add `storage_class` to the
 list response — one SELECT column, `volumes.rs:38-63` — and read it
 with a `local`-for-empty rendering, deleting the hard-coded
-`'LOCAL_LVM'` fallback, `+page.svelte:78`). *Alternative:* CLI-first,
+`'LOCAL_LVM'` fallback, `+page.svelte:78`).~~
+**[Corrected 2026-10-06, #528:]** the column was REMOVED, not
+repointed — the list API serves neither `backend` nor
+`storage_class` (only the detail route carries the class), so the
+column fabricated `'LOCAL_LVM'` for every row. The maintainer
+ratified removal over the one-field BFF list-route addition and
+declined a follow-up issue (2026-10-06); the per-volume class
+remains visible on the volume detail page. *Alternative:* CLI-first,
 UI later — acceptable; but the dead button is a standing lie on a
 shipped page and the fix is small.
 
@@ -599,8 +606,10 @@ New per PR:
   `volume_create_storage_class_rejection_row` (400 + zero journaling);
   `volume_create_requires_node_row` (400). cli-spec aligned in the
   same PR (the #372 lesson: the spec is a third voice that drifts).
-- **PR 4 (optional UI):** modal posts and the list refreshes; the
-  Storage Driver column renders `storage_class`/`local`.
+- **PR 4 (optional UI):** modal posts and the list refreshes; ~~the
+  Storage Driver column renders `storage_class`/`local`.~~
+  **[Corrected 2026-10-06, #528:]** the column was removed per
+  maintainer ratification (see the DP10 correction above).
 
 Validation ladder: `cargo test -p chv-agent-core` /
 `-p chv-controlplane-service` / `-p chv-webui-bff` / `-p chvctl`,

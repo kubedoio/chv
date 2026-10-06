@@ -5,6 +5,8 @@ import type {
 	ListVolumesResponse,
 	GetVolumeRequest,
 	GetVolumeResponse,
+	CreateVolumeRequest,
+	CreateVolumeResponse,
 	MutateVolumeRequest,
 	MutateVolumeResponse
 } from './types';
@@ -19,6 +21,14 @@ export async function listVolumes(req: ListVolumesRequest, token?: string): Prom
 
 export async function getVolume(req: GetVolumeRequest, token?: string): Promise<GetVolumeResponse> {
 	return bffFetch<GetVolumeResponse>(BFFEndpoints.getVolume, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+export async function createVolume(req: CreateVolumeRequest, token?: string): Promise<CreateVolumeResponse> {
+	return bffFetch<CreateVolumeResponse>(BFFEndpoints.createVolume, {
 		method: 'POST',
 		body: JSON.stringify(req),
 		token

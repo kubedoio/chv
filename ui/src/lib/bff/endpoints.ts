@@ -30,6 +30,7 @@ export const BFFEndpoints = {
 	deleteNetwork: '/v1/networks/delete',
 	listVolumes: '/v1/volumes',
 	getVolume: '/v1/volumes/get',
+	createVolume: '/v1/volumes/create',
 	mutateVolume: '/v1/volumes/mutate',
 	listEvents: '/v1/events',
 	listVmEvents: '/v1/vms/events',

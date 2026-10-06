@@ -331,6 +331,26 @@ export type MutateVolumeResponse = {
 	summary: string;
 };
 
+// #513 DP3: the create-surface contract. `capacity_bytes` is i64 on the
+// wire (1 ..= 64 TiB); `storage_class` is optional (absent/blank = the
+// node's default, local). The reserved keys `attached_vm_id` and
+// `seed_image_ref` are NOT part of this type — the UI must never send
+// them (the BFF rejects both loudly with a 400).
+export type CreateVolumeRequest = {
+	name: string;
+	node_id: string;
+	capacity_bytes: number;
+	storage_class?: string;
+};
+
+export type CreateVolumeResponse = {
+	accepted: boolean;
+	task_id: string;
+	volume_id: string;
+	summary: string;
+	next_refresh_path: string;
+};
+
 export type VolumeListItem = {
 	volume_id: string;
 	name: string;
@@ -342,7 +362,6 @@ export type VolumeListItem = {
 	status: string;
 	last_task: string;
 	alerts?: number;
-	backend?: string;
 	policy?: string;
 };
 
