@@ -38,11 +38,14 @@ spellings the binary never accepted.
 
 ### Volumes
 - `chvctl volume list` — List volumes
+- `chvctl volume create <name> --node <node_id> --size <bytes|K|M|G|T> [--storage-class <local|iscsi|ceph|lvm>]` — Create a standalone data volume on the named node. `--node` is required: standalone volumes have no VM to place them and there is no default placement node (a node the inventory says does not offer the requested class rejects the create). `--size` is **bytes-denominated** — deliberately unlike `vm create`'s GiB-valued `--disk-size-gb`: a bare number is bytes and the `K`/`M`/`G`/`T` suffixes are binary (KiB/MiB/GiB/TiB), e.g. `--size 10G` = 10737418240 bytes, bounded 1 byte ..= 64 TiB (the bound and the class vocabulary are validated client-side against the same shared definitions the BFF enforces). The response carries the server-minted `volume_id` and a `task_id` to feed `chvctl task watch`. Attach-at-create is not offered — `attached_vm_id` is a reserved key the BFF rejects with a 400 naming the mutate-attach path (create the volume, then attach via `POST /v1/volumes/mutate`); image seeding is likewise not offered (`seed_image_ref` is a reserved key rejected with a 400)
 - `chvctl volume snapshot <volume_id> --name <snapshot>` — Create a volume snapshot
 - `chvctl volume clone <volume_id> --name <target_volume_id>` — Clone a volume
 
-Volume create/show/delete are not implemented; the volume-create API is
-tracked in #513.
+Volume show/delete are not implemented; volume delete is tracked in
+#522. Created volumes are retained indefinitely (there is no delete
+surface) — on LVM-class nodes a create provisions a real LV at create
+time.
 
 ### Images
 - `chvctl image list` — List disk images
