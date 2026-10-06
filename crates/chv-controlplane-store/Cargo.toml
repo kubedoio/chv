@@ -14,6 +14,11 @@ tempfile = { workspace = true }
 [dependencies]
 chv-common = { path = "../chv-common" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
+# #379 DP4 follow-up: the shared accept-time class-capability predicate
+# (`node_offers_storage_class`) used by `NodeRepository`'s check
+# composition — the same vocabulary home the BFF and the lifecycle
+# service validate class strings against, never a local copy.
+chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 aes-gcm = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hex = { workspace = true }

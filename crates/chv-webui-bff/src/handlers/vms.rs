@@ -514,6 +514,36 @@ pub async fn create_vm(
         }
     };
 
+    // #379 DP4 (#512 second-pass follow-up): the accept-time
+    // node-capability check, on the production create surface. The
+    // lifecycle RPC's `ensure_node_offers_storage_class` had no
+    // production caller — this handler journals directly — so a create
+    // requesting a class the target node does not offer (or a classless
+    // disk — NULL = local — on an LVM-only node) was accepted with 200
+    // and failed only at the agent/stord open. Same discipline as the
+    // vocabulary check above and the attach-side path: the single
+    // shared composition (`NodeRepository::node_storage_class_rejection`,
+    // the exact code the lifecycle service calls) checks the create's
+    // one disk class against the placement node's advertised
+    // `storage_classes`, BEFORE the transaction — a rejection writes no
+    // vms/vm_desired_state/volumes/volume_desired_state/operations
+    // rows. Fails OPEN on a node that never reported classes,
+    // byte-exactly the lifecycle-side semantics: an unreported node
+    // never rejects (stord's own backend validation at the open is the
+    // backstop). A node_id that does not parse as a NodeId skips the
+    // check (fail-open) and keeps today's behavior — the check adds a
+    // rejection mode, never a new parse error.
+    if let Ok(node) = chv_controlplane_types::domain::NodeId::new(node_id.clone()) {
+        if let Some(reason) = state
+            .node_repo
+            .node_storage_class_rejection(&node, storage_class.as_deref(), "vm create")
+            .await?
+        {
+            tracing::warn!(%node_id, class = ?storage_class, "create_vm: rejecting storage class the node does not offer");
+            return Err(BffError::BadRequest(reason));
+        }
+    }
+
     // Use BEGIN IMMEDIATE to acquire SQLite's RESERVED lock at tx start, serializing
     // concurrent writers from the get-go. This closes the quota-check TOCTOU window:
     // without IMMEDIATE, two concurrent requests can both pass quota check inside their

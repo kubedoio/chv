@@ -420,18 +420,20 @@ impl LifecycleServiceImplementation {
         requested: Option<&str>,
         surface: &str,
     ) -> Result<(), ControlPlaneServiceError> {
-        let advertised = self.node_repo.get_storage_classes(node_id).await?;
-        match chv_hypervisor_api::resources::node_offers_storage_class(&advertised, requested) {
-            Some(false) => Err(ControlPlaneServiceError::InvalidArgument(format!(
-                "node {} does not offer storage class {} (advertised: {}) for {}",
-                node_id,
-                requested.unwrap_or(chv_hypervisor_api::resources::DEFAULT_BACKEND_CLASS),
-                advertised.join(", "),
-                surface,
-            ))),
-            // Some(true): definite match. None: the node never reported
-            // classes — fail OPEN (see above).
-            Some(true) | None => Ok(()),
+        // The fetch + decide + message composition lives on the store's
+        // NodeRepository (`node_storage_class_rejection`) so the BFF's
+        // create surface — the production create path, which cannot
+        // reach this crate's service — shares this exact decision
+        // (#512 second-pass follow-up). This wrapper only maps the
+        // rejection to the RPC's `InvalidArgument` (HTTP 400 through
+        // the BFF's `map_ack`).
+        match self
+            .node_repo
+            .node_storage_class_rejection(node_id, requested, surface)
+            .await?
+        {
+            Some(reason) => Err(ControlPlaneServiceError::InvalidArgument(reason)),
+            None => Ok(()),
         }
     }
 
