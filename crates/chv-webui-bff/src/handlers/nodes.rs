@@ -245,7 +245,9 @@ pub async fn get_node(
                     status,
                     operation_type AS summary,
                     operation_type AS operation,
-                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
+                    error_code,
+                    error_message
                 FROM operations
                 WHERE resource_kind = 'node' AND resource_id = $1
                 ORDER BY requested_at DESC
@@ -266,6 +268,11 @@ pub async fn get_node(
                         "summary": t.summary,
                         "operation": t.operation,
                         "started_unix_ms": t.started_unix_ms,
+                        // #502: NULL until a terminal failure records a
+                        // cause — passed through verbatim, never
+                        // fabricated.
+                        "error_code": t.error_code,
+                        "error_message": t.error_message,
                     })
                 })
                 .collect();
@@ -434,4 +441,7 @@ struct RecentTaskRow {
     summary: String,
     operation: String,
     started_unix_ms: Option<i64>,
+    // #502: the terminal-failure cause the fast-fail work journals.
+    error_code: Option<String>,
+    error_message: Option<String>,
 }

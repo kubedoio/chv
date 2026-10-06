@@ -18,6 +18,30 @@ const TERMINAL_STATUSES: [&str; 6] = [
     "Conflict",
 ];
 
+/// The recorded terminal-failure cause of an operation row (#502): the
+/// BFF's task-carrying responses surface the journaled
+/// `error_code`/`error_message` pair (the #498/#500 fast-fail columns
+/// — `UNSUPPORTED_BY_AGENT`, `DISPATCH_FAILED`, `AGENT_REJECTED`,
+/// `MIGRATION_FAILED`, … plus the agents' verbatim refusal text).
+/// NULL until a failure records them; never fabricated here — a
+/// terminal op with no recorded cause renders no cause line at all.
+pub fn failure_cause(detail: &serde_json::Value) -> Option<String> {
+    let code = detail
+        .get("error_code")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let message = detail
+        .get("error_message")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    match (code, message) {
+        (Some(code), Some(message)) => Some(format!("{code} — {message}")),
+        (Some(code), None) => Some(code.to_string()),
+        (None, Some(message)) => Some(message.to_string()),
+        (None, None) => None,
+    }
+}
+
 #[derive(Subcommand)]
 pub enum TaskCommands {
     /// List all tasks/operations
@@ -90,6 +114,13 @@ pub async fn execute(
                     break;
                 }
                 if TERMINAL_STATUSES.contains(&status) {
+                    // #502: surface WHY the task failed terminally —
+                    // the journaled code plus the agents' verbatim
+                    // refusal text, printed before the full detail and
+                    // the non-zero exit (which is unchanged).
+                    if let Some(cause) = failure_cause(&detail) {
+                        println!("  Cause: {cause}");
+                    }
                     output::print_value(&detail, format);
                     return Err(CliError::Task(format!(
                         "task {task_id} reached terminal status {status}"

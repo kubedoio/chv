@@ -44,7 +44,9 @@ pub async fn list_tasks(
             resource_id,
             requested_by AS actor,
             CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
-            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms
+            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms,
+            error_code,
+            error_message
         FROM operations
         WHERE 1=1
         "#,
@@ -87,7 +89,7 @@ pub async fn list_tasks(
     let offset = (page - 1) * page_size;
 
     let count_sql = query_sql
-        .replace("SELECT\n            operation_id AS task_id,\n            status,\n            operation_type AS operation,\n            resource_kind,\n            resource_id,\n            requested_by AS actor,\n            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,\n            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms",
+        .replace("SELECT\n            operation_id AS task_id,\n            status,\n            operation_type AS operation,\n            resource_kind,\n            resource_id,\n            requested_by AS actor,\n            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,\n            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms,\n            error_code,\n            error_message",
                  "SELECT COUNT(*)")
         .replace(" ORDER BY requested_at DESC LIMIT ? OFFSET ?", "");
 
@@ -126,6 +128,12 @@ pub async fn list_tasks(
                 "actor": r.actor.unwrap_or_default(),
                 "started_unix_ms": r.started_unix_ms,
                 "finished_unix_ms": r.finished_unix_ms,
+                // #502: the terminal-failure cause the fast-fail work
+                // (#498/#500) journals — NULL until a failure records
+                // it, passed through verbatim (never fabricated, never
+                // a generic placeholder).
+                "error_code": r.error_code,
+                "error_message": r.error_message,
             })
         })
         .collect();
@@ -171,7 +179,9 @@ pub async fn get_task(
             resource_id,
             requested_by AS actor,
             CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
-            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms
+            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms,
+            error_code,
+            error_message
         FROM operations
         WHERE operation_id = ?
         "#,
@@ -192,6 +202,12 @@ pub async fn get_task(
                 "actor": r.actor.unwrap_or_default(),
                 "started_unix_ms": r.started_unix_ms,
                 "finished_unix_ms": r.finished_unix_ms,
+                // #502: same two keys as the list items — the item
+                // shape here is byte-identical to list_tasks' by
+                // design (#372 DP6), so the terminal-failure cause
+                // rides along (NULL until a failure records it).
+                "error_code": r.error_code,
+                "error_message": r.error_message,
             }
         }))),
         None => Err(BffError::NotFound(format!("task {} not found", task_id))),
@@ -238,7 +254,9 @@ pub async fn stream_tasks(
                     operation_type AS summary,
                     resource_kind,
                     resource_id,
-                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS event_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS event_unix_ms,
+                    error_code,
+                    error_message
                 FROM operations
                 WHERE requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 seconds')
                 "#,
@@ -293,6 +311,10 @@ pub async fn stream_tasks(
                     "resource_kind": r.resource_kind,
                     "resource_id": r.resource_id.unwrap_or_default(),
                     "event_unix_ms": r.event_unix_ms,
+                    // #502: the terminal-failure cause, same pass-through
+                    // discipline as the list/get items above.
+                    "error_code": r.error_code,
+                    "error_message": r.error_message,
                 })).collect::<Vec<Value>>()
             });
 
@@ -315,6 +337,8 @@ struct TaskStreamRow {
     resource_kind: String,
     resource_id: Option<String>,
     event_unix_ms: Option<i64>,
+    error_code: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -327,4 +351,6 @@ struct TaskRow {
     actor: Option<String>,
     started_unix_ms: Option<i64>,
     finished_unix_ms: Option<i64>,
+    error_code: Option<String>,
+    error_message: Option<String>,
 }

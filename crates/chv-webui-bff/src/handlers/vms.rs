@@ -195,7 +195,9 @@ pub async fn get_vm(
                     operation_id AS task_id,
                     status,
                     operation_type AS summary,
-                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
+                    error_code,
+                    error_message
                 FROM operations
                 WHERE resource_kind = 'vm' AND resource_id = $1
                 ORDER BY requested_at DESC
@@ -215,6 +217,11 @@ pub async fn get_vm(
                         "status": t.status,
                         "summary": t.summary,
                         "started_unix_ms": t.started_unix_ms,
+                        // #502: NULL until a terminal failure records a
+                        // cause — passed through verbatim, never
+                        // fabricated.
+                        "error_code": t.error_code,
+                        "error_message": t.error_message,
                     })
                 })
                 .collect();
@@ -1485,6 +1492,9 @@ struct RecentTaskRow {
     status: String,
     summary: String,
     started_unix_ms: i64,
+    // #502: the terminal-failure cause the fast-fail work journals.
+    error_code: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

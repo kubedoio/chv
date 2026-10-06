@@ -140,7 +140,9 @@ pub async fn get_overview(
             resource_kind,
             resource_id,
             operation_type AS operation,
-            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
+            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
+            error_code,
+            error_message
         FROM operations
         ORDER BY requested_at DESC
         LIMIT 5
@@ -164,6 +166,10 @@ pub async fn get_overview(
                 "resource_id": r.resource_id.unwrap_or_default(),
                 "operation": r.operation,
                 "started_unix_ms": r.started_unix_ms.unwrap_or(0),
+                // #502: NULL until a terminal failure records a cause —
+                // passed through verbatim, never fabricated.
+                "error_code": r.error_code,
+                "error_message": r.error_message,
             })
         })
         .collect();
@@ -208,4 +214,7 @@ struct RecentTaskRow {
     resource_id: Option<String>,
     operation: String,
     started_unix_ms: Option<i64>,
+    // #502: the terminal-failure cause the fast-fail work journals.
+    error_code: Option<String>,
+    error_message: Option<String>,
 }

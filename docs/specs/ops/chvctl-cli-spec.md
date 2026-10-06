@@ -63,7 +63,7 @@ the platform today and the flag was silently ignored when it existed
 
 ### Tasks / Operations
 - `chvctl task list` — List tasks/operations
-- `chvctl task watch <task_id> [--timeout <seconds>]` — Poll a task until it reaches a terminal status (`Succeeded` exits 0; `Failed`/`Cancelled`/`Rejected`/`Stale`/`Conflict` exit non-zero). The watch is bounded: it gives up after `--timeout` seconds (default 900 = 15 minutes)
+- `chvctl task watch <task_id> [--timeout <seconds>]` — Poll a task until it reaches a terminal status (`Succeeded` exits 0; `Failed`/`Cancelled`/`Rejected`/`Stale`/`Conflict` exit non-zero). The watch is bounded: it gives up after `--timeout` seconds (default 900 = 15 minutes). On a terminally-failed task the watch prints the journaled cause before exiting (`Cause: <error_code> — <error_message>`, e.g. `UNSUPPORTED_BY_AGENT — snapshot_volume is unsupported in core-managed mode`) — the code and the agents' verbatim refusal text the control plane records at terminal failure (#502); a terminal task with no recorded cause prints no cause line, never a placeholder
 
 ### Users (Admin)
 - `chvctl user list` — List users
