@@ -1143,6 +1143,7 @@ dependencies = [
  "chv-common",
  "chv-controlplane-service",
  "chv-controlplane-store",
+ "chv-hypervisor-api",
  "chv-webui-bff",
  "chv-webui-bff-api",
  "clap",

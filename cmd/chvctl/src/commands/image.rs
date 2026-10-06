@@ -39,11 +39,11 @@ pub async fn execute(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            output::print_list(
-                &items,
-                &["image_id", "name", "format", "size", "status"],
-                format,
-            );
+            // `format` was a phantom column — the list handler never
+            // served it (#372 DP10/§2.7(a)); the BFF's keys are
+            // image_id/name/size/status/os/version/usage_count/
+            // last_updated.
+            output::print_list(&items, &["image_id", "name", "size", "status"], format);
         }
         ImageCommands::Import {
             name,
@@ -54,11 +54,12 @@ pub async fn execute(
             // chvctl builds sent "url", which the server silently ignored
             // (kubedoio/chv#339 — the URL was dropped and the image could
             // never be resolved at vm create). The server also accepts
-            // "url" as an alias for those older clients.
+            // "url" as an alias for those older clients — chvctl no longer
+            // sends the redundant second key (#372 DP10); the alias stays
+            // server-side.
             let body = json!({
                 "name": name,
                 "source_url": url,
-                "url": url,
                 "format": img_format,
             });
             let resp = client.post("/v1/images/import", &body).await?;

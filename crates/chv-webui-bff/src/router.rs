@@ -110,6 +110,7 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::events::list_events_for_vm),
         )
         .route("/v1/tasks", post(crate::handlers::tasks::list_tasks))
+        .route("/v1/tasks/get", post(crate::handlers::tasks::get_task))
         .route(
             "/v1/tasks/stream",
             axum::routing::get(crate::handlers::tasks::stream_tasks),

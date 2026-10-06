@@ -21,8 +21,12 @@ pub enum UserCommands {
     },
     /// Delete a user
     Delete {
-        /// Username
-        username: String,
+        /// User identifier (from `user list`) — the BFF's delete contract
+        /// key (#372 DP2; the command previously sent `username`, which
+        /// the handler rejected with 400 `missing user_id` on every
+        /// invocation — it had never worked, so there is no compat
+        /// surface)
+        user_id: String,
     },
 }
 
@@ -39,7 +43,13 @@ pub async fn execute(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            output::print_list(&items, &["username", "role", "created_at"], format);
+            // `user_id` is served by the list and makes the delete
+            // contract's key discoverable (#372 DP2).
+            output::print_list(
+                &items,
+                &["user_id", "username", "role", "created_at"],
+                format,
+            );
         }
         UserCommands::Create {
             username,
@@ -55,10 +65,12 @@ pub async fn execute(
             println!("User '{username}' created.");
             output::print_value(&resp, format);
         }
-        UserCommands::Delete { username } => {
-            let body = json!({ "username": username });
+        UserCommands::Delete { user_id } => {
+            // The BFF's delete_user requires `user_id` (self-delete guard
+            // on the JWT `sub`); `username` was read by nothing (#372 DP2).
+            let body = json!({ "user_id": user_id });
             client.post("/v1/users/delete", &body).await?;
-            println!("User '{username}' deleted.");
+            println!("User '{user_id}' deleted.");
         }
     }
     Ok(())
