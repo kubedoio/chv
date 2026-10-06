@@ -1,14 +1,11 @@
 use clap::{Parser, Subcommand};
 
-mod client;
-mod commands;
-mod config;
-mod output;
-
-use commands::{
+use chvctl::client;
+use chvctl::commands::{
     auth, backup, health, image, migrate, network, node, storage, task, user, vm, volume,
 };
-use output::OutputFormat;
+use chvctl::config;
+use chvctl::output::OutputFormat;
 
 #[derive(Parser)]
 #[command(

@@ -23,3 +23,25 @@ toml = "1.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# #372 contract-test harness (tests/contract.rs): drives the real command
+# path against a live BFF router. Dev-dependencies only — no production
+# dependency direction changes (nothing in the workspace depends on
+# chvctl, so there is no cycle). The list follows the #372 design §4
+# Option B, plus two additions the design left to implementation:
+# - chv-controlplane-service: admin_router(state, metrics) lives there
+#   (it merges bff_router and mounts /admin/migrations/{id}/cancel, the
+#   route the repointed `migrate cancel` row needs); the harness serves
+#   admin_router, not bff_router, for exactly that reason.
+# - chv-webui-bff-api: the MutationService response types the recording
+#   stub must construct.
+async-trait = { workspace = true }
+jsonwebtoken = { workspace = true }
+bcrypt = { workspace = true }
+sqlx = { workspace = true }
+axum = { workspace = true }
+chv-common = { path = "../../crates/chv-common" }
+chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
+chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
+chv-webui-bff = { path = "../../crates/chv-webui-bff" }
+chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
+
