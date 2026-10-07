@@ -3623,13 +3623,17 @@ mod tests {
     /// `closes`/`destroys` record the `close_volume`/`destroy_volume`
     /// calls, and `events` records the interleaved order of opens,
     /// closes, and destroys so the close→destroy sequence of the
-    /// `delete_volume` handler can be pinned.
+    /// `delete_volume` handler can be pinned. #540 adds `clones`: the
+    /// `prepare_clone` calls as `(source_volume_id, clone_name)` — the
+    /// clone target id the agent threads (the whole basis of the
+    /// carrier-locator dest) — plus its `prepare_clone:{id}` event.
     #[derive(Clone, Default)]
     struct StordOpenLog {
         opens: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
         open_options: Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
         closes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
         destroys: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+        clones: Arc<std::sync::Mutex<Vec<(String, String)>>>,
         events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -3820,9 +3824,28 @@ mod tests {
 
         async fn prepare_clone(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
+            req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            // #540: record the clone so the clone lifecycle test can pin
+            // the (source, target) pair the agent threaded — the target
+            // id IS the clone name stord materializes the carrier
+            // locator `{clone_id}.img` for.
+            let inner = req.into_inner();
+            self.opens
+                .clones
+                .lock()
+                .unwrap()
+                .push((inner.volume_id.clone(), inner.clone_name.clone()));
+            self.opens
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("prepare_clone:{}", inner.clone_name));
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
 
         async fn restore_snapshot(
@@ -5100,6 +5123,159 @@ mod tests {
                 "destroy:vol-e2e".to_string(),
             ],
             "the attached-then-detached lifecycle must interleave open→open→detach→close→destroy"
+        );
+    }
+
+    /// #540 end-to-end (the #539 pattern extended over the clone): a
+    /// standalone volume is cloned, the CLONE is attached, detached,
+    /// and deleted — and every name in the chain is the clone's
+    /// carrier locator `{clone_id}.img`. The agent's clone handler
+    /// threads `target_volume_id` as the clone name, so stord's
+    /// `prepare_clone` materializes the clone's real data at
+    /// `{clone_id}.img` (pinned at the backend tier by
+    /// `local_backend_prepare_clone_raw_file`); the attach (the CP
+    /// dispatch's standalone spec bytes, the #539 producer shape)
+    /// opens that SAME file instead of create-on-opening a fresh
+    /// empty one; the #522 delete's destroy then reclaims exactly
+    /// that file — the clone's real data, the #539-disclosed gap
+    /// closed. Red/green: reverting the local backend's clone dest to
+    /// the pre-#540 `{source}-{clone}.img` fails the backend-tier pin
+    /// (the attach open and the destroy still name `{clone_id}.img`,
+    /// so the composition is load-bearing); reverting the agent's
+    /// target-id threading fails the `clones` assertion.
+    ///
+    /// Scope note (the #539 test's discipline): this test drives the
+    /// REAL agent handlers against the recording mock stord with a
+    /// hard-coded CP-shaped attach spec — the CP producer's bytes are
+    /// pinned at the producer/orchestrator/BFF tiers, and the
+    /// filesystem-level "byte-identical to the source" claim is
+    /// pinned at the backend tier; the coverage composes. Embedded
+    /// (NULL-kind) clone targets are deliberately not driven here:
+    /// their attach still does not navigate the carrier locator (the
+    /// A1/A4 pre-existing breakage #540 discloses as residue).
+    #[tokio::test]
+    async fn standalone_clone_attach_then_detach_then_delete_reclaims_the_clones_real_file() {
+        let (server, opens, _dir) = create_volume_test_server().await;
+
+        // 1. The #513 create carrier mints the SOURCE's backing file
+        //    at the relative `{volume_id}.img` (a sized open).
+        let resp = proto::lifecycle_service_server::LifecycleService::create_volume(
+            &server,
+            Request::new(create_volume_request(
+                "vol-cl-src",
+                br#"{"size_bytes":1073741824}"#,
+            )),
+        )
+        .await;
+        assert!(resp.is_ok(), "create must succeed: {:?}", resp.err());
+
+        // 2. The clone: the agent threads the TARGET id as the clone
+        //    name — the id stord materializes `{clone_id}.img` for.
+        let resp = proto::lifecycle_service_server::LifecycleService::clone_volume(
+            &server,
+            Request::new(proto::CloneVolumeRequest {
+                meta: Some(test_meta("1")),
+                node_id: "node-1".to_string(),
+                source_volume_id: "vol-cl-src".to_string(),
+                target_volume_id: "vol-cl-tgt".to_string(),
+            }),
+        )
+        .await;
+        assert!(resp.is_ok(), "clone must succeed: {:?}", resp.err());
+
+        // 3. Attach the CLONE (the CP dispatch's standalone spec
+        //    bytes): the open must land on the clone's carrier
+        //    locator — the file prepare_clone materialized, never a
+        //    fresh empty create-on-open at a foreign name.
+        let resp = proto::lifecycle_service_server::LifecycleService::attach_volume(
+            &server,
+            Request::new(proto::AttachVolumeRequest {
+                meta: Some(test_meta("1")),
+                node_id: "node-1".to_string(),
+                volume: Some(proto::VolumeMutationSpec {
+                    volume_id: "vol-cl-tgt".to_string(),
+                    vm_id: "vm-cl".to_string(),
+                    volume_spec_json: br#"{"locator":"vol-cl-tgt.img"}"#.to_vec(),
+                }),
+            }),
+        )
+        .await;
+        assert!(resp.is_ok(), "attach must succeed: {:?}", resp.err());
+
+        // 4. Detach (no re-open — the cached handle is closed).
+        let resp = proto::lifecycle_service_server::LifecycleService::detach_volume(
+            &server,
+            Request::new(proto::DetachVolumeRequest {
+                meta: Some(test_meta("1")),
+                node_id: "node-1".to_string(),
+                vm_id: "vm-cl".to_string(),
+                volume_id: "vol-cl-tgt".to_string(),
+                force: false,
+            }),
+        )
+        .await;
+        assert!(resp.is_ok(), "detach must succeed: {:?}", resp.err());
+
+        // 5. The #522 delete destroys the CLONE at its carrier
+        //    locator — the clone's real data file.
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_volume(
+            &server,
+            Request::new(delete_volume_request("vol-cl-tgt", "")),
+        )
+        .await;
+        assert!(resp.is_ok(), "delete must succeed: {:?}", resp.err());
+
+        // The clone dispatch threaded the target id as the clone name
+        // (the whole basis of the carrier-locator dest).
+        assert_eq!(
+            opens.clones.lock().unwrap().as_slice(),
+            [("vol-cl-src".to_string(), "vol-cl-tgt".to_string())],
+            "the clone must dispatch prepare_clone(source, target) — the target id is the name stord materializes"
+        );
+        // The clone target's attach open names its carrier locator —
+        // the same file prepare_clone wrote, not a fresh empty file.
+        assert_eq!(
+            opens.opens.lock().unwrap().as_slice(),
+            [
+                (
+                    "vol-cl-src".to_string(),
+                    "local".to_string(),
+                    "vol-cl-src.img".to_string(),
+                ),
+                (
+                    "vol-cl-tgt".to_string(),
+                    "local".to_string(),
+                    "vol-cl-tgt.img".to_string(),
+                ),
+            ],
+            "the clone's attach must open the CLONE's carrier-locator file"
+        );
+        // The destroy reclaims exactly that file: one destroy, the
+        // clone's real data, never the source's.
+        assert_eq!(
+            opens.destroys.lock().unwrap().as_slice(),
+            [(
+                "vol-cl-tgt".to_string(),
+                "local".to_string(),
+                "vol-cl-tgt.img".to_string(),
+            )],
+            "the delete must destroy the clone's carrier locator — the clone's real data"
+        );
+        // The full interleaving: the clone materialization happens
+        // between the source's create open and the clone's attach
+        // open, and the source is never closed or destroyed by the
+        // clone's lifecycle.
+        assert_eq!(
+            opens.events.lock().unwrap().as_slice(),
+            [
+                "open:vol-cl-src".to_string(),
+                "prepare_clone:vol-cl-tgt".to_string(),
+                "open:vol-cl-tgt".to_string(),
+                "detach:vol-cl-tgt".to_string(),
+                "close:vol-cl-tgt".to_string(),
+                "destroy:vol-cl-tgt".to_string(),
+            ],
+            "the clone lifecycle must interleave open→prepare_clone→open→detach→close→destroy"
         );
     }
 

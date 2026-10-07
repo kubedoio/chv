@@ -50,8 +50,10 @@ impl LocalFileBackend {
     }
 
     /// Defense in depth: snapshot/clone names become path components in
-    /// filenames like `{volume_id}-{name}.img`; reject anything that is not
-    /// a single safe component before building such a path.
+    /// filenames like `{volume_id}-{snapshot_name}.img` (snapshots) and
+    /// `{clone_id}.img` (clones, the carrier locator — #540); reject
+    /// anything that is not a single safe component before building such
+    /// a path.
     fn require_safe_name(name: &str, field: &str) -> Result<(), ChvError> {
         if !chv_common::is_safe_id(name) {
             return Err(ChvError::InvalidArgument {
@@ -156,15 +158,28 @@ impl LocalFileBackend {
         }
     }
 
+    /// Copy the volume's backing file to `dest_file` — the COMPLETE
+    /// filename (a single safe component) resolved under this backend's
+    /// runtime dir.
+    ///
+    /// #540: the clone caller passes the target's CARRIER locator
+    /// `{clone_id}.img` — the same relative name every open path (the
+    /// #513 create carrier's sized open, the post-#539 standalone
+    /// attach's `{clone_id}.img` locator, the #522 destroy's DP4
+    /// carrier) resolves against this runtime dir, so a cloned
+    /// volume's data is reachable at attach and reclaimable at delete.
+    /// The snapshot caller keeps the legacy
+    /// `{volume_id}-{snapshot_name}.img` (the name `restore_snapshot`
+    /// and `delete_snapshot` navigate); only the clone dest changed.
     async fn copy_volume(
         &self,
         volume_id: &str,
         handle: &str,
-        dest_name: &str,
+        dest_file: &str,
         op_label: &str,
         qcow2_reason: &str,
     ) -> Result<(), ChvError> {
-        Self::require_safe_name(dest_name, "dest_name")?;
+        Self::require_safe_name(dest_file, "dest_file")?;
         let prefix = format!("local-{}-", volume_id);
         if !handle.starts_with(&prefix) {
             return Err(ChvError::BackendUnavailable {
@@ -212,9 +227,7 @@ impl LocalFileBackend {
             });
         }
 
-        let dest = self
-            .runtime_dir
-            .join(format!("{}-{}.img", volume_id, dest_name));
+        let dest = self.runtime_dir.join(dest_file);
         tokio::fs::copy(&path, &dest)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
@@ -681,10 +694,13 @@ impl StorageBackend for LocalFileBackend {
         _ownership: chv_common::AttachmentOwnership,
         snapshot_name: &str,
     ) -> Result<(), ChvError> {
+        Self::require_safe_name(snapshot_name, "snapshot_name")?;
         self.copy_volume(
             volume_id,
             handle,
-            snapshot_name,
+            // Snapshots keep the legacy `{volume_id}-{name}.img` — the
+            // name restore_snapshot/delete_snapshot navigate.
+            &format!("{}-{}.img", volume_id, snapshot_name),
             "snapshot",
             "qcow2 snapshot not supported",
         )
@@ -698,10 +714,19 @@ impl StorageBackend for LocalFileBackend {
         _ownership: chv_common::AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError> {
+        // #540: `clone_name` is the TARGET volume's id (the agent's
+        // clone handler threads `target_volume_id` as the clone name),
+        // so the dest is the target's carrier locator `{clone_id}.img`
+        // — the relative name create/attach/destroy all navigate.
+        // Target ids are fresh per clone transaction (the #384
+        // strict-insert transaction refuses a target id that already
+        // has a volumes row, and rows are never deleted), so the name
+        // cannot collide with a live volume's carrier file.
+        Self::require_safe_name(clone_name, "clone_name")?;
         self.copy_volume(
             volume_id,
             handle,
-            clone_name,
+            &format!("{}.img", clone_name),
             "clone",
             "qcow2 clone not supported",
         )
@@ -1412,6 +1437,14 @@ mod tests {
         assert_eq!(std::fs::metadata(&dest).unwrap().len(), 512);
     }
 
+    /// #540: a clone's backing file lands at the TARGET's carrier
+    /// locator `{clone_id}.img` — the relative name every open path
+    /// (the #513 create carrier's sized open, the post-#539 standalone
+    /// attach, the #522 destroy) resolves under the runtime dir — NOT
+    /// the pre-#540 `{source_id}-{clone_id}.img` no open path ever
+    /// navigated (clone data was unreachable at attach and the #522
+    /// delete reclaimed the wrong file). Red/green: reverting the dest
+    /// composition fails the carrier assertion.
     #[tokio::test]
     async fn local_backend_prepare_clone_raw_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1433,9 +1466,15 @@ mod tests {
             .await
             .unwrap();
 
-        let dest = dir.path().join("vol-1-clone1.img");
+        // The clone's real data is at the target's carrier locator.
+        let dest = dir.path().join("clone1.img");
         assert!(dest.exists());
         assert_eq!(std::fs::metadata(&dest).unwrap().len(), 512);
+        // And the pre-#540 unreachable name is NOT minted.
+        assert!(
+            !dir.path().join("vol-1-clone1.img").exists(),
+            "the pre-#540 `{{source}}-{{clone}}.img` name must not be minted"
+        );
     }
 
     #[tokio::test]

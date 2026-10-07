@@ -437,7 +437,9 @@ async fn lvm_real_clone_copies_data() {
         .prepare_clone(vid, &handle, ownership(), "c1")
         .await
         .expect("prepare_clone");
-    let clone_name = format!("{vid}-clone-c1");
+    // #540: the clone LV carries the target's own id (the name every
+    // open path navigates), not the pre-#540 `{source}-clone-{name}`.
+    let clone_name = "c1".to_string();
     let clone_dev = lv_path(&clone_name);
     assert!(
         clone_dev.exists(),
