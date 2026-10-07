@@ -49,8 +49,8 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 > is a proxy-only edge pointing at the control plane, and
 > [DEPLOYMENT.md](DEPLOYMENT.md) ("Serving the Web UI in package mode")
 > documents how to use it; that serving path is
-> [CODE-SUPPORTED, UNQUALIFIED] (the #447 container package-smoke leg is
-> the gate). The qualified UI path is still
+> [CODE-SUPPORTED, UNQUALIFIED] (the container package-smoke leg
+> (#549; #447 closed 2026-10-07) is the gate). The qualified UI path is still
 > `scripts/install.sh`, which enables `[webui]` for `/opt/chv/ui` and
 > configures nginx as a proxy-only edge. Decision D3 in
 > [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) (§5 UC-3, §8 D3)

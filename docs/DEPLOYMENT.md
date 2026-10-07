@@ -573,8 +573,9 @@ The static `map` approach is production-standard for small-to-medium clusters (t
 
 > **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. Serving the
 > packaged UI tree is an operator-provided step — no qualification leg
-> exercises it yet (the container package-smoke leg tracked in #447).
-> `scripts/install.sh` remains the qualified deployment path.
+> exercises it yet (the container package-smoke leg tracked in #549;
+> #447 closed 2026-10-07). `scripts/install.sh` remains the qualified
+> deployment path.
 
 The `chv-controlplane` package ships the Web UI static tree at
 `/usr/share/chv/ui`, and the control plane can serve it directly from
@@ -662,8 +663,8 @@ it; the VM serial console stops working without it.
   binary owns static serving). The two copies can still drift.
 - The tier label for serving-from-packages stays
   [CODE-SUPPORTED, UNQUALIFIED] until the container package-smoke leg
-  (#447) runs: enabling `[webui]` and starting the binary in a clean
-  container, asserting the UI is served.
+  (#549; #447 closed 2026-10-07) runs: enabling `[webui]` and starting
+  the binary in a clean container, asserting the UI is served.
 
 ---
 

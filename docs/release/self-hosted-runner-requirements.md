@@ -219,7 +219,7 @@ Use this checklist when setting up a new self-hosted runner for CHV integration 
 - [ ] `cloud-hypervisor` installed at `/usr/bin/cloud-hypervisor`
 - [ ] Rust toolchain installed (`rustup`)
 - [ ] `protoc` installed
-- [ ] Node.js 20 + npm installed
+- [ ] Node.js 22 + npm installed
 - [ ] Docker installed (optional, for container smoke tests)
 - [ ] `openssl` installed (for test cert generation)
 - [ ] `jq` installed (for JSON parsing in tests)
