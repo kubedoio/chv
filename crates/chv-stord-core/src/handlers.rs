@@ -326,7 +326,8 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
     }
 
     /// Snapshot and clone names become path components in backend filenames
-    /// (e.g. `{volume_id}-{name}.img`), so reject any name that is not a
+    /// (snapshots compose `{volume_id}-{snapshot_name}.img`; clones embed as
+    /// the carrier `{clone_id}.img`), so reject any name that is not a
     /// single safe component before it reaches the backend.
     fn validate_snapshot_or_clone_name(name: &str, field: &str) -> Result<(), ChvError> {
         if !chv_common::is_safe_id(name) {
