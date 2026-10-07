@@ -51,13 +51,16 @@ curl -sfL https://get.cellhv.com/ | \
   sh -
 ```
 
-> **Prerequisite — first stable release:** the one-liner resolves the latest
-> **stable** GitHub release and downloads its tarball. No stable release has
-> been published yet (the only existing release is the rolling `nightly`
-> pre-release, which carries `.deb`/`.rpm` packages but no release tarball),
-> so this path activates with the first stable release — until then the
-> installer exits early with that explanation. Use the nightly packages or
-> [build and install from a local tarball](#build--package-a-release) today.
+> **Release source:** the one-liner resolves the latest **stable** GitHub
+> release and downloads its tarball. v0.3.0 is that release today (published,
+> not a pre-release; its assets include the `chv-0.3.0-linux-amd64.tar.gz`
+> tarball with a `.sha256` sidecar alongside the `.deb`/`.rpm` packages), so
+> this resolution leg is live — tagged releases are the artifact source, and
+> the rolling `nightly` pre-release is never selected. The `get.cellhv.com`
+> endpoint itself is not stood up yet (see
+> [Hosting the Installer (`get.cellhv.com`)](#hosting-the-installer-getcellhvcom));
+> for a one-liner that runs today, [Quick Install](#quick-install-single-command-from-github-releases)
+> below installs from the same stable tagged releases directly off GitHub.
 
 The installer will:
 
@@ -159,10 +162,12 @@ After it completes, open `http://<host-ip>:8080/` and log in as
 
 ### Tier-label gate
 
-The label stays [CODE-SUPPORTED, UNQUALIFIED] until a qualification leg
-for this path exists (a container/host leg that runs the script
-end-to-end and asserts enrollment + WebUI serving — the same gate shape
-as the #447 container package-smoke leg tracked in #549).
+The label stays [CODE-SUPPORTED, UNQUALIFIED] until this path's own
+qualification leg passes — the fresh-host end-to-end smoke tracked in
+#556 (run the one-liner on a clean Linux host and assert package
+install, config generation, service bring-up, agent enrollment, and
+WebUI serving), in the same gate shape as the #447 container
+package-smoke leg tracked in #549.
 
 ---
 
