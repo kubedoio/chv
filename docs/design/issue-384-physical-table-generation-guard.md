@@ -117,6 +117,13 @@ migration writes to either table (verified: no `INSERT`/`UPDATE` on
 | N6 | BFF template network ensure | `templates.rs:458-469` (check at `:450-455`) | plain `INSERT`, fail-closed | n/a |
 | N7 | VTEP VNI set / release | `chv-controlplane-store/src/vtep.rs:404-408`, `:427-430` | `UPDATE networks SET vni` — scoped to the `vni` column only | no |
 
+[Corrected 2026-10-07, #544:] census row N3's shape is historical —
+the network delete no longer runs `DELETE FROM networks`: it retains
+the row and writes a terminal `'Deleting'` NDS tombstone (generation
+bumped, deleter stamped), which the fragment upserts refuse at the
+SQL level on both conflict arms (`StoreError::Conflict`), closing the
+§3.6 late-fragment resurrection window.
+
 The networks census differs materially from volumes (see §3.6): there is no
 network clone, no resize executor, and the fragment upsert is the *only*
 conflict-capable writer.
@@ -519,7 +526,10 @@ the guard.
 - **Network resurrection (§3.6):** a late network fragment can re-create
   a deleted network. Not fixed by any option here; recommend filing as
   its own issue (the fix shape is a tombstone or a delete-generation
-  watermark, not a DO UPDATE guard).
+  watermark, not a DO UPDATE guard). [Corrected 2026-10-07, #544:] the
+  predicted tombstone fix landed (#544, fixing #499) — the delete
+  retains the row and the fragment upserts refuse the terminal
+  `'Deleting'` NDS tombstone at the SQL level.
 - **Clone residue:** a clone whose dispatch later fails still leaves the
   materialized target row (volumes rows are never deleted, §2.4) — PR A
   narrows but does not remove this (it prevents *racing* duplicates, not
