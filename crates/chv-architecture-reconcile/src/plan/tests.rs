@@ -199,8 +199,8 @@ fn snapshot_match_suppresses_create_for_modelled_resources() {
     inv.datastores.push(DatastoreInfo {
         name: "ds-a".into(),
         kind: "qcow2-dir".into(),
-        capacity_gb: 100,
-        free_gb: 50,
+        capacity_gb: Some(100),
+        free_gb: Some(50),
         host: None,
     });
     inv.images.push(ImageInfo {
@@ -303,8 +303,8 @@ fn snapshot_for(arch: &CHVArchitecture) -> InventorySnapshot {
         inv.datastores.push(DatastoreInfo {
             name: d.name.clone(),
             kind: "qcow2-dir".into(),
-            capacity_gb: 0,
-            free_gb: 0,
+            capacity_gb: None,
+            free_gb: None,
             host: None,
         });
     }

@@ -151,6 +151,20 @@ pub fn compute_drift(baseline: &CHVArchitecture, snapshot: &InventorySnapshot) -
     // === 3. FieldChanged =============================================
     // Datastore.kind: baseline uses a typed enum we serialize via serde to
     // get the wire form; live uses a free-form String. Compare wire forms.
+    //
+    // #514 disclosure: since the string-array repair, live entries
+    // derived from enrollment's class strings carry kind = the raw
+    // class string (`local`, `lvm`, …) — a DISJOINT vocabulary from
+    // the baseline's wire kinds (`qcow2-dir`, `ceph-rbd`, …). A
+    // baseline declaring a wire kind against a live class-named
+    // datastore therefore mints a kind-changed finding. That is
+    // defensible drift signal, kept deliberately: the two kinds are
+    // genuinely different strings, inventing a class→wire-kind
+    // mapping would fabricate agreement that was never reported, and
+    // a provenance tolerance (distinguishing class-derived from
+    // wire-kind live entries) would be an unruled redesign of this
+    // comparison — flagged in #514 rather than forced here. Pinned by
+    // `drift::tests::class_named_live_datastore_kind_mints_finding`.
     for (idx, ds) in baseline.datastores.iter().enumerate() {
         if let Some(live) = snap_datastores.get(ds.name.as_str()) {
             let expected = datastore_kind_wire(&ds.datastore_type);
@@ -234,7 +248,10 @@ pub fn compute_drift(baseline: &CHVArchitecture, snapshot: &InventorySnapshot) -
     // carry capacity numbers, so for MVP we have nothing to compare on this
     // axis. We keep the loop scaffolded so a future schema addition slots
     // straight in. (See docs/specs/architecture-designer/contracts/yaml-contract.md.)
-    // Intentionally no findings emitted here today.
+    // Note for that future: live capacity/free are `Option<u64>` since
+    // #514 — class-string-derived entries report `None`, so any future
+    // capacity drift comparison must treat unknown as "no signal", never
+    // as zero. Intentionally no findings emitted here today.
 
     // === 5. NetworkChanged ===========================================
     for (idx, net) in baseline.networks.iter().enumerate() {

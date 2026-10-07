@@ -1,23 +1,30 @@
 //! Live `InventoryProvider` implementation backed by the control-plane
 //! SQLite repositories.
 //!
-//! **Datastores are dead as operated (#514)**: `list_datastores`
-//! derives from `node_inventory.storage_classes`, but the two ends of
-//! that seam disagree — enrollment persists the agent's report as a
+//! **Datastores (#514, follow-up to #542's STOP branch)**:
+//! `list_datastores` now parses the string array enrollment actually
+//! persists. Enrollment writes `node_inventory.storage_classes` as a
 //! JSON array of class STRINGS (`chv-controlplane-service/src/
-//! enrollment.rs`), while the parse below expects an array of
-//! `{ name, kind, capacity_gb, free_gb }` objects. String items have
-//! no `name`, so the parse yields nothing and the surface always
-//! returns empty. The 2026-10-07 maintainer ruling STOPped the ruled
-//! repair (map each class string to a datastore entry with unknown
-//! capacity) because `DatastoreInfo::capacity_gb`/`free_gb` are
-//! required `u64` — unknown cannot be represented without fabricating
-//! a number, and a fabricated `free_gb: 0` would make the fleet check
-//! emit blocking `DATASTORE_INSUFFICIENT_CAPACITY` findings ("0 GB
-//! free") where the empty list yields the truthful
-//! `DATASTORE_NOT_FOUND`. The truthful repair needs the capacity
-//! fields made Optional (plus a ruling on what the capacity check
-//! does with unknown) — see #514. Backup targets
+//! enrollment.rs`) — e.g. `["local","lvm"]`. Each class string
+//! becomes a datastore entry named by the class, with `kind` = the
+//! raw class string (the two vocabularies — class strings vs the
+//! architecture's `DatastoreType` wire kinds — are disjoint; inventing
+//! a class→wire-kind mapping would be a lie, so the derivation stays
+//! truthful and the drift check's kind comparison may mint a
+//! kind-changed finding where a baseline wire kind meets a live class
+//! kind — disclosed, see `drift/compute.rs`) and capacity/free =
+//! `None` — NEVER a fabricated number (the 2026-10-07 ruling's
+//! never-fabricate prohibition, made representable by #514's
+//! `Option<u64>` reshaping of `DatastoreInfo`). An object shape
+//! `{"name","kind","capacity_gb","free_gb"}` (no writer in the tree
+//! persists it; only tests construct it) still parses, with numbers
+//! mapping to `Some` and absent fields mapping to `None` — the old
+//! `.unwrap_or(0)` defaults were fabrications and are gone. The fleet
+//! check downgrades the capacity verdict to a warning when free is
+//! unknown (the `*_complete`-flag precedent), and class-named entries
+//! now exist in the live set, so architectures naming a class the
+//! node offers no longer hit blocking `DATASTORE_NOT_FOUND` — the
+//! truthful direction (the node DOES offer the class). Backup targets
 //! likewise return an empty list with `complete = false` until a real
 //! `BackupTargetRepository` lands; the validator downgrades the
 //! corresponding `BACKUP_TARGET_UNREACHABLE` finding to a warning
@@ -128,29 +135,22 @@ impl InventoryProvider for FleetInventoryProvider {
     }
 
     async fn list_datastores(&self) -> Result<Vec<DatastoreInfo>, FleetError> {
-        // DEAD AS OPERATED (#514) — pinned by
-        // `list_datastores_string_array_blob_stays_empty`. Enrollment
-        // persists `node_inventory.storage_classes` as a JSON array of
-        // class STRINGS (e.g. `["local","lvm"]` — see
-        // `chv-controlplane-service/src/enrollment.rs`), but this parse
-        // expects an array of `{ name, kind, capacity_gb, free_gb }`
-        // objects — a shape no writer persists. String items never
-        // yield a `name`, so the loop below matches nothing and this
-        // always returns empty; fleet checks then emit
-        // DATASTORE_NOT_FOUND for any architecture that names a
-        // datastore, which is the truthful behavior today.
-        //
-        // The ruled repair (2026-10-07: map each class string to an
-        // entry with name/kind from the class and capacity unknown)
-        // is STOPped on a shape fact: `DatastoreInfo.capacity_gb` and
-        // `free_gb` are required `u64`, so "unknown" cannot be
-        // represented without fabricating a number — and a fabricated
-        // `free_gb: 0` would flip the fleet check's
-        // DATASTORE_NOT_FOUND into lying blocking
-        // DATASTORE_INSUFFICIENT_CAPACITY ("0 GB free") findings. Do
-        // NOT "fix" this parse by mapping strings onto zero-capacity
-        // entries; the truthful repair needs the capacity fields made
-        // Optional first (tracked in #514).
+        // #514 (follow-up ruling, 2026-10-07 — supersedes #542's STOP
+        // branch): enrollment persists `node_inventory.storage_classes`
+        // as a JSON array of class STRINGS (e.g. `["local","lvm"]` —
+        // see `chv-controlplane-service/src/enrollment.rs`), and this
+        // parse now handles exactly that: each class string becomes a
+        // datastore entry named by the class, `kind` = the raw class
+        // string (NEVER an invented class→wire-kind mapping), and
+        // capacity/free = `None` — unknown, never a fabricated number
+        // (the ruling's never-fabricate prohibition stands: a zero or
+        // invented number in place of `None` must fail loudly, which
+        // `list_datastores_string_array_blob_yields_class_entries`
+        // pins). The object shape `{ name, kind, capacity_gb,
+        // free_gb }` (no production writer persists it; only tests
+        // construct it) keeps parsing — numbers map to `Some`, absent
+        // fields map to `None` (the old `.unwrap_or(0)` defaults were
+        // fabrications). An absent/empty blob still yields no entries.
         let rows = sqlx::query(
             r#"
             SELECT n.node_id AS node_id, inv.storage_classes AS storage_classes
@@ -164,6 +164,13 @@ impl InventoryProvider for FleetInventoryProvider {
 
         // Aggregate by datastore name; first entry wins for kind/host,
         // capacity/free sum across hosts that report the same name.
+        // Aggregating an unknown with a known is unknown: if any host
+        // reporting a name has no capacity number, the aggregate is
+        // `None` — summing a known with an unknown would fabricate a
+        // total the fleet never reported. BOTH branches below route
+        // through `sum_known`, so the poisoning is order-independent
+        // (a same-name string class arriving after an object with
+        // numbers poisons the aggregate just as the reverse does).
         let mut acc: BTreeMap<String, DatastoreInfo> = BTreeMap::new();
         for row in &rows {
             let node_id: String = row.try_get("node_id").unwrap_or_default();
@@ -185,31 +192,55 @@ impl InventoryProvider for FleetInventoryProvider {
                 None => continue,
             };
             for item in arr {
-                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let kind = item
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let capacity_gb = item
-                    .get("capacity_gb")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let free_gb = item.get("free_gb").and_then(|v| v.as_u64()).unwrap_or(0);
-                acc.entry(name.to_string())
-                    .and_modify(|existing| {
-                        existing.capacity_gb = existing.capacity_gb.saturating_add(capacity_gb);
-                        existing.free_gb = existing.free_gb.saturating_add(free_gb);
-                    })
-                    .or_insert(DatastoreInfo {
-                        name: name.to_string(),
-                        kind,
-                        capacity_gb,
-                        free_gb,
-                        host: Some(node_id.clone()),
-                    });
+                // Object shape: `{ name, kind, capacity_gb, free_gb }`
+                // — numbers become `Some`, absent fields `None`.
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    let kind = item
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let capacity_gb = item.get("capacity_gb").and_then(|v| v.as_u64());
+                    let free_gb = item.get("free_gb").and_then(|v| v.as_u64());
+                    acc.entry(name.to_string())
+                        .and_modify(|existing| {
+                            existing.capacity_gb = sum_known(existing.capacity_gb, capacity_gb);
+                            existing.free_gb = sum_known(existing.free_gb, free_gb);
+                        })
+                        .or_insert(DatastoreInfo {
+                            name: name.to_string(),
+                            kind,
+                            capacity_gb,
+                            free_gb,
+                            host: Some(node_id.clone()),
+                        });
+                } else if let Some(class) = item.as_str() {
+                    // String shape — what enrollment actually persists.
+                    // Each class string is a datastore entry named by
+                    // the class; kind is the raw class string; capacity
+                    // is unknown (`None`), never fabricated. The
+                    // `and_modify` routes the unknown through the same
+                    // `sum_known` poisoning path as the object branch:
+                    // an unknown term poisons an EXISTING aggregate
+                    // too (a bare `or_insert` would be a no-op on an
+                    // existing key and silently drop the unknown,
+                    // making the invariant order-dependent). First
+                    // entry still wins for kind/host.
+                    acc.entry(class.to_string())
+                        .and_modify(|existing| {
+                            existing.capacity_gb = sum_known(existing.capacity_gb, None);
+                            existing.free_gb = sum_known(existing.free_gb, None);
+                        })
+                        .or_insert(DatastoreInfo {
+                            name: class.to_string(),
+                            kind: class.to_string(),
+                            capacity_gb: None,
+                            free_gb: None,
+                            host: Some(node_id.clone()),
+                        });
+                }
+                // Anything else (a number, a bool, an object without a
+                // `name`) is not a shape any writer persists; skip it.
             }
         }
         Ok(acc.into_values().collect())
@@ -239,6 +270,18 @@ impl InventoryProvider for FleetInventoryProvider {
 
     async fn caller_can_deploy(&self) -> Result<bool, FleetError> {
         Ok(self.deploy_allowed_for_caller)
+    }
+}
+
+/// Sum two capacity numbers for cross-host aggregation. `Some` +
+/// `Some` = `Some(sum)`; anything else is `None` — if any host
+/// reporting a datastore name has no capacity number, the aggregate
+/// is unknown. Fabricating a total over an unknown term is the exact
+/// lie #514's never-fabricate prohibition forbids.
+fn sum_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        _ => None,
     }
 }
 
@@ -311,6 +354,11 @@ mod tests {
 
     #[tokio::test]
     async fn list_datastores_aggregates_storage_classes_across_nodes() {
+        // The OBJECT shape — no production writer persists it (only
+        // tests construct it); the shape enrollment actually persists
+        // is the string array covered by
+        // `list_datastores_string_array_blob_yields_class_entries`
+        // (#514).
         let p = build_provider().await;
         let pool = p.nodes.pool().clone();
 
@@ -334,31 +382,157 @@ mod tests {
         let stores = p.list_datastores().await.unwrap();
         assert_eq!(stores.len(), 1);
         assert_eq!(stores[0].name, "fast");
-        assert_eq!(stores[0].capacity_gb, 2000, "summed across nodes");
-        assert_eq!(stores[0].free_gb, 1000);
+        assert_eq!(stores[0].capacity_gb, Some(2000), "summed across nodes");
+        assert_eq!(stores[0].free_gb, Some(1000));
     }
 
     #[tokio::test]
-    async fn list_datastores_string_array_blob_stays_empty() {
-        // Pins the KNOWN-DEAD status quo of #514, not a desired
-        // behavior: enrollment persists `storage_classes` as a JSON
-        // array of class strings — exactly this blob, the output of
-        // `serde_json::to_value` on the agent's `Vec<String>` — while
-        // the parse expects `{ name, kind, capacity_gb, free_gb }`
-        // objects, so the persisted reality yields no datastores.
+    async fn list_datastores_object_shape_without_capacity_fields_is_none() {
+        // The object shape `{ name, kind, capacity_gb, free_gb }` (no
+        // production writer persists it — tests only) maps numbers to
+        // `Some` and ABSENT fields to `None`. The old parse defaulted
+        // missing fields to 0 — a fabrication; this pins the honest
+        // handling (#514's never-fabricate rule).
+        let p = build_provider().await;
+        let pool = p.nodes.pool().clone();
+
+        sqlx::query(
+            r#"INSERT INTO nodes (node_id, hostname, display_name)
+               VALUES ('n1', 'h1', 'h1')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let blob = r#"[{"name":"fast","kind":"nvme"}]"#;
+        sqlx::query(
+            r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes)
+               VALUES ('n1', 'x86_64', 1, 1, ?1)"#,
+        )
+        .bind(blob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stores = p.list_datastores().await.unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].name, "fast");
+        assert_eq!(
+            stores[0].capacity_gb, None,
+            "absent capacity is unknown, not 0"
+        );
+        assert_eq!(stores[0].free_gb, None, "absent free is unknown, not 0");
+    }
+
+    #[tokio::test]
+    async fn list_datastores_unknown_capacity_poisons_the_aggregate() {
+        // Cross-host aggregation: `Some + Some = Some(sum)`, but any
+        // `None` term makes the aggregate `None` — summing a known
+        // with an unknown would fabricate a total the fleet never
+        // reported (#514's never-fabricate rule).
+        let p = build_provider().await;
+        let pool = p.nodes.pool().clone();
+
+        sqlx::query(
+            r#"INSERT INTO nodes (node_id, hostname, display_name)
+               VALUES ('n1', 'h1', 'h1'), ('n2', 'h2', 'h2')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes)
+               VALUES ('n1', 'x86_64', 1, 1, ?1)"#,
+        )
+        .bind(r#"[{"name":"fast","kind":"nvme","capacity_gb":1000,"free_gb":500}]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes)
+               VALUES ('n2', 'x86_64', 1, 1, ?1)"#,
+        )
+        .bind(r#"[{"name":"fast","kind":"nvme"}]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stores = p.list_datastores().await.unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].capacity_gb, None, "known + unknown = unknown");
+        assert_eq!(stores[0].free_gb, None);
+    }
+
+    #[tokio::test]
+    async fn list_datastores_string_and_object_same_name_poison_both_orderings() {
+        // Review-fold pin (PR #546 SHOULD-FIX): a same-name class
+        // string arriving AFTER an object with numbers must poison
+        // the aggregate just as the reverse ordering does — the
+        // string branch routes through the same `sum_known` poisoning
+        // path instead of a bare `or_insert` (which was a no-op on an
+        // existing key and silently dropped the second host's
+        // unknown, making the documented invariant order-dependent).
         //
-        // The maintainer ruling (2026-10-07) STOPped the ruled repair
-        // (each class string -> an entry with name/kind from the class
-        // and capacity unknown) because `DatastoreInfo`'s
-        // `capacity_gb`/`free_gb` are required `u64`: unknown capacity
-        // cannot be represented without fabricating a number, and a
-        // fabricated `free_gb: 0` would make the fleet check emit
-        // blocking `DATASTORE_INSUFFICIENT_CAPACITY` ("0 GB free")
-        // findings where the empty list yields the truthful
-        // `DATASTORE_NOT_FOUND`. Flipping this test green by mapping
-        // strings onto zero-capacity entries is the exact lie the
-        // ruling forbids; the truthful repair needs the capacity
-        // fields made Optional first — tracked in #514.
+        // Both permutations are covered in one scan-order-agnostic
+        // test: "alpha" carries numbers on n1 and the string on n2,
+        // "beta" the mirror — whichever order SQLite visits the rows,
+        // each name sees one known and one unknown term, and both
+        // aggregates must be `None`.
+        let p = build_provider().await;
+        let pool = p.nodes.pool().clone();
+
+        sqlx::query(
+            r#"INSERT INTO nodes (node_id, hostname, display_name)
+               VALUES ('n1', 'h1', 'h1'), ('n2', 'h2', 'h2')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes)
+               VALUES ('n1', 'x86_64', 1, 1, ?1)"#,
+        )
+        // alpha: object with numbers; beta: class string.
+        .bind(r#"[{"name":"alpha","kind":"nvme","capacity_gb":1000,"free_gb":500},"beta"]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes, storage_classes)
+               VALUES ('n2', 'x86_64', 1, 1, ?1)"#,
+        )
+        // alpha: class string; beta: object with numbers.
+        .bind(r#"["alpha",{"name":"beta","kind":"nvme","capacity_gb":1000,"free_gb":500}]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stores = p.list_datastores().await.unwrap();
+        assert_eq!(stores.len(), 2);
+        let by_name: std::collections::BTreeMap<&str, &DatastoreInfo> =
+            stores.iter().map(|s| (s.name.as_str(), s)).collect();
+        for name in ["alpha", "beta"] {
+            let ds = by_name.get(name).expect("same-name entries aggregate");
+            assert_eq!(
+                ds.capacity_gb, None,
+                "{name}: known + unknown = unknown regardless of visit order"
+            );
+            assert_eq!(ds.free_gb, None, "{name}: free poisoned the same way");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_datastores_string_array_blob_yields_class_entries() {
+        // FLIPS #542's pin (`list_datastores_string_array_blob_stays_empty`)
+        // — that flip is the point of the follow-up ruling (2026-10-07),
+        // which Option-ified `DatastoreInfo.capacity_gb`/`free_gb` so the
+        // ruled repair could land truthfully: each class string in the
+        // enrollment-persisted blob (exactly what `serde_json::to_value`
+        // on the agent's `Vec<String>` produces) becomes a datastore
+        // entry named by the class, with `kind` = the raw class string
+        // and capacity/free = `None` — the truthful representation of
+        // unknown. The never-fabricate prohibition STANDS: a zero or
+        // invented number in place of `None` must still fail loudly,
+        // here and in the fleet check's unknown-capacity warning path.
         let p = build_provider().await;
         let pool = p.nodes.pool().clone();
 
@@ -380,11 +554,28 @@ mod tests {
         .unwrap();
 
         let stores = p.list_datastores().await.unwrap();
-        assert!(
-            stores.is_empty(),
-            "string-array blob yields no datastores (dead parse, #514); \
-             repairing it with fabricated zero capacities is forbidden by \
-             the 2026-10-07 ruling"
+        assert_eq!(
+            stores.len(),
+            2,
+            "each class string yields one class-named entry (#514 follow-up ruling)"
         );
+        let by_name: std::collections::BTreeMap<&str, &DatastoreInfo> =
+            stores.iter().map(|s| (s.name.as_str(), s)).collect();
+        let local = by_name
+            .get("local")
+            .expect("class 'local' becomes an entry");
+        assert_eq!(
+            local.kind, "local",
+            "kind is the raw class string, never an invented wire kind"
+        );
+        assert_eq!(
+            local.capacity_gb, None,
+            "unknown capacity is None, never a fabricated number (2026-10-07 ruling)"
+        );
+        assert_eq!(local.free_gb, None);
+        let lvm = by_name.get("lvm").expect("class 'lvm' becomes an entry");
+        assert_eq!(lvm.kind, "lvm");
+        assert_eq!(lvm.capacity_gb, None);
+        assert_eq!(lvm.free_gb, None);
     }
 }

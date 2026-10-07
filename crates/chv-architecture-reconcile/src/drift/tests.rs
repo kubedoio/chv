@@ -104,8 +104,8 @@ fn live_datastore(name: &str, kind: &str) -> DatastoreInfo {
     DatastoreInfo {
         name: name.to_string(),
         kind: kind.to_string(),
-        capacity_gb: 100,
-        free_gb: 50,
+        capacity_gb: Some(100),
+        free_gb: Some(50),
         host: None,
     }
 }
@@ -222,6 +222,49 @@ fn compute_drift_emits_field_changed_when_datastore_kind_differs() {
     }
     assert_eq!(report.findings[0].code(), "DRIFT_FIELD_CHANGED");
     assert_eq!(report.summary.by_type.get("DRIFT_FIELD_CHANGED"), Some(&1));
+}
+
+#[test]
+fn class_named_live_datastore_kind_mints_finding() {
+    // #514 disclosure pin: since the string-array repair, live entries
+    // derived from enrollment's class strings carry kind = the RAW
+    // class string — a vocabulary disjoint from the baseline's
+    // `DatastoreType` wire kinds. A baseline declaring a wire kind
+    // against a live class-named datastore mints a kind-changed
+    // finding, and that is DELIBERATE: the two kinds are genuinely
+    // different strings, and inventing a class→wire-kind mapping (or
+    // silently tolerating the mismatch) would fabricate agreement
+    // that was never reported. A provenance tolerance for this seam
+    // would be an unruled redesign of the comparison — flagged in
+    // #514, not forced here. The entry shape below (name = class,
+    // kind = class, capacities None) is exactly what the repaired
+    // `list_datastores` produces for a class string.
+    let mut baseline = empty_baseline();
+    baseline.datastores.push(nfs_datastore("local"));
+    let mut snapshot = empty_snapshot();
+    snapshot.datastores.push(DatastoreInfo {
+        name: "local".to_string(),
+        kind: "local".to_string(), // the raw class string, not a wire kind
+        capacity_gb: None,
+        free_gb: None,
+        host: None,
+    });
+
+    let report = compute_drift(&baseline, &snapshot);
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "baseline wire kind vs live class kind is exactly one finding"
+    );
+    match &report.findings[0] {
+        DriftFinding::FieldChanged {
+            expected, actual, ..
+        } => {
+            assert_eq!(expected, "nfs");
+            assert_eq!(actual, "local");
+        }
+        other => panic!("expected FieldChanged, got {other:?}"),
+    }
 }
 
 // --- 4. CapacityChanged ------------------------------------------------
