@@ -32,7 +32,8 @@ tempfile = { workspace = true }
 # dependency direction changes (nothing in the workspace depends on
 # chvctl, so there is no cycle). The list follows the #372 design §4
 # Option B, plus two additions the design left to implementation:
-# - chv-controlplane-service: admin_router(state, metrics) lives there
+# - chv-controlplane-service: admin_router(state, metrics, webui) lives
+#   there
 #   (it merges bff_router and mounts /admin/migrations/{id}/cancel, the
 #   route the repointed `migrate cancel` row needs); the harness serves
 #   admin_router, not bff_router, for exactly that reason.
@@ -44,6 +45,7 @@ bcrypt = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }
 chv-common = { path = "../../crates/chv-common" }
+chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-webui-bff = { path = "../../crates/chv-webui-bff" }

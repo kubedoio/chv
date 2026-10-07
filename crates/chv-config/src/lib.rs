@@ -684,6 +684,42 @@ const DEFAULT_CONTROLPLANE_DB_MAX_LIFETIME_SECS: u64 = 1800;
 const DEFAULT_CONTROLPLANE_AGENT_SOCKET_PATTERN: &str = "/run/chv/agent/api.sock";
 const DEFAULT_CONTROLPLANE_KERNEL_PATH: &str = "/var/lib/chv/vmlinux";
 const DEFAULT_CONTROLPLANE_FIRMWARE_PATH: &str = "/var/lib/chv/hypervisor-fw";
+const DEFAULT_CONTROLPLANE_WEBUI_DIR: &str = "/usr/share/chv/ui";
+
+/// Static Web UI serving (`[webui]`, issue #447 — decision D3 target,
+/// `docs/DEPLOYMENT-ARCHITECTURE.md` §8 D3).
+///
+/// `enabled` defaults to `false` (fail-closed): the control plane serves
+/// no static assets unless the operator opts in — no new serving surface
+/// appears on the HTTP listener by default. `dir` defaults to the
+/// packaged UI tree (`packaging/nfpm/chv-controlplane.yaml` installs
+/// `ui/build/` at `/usr/share/chv/ui`; `scripts/install.sh` uses
+/// `/opt/chv/ui` and enables the section for its own tree).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebUiConfig {
+    /// Master switch. Default: disabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Root of the built UI tree (`index.html` at its root). When
+    /// enabled, non-reserved request paths are served from this
+    /// directory with an SPA fallback to `index.html`.
+    #[serde(default = "default_webui_dir")]
+    pub dir: PathBuf,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_webui_dir(),
+        }
+    }
+}
+
+fn default_webui_dir() -> PathBuf {
+    PathBuf::from(DEFAULT_CONTROLPLANE_WEBUI_DIR)
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ControlPlaneTlsConfig {
@@ -722,6 +758,10 @@ pub struct ControlPlaneConfig {
     /// VXLAN overlay network defaults for cluster-wide behavior.
     #[serde(default)]
     pub overlay: OverlayConfig,
+    /// Static Web UI serving (issue #447, D3 target). Disabled by
+    /// default — fail-closed.
+    #[serde(default)]
+    pub webui: WebUiConfig,
 }
 
 fn default_jwt_secret() -> String {
@@ -781,6 +821,7 @@ impl Default for ControlPlaneConfig {
             kernel_path: default_kernel_path(),
             firmware_path: default_firmware_path(),
             overlay: OverlayConfig::default(),
+            webui: WebUiConfig::default(),
         }
     }
 }
@@ -988,6 +1029,57 @@ jwt_secret = "tooshort"
             cfg.core_api_socket_path,
             PathBuf::from("/run/chv/core/core-v1.sock")
         );
+    }
+
+    #[test]
+    fn controlplane_webui_section_defaults_disabled_and_parses_overrides() {
+        // #447: the [webui] section is an explicit opt-in — absent
+        // means disabled with the packaged-tree default dir, so every
+        // existing controlplane.toml is unaffected (fail-closed).
+        let cfg = load_controlplane_config(None).expect("default controlplane config");
+        assert!(!cfg.webui.enabled);
+        assert_eq!(cfg.webui.dir, PathBuf::from("/usr/share/chv/ui"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("controlplane.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+grpc_bind = "127.0.0.1:8443"
+http_bind = "127.0.0.1:8080"
+log_level = "info"
+runtime_dir = "/run/chv/controlplane"
+jwt_secret = "a]Kx8v2mN!pR7qYsW3dF6gH9jL0nBcTe"
+
+[webui]
+enabled = true
+dir = "/opt/chv/ui"
+"#,
+        )
+        .expect("write config");
+
+        let cfg = load_controlplane_config(Some(&config_path)).expect("parse with [webui] section");
+        assert!(cfg.webui.enabled);
+        assert_eq!(cfg.webui.dir, PathBuf::from("/opt/chv/ui"));
+
+        // Invalid: a non-path value for `dir` is a parse error, not a
+        // silent default (fail-closed on misconfiguration).
+        std::fs::write(
+            &config_path,
+            r#"
+grpc_bind = "127.0.0.1:8443"
+http_bind = "127.0.0.1:8080"
+log_level = "info"
+runtime_dir = "/run/chv/controlplane"
+jwt_secret = "a]Kx8v2mN!pR7qYsW3dF6gH9jL0nBcTe"
+
+[webui]
+enabled = true
+dir = 1234
+"#,
+        )
+        .expect("write config");
+        assert!(load_controlplane_config(Some(&config_path)).is_err());
     }
 
     #[test]

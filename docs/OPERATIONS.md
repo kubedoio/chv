@@ -317,10 +317,10 @@ For detailed step-by-step procedures covering VM snapshot restore, volume snapsh
 ### Web UI Blank or API Errors
 | Symptom | Fix |
 |---------|-----|
-| Blank page | Verify `/opt/chv/ui/index.html` exists; check `nginx -T \| grep root` |
-| JSON parse error | Ensure nginx `proxy_pass` has NO trailing slash after the port |
+| Blank page | Verify `/opt/chv/ui/index.html` exists; since #447 the control plane binary serves the tree — check `[webui]` in `/etc/chv/controlplane.toml` and `journalctl -u chv-controlplane` (the startup line names the dir; a missing dir warns) |
+| JSON parse error | Ensure the nginx `proxy_pass` has NO trailing slash after the port |
 | 502 Bad Gateway | Verify control plane is running: `systemctl status chv-controlplane` |
-| Console disconnected | Check WebSocket proxy config; verify agent PTY process is running |
+| Console disconnected | Check the edge's WebSocket `/ws/` proxy config (the binary does not proxy `/ws/`); verify agent PTY process is running |
 
 ### chv-stord or chv-nwd Keep Restarting
 | Check | Command |

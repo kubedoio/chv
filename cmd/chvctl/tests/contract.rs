@@ -15,8 +15,11 @@
 //!   (in-memory SQLite + `run_migrations` + a recording
 //!   `MutationService` stub — the `tests/volume_snapshot_clone.rs`
 //!   pattern, same shape in 21 BFF test files).
-//! - The server is the control plane's `admin_router(state, metrics)`,
-//!   NOT the plain `bff_router`: admin_router merges bff_router and
+//! - The server is the control plane's
+//!   `admin_router(state, metrics, webui)` (the Web UI stays disabled —
+//!   the `[webui]` fail-closed default; these rows drive the API
+//!   surface only), NOT the plain `bff_router`: admin_router merges
+//!   bff_router and
 //!   additionally mounts `/admin/migrations/{id}/cancel`
 //!   (`chv-controlplane-service/src/api/router.rs`), the route the
 //!   repointed `migrate cancel` row (design §2.3/DP4) needs — a
@@ -414,9 +417,15 @@ impl Harness {
         let state = build_state(pool.clone(), mutations.clone(), agent_runtime_dir.clone());
 
         // A default/empty convergence-metrics instance suffices for these
-        // rows — the harness never exercises convergence paths.
+        // rows — the harness never exercises convergence paths. The Web
+        // UI stays disabled (the [webui] fail-closed default): these
+        // rows drive the API surface only.
         let metrics = chv_controlplane_service::convergence_metrics::new_shared();
-        let app = chv_controlplane_service::api::router::admin_router(state, metrics);
+        let app = chv_controlplane_service::api::router::admin_router(
+            state,
+            metrics,
+            chv_config::WebUiConfig::default(),
+        );
 
         let task_polls = Arc::new(AtomicUsize::new(0));
         let counter = task_polls.clone();
