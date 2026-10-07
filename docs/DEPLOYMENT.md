@@ -11,11 +11,12 @@ This guide deploys CHV on a single Linux host. The host runs the **control plane
 ## Table of Contents
 
 1. [Quick Start (One-Liner Install)](#quick-start-one-liner-install)
-2. [What Gets Installed](#what-gets-installed)
-3. [Build & Package a Release](#build--package-a-release)
-4. [Manual Deployment (Step-by-Step)](#manual-deployment-step-by-step)
-5. [Hosting the Installer (`get.cellhv.com`)](#hosting-the-installer-getcellhvcom)
-6. [Operations & Troubleshooting](#operations--troubleshooting)
+2. [Quick Install (single command, from GitHub releases)](#quick-install-single-command-from-github-releases)
+3. [What Gets Installed](#what-gets-installed)
+4. [Build & Package a Release](#build--package-a-release)
+5. [Manual Deployment (Step-by-Step)](#manual-deployment-step-by-step)
+6. [Hosting the Installer (`get.cellhv.com`)](#hosting-the-installer-getcellhvcom)
+7. [Operations & Troubleshooting](#operations--troubleshooting)
 
 ---
 
@@ -75,6 +76,93 @@ After ~60 seconds, open the printed IP address in your browser.
 Default login: **admin / (random password)**. The bootstrap password is written
 to `/etc/chv/initial_admin_password` (mode 0600, root-owned) and printed once
 in the install output. You will be required to change it on first login.
+
+---
+
+## Quick Install (single command, from GitHub releases)
+
+> **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. This path has no
+> qualification leg yet — no m4.x campaign or container smoke test
+> exercises it. It shares install.sh's conventions (users, `/etc/chv`
+> layout, systemd units, chown discipline) but rides the #447
+> package-serving shape. `scripts/install.sh` remains the qualified
+> deployment path.
+
+A curl-pipe-bash installer for trying CHV on a fresh Linux host — one
+command yields the control plane with the WebUI served by the binary
+itself (#447 D3 shape — `[webui]` enabled, **no nginx involved**), plus
+the local agent enrolled against it (`chv-agent` + `chv-stord` +
+`chv-nwd`), systemd units, and config under `/etc/chv`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kubedoio/chv/main/scripts/quick-install.sh | sudo bash -s
+```
+
+Or pinned to a tagged release, with a dry run available:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kubedoio/chv/main/scripts/quick-install.sh | sudo bash -s -- --version 0.3.0
+curl -fsSL https://raw.githubusercontent.com/kubedoio/chv/main/scripts/quick-install.sh | sudo bash -s -- --dry-run
+```
+
+The script (`scripts/quick-install.sh`, issue #482) resolves the latest
+**stable** tagged release via the GitHub API (nightly is deliberately not
+supported), detects architecture (amd64/arm64) and distro family
+(.deb on Debian-family, .rpm on RH-family, release tarball fallback
+elsewhere), downloads the matching release assets, and verifies them
+against the release's `SHA256SUMS` (packages) or the tarball's `.sha256`
+sidecar — a missing asset or checksum mismatch aborts before anything is
+installed. It then installs the artifacts, generates TLS material and
+`/etc/chv/*.toml`, seeds the bootstrap token (via the loopback-only
+`/internal/bootstrap-token` route) and the bootstrap admin user, enables
+and starts the four systemd services, and waits for the local agent's
+enrollment.
+
+After it completes, open `http://<host-ip>:8080/` and log in as
+**admin** with the password from `/etc/chv/initial_admin_password`
+(printed once, mode 0600, root-only; rotation is forced on first login).
+
+### Disclosed judgments and limits
+
+- **`http_bind` is `0.0.0.0:8080`, plain HTTP.** With no nginx edge, the
+  control plane's own listener is the only front door. Static assets are
+  unauthenticated by design (the login page must load); every API route
+  keeps its auth. Do not expose this port to untrusted networks — put an
+  edge proxy in front (see "Serving the Web UI in package mode") if you
+  need TLS or remote access with a hardened posture.
+- **The serial console (`/ws/`) does not work on this path.** The control
+  plane binary does not proxy `/ws/` (the #447 decision,
+  maintainer-ratified 2026-10-07) and this path installs no edge. VM
+  lifecycle works from the WebUI; the console needs an edge proxy.
+- **arm64 hosts fail closed today.** The script is arm64-ready (it
+  resolves `linux-arm64` asset names), but the release pipeline currently
+  publishes linux-amd64 assets only — on an arm64 host the script aborts
+  with that explanation rather than half-installing.
+- **Idempotency.** A re-run upgrades artifacts in place; config under
+  `/etc/chv`, certs, the database, and the bootstrap/admin secrets are
+  never overwritten. An existing deployment this script did not configure
+  (packages deployed by hand, or `install.sh`) is refused unless `--force`
+  is given — `install.sh`'s `/opt/chv/ui` layout and nginx edge are never
+  silently converted. A control-plane database without configuration (a
+  partial or hand-managed state) is likewise refused unless `--force`:
+  fresh config would mint a new `jwt_secret` against a live database and
+  invalidate existing sessions and agent tokens.
+- **Uninstall.** `sudo scripts/quick-install.sh --uninstall` removes the
+  software and preserves `/etc/chv` and `/var/lib/chv`;
+  `--uninstall --purge` also removes data and config (the `chv` and
+  `chv-stord` users are retained, matching
+  [docs/install/uninstall.md](install/uninstall.md)).
+- **No bridge/NAT bootstrap, no base image, no seeded test VM.** This
+  path stops at "enrolled node + WebUI". Networks and images are created
+  from the WebUI/API (or use the qualified `install.sh` path for its
+  dev-resource seeding).
+
+### Tier-label gate
+
+The label stays [CODE-SUPPORTED, UNQUALIFIED] until a qualification leg
+for this path exists (a container/host leg that runs the script
+end-to-end and asserts enrollment + WebUI serving — the same gate shape
+as the #447 container package-smoke leg tracked in #549).
 
 ---
 
