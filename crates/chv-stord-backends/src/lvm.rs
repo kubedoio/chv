@@ -351,7 +351,19 @@ impl StorageBackend for LVMBackend {
         }
         Self::sanitize_id(clone_name)?;
         let origin = self.volume_path(volume_id)?;
-        let clone_lv = format!("{}-clone-{}", volume_id, clone_name);
+        // #540: `clone_name` is the TARGET volume's id (the agent's
+        // clone handler threads `target_volume_id` as the clone name),
+        // so the clone LV is named for the target's OWN id — the name
+        // every open path (open/attach/health/resize, and the #522
+        // destroy's `{vg}/{volume_id}`) navigates. The pre-#540
+        // `{source_id}-clone-{name}` LV was a name no open path ever
+        // produced (the local backend's file-tier twin of the same
+        // defect); target ids are fresh per clone transaction (the
+        // #384 strict-insert transaction refuses a target id that
+        // already has a volumes row), so the LV name cannot collide
+        // with a live volume's LV — and a collision would fail loudly
+        // in `lvcreate` anyway.
+        let clone_lv = clone_name.to_string();
         let out = Command::new("lvcreate")
             .args([
                 "-s",

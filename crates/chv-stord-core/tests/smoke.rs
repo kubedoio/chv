@@ -523,8 +523,17 @@ async fn prepare_clone_smoke() {
         .into_inner();
     assert_eq!(resp.status, "OK");
 
-    let clone_path = dir.path().join("vol-clone-clone1.img");
+    // #540: the clone's backing file lands at the TARGET's carrier
+    // locator `{clone_id}.img` — the relative name every open path
+    // (create carrier, standalone attach, #522 destroy) resolves under
+    // stord's runtime dir — not the pre-#540
+    // `{source_id}-{clone_id}.img` no open path navigated.
+    let clone_path = dir.path().join("clone1.img");
     assert!(clone_path.exists());
+    assert!(
+        !dir.path().join("vol-clone-clone1.img").exists(),
+        "the pre-#540 unreachable clone name must not be minted"
+    );
 
     client
         .close_volume(CloseVolumeRequest {

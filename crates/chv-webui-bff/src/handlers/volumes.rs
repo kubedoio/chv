@@ -899,10 +899,19 @@ pub async fn delete_volume(
     // locator would MISS, so accepting it would tombstone the row and
     // reclaim nothing (the silent-leak failure class this design
     // exists to kill). Clones inherit the source's kind, so a clone
-    // of a standalone volume passes this gate — but its backing file
-    // is NOT at the carrier locator (the stord local backend mints
-    // `{source_id}-{clone_id}.img`), so deleting a clone target
-    // reclaims the wrong file: tracked as #540.
+    // of a standalone volume passes this gate — and since #540 its
+    // backing file IS at the carrier locator (the stord local backend
+    // materializes the clone at `{clone_id}.img`, the target's own
+    // carrier — the pre-#540 bug minted `{source_id}-{clone_id}.img`,
+    // a name no open path navigated, so a delete reclaimed the wrong
+    // file), so deleting a 'data'-kind clone target reclaims the
+    // clone's real data. Residue, disclosed: clones materialized
+    // BEFORE #540 keep their data at the unreachable old name (no
+    // sweep, the #533 stray-population precedent), and an embedded
+    // (NULL-kind) clone target's data now also lands at
+    // `{clone_id}.img` but its attach path (A1 vm-dir-nested / A4
+    // bare-id) still does not navigate that locator — pre-existing,
+    // disclosed in #540; those volumes are refused here regardless.
     if volume_kind.as_deref() != Some("data") {
         tracing::warn!(%volume_id, kind = ?volume_kind, "delete_volume: rejecting non-data volume kind");
         return Err(BffError::BadRequest(format!(
