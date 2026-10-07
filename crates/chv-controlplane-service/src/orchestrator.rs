@@ -195,7 +195,8 @@ impl Orchestrator {
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
                 ) AS node_id,
                 (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
-                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
+                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes,
+                (SELECT volume_kind FROM volumes WHERE volume_id = operations.resource_id) AS volume_kind
             "#,
         )
         .fetch_all(&self.pool)
@@ -230,7 +231,8 @@ impl Orchestrator {
                     (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
                 ) AS node_id,
                 (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
-                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
+                (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes,
+                (SELECT volume_kind FROM volumes WHERE volume_id = operations.resource_id) AS volume_kind
             "#,
         )
         .fetch_all(&self.pool)
@@ -896,6 +898,14 @@ impl Orchestrator {
                         // attach dispatch (resolved in the claim query);
                         // NULL emits the key-free `{}` (PR 3 correction).
                         row.volume_storage_class.as_deref(),
+                        // #533: the volume's KIND rides it too (resolved
+                        // in the same claim query), so a standalone
+                        // ('data') volume's attach opens at the #513
+                        // create carrier's `{volume_id}.img` locator
+                        // instead of the A4 bare-id default's second
+                        // file — the #522 delete's DP4 destroy targets
+                        // the carrier locator exactly.
+                        row.volume_kind.as_deref(),
                     )
                     .await
             }
@@ -1906,6 +1916,13 @@ struct AcceptedOperationRow {
     /// provisioning size in `volume_spec_json` without a follow-up
     /// query — the same single-round-trip discipline as the class.
     volume_capacity_bytes: Option<i64>,
+    /// #533: the volume's kind, resolved in the same claim statement
+    /// for Volume-kind rows (NULL for other kinds and for every
+    /// embedded/boot/pre-#513 volume) so the AttachVolume dispatch can
+    /// shape a standalone (`volume_kind = 'data'`) volume's open
+    /// locator as the #513 create carrier's — the same
+    /// single-round-trip discipline as the class and capacity.
+    volume_kind: Option<String>,
 }
 
 /// #368 P2 selection: one VM whose desired state still demands it, whose
@@ -2061,7 +2078,8 @@ mod tests {
                 (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
             ) AS node_id,
             (SELECT storage_class FROM volumes WHERE volume_id = operations.resource_id) AS volume_storage_class,
-            (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes
+            (SELECT capacity_bytes FROM volumes WHERE volume_id = operations.resource_id) AS volume_capacity_bytes,
+            (SELECT volume_kind FROM volumes WHERE volume_id = operations.resource_id) AS volume_kind
     "#;
 
     async fn seed_node(pool: &StorePool, node_id: &str) {
@@ -2475,6 +2493,15 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed class-carrying volume");
+        // #533: a standalone 'data' volume (the #513 DP8 stamp), so the
+        // claim's kind resolution is pinned beside the class's.
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind) \
+             VALUES ('vol-std', 'node-b', 'Vol vol-std', 1024, 'data')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed standalone volume");
 
         seed_accepted_op(
             &pool,
@@ -2496,11 +2523,20 @@ mod tests {
         .await;
         seed_accepted_op(
             &pool,
+            "op-vol-std",
+            "Volume",
+            "vol-std",
+            "AttachVolume",
+            "2026-01-01T00:00:03Z",
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
             "op-vm",
             "Vm",
             "vm-1",
             "StartVm",
-            "2026-01-01T00:00:03Z",
+            "2026-01-01T00:00:04Z",
         )
         .await;
 
@@ -2523,6 +2559,22 @@ mod tests {
         assert_eq!(
             by_id["op-vm"].volume_storage_class, None,
             "a non-volume op resolves NULL"
+        );
+        // #533: the kind rides the same claim statement — Some("data")
+        // only for the #513 standalone stamp, NULL for embedded
+        // volumes and non-volume ops.
+        assert_eq!(
+            by_id["op-vol-std"].volume_kind.as_deref(),
+            Some("data"),
+            "a standalone volume resolves its kind in the claim (#533's locator discriminator)"
+        );
+        assert_eq!(
+            by_id["op-vol-lvm"].volume_kind, None,
+            "an embedded volume resolves a NULL kind"
+        );
+        assert_eq!(
+            by_id["op-vm"].volume_kind, None,
+            "a non-volume op resolves a NULL kind"
         );
     }
 
@@ -2692,6 +2744,135 @@ mod tests {
 
         // Both ops converged on the OK ack.
         for op_id in ["op-att-cls", "op-att-bare"] {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                    .bind(op_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("op status");
+            assert_eq!(status, "Succeeded", "{op_id} must converge");
+        }
+    }
+
+    /// #533 (the #513 design's DP2 locator guard, §8): the
+    /// AttachVolume dispatch shapes a STANDALONE volume's
+    /// (`volume_kind = 'data'` — the #513 DP8 stamp, the same
+    /// discriminator the #522 delete's kind gate rides)
+    /// `volume_spec_json` with the create carrier's relative
+    /// `{volume_id}.img` locator, so the agent's A4 open lands on the
+    /// file the #513 create carrier minted — not a create-on-open
+    /// SECOND default-size file at the bare-id default, the stray the
+    /// #522 delete's DP4 destroy deliberately never chases. LVM keeps
+    /// the class-only shape (the agent's LVM default already shapes
+    /// the carrier's dm-path token). An embedded volume (NULL kind —
+    /// every pre-#513 volume, boot disk, import, template) keeps the
+    /// pre-#533 bytes: no locator key, so the A4 bare-id default and
+    /// the A1 vm-nested path are untouched.
+    #[tokio::test]
+    async fn attach_volume_dispatch_shapes_the_standalone_carrier_locator() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-att-533").await;
+
+        // Two standalone 'data' volumes in the #513 route's own row
+        // shapes (NULL class = local, never materialized; the LVM one
+        // carries its class), plus an embedded NULL-kind volume.
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind, storage_class) \
+             VALUES ('vol-std', 'node-att-533', 'Vol vol-std', 1073741824, 'data', NULL), \
+                    ('vol-std-lvm', 'node-att-533', 'Vol vol-std-lvm', 1073741824, 'data', 'lvm')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed standalone volumes");
+        seed_volume(&pool, "vol-emb", "node-att-533").await;
+        for volume_id in ["vol-std", "vol-std-lvm", "vol-emb"] {
+            sqlx::query(
+                "INSERT INTO volume_desired_state \
+                 (volume_id, desired_generation, desired_status, attached_vm_id, read_only) \
+                 VALUES (?, 1, 'Pending', NULL, 0)",
+            )
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed volume desired state");
+        }
+        for (op_id, volume_id) in [
+            ("op-att-std", "vol-std"),
+            ("op-att-std-lvm", "vol-std-lvm"),
+            ("op-att-emb", "vol-emb"),
+        ] {
+            sqlx::query(
+                "INSERT INTO operations \
+                 (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+                  desired_generation, correlation_id, requested_at, updated_at) \
+                 VALUES (?, ?, 'Volume', ?, 'AttachVolume', 'Accepted', 1, 'vm=vm-att', \
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(op_id)
+            .bind(format!("idem-{op_id}"))
+            .bind(volume_id)
+            .execute(&pool)
+            .await
+            .expect("seed attach op");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-att-533", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let calls = agent.attach_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "all three attach ops dispatched: {calls:?}");
+        let spec_json_for = |volume_id: &str| {
+            calls
+                .iter()
+                .find(|c| c.volume.as_ref().map(|v| v.volume_id.as_str()) == Some(volume_id))
+                .unwrap_or_else(|| panic!("no attach dispatch for {volume_id}: {calls:?}"))
+                .volume
+                .clone()
+                .unwrap()
+                .volume_spec_json
+        };
+        assert_eq!(
+            spec_json_for("vol-std"),
+            br#"{"locator":"vol-std.img"}"#.to_vec(),
+            "a standalone NULL-class volume's attach must carry the create carrier's relative locator — exactly that key"
+        );
+        assert_eq!(
+            spec_json_for("vol-std-lvm"),
+            br#"{"backend_class":"lvm"}"#.to_vec(),
+            "a standalone LVM volume's attach keeps the class-only shape (the agent's LVM default IS the carrier locator)"
+        );
+        assert_eq!(
+            spec_json_for("vol-emb"),
+            b"{}".to_vec(),
+            "an embedded (NULL-kind) volume's attach keeps the pre-#533 key-free bytes"
+        );
+
+        // All three ops converged on the OK ack.
+        for op_id in ["op-att-std", "op-att-std-lvm", "op-att-emb"] {
             let status: String =
                 sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
                     .bind(op_id)
