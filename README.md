@@ -136,7 +136,7 @@ See [`docs/install/channels.md`](./docs/install/channels.md) for stable, RC, nig
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (stable)
-- [Node.js](https://nodejs.org/) 20+ and npm
+- [Node.js](https://nodejs.org/) 22+ and npm
 - `protobuf-compiler` (for regenerating `gen/rust/` from `proto/`)
 
 ### Quick Start
