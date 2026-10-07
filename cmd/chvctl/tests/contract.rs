@@ -51,7 +51,7 @@
 //!   TODO referencing the design §2 section and the PR that flips the
 //!   row. The harness must pass at main — red-where-known means
 //!   asserting the current broken behavior, not failing. After PR 4
-//!   there are NONE left: every row in this file is green (46 rows),
+//!   there are NONE left: every row in this file is green (49 rows),
 //!   which is the campaign's terminal state — any future drift fails
 //!   the suite outright instead of needing a new pin.
 //!
@@ -138,6 +138,27 @@
 //! (the loud detach-first message the CLI surfaces verbatim, zero
 //! journaling), and the in-flight-operation 409 (the loud message
 //! naming the in-flight operation id, zero journaling).
+//!
+//! #532 (the vm-import CLI) added the `vm import` rows (46 → 49
+//! rows, still zero pinned-broken) — the first in-tree client for
+//! `POST /v1/vms/import`, and therefore the first chvctl request on
+//! the multipart arm of the CSRF gate (#531): a green import
+//! end-to-end (the command's multipart request — the `name`/`file`
+//! part names and the file content, pinned by the journaled rows and
+//! the written disk — plus the non-empty `x-csrf-token` header the
+//! gate requires, captured by a harness middleware on the command's
+//! own wire path, the #386/#481 ownership stamping, and the response
+//! shape pinned through a re-drive of the command's own client
+//! method), the CSRF-gate rejection row (the same multipart request
+//! WITHOUT the header — and with a blank one — is 403
+//! `CSRF_REJECTED` with zero journaling, sent with a fully valid
+//! operator JWT so the rejection is provably the CSRF layer), and
+//! the non-qcow2 400 (the handler's magic check on the file part's
+//! content, surfaced through the command's error path, zero
+//! journaling). The harness's `AppState` gained a temp
+//! `agent_runtime_dir` for these rows (the import handler writes the
+//! uploaded image there; the JSON routes never touch it — the
+//! `csrf_multipart_import.rs` pattern).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -354,6 +375,19 @@ struct Harness {
     /// the `task watch` row's poll-hit assertion (design §2.5/DP6: the
     /// fixed command polls the single-task get route).
     task_polls: Arc<AtomicUsize>,
+    /// Every `POST /v1/vms/import` request the server has seen, as
+    /// `(content-type, x-csrf-token)` — the `vm import` rows' pin of
+    /// the command's own wire shape (#532): the multipart content type
+    /// and the NON-EMPTY CSRF marker the gate requires (#531),
+    /// captured before the gate itself runs (this middleware is the
+    /// outermost layer).
+    import_requests: ImportRequests,
+    /// The per-harness agent runtime dir the `AppState` was built with
+    /// (a tempdir — the import handler writes uploaded images there;
+    /// the JSON routes never touch it, so only the `vm import` rows
+    /// read this). `_runtime_dir` keeps it alive for the row.
+    agent_runtime_dir: std::path::PathBuf,
+    _runtime_dir: tempfile::TempDir,
 }
 
 impl Harness {
@@ -367,8 +401,17 @@ impl Harness {
             .await
             .expect("run migrations");
 
+        // A per-harness temp runtime dir (#532, the
+        // `csrf_multipart_import.rs` pattern): the vm-import handler
+        // writes the uploaded image under `agent_runtime_dir`. The
+        // pre-#532 harness hardcoded `/var/lib/chv/agent` — fine for
+        // the JSON routes (which never touch the filesystem) but not
+        // creatable/writable on an arbitrary CI runner.
+        let runtime_dir = tempfile::tempdir().expect("agent runtime tempdir");
+        let agent_runtime_dir = runtime_dir.path().to_path_buf();
+
         let mutations = Arc::new(RecordingMutations::default());
-        let state = build_state(pool.clone(), mutations.clone());
+        let state = build_state(pool.clone(), mutations.clone(), agent_runtime_dir.clone());
 
         // A default/empty convergence-metrics instance suffices for these
         // rows — the harness never exercises convergence paths.
@@ -377,11 +420,28 @@ impl Harness {
 
         let task_polls = Arc::new(AtomicUsize::new(0));
         let counter = task_polls.clone();
+        let import_requests = Arc::new(Mutex::new(Vec::new()));
+        let recorder = import_requests.clone();
         let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
             let counter = counter.clone();
+            let recorder = recorder.clone();
             async move {
                 if req.uri().path() == "/v1/tasks/get" {
                     counter.fetch_add(1, Ordering::SeqCst);
+                }
+                if req.uri().path() == "/v1/vms/import" {
+                    let csrf = req
+                        .headers()
+                        .get("x-csrf-token")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from);
+                    let content_type = req
+                        .headers()
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    recorder.lock().unwrap().push((content_type, csrf));
                 }
                 next.run(req).await
             }
@@ -403,7 +463,16 @@ impl Harness {
             jwt_secret: "test-secret".to_string(),
             mutations,
             task_polls,
+            import_requests,
+            agent_runtime_dir,
+            _runtime_dir: runtime_dir,
         }
+    }
+
+    /// The `(content-type, x-csrf-token)` pairs of every
+    /// `/v1/vms/import` request the harness has served (#532).
+    fn import_requests(&self) -> Vec<(String, Option<String>)> {
+        self.import_requests.lock().unwrap().clone()
     }
 
     fn client(&self, token: Option<String>) -> BffClient {
@@ -453,6 +522,27 @@ impl Harness {
         .execute(&self.pool)
         .await
         .expect("seed node");
+    }
+
+    /// A node plus a HEALTHY observed-state row — the vm-import
+    /// handler's placement rule (it joins `node_observed_state` on
+    /// `health_status = 'healthy'`, unlike the JSON create paths'
+    /// first-enrolled-node default that plain [`Harness::seed_node`]
+    /// serves). The `csrf_multipart_import.rs` seeding shape (#532).
+    async fn seed_healthy_node(&self) {
+        sqlx::query(
+            "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('n-1', 'h-1', 'Node 1')",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("seed node");
+        sqlx::query(
+            "INSERT INTO node_observed_state (node_id, observed_generation, observed_state, \
+             health_status, runtime_status) VALUES ('n-1', 1, 'TenantReady', 'healthy', 'Running')",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("seed node observed state");
     }
 
     /// An enrolled node plus an inventory row advertising exactly these
@@ -679,9 +769,20 @@ impl Harness {
     }
 }
 
+/// The `(content-type, x-csrf-token)` pairs of every
+/// `/v1/vms/import` request the harness has served (#532).
+type ImportRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 /// The BFF test-suite `AppState` builder (`tests/volume_snapshot_clone.rs`
-/// pattern): in-memory pool, all repositories, recording mutation stub.
-fn build_state(pool: sqlx::SqlitePool, mutations: Arc<RecordingMutations>) -> AppState {
+/// pattern): in-memory pool, all repositories, recording mutation stub,
+/// and (since #532) a caller-provided agent runtime dir — the vm-import
+/// handler writes uploaded images there, so the harness passes a
+/// tempdir (the JSON routes never touch it).
+fn build_state(
+    pool: sqlx::SqlitePool,
+    mutations: Arc<RecordingMutations>,
+    agent_runtime_dir: std::path::PathBuf,
+) -> AppState {
     AppState {
         node_repo: NodeRepository::new(pool.clone()),
         operation_repo: OperationRepository::new(pool.clone()),
@@ -697,7 +798,7 @@ fn build_state(pool: sqlx::SqlitePool, mutations: Arc<RecordingMutations>) -> Ap
         drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
         mutations,
         jwt_secret: "test-secret".to_string(),
-        agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
+        agent_runtime_dir,
         cache: chv_webui_bff::BffCache::new(5),
         clock: Arc::new(SystemClock),
         pool,
@@ -763,6 +864,34 @@ fn assert_api_error(result: Result<(), CliError>, status: u16) {
         ),
         other => panic!("expected HTTP {status}, got {other:?}"),
     }
+}
+
+/// Minimal qcow2-looking payload: the import handler only checks the
+/// 4-byte magic before accepting the stream (the
+/// `csrf_multipart_import.rs` shape, #532).
+fn qcow2_bytes() -> Vec<u8> {
+    let mut bytes = b"QFI\xfb".to_vec();
+    bytes.extend_from_slice(b"\x00\x00\x00\x03rest-of-disk");
+    bytes
+}
+
+/// (vm rows, volume rows, operation rows) — the zero-journaling
+/// assertion for rejected requests (the `csrf_multipart_import.rs`
+/// discipline, contract-tier; #532).
+async fn journal_counts(pool: &sqlx::SqlitePool) -> (i64, i64, i64) {
+    let vms: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
+        .fetch_one(pool)
+        .await
+        .expect("count vms");
+    let volumes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM volumes")
+        .fetch_one(pool)
+        .await
+        .expect("count volumes");
+    let ops: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(pool)
+        .await
+        .expect("count operations");
+    (vms, volumes, ops)
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1313,361 @@ async fn vm_resize_row() {
     )
     .await
     .expect("chvctl vm resize against POST /v1/vms/resize");
+}
+
+/// `chvctl vm import <name> --file <qcow2>` — GREEN (#532, the route's
+/// first in-tree client). The command's request shape is the route's
+/// whole contract: multipart POST `/v1/vms/import` with a `name` text
+/// field and a `file` binary field, PLUS the non-empty `x-csrf-token`
+/// header the #531 CSRF gate requires on multipart (chvctl's only
+/// multipart request — every other mutation is JSON, which the gate
+/// admits on content type alone). The row pins, through the command's
+/// own wire path: the header presence (captured by the harness
+/// middleware on the command's actual request — the one thing a
+/// client regression could silently drop, and the exact 403 the gate
+/// answers without it is pinned by the rejection row below), the
+/// part names and content (the journaled `display_name` rows for the
+/// `name` field; the byte-identical written disk for the `file`
+/// field), the #386/#481 ownership stamping (the importing operator
+/// on the vm, volume, and operation rows), the journaled row shapes
+/// (the `-disk` volume at the uploaded byte count, attached to the
+/// imported VM; the Accepted `CreateVm` operation keyed
+/// `import-vm-{vm_id}`), and the response shape — pinned through a
+/// re-drive of the command's own client method (`post_multipart`,
+/// the `volume_delete_row` re-drive discipline; unlike that route
+/// the import is not idempotent, so the re-drive uses a fresh name
+/// and asserts the journal grew by exactly one of each row).
+#[tokio::test]
+async fn vm_import_row() {
+    let h = Harness::start().await;
+    h.seed_healthy_node().await;
+    let token = h.seed_jwt_as("operator").await;
+    let client = h.client(Some(token));
+
+    // The upload: a real on-disk qcow2 file — the operator's actual
+    // path (the command reads --file from disk).
+    let dir = tempfile::tempdir().expect("import upload tempdir");
+    let disk = dir.path().join("disk.qcow2");
+    std::fs::write(&disk, qcow2_bytes()).expect("write upload file");
+
+    vm::execute(
+        &client,
+        vm::VmCommands::Import {
+            name: "imported-vm".to_string(),
+            file: disk.to_string_lossy().to_string(),
+        },
+        &OutputFormat::Json,
+    )
+    .await
+    .expect("chvctl vm import against POST /v1/vms/import");
+
+    // The command's own wire shape (#531's gate contract, captured on
+    // the command's actual request): multipart content type plus a
+    // NON-EMPTY x-csrf-token header — the one thing the gate adds for
+    // multipart. Dropping the header from the client flips this red.
+    let requests = h.import_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one import request so far: {requests:?}"
+    );
+    assert!(
+        requests[0].0.starts_with("multipart/form-data"),
+        "the import request must be multipart: {:?}",
+        requests[0]
+    );
+    assert!(
+        requests[0]
+            .1
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty()),
+        "the command's client must send the non-empty x-csrf-token the gate requires: {:?}",
+        requests[0]
+    );
+
+    // The journaled row shapes (the #386/#481 ownership stamping, the
+    // `volume_delete_row` discipline): the VM stamped with the
+    // importing operator — and its display_name is the `name` part's
+    // pin (a mis-keyed part would have 400'd "missing name").
+    let (vm_id, vm_owner): (String, String) =
+        sqlx::query_as("SELECT vm_id, owner_id FROM vms WHERE display_name = 'imported-vm'")
+            .fetch_one(&h.pool)
+            .await
+            .expect("imported vm row");
+    assert_eq!(
+        vm_owner, "u-operator",
+        "the import must stamp the importing operator on the vm row (#386)"
+    );
+
+    // Its disk volume: the derived `-disk` display name, the uploaded
+    // byte count as the capacity, the same owner, attached to the
+    // imported VM.
+    let (volume_id, vol_owner, capacity): (String, String, i64) = sqlx::query_as(
+        "SELECT volume_id, owner_id, capacity_bytes FROM volumes WHERE display_name = 'imported-vm-disk'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("imported volume row");
+    assert_eq!(
+        vol_owner, "u-operator",
+        "the import must stamp the importing operator on the volume row (#386)"
+    );
+    assert_eq!(
+        capacity,
+        qcow2_bytes().len() as i64,
+        "the volume capacity must be the uploaded file's size"
+    );
+    let (attached_vm, vds_status): (String, String) = sqlx::query_as(
+        "SELECT attached_vm_id, desired_status FROM volume_desired_state WHERE volume_id = ?",
+    )
+    .bind(&volume_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("imported volume desired state");
+    assert_eq!(
+        attached_vm, vm_id,
+        "the imported disk attaches to the imported VM"
+    );
+    assert_eq!(
+        vds_status, "Pending",
+        "the imported volume's desired status is Pending"
+    );
+
+    // The Accepted CreateVm operation with the handler's idempotency
+    // key, stamped with the importing operator.
+    let (op_type, op_status, op_requester, op_key): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT operation_type, status, requested_by, idempotency_key \
+             FROM operations WHERE resource_kind = 'vm' AND resource_id = ?",
+        )
+        .bind(&vm_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("import operation row");
+    assert_eq!(op_type, "CreateVm");
+    assert_eq!(op_status, "Accepted");
+    assert_eq!(op_requester, "u-operator");
+    assert_eq!(op_key, format!("import-vm-{vm_id}"));
+
+    // The `file` part's content pin: the uploaded image lands under
+    // the agent runtime dir byte-identical to what --file held.
+    let written = tokio::fs::read(
+        h.agent_runtime_dir
+            .join("vms")
+            .join(&vm_id)
+            .join("disk.qcow2"),
+    )
+    .await
+    .expect("the uploaded image lands under the agent runtime dir");
+    assert_eq!(
+        written,
+        qcow2_bytes(),
+        "the written disk must be byte-identical to the uploaded file part"
+    );
+
+    // The response shape (the command only prints; the row re-drives
+    // the command's own client method with a fresh name — the import
+    // is not idempotent, so a re-drive is a second VM, and the row
+    // asserts the journal grew by exactly one of each row).
+    let resp = client
+        .post_multipart(
+            "/v1/vms/import",
+            "imported-vm-2",
+            "disk.qcow2",
+            qcow2_bytes(),
+        )
+        .await
+        .expect("re-drive of the command's multipart client method");
+    assert_eq!(
+        resp.get("name").and_then(Value::as_str),
+        Some("imported-vm-2"),
+        "the import response must round-trip the name: {resp}"
+    );
+    assert!(
+        resp.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty()),
+        "the import response must carry the server-minted id: {resp}"
+    );
+    assert_eq!(
+        resp.get("image_id").and_then(Value::as_str),
+        Some("imported"),
+        "the import response must carry the imported-image sentinel: {resp}"
+    );
+    assert_eq!(
+        resp.get("desired_state").and_then(Value::as_str),
+        Some("Pending"),
+        "the import response must carry the Pending desired state: {resp}"
+    );
+    assert!(
+        resp.get("disk_path")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.ends_with("disk.qcow2")),
+        "the import response must carry the written disk path: {resp}"
+    );
+    assert_eq!(
+        journal_counts(&h.pool).await,
+        (2, 2, 2),
+        "the re-drive journaled exactly one more of each row"
+    );
+    // Both captured requests carried the gate's marker (the re-drive
+    // goes through the same client method the command used).
+    for (content_type, csrf) in &h.import_requests() {
+        assert!(content_type.starts_with("multipart/form-data"));
+        assert!(
+            csrf.as_deref().is_some_and(|v| !v.trim().is_empty()),
+            "every import request through the client must carry the marker"
+        );
+    }
+
+    // Observability: the imported VM renders in `vm list` with the
+    // display columns chvctl prints (the §2.7(a) guard).
+    let items = list_items(&client, "/v1/vms").await;
+    assert!(items
+        .iter()
+        .any(|i| i.get("name").and_then(Value::as_str) == Some("imported-vm")));
+    assert_columns_present(
+        &items,
+        &["vm_id", "name", "power_state", "node_id", "cpu", "memory"],
+    );
+}
+
+/// `POST /v1/vms/import` multipart WITHOUT the `x-csrf-token` header —
+/// the #531 gate's rejection, pinned at the same listener the command
+/// talks to (#532). The request is shaped exactly like the command's
+/// (same `name`/`file` parts, same fully valid operator JWT) minus the
+/// one header the client sends — so a 403 here is provably the CSRF
+/// layer, not auth, and a future client regression (dropping the
+/// header) fails loudly as `403 CSRF_REJECTED` instead of being
+/// misattributed to auth (the #532 issue's exact risk). The blank
+/// header is pinned too: the gate requires NON-EMPTY. The header's
+/// presence on the command's own path is pinned by `vm_import_row`'s
+/// capture — this row pins what its absence buys.
+#[tokio::test]
+async fn vm_import_csrf_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_healthy_node().await;
+    let token = h.seed_jwt_as("operator").await;
+
+    // The command's multipart shape minus the CSRF marker: a raw
+    // reqwest request (the client method under test always sends the
+    // header — that presence is pinned by vm_import_row's capture).
+    let http = reqwest::Client::new();
+    for csrf_header in [None, Some("   ")] {
+        let file_part = reqwest::multipart::Part::bytes(qcow2_bytes())
+            .file_name("disk.qcow2")
+            .mime_str("application/octet-stream")
+            .expect("static mime type");
+        let form = reqwest::multipart::Form::new()
+            .text("name", "csrf-less-vm")
+            .part("file", file_part);
+        let mut req = http
+            .post(format!("{}/v1/vms/import", h.url))
+            .header("Authorization", format!("Bearer {token}"));
+        if let Some(marker) = csrf_header {
+            req = req.header("x-csrf-token", marker);
+        }
+        let resp = req
+            .multipart(form)
+            .send()
+            .await
+            .expect("multipart POST without the CSRF marker");
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "a multipart import without a usable CSRF marker must be rejected before routing"
+        );
+        let body: Value = resp.json().await.expect("rejection body");
+        assert_eq!(
+            body.get("code").and_then(Value::as_str),
+            Some("CSRF_REJECTED"),
+            "the rejection must name the CSRF layer: {body}"
+        );
+    }
+
+    // The gate fired before the handler: nothing journaled, even
+    // though the JWT was fully valid (the rejection is the CSRF
+    // layer's, not auth's). The same JWT succeeds on a JSON route —
+    // making that attribution airtight rather than contextual
+    // (review-folded: the gate runs before auth, so the 403 alone
+    // would not distinguish a CSRF rejection from an auth failure).
+    let json_resp = http
+        .post(format!("{}/v1/tasks", h.url))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("JSON probe with the same JWT");
+    assert_eq!(
+        json_resp.status().as_u16(),
+        200,
+        "the same JWT must succeed on a JSON route — isolating the 403 to the CSRF layer"
+    );
+    assert_eq!(
+        journal_counts(&h.pool).await,
+        (0, 0, 0),
+        "a CSRF-rejected import must not journal anything"
+    );
+
+    // And the harness saw exactly the two rejected requests, neither
+    // carrying a usable marker (absent / blank).
+    let requests = h.import_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "exactly the two probe requests: {requests:?}"
+    );
+    for (content_type, csrf) in &requests {
+        assert!(content_type.starts_with("multipart/form-data"));
+        assert!(
+            csrf.as_deref().is_none_or(|v| v.trim().is_empty()),
+            "neither rejection carried a usable marker: {requests:?}"
+        );
+    }
+}
+
+/// `chvctl vm import` with a non-qcow2 file — the `file` part's
+/// CONTENT contract: the handler checks the qcow2 magic on the
+/// uploaded bytes, so a file that is not a qcow2 image is a loud 400
+/// naming it (surfaced verbatim through the command's error path),
+/// and nothing is journaled. Discriminating against a mis-wired
+/// client: if the bytes went under the wrong part (or the handler
+/// stopped reading the magic), the message this row matches changes
+/// ("missing file or file too small to be qcow2" / a 200).
+#[tokio::test]
+async fn vm_import_non_qcow2_rejection_row() {
+    let h = Harness::start().await;
+    h.seed_healthy_node().await;
+    let token = h.seed_jwt_as("operator").await;
+
+    let dir = tempfile::tempdir().expect("import upload tempdir");
+    let disk = dir.path().join("not-qcow2.img");
+    std::fs::write(&disk, b"\x00\x00\x00\x00definitely-not-qcow2").expect("write non-qcow2 file");
+
+    let result = vm::execute(
+        &h.client(Some(token)),
+        vm::VmCommands::Import {
+            name: "not-qcow2-vm".to_string(),
+            file: disk.to_string_lossy().to_string(),
+        },
+        &OutputFormat::Json,
+    )
+    .await;
+    match &result {
+        Err(CliError::Api { status, message }) => {
+            assert_eq!(*status, 400, "a non-qcow2 upload rejects with 400");
+            assert!(
+                message.contains("not a valid qcow2 image"),
+                "the 400 the CLI surfaces must name the qcow2 magic check: {message}"
+            );
+        }
+        other => panic!("expected the non-qcow2 400, got {other:?}"),
+    }
+    assert_eq!(
+        journal_counts(&h.pool).await,
+        (0, 0, 0),
+        "a rejected import must not journal anything"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,11 @@ use reqwest::Client;
 use serde_json::Value;
 use std::fmt;
 
+/// The non-empty `x-csrf-token` marker the BFF's CSRF gate requires on
+/// multipart requests (#496/#531; sent by [`BffClient::post_multipart`]
+/// — see that method's doc comment for why a constant, not a secret).
+const MULTIPART_CSRF_MARKER: &str = "chvctl";
+
 #[derive(Debug)]
 pub enum CliError {
     Http(String),
@@ -109,6 +114,62 @@ impl BffClient {
         let req = self.http.delete(self.url(path));
         let req = self.apply_auth(req);
         let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
+        self.handle_response(resp).await
+    }
+
+    /// POST a multipart form (`name` text field + `file` binary field)
+    /// to the BFF — the `POST /v1/vms/import` contract (#532).
+    ///
+    /// # The CSRF marker (a discovery, disclosed)
+    ///
+    /// This is chvctl's FIRST multipart request, and multipart is the
+    /// one content type the BFF's CSRF gate does not admit on shape
+    /// alone: `application/json` is un-forgeable cross-site (an HTML
+    /// form's enctype can never produce it), but multipart IS
+    /// form-native, so the gate (#496/#531) requires a non-empty
+    /// `x-csrf-token` header on it — 403 `CSRF_REJECTED` without one.
+    ///
+    /// No CSRF mechanism existed anywhere in chvctl's client before
+    /// this method: every existing mutation goes through [`post`],
+    /// whose JSON content type is itself the admissible shape, so no
+    /// header was ever needed. There is also no token model to mirror:
+    /// the tree has no CSRF token issuance or verification (the
+    /// `x-csrf-token` name appears only in the BFF's CORS allow-list,
+    /// and the UI's `bffFetch` — also always-JSON — sends no such
+    /// header either). The gate is presence-based by design: it never
+    /// reads the value, so the marker here is a fixed non-empty
+    /// constant, not a secret. If a token model is ever introduced,
+    /// this is the single send-site to adopt it.
+    ///
+    /// The marker's soundness leans on one invariant elsewhere: the
+    /// CORS layer (`build_cors_layer`) allows the header for exactly
+    /// the single configured origin — never a wildcard, never a
+    /// reflected one. If the CORS layer ever starts reflecting
+    /// origins, this marker and the #496/#531 gate stop meaning
+    /// anything (any cross-site fetch could preflight through).
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        name: &str,
+        file_name: &str,
+        file_bytes: Vec<u8>,
+    ) -> Result<Value, CliError> {
+        let file_part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")
+            .expect("static mime type");
+        let form = reqwest::multipart::Form::new()
+            .text("name", name.to_string())
+            .part("file", file_part);
+
+        let req = self.http.post(self.url(path));
+        let req = self.apply_auth(req);
+        let req = req.header("x-csrf-token", MULTIPART_CSRF_MARKER);
+        let resp = req
+            .multipart(form)
             .send()
             .await
             .map_err(|e| CliError::Http(e.to_string()))?;

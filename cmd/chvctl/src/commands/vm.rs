@@ -82,6 +82,14 @@ pub enum VmCommands {
         #[arg(long)]
         memory: Option<String>,
     },
+    /// Import a VM from a qcow2 disk image
+    Import {
+        /// Name for the imported VM
+        name: String,
+        /// Path to the qcow2 disk image file
+        #[arg(long)]
+        file: String,
+    },
 }
 
 pub async fn execute(
@@ -225,6 +233,27 @@ pub async fn execute(
             client.post("/v1/vms/resize", &body).await?;
             println!("VM {vm_id} resized.");
         }
+        VmCommands::Import { name, file } => {
+            // The BFF import contract (`POST /v1/vms/import`, refs
+            // #386/#481) is multipart — the route's whole request
+            // shape is a `name` text field and a `file` binary field
+            // whose first four bytes must be the qcow2 magic (the
+            // server rejects anything else with a 400). The CSRF gate
+            // requires a non-empty `x-csrf-token` header on multipart
+            // (#531); the client's multipart method sends it — see
+            // `BffClient::post_multipart`'s doc comment.
+            let file_name = std::path::Path::new(&file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("disk.qcow2")
+                .to_string();
+            let bytes = read_import_file(&file)?;
+            let resp = client
+                .post_multipart("/v1/vms/import", &name, &file_name, bytes)
+                .await?;
+            println!("VM import initiated.");
+            output::print_value(&resp, format);
+        }
     }
     Ok(())
 }
@@ -254,6 +283,38 @@ pub(crate) fn resolve_cloud_init_userdata(input: &str) -> Result<String, CliErro
             .map_err(|e| CliError::Io(format!("failed to read cloud-init file {path:?}: {e}"))),
         None => Ok(input.to_string()),
     }
+}
+
+/// Read the qcow2 disk image `vm import --file` uploads (#532). The
+/// server validates the qcow2 magic (a non-qcow2 file is a loud 400
+/// naming it), so the client only proves the file is readable — the
+/// same client-thin/server-authoritative split `--storage-class` uses.
+/// A regular-file + size guard runs first (review-folded): an
+/// unbounded `std::fs::read` would buffer a near-cap file entirely
+/// into heap, and a device or FIFO path would read until OOM.
+pub(crate) fn read_import_file(path: &str) -> Result<Vec<u8>, CliError> {
+    /// Mirrors the server's `MAX_FILE_SIZE` (the import handler's
+    /// 100 GiB cap) so an oversized file fails loudly client-side
+    /// instead of buffering the bytes first.
+    const IMPORT_FILE_MAX_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+
+    let meta = std::fs::metadata(path)
+        .map_err(|e| CliError::Io(format!("failed to read image file {path:?}: {e}")))?;
+    if !meta.is_file() {
+        return Err(CliError::Io(format!(
+            "image file {path:?} is not a regular file — refusing to read it \
+             (a device or FIFO would read without end)"
+        )));
+    }
+    if meta.len() > IMPORT_FILE_MAX_BYTES {
+        return Err(CliError::Io(format!(
+            "image file {path:?} is {} bytes — over the 100 GiB upload limit \
+             the server enforces",
+            meta.len()
+        )));
+    }
+    std::fs::read(path)
+        .map_err(|e| CliError::Io(format!("failed to read image file {path:?}: {e}")))
 }
 
 /// Parse a human size ("512M", "2G", "1.5GiB", "4096") into bytes.
@@ -297,7 +358,9 @@ pub(crate) fn parse_size_bytes(input: &str) -> Result<i64, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_size_bytes, resolve_cloud_init_userdata, validate_storage_class};
+    use super::{
+        parse_size_bytes, read_import_file, resolve_cloud_init_userdata, validate_storage_class,
+    };
 
     #[test]
     fn parses_plain_bytes() {
@@ -383,5 +446,50 @@ mod tests {
     fn cloud_init_at_missing_file_is_a_loud_error() {
         let err = resolve_cloud_init_userdata("@/nonexistent/chvctl/user-data").unwrap_err();
         assert!(err.to_string().contains("cloud-init file"));
+    }
+
+    #[test]
+    fn import_file_reads_the_file() {
+        let dir = tempfile::tempdir().expect("import tempdir");
+        let path = dir.path().join("disk.qcow2");
+        std::fs::write(&path, b"QFI\xfbrest-of-disk").expect("write disk image");
+        assert_eq!(
+            read_import_file(path.to_str().unwrap()).unwrap(),
+            b"QFI\xfbrest-of-disk".to_vec()
+        );
+    }
+
+    #[test]
+    fn import_at_missing_file_is_a_loud_error() {
+        let err = read_import_file("/nonexistent/chvctl/disk.qcow2").unwrap_err();
+        assert!(err.to_string().contains("image file"));
+    }
+
+    #[test]
+    fn import_at_oversize_file_is_refused_before_reading() {
+        let dir = tempfile::tempdir().expect("import tempdir");
+        let path = dir.path().join("huge.qcow2");
+        // A sparse file: its metadata length is over the cap without
+        // occupying disk, so the guard trips before any byte is read.
+        std::fs::File::create(&path)
+            .expect("create sparse file")
+            .set_len(101 * 1024 * 1024 * 1024)
+            .expect("set sparse length");
+        let err = read_import_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("100 GiB"),
+            "the oversize refusal must name the cap: {err}"
+        );
+    }
+
+    #[test]
+    fn import_at_non_regular_file_is_refused() {
+        // /dev/null is a character device — readable-looking but not a
+        // regular file; the guard must refuse it before any read.
+        let err = read_import_file("/dev/null").unwrap_err();
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "the non-regular refusal must name it: {err}"
+        );
     }
 }
