@@ -83,16 +83,35 @@ pub async fn get_overview(
                 0
             });
 
-    let networks_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM networks")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "overview: failed to query networks_total");
-            0
-        });
+    // #499: tombstoned networks are excluded from both counts (the
+    // NULL-safe DP9 predicate) — the physical rows survive the delete
+    // as the tombstone's anchor, and without the exclusion the totals
+    // (and `networks_healthy`, whose observed-state rows linger) would
+    // count deleted networks forever.
+    let networks_total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*) FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query networks_total");
+        0
+    });
 
     let networks_healthy = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM network_observed_state WHERE health_status = 'healthy'",
+        r#"
+        SELECT COUNT(*) FROM network_observed_state nos
+        WHERE nos.health_status = 'healthy'
+          AND NOT EXISTS (
+              SELECT 1 FROM network_desired_state nds
+              WHERE nds.network_id = nos.network_id
+                AND nds.desired_status = 'Deleting'
+          )
+        "#,
     )
     .fetch_one(&state.pool)
     .await

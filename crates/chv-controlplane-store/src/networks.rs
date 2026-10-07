@@ -44,6 +44,13 @@ impl NetworkRepository {
     }
 
     /// List every network with its desired-state CIDR (when known).
+    ///
+    /// #499: a deleted network keeps its rows as a `'Deleting'` NDS
+    /// tombstone (the physical `networks` row survives the delete so the
+    /// tombstone can exist — the FK cascades the other way). Tombstoned
+    /// networks are excluded here so the Architecture Designer's fleet
+    /// checks never see a deleted network as a placeable target — the
+    /// NULL-safe predicate is the #522 DP9 discipline byte-exactly.
     pub async fn list(&self) -> Result<Vec<NetworkRow>, StoreError> {
         let rows = sqlx::query(
             r#"
@@ -53,6 +60,7 @@ impl NetworkRepository {
                 d.cidr         AS cidr
             FROM networks n
             LEFT JOIN network_desired_state d ON d.network_id = n.network_id
+            WHERE (d.desired_status IS NULL OR d.desired_status != 'Deleting')
             ORDER BY n.network_id
             "#,
         )

@@ -5346,3 +5346,181 @@ async fn volume_snapshot_rejected_over_http_on_core_managed_node() {
         "clone rejection must carry the CP's message: {body}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// #499 — the late-fragment resurrection pin (end to end)
+// ─────────────────────────────────────────────────────────────────────
+
+/// The #499 scenario, through the real fragment entry point: an
+/// operator deletes a network (the BFF route's tombstone — the NDS row
+/// kept with a terminal 'Deleting' status and a generation bump), and a
+/// `NetworkFragments` report that was queued on the agent before the
+/// delete arrives afterwards. The fragment carries a wall-clock
+/// generation (the shape that beats the tombstone's small integer), so
+/// only the `IS NOT 'Deleting'` conflict-arm term stands between it and
+/// a resurrected network.
+///
+/// Asserted: the ingest fails loudly (the warn + DesiredStateRejected
+/// event path), the NDS tombstone survives byte-for-byte, the physical
+/// `networks` row is not re-asserted, and no exposure row lands. The
+/// network stays deleted.
+#[tokio::test]
+async fn late_network_fragment_cannot_resurrect_a_deleted_network() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-499', 'host-499', 'host-499')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The pre-delete shape: a live network the agent has applied and
+    // reported (NDS generation 3 — BFF create writes 1, two updates
+    // bumped it).
+    sqlx::query(
+        "INSERT INTO networks (network_id, node_id, display_name, network_class) \
+         VALUES ('net-499', 'node-499', 'tenant-net', 'bridge')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_desired_state (network_id, desired_generation, desired_status) \
+         VALUES ('net-499', 3, 'Active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The operator delete — the exact tombstone statement the BFF
+    // route's transaction writes (#499).
+    sqlx::query(
+        r#"
+        INSERT INTO network_desired_state (
+            network_id, desired_generation, desired_status, updated_by,
+            requested_at, updated_at
+        )
+        VALUES ('net-499', 1, 'Deleting', 'op@test', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        ON CONFLICT (network_id) DO UPDATE SET
+            desired_status = 'Deleting',
+            desired_generation = network_desired_state.desired_generation + 1,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT desired_generation, desired_status FROM network_desired_state \
+             WHERE network_id = 'net-499'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (4, Some("Deleting".into())),
+        "the tombstone must have landed at generation 4 (3 + 1)"
+    );
+
+    // The fragment rides a dispatched operation (the agent echoes the
+    // operation id of the intent it applied) — seeded so the rejection
+    // event's FK (`events.operation_id REFERENCES operations`) holds.
+    sqlx::query(
+        "INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, \
+         operation_type, status) \
+         VALUES ('op-499-late', 'op-499-late', 'network', 'net-499', 'ApplyNetworkDesiredState', 'Succeeded')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+
+    let service = ReconcileServiceImplementation::new(
+        node_repo,
+        desired_state_repo,
+        event_repo,
+        ObservedStateRepository::new(pool.clone()),
+        OperationRepository::new(pool.clone()),
+    );
+
+    // The late fragment: the agent's deferred-report shape — the spec it
+    // applied BEFORE the delete, echoed with a wall-clock-milliseconds
+    // generation (what the CP-side mutation verbs mint; the worst case
+    // for the tombstone's small-integer generation).
+    let spec_json = r#"{"network_class": "bridge", "exposures": [{"service_name": "web", "protocol": "tcp", "listen_port": 80, "target_port": 8080}]}"#;
+    let request = proto::ApplyNetworkDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-499-late".into(),
+            requested_by: "agent".into(),
+            target_node_id: "node-499".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1_769_000_000_000,
+        }),
+        node_id: "node-499".into(),
+        network_id: "net-499".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "net-499".into(),
+            kind: "Network".into(),
+            generation: "1769000000000".into(),
+            spec_json: spec_json.as_bytes().to_vec(),
+            policy_json: vec![],
+            updated_at: "2026-10-07T00:00:00Z".into(),
+            updated_by: "agent".into(),
+        }),
+    };
+
+    let result = service.apply_network_desired_state(request).await;
+    assert!(
+        result.is_err(),
+        "a fragment for a tombstoned network must be dropped, got: {:?}",
+        result
+    );
+
+    // No NDS resurrection, no physical re-assert, no exposures.
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT desired_generation, desired_status FROM network_desired_state \
+             WHERE network_id = 'net-499'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (4, Some("Deleting".into())),
+        "the tombstone must survive the late fragment byte-for-byte"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, String)>(
+            "SELECT node_id, display_name FROM networks WHERE network_id = 'net-499'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (Some("node-499".into()), "tenant-net".into()),
+        "the physical networks row must not be re-asserted by the refused fragment"
+    );
+    let exposures: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM network_exposures WHERE network_id = 'net-499'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(exposures, 0, "no exposure row may land for a tombstone");
+
+    // The loud refusal: the DesiredStateRejected event the fragment
+    // path emits before returning the error (beside the warn log).
+    let rejected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE resource_id = 'net-499' AND event_type = 'DesiredStateRejected'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        rejected > 0,
+        "the refused fragment must leave a desired_state_rejected event"
+    );
+}

@@ -452,14 +452,45 @@ pub async fn clone_vm_template(
     .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
 
     // Ensure network exists
-    let network_exists: Option<String> =
-        sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
-            .bind(&network_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
+    // #499: a tombstoned (deleted) network is treated as ABSENT here
+    // (the NULL-safe DP9 predicate) — but its physical row survives as
+    // the tombstone's anchor, so the re-create INSERT below would die
+    // on the PK. The tombstone check right after turns that into the
+    // clean refusal: instantiating a template whose network was deleted
+    // fails loudly instead of resurrecting the network.
+    let network_exists: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT n.network_id FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE n.network_id = ?
+          AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .bind(&network_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
 
     if network_exists.is_none() {
+        let tombstoned: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT n.network_id FROM networks n
+            JOIN network_desired_state nds ON nds.network_id = n.network_id
+            WHERE n.network_id = ? AND nds.desired_status = 'Deleting'
+            "#,
+        )
+        .bind(&network_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check network tombstone: {}", e)))?;
+        if tombstoned.is_some() {
+            return Err(BffError::Conflict(format!(
+                "network '{}' has been deleted; create a network with this id first, \
+                 or rebind the template",
+                network_id
+            )));
+        }
+
         sqlx::query(
             r#"
             INSERT INTO networks (network_id, node_id, display_name, updated_at)

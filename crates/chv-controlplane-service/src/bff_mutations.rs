@@ -704,13 +704,27 @@ impl MutationService for ControlPlaneMutationService {
         force: bool,
         requested_by: String,
     ) -> Result<MutateNetworkResponse, BffError> {
+        // #499: a tombstoned (deleted) network is NotFound here (the
+        // NULL-safe DP9 predicate) — the mutation verbs (start/stop/
+        // restart) must not reach a deleted network's lifecycle, and
+        // the store's `set_network_status` guard backstops this
+        // non-transactional read with a loud Conflict at the SQL level.
+        // fetch_optional (not the historical fetch_one) so both a
+        // missing and a tombstoned network take the clean 404 arm —
+        // the old shape surfaced a missing network as a 500.
         let node_id = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT node_id FROM networks WHERE network_id = ?",
+            r#"
+            SELECT n.node_id FROM networks n
+            LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+            WHERE n.network_id = ?
+              AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+            "#,
         )
         .bind(&network_id)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to look up network: {}", e)))?
+        .flatten()
         .ok_or_else(|| BffError::NotFound(format!("network {} not found", network_id)))?;
 
         let meta = self.build_meta(node_id.clone(), requested_by);

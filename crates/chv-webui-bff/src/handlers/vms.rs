@@ -713,12 +713,21 @@ pub async fn create_vm(
     // collided on the subnet — duplicate host routes, breaking
     // host→guest connectivity for the second bridge (verified on real
     // KVM by the M4.4 qualification, issue #354).
-    let mut resolved_network_id: Option<String> =
-        sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
-            .bind(&network_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
+    let mut resolved_network_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT n.network_id FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE n.network_id = ?
+          -- #499: a tombstoned (deleted) network must not capture an id
+          -- reference — row-absence used to mean deleted, the tombstone
+          -- now does.
+          AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .bind(&network_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
 
     if resolved_network_id.is_none() {
         // Name hits prefer fleet-wide networks (node_id IS NULL — the
@@ -728,11 +737,15 @@ pub async fn create_vm(
         // a legacy implicit row whose network_id equals the reference
         // (e.g. an implicit 'default') keeps shadowing a same-named
         // operator network — the pre-#354 single-network behavior.
+        // #499: tombstoned networks are excluded from name resolution
+        // too (they used to be absent rows).
         resolved_network_id = sqlx::query_scalar(
             r#"
-            SELECT network_id FROM networks
-            WHERE display_name = ? AND (node_id IS NULL OR node_id = ?)
-            ORDER BY (node_id IS NULL) DESC, network_id
+            SELECT n.network_id FROM networks n
+            LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+            WHERE n.display_name = ? AND (n.node_id IS NULL OR n.node_id = ?)
+              AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+            ORDER BY (n.node_id IS NULL) DESC, n.network_id
             LIMIT 1
             "#,
         )
@@ -746,6 +759,31 @@ pub async fn create_vm(
     let network_id = match resolved_network_id {
         Some(id) => id,
         None => {
+            // #499: the implicit branch would INSERT a network row under
+            // the reference's id — but a tombstoned network still HOLDS
+            // that id (the row survives as the tombstone's anchor), so
+            // the insert would die on the PK. Fail with the honest,
+            // clean refusal instead of the 500: the operator referenced
+            // a network that was deleted.
+            let tombstoned: Option<String> = sqlx::query_scalar(
+                r#"
+                SELECT n.network_id FROM networks n
+                JOIN network_desired_state nds ON nds.network_id = n.network_id
+                WHERE n.network_id = ? AND nds.desired_status = 'Deleting'
+                "#,
+            )
+            .bind(&network_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network tombstone: {}", e)))?;
+            if tombstoned.is_some() {
+                return Err(BffError::Conflict(format!(
+                    "network '{}' has been deleted; create a network with this id or name \
+                     first, or reference another network",
+                    network_id
+                )));
+            }
+
             let network_cidr = payload
                 .get("network_cidr")
                 .and_then(|v| v.as_str())
@@ -768,6 +806,10 @@ pub async fn create_vm(
                 JOIN networks n ON n.network_id = nds.network_id
                 WHERE nds.cidr IS NOT NULL AND nds.cidr != ''
                   AND (n.node_id IS NULL OR n.node_id = ?)
+                  -- #499: a tombstoned (deleted) network's subnet is
+                  -- freed — its bridge is gone; it must not block an
+                  -- implicit network from reusing the cidr.
+                  AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
                 "#,
             )
             .bind(&node_id)

@@ -255,6 +255,15 @@ ON CONFLICT (network_id) DO UPDATE SET
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE network_desired_state.desired_generation <= EXCLUDED.desired_generation
+  -- #499: never journal over a delete tombstone. Network delete keeps
+  -- the NDS row with a terminal 'Deleting' status (the #522 volume
+  -- tombstone pattern); this IS NOT term makes the conflict arm refuse
+  -- a late agent fragment (or any other writer) that would otherwise
+  -- re-materialize the row's intent and, through the tx-coupled
+  -- physical upsert, resurrect the deleted network. The INSERT path
+  -- (no row) is closed by construction: the tombstone IS the row.
+  -- IS NOT is NULL-safe: a NULL-status row passes the guard.
+  AND network_desired_state.desired_status IS NOT 'Deleting'
 "#;
 
 const PATCH_VM_POWER_STATE_SQL: &str = r#"
@@ -369,6 +378,13 @@ ON CONFLICT (network_id) DO UPDATE SET
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE network_desired_state.desired_generation <= EXCLUDED.desired_generation
+  -- #499 (the #522 review-S1 sibling-verb guard, network-shaped): the
+  -- start/stop/restart mutation verbs journal wall-clock-millisecond
+  -- generations, so the generation guard alone would always let a
+  -- late-arriving status patch overwrite a 'Deleting' tombstone and
+  -- resurrect a deleted network's intent. IS NOT is NULL-safe: a
+  -- NULL-status row passes the guard.
+  AND network_desired_state.desired_status IS NOT 'Deleting'
 "#;
 
 const PATCH_VOLUME_RESIZE_SQL: &str = r#"
@@ -1005,6 +1021,57 @@ impl DesiredStateRepository {
         })
     }
 
+    /// #499 (the #522 review-S1 disambiguation, network-shaped): the
+    /// conflict arms of [`UPSERT_NETWORK_DESIRED_STATE_SQL`] (the agent
+    /// fragment path — the only production caller of the physical
+    /// `networks` upsert) and [`PATCH_NETWORK_STATUS_SQL`] (the
+    /// start/stop/restart mutation verbs) refuse to journal over a
+    /// `'Deleting'` tombstone at the SQL level; this helper turns that
+    /// block into a loud [`StoreError::Conflict`] (gRPC ALREADY_EXISTS
+    /// / HTTP 409 through the BFF's `map_ack`, the #384 precedent)
+    /// instead of the pre-existing stale-generation refusal. The
+    /// network generations the control plane mints are small integers
+    /// (BFF create writes 1, update bumps +1) while the mutation verbs
+    /// carry wall-clock milliseconds, so the generation guard alone
+    /// never blocks a late writer against a tombstone — and, unlike
+    /// the volume case, the delete is BFF-direct with NO agent
+    /// dispatch, so nothing but this term stands between a late
+    /// fragment and a resurrected network.
+    ///
+    /// Takes an executor (not `&self.pool`) because the two fragment
+    /// upserts are still inside their transaction when they disambiguate
+    /// — a pool query there would wait on the connection the tx itself
+    /// holds (deadlock on a single-connection pool). The tx-bound read
+    /// sees the same committed tombstone the refused upsert just
+    /// evaluated.
+    async fn refuse_network_write_if_deleting<'e, E>(
+        executor: E,
+        network_id: &ResourceId,
+        generation: i64,
+    ) -> Result<(), StoreError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let status: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT desired_status FROM network_desired_state WHERE network_id = $1",
+        )
+        .bind(network_id.as_str())
+        .fetch_optional(executor)
+        .await?;
+        if matches!(&status, Some(Some(status)) if status == "Deleting") {
+            return Err(StoreError::Conflict {
+                entity: "network",
+                id: network_id.to_string(),
+                reason: "network is deleting; the write was refused (the network stays deleted)",
+            });
+        }
+        Err(StoreError::StaleGeneration {
+            entity: "network",
+            id: network_id.to_string(),
+            incoming: generation,
+        })
+    }
+
     pub async fn upsert_network(&self, input: &NetworkDesiredStateInput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         let generation = generation_to_i64(input.desired_generation)?;
@@ -1039,11 +1106,12 @@ impl DesiredStateRepository {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "network",
-                id: input.network_id.to_string(),
-                incoming: generation,
-            });
+            // #499: a 'Deleting' tombstone blocks the conflict arm (see
+            // the SQL) — refuse loudly instead of reporting a stale
+            // generation. The whole transaction (the physical `networks`
+            // re-assert included) rolls back with this error.
+            return Self::refuse_network_write_if_deleting(&mut *tx, &input.network_id, generation)
+                .await;
         }
 
         tx.commit().await?;
@@ -1088,11 +1156,14 @@ impl DesiredStateRepository {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "network",
-                id: input.network_id.to_string(),
-                incoming: generation,
-            });
+            // #499: a 'Deleting' tombstone blocks the conflict arm (see
+            // the SQL) — refuse loudly instead of reporting a stale
+            // generation. The whole transaction (the physical `networks`
+            // re-assert and every exposure row included) rolls back with
+            // this error: a late agent fragment for a deleted network is
+            // dropped, never resurrecting anything.
+            return Self::refuse_network_write_if_deleting(&mut *tx, &input.network_id, generation)
+                .await;
         }
 
         for exposure in exposures {
@@ -1147,11 +1218,15 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::StaleGeneration {
-                entity: "network",
-                id: input.network_id.to_string(),
-                incoming: generation,
-            });
+            // #499 (the #522 review-S1 sibling-verb guard): a 'Deleting'
+            // tombstone blocks the conflict arm (see the SQL) — refuse
+            // loudly instead of reporting a stale generation.
+            return Self::refuse_network_write_if_deleting(
+                &self.pool,
+                &input.network_id,
+                generation,
+            )
+            .await;
         }
         Ok(())
     }

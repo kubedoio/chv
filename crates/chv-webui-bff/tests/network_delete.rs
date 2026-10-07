@@ -362,12 +362,36 @@ async fn network_delete_succeeds_after_vm_delete() {
         "network delete must succeed after all VMs are deleted, body: {body}"
     );
 
+    // #499: the delete no longer removes the rows — it tombstones the
+    // NDS row (terminal 'Deleting', generation bumped past the create's
+    // 1) and keeps the physical row as the tombstone's anchor (the FK
+    // cascades the other way). Deleted means the tombstone, not
+    // row-absence.
+    let (generation, status_col): (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, desired_status FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("fetch nds tombstone");
+    assert_eq!(
+        generation, 2,
+        "the tombstone must bump the create's generation 1"
+    );
+    assert_eq!(
+        status_col.as_deref(),
+        Some("Deleting"),
+        "the tombstone status must be terminal 'Deleting'"
+    );
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM networks WHERE network_id = ?")
         .bind(&net_id)
         .fetch_one(&state.pool)
         .await
         .expect("count networks");
-    assert_eq!(remaining, 0, "network row must be gone");
+    assert_eq!(
+        remaining, 1,
+        "the physical row must survive as the tombstone's anchor"
+    );
 }
 
 #[tokio::test]
@@ -561,4 +585,268 @@ async fn network_delete_of_missing_network_is_404_for_admin() {
         StatusCode::NOT_FOUND,
         "missing network must 404, body: {body}"
     );
+}
+
+/// #499: the delete's own semantics — the tombstone lands with the
+/// requester stamped, the reads that must exclude it do (list, detail,
+/// repeat delete), and the derived state the old cascade removed is
+/// still cleaned (exposures, nic rows, vni allocations).
+#[tokio::test]
+async fn network_delete_tombstone_lands_and_reads_exclude_it() {
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-tomb", "10.99.3.0/24").await;
+
+    // Derived state the old cascade removed — seed all three shapes.
+    sqlx::query(
+        "INSERT INTO network_exposures (network_id, service_name, protocol, listen_port) \
+         VALUES (?, 'web', 'tcp', 80)",
+    )
+    .bind(&net_id)
+    .execute(&state.pool)
+    .await
+    .expect("seed exposure");
+    sqlx::query(
+        "INSERT INTO vni_allocations (vni, network_id, allocated_at, binding_generation) \
+         VALUES (100, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 1)",
+    )
+    .bind(&net_id)
+    .execute(&state.pool)
+    .await
+    .expect("seed vni allocation");
+
+    let (status, body) = delete_network(&state, &token, &net_id).await;
+    assert_eq!(status, StatusCode::OK, "delete must succeed, body: {body}");
+
+    // The tombstone: terminal status, generation bumped (create wrote
+    // 1), the deleting operator stamped as updated_by.
+    let (generation, status_col, updated_by): (i64, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT desired_generation, desired_status, updated_by \
+             FROM network_desired_state WHERE network_id = ?",
+        )
+        .bind(&net_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("fetch nds tombstone");
+    assert_eq!(
+        generation, 2,
+        "the tombstone must bump the create's generation 1"
+    );
+    assert_eq!(status_col.as_deref(), Some("Deleting"));
+    assert_eq!(
+        updated_by.as_deref(),
+        Some("u-operator"),
+        "the deleter must be stamped"
+    );
+
+    // The derived-state cleanup the cascade used to do.
+    for (table, what) in [
+        ("network_exposures", "exposure rows"),
+        ("vni_allocations", "vni allocations"),
+        ("vm_nic_desired_state", "nic rows"),
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE network_id = ?"
+        ))
+        .bind(&net_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 0, "{what} must be cleaned by the delete");
+    }
+
+    // The reads exclude the tombstone: list omits it, detail 404s, and
+    // a repeat delete keeps the pre-#499 NotFound contract.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks",
+        &token,
+        r#"{"page":1,"page_size":50}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "list must succeed, body: {body}");
+    let listed = body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["network_id"].as_str() == Some(net_id.as_str()))
+        .count();
+    assert_eq!(
+        listed, 0,
+        "a tombstoned network must not appear in the list"
+    );
+
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/get",
+        &token,
+        &format!(r#"{{"network_id":"{net_id}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a tombstoned network must 404 on detail, body: {body}"
+    );
+
+    let (status, body) = delete_network(&state, &token, &net_id).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a repeat delete must keep the NotFound contract, body: {body}"
+    );
+    let (generation, status_col): (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, desired_status FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("fetch nds tombstone");
+    assert_eq!(
+        (generation, status_col.as_deref()),
+        (2, Some("Deleting")),
+        "the refused repeat delete must not re-stamp the tombstone"
+    );
+}
+
+/// #499: a VM create referencing a deleted network is refused with the
+/// clean 409 — pre-#499 the absent row fell through to implicit
+/// creation; a naive tombstone retention would have ATTACHED the VM to
+/// the deleted network instead.
+#[tokio::test]
+async fn vm_create_referencing_a_deleted_network_is_refused() {
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-gone", "10.99.4.0/24").await;
+
+    let (status, _) = delete_network(&state, &token, &net_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/vms/create",
+        &token,
+        &format!(r#"{{"name":"vm-x","image_ref":"/tmp/x.img","network_id":"{net_id}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a VM create naming a deleted network must refuse, body: {body}"
+    );
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("has been deleted"),
+        "the refusal must name the deletion, got: {msg}"
+    );
+
+    // Fail-closed: nothing was journaled.
+    let vms: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
+        .fetch_one(&state.pool)
+        .await
+        .expect("count vms");
+    assert_eq!(vms, 0, "no VM row may land from the refused create");
+    let nics: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("count nics");
+    assert_eq!(nics, 0, "no nic row may attach to the deleted network");
+}
+
+/// #499, the resurrection pin at the BFF tier: after the delete, the
+/// exact store upsert the CP fragment path drives
+/// (`upsert_network_with_exposures`, the only production caller of the
+/// physical `networks` upsert) is refused against the tombstone — no
+/// NDS resurrection, no physical re-assert, no exposures. The
+/// end-to-end fragment entry (`apply_network_desired_state`) is pinned
+/// in `chv-controlplane-service`'s suite.
+#[tokio::test]
+async fn late_fragment_upsert_cannot_resurrect_a_deleted_network() {
+    use chv_controlplane_types::domain::{Generation, ResourceId};
+
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-res", "10.99.5.0/24").await;
+
+    let (status, _) = delete_network(&state, &token, &net_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The late fragment's write, worst case: a wall-clock-milliseconds
+    // generation (always beats the tombstone's small integer) with an
+    // exposure riding the spec.
+    let wall_clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let err = state
+        .desired_state_repo
+        .upsert_network_with_exposures(
+            &chv_controlplane_store::NetworkDesiredStateInput {
+                network_id: ResourceId::new(&net_id).unwrap(),
+                node_id: None,
+                display_name: format!("resurrected-{net_id}"),
+                network_class: Some("bridge".into()),
+                desired_generation: Generation::new(wall_clock as u64),
+                desired_status: None,
+                requested_by: Some("agent".into()),
+                updated_by: Some("agent".into()),
+                firewall_rules_json: None,
+                nat_rules_json: None,
+                dhcp_scope_json: None,
+                dns_enabled: None,
+                dns_scope_json: None,
+                requested_unix_ms: wall_clock,
+            },
+            &[chv_controlplane_store::NetworkExposureInput {
+                network_id: ResourceId::new(&net_id).unwrap(),
+                service_name: "web".into(),
+                protocol: "tcp".into(),
+                listen_address: None,
+                listen_port: Some(80),
+                target_address: None,
+                target_port: Some(8080),
+                exposure_policy: None,
+                updated_unix_ms: wall_clock,
+            }],
+        )
+        .await
+        .expect_err("the fragment upsert must refuse a tombstoned network");
+    assert!(
+        matches!(
+            err,
+            chv_controlplane_store::StoreError::Conflict { reason, .. }
+                if reason.contains("network is deleting")
+        ),
+        "the refusal must be the loud tombstone Conflict, got: {err:?}"
+    );
+
+    // The network stays deleted: tombstone intact, physical row not
+    // re-asserted, no exposure row.
+    let (generation, status_col): (i64, Option<String>) = sqlx::query_as(
+        "SELECT desired_generation, desired_status FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("fetch nds tombstone");
+    assert_eq!((generation, status_col.as_deref()), (2, Some("Deleting")));
+    let name: String = sqlx::query_scalar("SELECT display_name FROM networks WHERE network_id = ?")
+        .bind(&net_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("fetch networks row");
+    assert_eq!(name, "tenant-res", "the physical row must keep its shape");
+    let exposures: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM network_exposures WHERE network_id = ?")
+            .bind(&net_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("count exposures");
+    assert_eq!(exposures, 0, "no exposure row may land for a tombstone");
 }
