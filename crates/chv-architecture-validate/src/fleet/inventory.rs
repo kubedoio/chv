@@ -113,8 +113,18 @@ pub struct NetworkInfo {
 pub struct DatastoreInfo {
     pub name: String,
     pub kind: String,
-    pub capacity_gb: u64,
-    pub free_gb: u64,
+    /// Total capacity in GiB, when the source knows it. `None` means
+    /// unknown — never a fabricated number (a `free_gb` of `0` is a
+    /// real "full", not a stand-in for "unreported"). Sources that
+    /// report no capacity (the storage-class string array enrollment
+    /// persists) yield `None`; the fleet check downgrades the
+    /// capacity verdict to a warning rather than blocking on `None`
+    /// (the `*_complete`-flag precedent, #514).
+    #[serde(default)]
+    pub capacity_gb: Option<u64>,
+    /// Free capacity in GiB, same honesty contract as `capacity_gb`.
+    #[serde(default)]
+    pub free_gb: Option<u64>,
     pub host: Option<String>,
 }
 

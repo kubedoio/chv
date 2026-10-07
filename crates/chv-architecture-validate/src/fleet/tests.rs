@@ -290,12 +290,147 @@ fn datastore_insufficient_capacity_emitted() {
     inv.datastores.push(DatastoreInfo {
         name: "ds1".into(),
         kind: "qcow2-dir".into(),
-        capacity_gb: 100,
-        free_gb: 50,
+        capacity_gb: Some(100),
+        free_gb: Some(50),
         host: None,
     });
     let f = check_fleet(&a, &inv);
     assert!(has_code(&f, codes::DATASTORE_INSUFFICIENT_CAPACITY));
+}
+
+#[test]
+fn datastore_unknown_capacity_downgrades_to_warning() {
+    // #514 follow-up ruling: a datastore whose free capacity is
+    // unknown (`None` — the class-string enrollment path reports no
+    // capacity numbers) downgrades the capacity verdict to a
+    // non-blocking WARNING naming the unknown, following the
+    // `*_complete`-flag precedent (`backup.rs`, `network.rs`,
+    // `permissions.rs`): we cannot verify the fit, but we still say
+    // so instead of silently passing. Never a fabricated number —
+    // `None` is not `0`.
+    let mut a = empty_arch("t");
+    a.datastores.push(Datastore {
+        name: "local".into(),
+        datastore_type: DatastoreType::Qcow2Dir,
+        path: None,
+        pool: None,
+        capabilities: None,
+        secret_ref: None,
+    });
+    let mut inst = instance_on("vm1", "h1");
+    inst.disks.push(InstanceDisk {
+        name: "root".into(),
+        size_gb: Some(500),
+        datastore: Some("local".into()),
+    });
+    a.instances.push(inst);
+    let mut inv = empty_inv();
+    inv.nodes.push(ok_node("h1"));
+    // A class-named entry exactly as the repaired string-array parse
+    // produces it: name = class, kind = class, capacities None.
+    inv.datastores.push(DatastoreInfo {
+        name: "local".into(),
+        kind: "local".into(),
+        capacity_gb: None,
+        free_gb: None,
+        host: None,
+    });
+    let f = check_fleet(&a, &inv);
+
+    // Coupled behavior change, pinned: the class-named entry now
+    // EXISTS in the live set, so no blocking DATASTORE_NOT_FOUND for
+    // a class the node offers (previously the dead parse yielded an
+    // empty live set and every planned datastore hit NOT_FOUND).
+    assert!(
+        !has_code(&f, codes::DATASTORE_NOT_FOUND),
+        "class-named live entry suppresses DATASTORE_NOT_FOUND"
+    );
+
+    // The capacity verdict is the warning, not a blocking error.
+    let finding = f
+        .iter()
+        .find(|x| x.code == codes::DATASTORE_INSUFFICIENT_CAPACITY)
+        .expect("unknown free capacity still emits a finding");
+    assert_eq!(finding.severity, Severity::Warning);
+    assert!(!finding.blocking);
+    assert!(
+        finding.message.contains("unknown free capacity"),
+        "warning names the unknown: {}",
+        finding.message
+    );
+}
+
+#[test]
+fn datastore_zero_free_capacity_still_blocks() {
+    // `Some(0)` is a REAL "full", not a stand-in for unknown — the
+    // Option-ification must not soften genuine zero-capacity
+    // reports. Only `None` (unknown) downgrades.
+    let mut a = empty_arch("t");
+    a.datastores.push(Datastore {
+        name: "ds1".into(),
+        datastore_type: DatastoreType::Qcow2Dir,
+        path: None,
+        pool: None,
+        capabilities: None,
+        secret_ref: None,
+    });
+    let mut inst = instance_on("vm1", "h1");
+    inst.disks.push(InstanceDisk {
+        name: "root".into(),
+        size_gb: Some(1),
+        datastore: Some("ds1".into()),
+    });
+    a.instances.push(inst);
+    let mut inv = empty_inv();
+    inv.nodes.push(ok_node("h1"));
+    inv.datastores.push(DatastoreInfo {
+        name: "ds1".into(),
+        kind: "qcow2-dir".into(),
+        capacity_gb: Some(0),
+        free_gb: Some(0),
+        host: None,
+    });
+    let f = check_fleet(&a, &inv);
+    let finding = f
+        .iter()
+        .find(|x| x.code == codes::DATASTORE_INSUFFICIENT_CAPACITY)
+        .expect("planned 1 GB over a real 0 GB free still fires");
+    assert_eq!(finding.severity, Severity::Error);
+    assert!(finding.blocking);
+}
+
+#[test]
+fn datastore_info_serde_reads_numbers_and_tolerates_absent_capacity() {
+    // #514: the BFF persists `InventorySnapshot` (carrying
+    // `DatastoreInfo`) as JSON via `InventorySnapshotRepository`.
+    // Read compatibility after the `Option<u64>` reshaping, pinned:
+    // a previously persisted numeric shape deserializes numbers into
+    // `Some` byte-compatibly, and a shape with absent (or null)
+    // capacity fields deserializes to `None` — never a fabricated
+    // number, never a parse failure.
+    let numeric: DatastoreInfo = serde_json::from_str(
+        r#"{"name":"ds1","kind":"qcow2-dir","capacity_gb":100,"free_gb":50,"host":"h1"}"#,
+    )
+    .expect("persisted numeric shape stays readable");
+    assert_eq!(numeric.capacity_gb, Some(100));
+    assert_eq!(numeric.free_gb, Some(50));
+
+    let absent: DatastoreInfo = serde_json::from_str(r#"{"name":"ds1","kind":"local"}"#)
+        .expect("absent capacity fields deserialize (not an error)");
+    assert_eq!(absent.capacity_gb, None);
+    assert_eq!(absent.free_gb, None);
+
+    let null: DatastoreInfo =
+        serde_json::from_str(r#"{"name":"ds1","kind":"local","capacity_gb":null,"free_gb":null}"#)
+            .expect("explicit nulls deserialize");
+    assert_eq!(null.capacity_gb, None);
+    assert_eq!(null.free_gb, None);
+
+    // And the round trip preserves the unknown as unknown.
+    let re: DatastoreInfo =
+        serde_json::from_str(&serde_json::to_string(&absent).unwrap()).expect("round trip parses");
+    assert_eq!(re.capacity_gb, None);
+    assert_eq!(re.free_gb, None);
 }
 
 #[test]
@@ -380,8 +515,8 @@ fn secret_ref_missing_emitted_when_secret_store_complete() {
     inv.datastores.push(DatastoreInfo {
         name: "ds1".into(),
         kind: "ceph-rbd".into(),
-        capacity_gb: 1000,
-        free_gb: 1000,
+        capacity_gb: Some(1000),
+        free_gb: Some(1000),
         host: None,
     });
     // Authoritative secret store with a different name — `ceph-key` is missing.
@@ -451,8 +586,8 @@ fn secret_ref_present_in_authoritative_store_does_not_emit() {
     inv.datastores.push(DatastoreInfo {
         name: "ceph-key".into(), // intentionally same name as the secret_ref
         kind: "ceph-rbd".into(),
-        capacity_gb: 1000,
-        free_gb: 1000,
+        capacity_gb: Some(1000),
+        free_gb: Some(1000),
         host: None,
     });
     inv.secrets.push(crate::fleet::SecretInfo {
@@ -527,8 +662,8 @@ fn happy_path_no_findings() {
     inv.datastores.push(DatastoreInfo {
         name: "ds1".into(),
         kind: "qcow2-dir".into(),
-        capacity_gb: 1000,
-        free_gb: 500,
+        capacity_gb: Some(1000),
+        free_gb: Some(500),
         host: None,
     });
     inv.images.push(ImageInfo {
@@ -655,8 +790,8 @@ fn every_emitted_code_lives_in_all_codes() {
     inv.datastores.push(DatastoreInfo {
         name: "tight-ds".into(),
         kind: "qcow2-dir".into(),
-        capacity_gb: 100,
-        free_gb: 10,
+        capacity_gb: Some(100),
+        free_gb: Some(10),
         host: None,
     });
     inv.backup_targets.push(BackupTargetInfo {

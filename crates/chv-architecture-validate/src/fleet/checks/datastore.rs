@@ -81,25 +81,52 @@ pub(super) fn check(model: &CHVArchitecture, inv: &InventorySnapshot) -> Vec<Fin
         }
     }
 
-    // Capacity check: per-datastore sum vs free.
+    // Capacity check: per-datastore sum vs free. When free is unknown
+    // (`None` — the class-string enrollment path reports no capacity)
+    // the verdict downgrades to a warning instead of blocking, the
+    // same posture as the `*_complete`-flag checks (`backup.rs`,
+    // `network.rs`, `permissions.rs`): we cannot verify the fit, but
+    // we still say so loudly instead of silently passing. `Some(0)`
+    // stays a REAL "full" and keeps blocking.
     for (ds_name, planned) in &planned_gb {
         if let Some(ds) = live.get(ds_name) {
-            if *planned > ds.free_gb {
-                findings.push(Finding {
-                    severity: Severity::Error,
-                    code: Cow::Borrowed(codes::DATASTORE_INSUFFICIENT_CAPACITY),
-                    message: format!(
-                        "datastore {} has {} GB free but architecture plans {} GB",
-                        ds.name, ds.free_gb, planned
-                    ),
-                    path: None,
-                    resource_ref: Some(format!("datastore/{}", ds.name)),
-                    blocking: true,
-                    suggestion: Some(
-                        "shrink instance disks, expand the datastore, or split across datastores"
-                            .into(),
-                    ),
-                });
+            match ds.free_gb {
+                Some(free_gb) => {
+                    if *planned > free_gb {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            code: Cow::Borrowed(codes::DATASTORE_INSUFFICIENT_CAPACITY),
+                            message: format!(
+                                "datastore {} has {} GB free but architecture plans {} GB",
+                                ds.name, free_gb, planned
+                            ),
+                            path: None,
+                            resource_ref: Some(format!("datastore/{}", ds.name)),
+                            blocking: true,
+                            suggestion: Some(
+                                "shrink instance disks, expand the datastore, or split across datastores"
+                                    .into(),
+                            ),
+                        });
+                    }
+                }
+                None => {
+                    findings.push(Finding {
+                        severity: Severity::Warning,
+                        code: Cow::Borrowed(codes::DATASTORE_INSUFFICIENT_CAPACITY),
+                        message: format!(
+                            "datastore {} has unknown free capacity (fleet reports no capacity for this datastore) — architecture plans {} GB, capacity fit not verified",
+                            ds.name, planned
+                        ),
+                        path: None,
+                        resource_ref: Some(format!("datastore/{}", ds.name)),
+                        blocking: false,
+                        suggestion: Some(
+                            "verify free capacity on the datastore before deploying this architecture"
+                                .into(),
+                        ),
+                    });
+                }
             }
         }
     }

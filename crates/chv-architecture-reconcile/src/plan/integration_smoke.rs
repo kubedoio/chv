@@ -171,8 +171,8 @@ fn second_apply_with_matching_snapshot_yields_no_changes() {
     inv.datastores.push(DatastoreInfo {
         name: "ds-a".into(),
         kind: "qcow2-dir".into(),
-        capacity_gb: 100,
-        free_gb: 50,
+        capacity_gb: Some(100),
+        free_gb: Some(50),
         host: None,
     });
     inv.images.push(ImageInfo {
