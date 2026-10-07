@@ -264,6 +264,14 @@ pool model but are mutually inconsistent and dead end-to-end:
    parse at `:157-170`) — string items never yield a `name`, so
    `list_datastores` always returns empty. The datastores surface is
    dead code as operated.
+   [Corrected 2026-10-07, #546:] the surface is live — `list_datastores`
+   now parses the string array enrollment actually persists (each class
+   string yields an entry named by the class, `capacity_gb`/`free_gb`
+   unknown — `Option`, never fabricated; the object shape keeps
+   parsing), class-named entries suppress `DATASTORE_NOT_FOUND` for
+   classes a node offers, and the `DATASTORE_INSUFFICIENT_CAPACITY`
+   check downgrades to a warning on unknown capacity (`Some(0)` still
+   blocks).
 3. **The `storage_pools` table + BFF/CP create routes** (C4) accept an
    operator-invented `pool_type` string with operator-supplied
    capacity, connected to no provisioning, no placement, and no stord
@@ -379,7 +387,10 @@ probe).
 
 **What changes:** everything in A *plus* the inventory truth-fix, a
 placement policy hook, capacity reporting, and either deleting or
-repairing the fleet datastores parse. **What breaks:** nothing
+repairing the fleet datastores parse. [Corrected 2026-10-07, #546:]
+the parse half of that repair has landed — see §2.5 item 2's
+correction; what remains deferred to B is the capacity half
+(free-extent reporting). **What breaks:** nothing
 existing — but the current probe is actively wrong on LVM nodes:
 `install.sh:224` creates `storage/localdisk` and `storage/lvm`, the
 `KNOWN` list probes only `localdisk`/`ceph`/`nfs` (`inventory.rs:96`),
@@ -392,7 +403,10 @@ platform is single-node-per-VM today, clone placement already follows
 the source's node, and every existing deployment has exactly one
 backend per node. It also has to decide the fate of three dead surfaces
 (storage_pools, fleet datastores, the probe) — each a small design
-decision of its own. B should be the *destination*, not the first step.
+decision of its own. [Corrected 2026-10-07, #546:] the fleet
+datastores member of that list is no longer dead (see §2.5 item 2's
+correction); `storage_pools` and the probe remain as stated. B should
+be the *destination*, not the first step.
 
 ### Option C — config-driven node-level default (the minimal-change option)
 
@@ -711,8 +725,13 @@ New tests per piece:
    accept-time check (DP4) must normalize.
 5. **The dead surfaces stay dead (by decision).** `storage_pools`,
    the inventory probe, and the fleet datastores parse remain
-   misleading until Option B or deletion (§8). An operator reading the
-   UI's storage page can believe pools exist that nothing serves.
+   misleading until Option B or deletion (§8). [Corrected 2026-10-07,
+   #546:] the fleet datastores parse no longer misleads — it parses
+   the enrollment string array into class-named entries with unknown
+   (`Option`) capacities and suppresses `DATASTORE_NOT_FOUND` for
+   offered classes (§2.5 item 2's correction); `storage_pools` and the
+   inventory probe remain as stated. An operator reading the UI's
+   storage page can believe pools exist that nothing serves.
 6. **Seed images on LVM are unsupported (DP2 scope cut).** A VM create
    with an `image_ref` and an LVM class disk has no seed path; if PR 3
    doesn't reject that combination at accept time, it fails at
