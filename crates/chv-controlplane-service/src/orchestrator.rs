@@ -1417,10 +1417,15 @@ impl Orchestrator {
             // cause-naming UNSUPPORTED_BY_AGENT code carrying the agents'
             // refusal detail BEFORE propagating, because the tick's
             // Unimplemented bypass never reaches mark_for_retry — without
-            // this write the row would sit in Running forever. Any other
-            // error class (mixed failures included) propagates unchanged
-            // with no terminal write, so the shared retry curve keeps
-            // today's semantics.
+            // this write the row would sit in Running forever. In the
+            // partial-success shape (#502) the roll-up reason riding
+            // `error_message` names both sets — refusing nodes with their
+            // per-node error text, and the applied nodes — so the #530
+            // surfaces (task detail, TaskTimeline, `chvctl task watch`)
+            // render the distinction verbatim with zero client work. Any
+            // other error class (mixed failures included) propagates
+            // unchanged with no terminal write, so the shared retry curve
+            // keeps today's semantics.
             if matches!(e, ChvError::Unimplemented { .. }) {
                 self.operation_repo
                     .update_status(&OperationStatusUpdateInput {
@@ -4978,6 +4983,22 @@ mod tests {
                 .contains("update_overlay is unsupported in core-managed mode"),
             "the agents' refusal text must ride the error message: {error_message:?}"
         );
+        // #502: the pure all-refusals shape (nothing applied) keeps the
+        // roll-up message byte-for-byte — no applied clause is appended.
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("refused by all 2 failing node(s)"),
+            "the all-refusals roll-up shape is unchanged: {error_message:?}"
+        );
+        assert!(
+            !error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("applied on"),
+            "no applied clause when nothing applied: {error_message:?}"
+        );
         assert_eq!(
             retry_count, 0,
             "no retry may be scheduled for a terminal-class error"
@@ -5008,6 +5029,126 @@ mod tests {
             "exactly one dispatch per node across all ticks"
         );
         let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ovl-1").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// #502 partial-success roll-up: a fan-out where SOME participating
+    /// nodes apply their fabric plan and the rest refuse with gRPC
+    /// `Unimplemented` is still the all-refusals fast-fail shape (every
+    /// FAILURE is a refusal), so the operation goes terminal on the FIRST
+    /// dispatch with `Failed` / `UNSUPPORTED_BY_AGENT` and zero retries —
+    /// but the terminal record now names BOTH sets: the refusing nodes
+    /// with their per-node error text AND the applied nodes, so an
+    /// operator reading the error message (the #530 surfaces render it
+    /// verbatim) can tell partial application happened. Before #502 the
+    /// roll-up listed only the refusing nodes.
+    #[tokio::test]
+    async fn update_overlay_fan_out_partial_success_rollup_names_applied_and_refused_nodes() {
+        let pool = create_test_pool().await;
+        seed_update_overlay_op(&pool, "net-ovl", "op-ovl-3").await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // node-ovl-a applies its plan (no entry → Ok ack); node-ovl-b
+        // refuses with the core-managed fail-closed gate.
+        let mut overlay_status_by_node = std::collections::HashMap::new();
+        overlay_status_by_node.insert(
+            "node-ovl-b".to_string(),
+            tonic::Status::unimplemented("update_overlay is unsupported in core-managed mode"),
+        );
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                overlay_status_by_node,
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-a", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-ovl-b", agent.clone());
+
+        let orchestrator = test_orchestrator_with_overlay(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here — a
+        // partial refusal is terminal-class because every FAILURE was a
+        // refusal (the applied nodes are not failures).
+        orchestrator.tick().await.expect("tick 1");
+
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-ovl-3").await;
+        assert_eq!(
+            status, "Failed",
+            "a partial-success all-refusals fan-out is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        let message = error_message.as_deref().unwrap_or_default();
+        // The refusing set: count, node id, and the agent's refusal text.
+        assert!(
+            message.contains("refused by all 1 failing node(s)"),
+            "the refusing count rides the roll-up: {message:?}"
+        );
+        assert!(
+            message.contains("node-ovl-b"),
+            "the refusing node is named: {message:?}"
+        );
+        assert!(
+            message.contains("update_overlay is unsupported in core-managed mode"),
+            "the refusing node's agent text rides the roll-up verbatim: {message:?}"
+        );
+        // The applied set (#502): the applied node is named distinctly.
+        assert!(
+            message.contains("applied on 1 node(s): node-ovl-a"),
+            "the applied node is named distinctly from the refusals: {message:?}"
+        );
+        assert!(
+            message.contains("node-ovl-a") && message.contains("node-ovl-b"),
+            "both sets appear in one terminal message: {message:?}"
+        );
+        assert_eq!(
+            retry_count, 0,
+            "no retry may be scheduled for a terminal-class error"
+        );
+        assert_eq!(
+            next_retry_at, None,
+            "mark_for_retry must never run: no next_retry_at may be written"
+        );
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            2,
+            "the fan-out still attempts every participating node exactly once"
+        );
+
+        // Further ticks must not resurrect the terminal row or re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.overlay_calls.lock().unwrap().len(),
+            2,
+            "exactly one dispatch per node across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-ovl-3").await;
         assert_eq!(status, "Failed", "the terminal row stays terminal");
         assert_eq!(retry_count, 0);
         assert_eq!(next_retry_at, None);

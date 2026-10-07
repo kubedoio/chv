@@ -22,7 +22,11 @@ use tracing::{info, warn};
 /// refusal — including the partial-success shape where some nodes applied
 /// their plan and only the failing nodes refused — the refusal identity is
 /// preserved and the operation fails terminally (`Failed` /
-/// `UNSUPPORTED_BY_AGENT`) on the first dispatch, with no re-dispatch.
+/// `UNSUPPORTED_BY_AGENT`) on the first dispatch, with no re-dispatch. In
+/// that partial-success shape the roll-up reason names BOTH sets (#502):
+/// the refusing nodes with their per-node error text, and the nodes whose
+/// dispatch acked (the applied set), so the operator can tell partial
+/// application happened from the terminal record alone.
 #[derive(Clone)]
 pub struct OverlayManager {
     node_pool: NodeClientPool,
@@ -53,7 +57,8 @@ impl OverlayManager {
     ///
     /// All nodes are attempted even if some fail; the returned error
     /// carries per-node detail so the operation record shows exactly which
-    /// agents missed the update.
+    /// agents missed the update — and, in the all-refusals shape, which
+    /// nodes applied (#502).
     pub async fn send_fabric_update(
         &self,
         network_id: &str,
@@ -61,6 +66,12 @@ impl OverlayManager {
         operation_id: &str,
     ) -> Result<(), ChvError> {
         let mut failures: Vec<String> = Vec::new();
+        // #502 partial-success roll-up: the nodes whose dispatch acked.
+        // Known at roll-up time by construction — the fan-out attempts
+        // every plan and this loop observes each ack — but before #502 it
+        // was logged per node and dropped, so a partial-success
+        // all-refusals fan-out recorded only the refusing set.
+        let mut applied: Vec<String> = Vec::new();
         // #378 §7 fast-fail, overlay leg: whether every per-node failure
         // was an `Unimplemented` refusal (the all-core-managed shape).
         let mut all_refusals = true;
@@ -72,6 +83,7 @@ impl OverlayManager {
                 .await
             {
                 Ok(()) => {
+                    applied.push(node_id.clone());
                     info!(
                         network_id = network_id,
                         node_id = %node_id,
@@ -109,16 +121,35 @@ impl OverlayManager {
             // arrive in a deterministic compile order: the planner walks
             // the peer list, which the store returns `ORDER BY node_id`),
             // so the operation record still shows which agents refused.
+            // #502 partial-success roll-up: in the shape where some nodes
+            // applied and only the failing nodes refused, the reason ALSO
+            // names the applied set — the message reads "... refused by
+            // all N failing node(s): <per-node refusals>; applied on M
+            // node(s): <ids>" — so the terminal record distinguishes
+            // partial application from a whole-cluster refusal. The pure
+            // all-refusals shape (no node applied) keeps today's message
+            // byte-for-byte: the applied clause is appended only when the
+            // set is non-empty.
             // Mixed failures (some refusals, some other classes)
             // deliberately keep the Internal aggregation below: a partial
             // refusal is not terminal-class for the operation — the
             // non-refusing nodes may still fail transiently and succeed
             // on retry — so the shared retry curve must stay in charge.
+            let applied_summary = if applied.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; applied on {} node(s): {}",
+                    applied.len(),
+                    applied.join(", ")
+                )
+            };
             Err(ChvError::Unimplemented {
                 reason: format!(
-                    "fabric update for network {network_id} refused by all {} failing node(s): {}",
+                    "fabric update for network {network_id} refused by all {} failing node(s): {}{}",
                     failures.len(),
-                    failures.join("; ")
+                    failures.join("; "),
+                    applied_summary,
                 ),
             })
         } else {
