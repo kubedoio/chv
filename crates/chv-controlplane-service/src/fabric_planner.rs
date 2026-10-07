@@ -161,6 +161,15 @@ impl FabricPlanner {
 
     /// Load the network row with the overlay columns plus the desired
     /// generation (the plan generation fence).
+    ///
+    /// #499: tombstoned (deleted) networks are NotFound — the physical
+    /// row survives the delete as the tombstone's anchor, so without
+    /// this exclusion a deleted overlay network would still compile
+    /// fabric plans and (through `allocate_vni`) mint fresh VNI
+    /// allocations on a dead network. This is the load-bearing gate
+    /// between the vtep writers (`vtep.rs`'s `UPDATE networks SET vni`)
+    /// and a tombstone: everything they allocate flows through this
+    /// lookup first.
     async fn load_network(
         &self,
         network_id: &str,
@@ -169,7 +178,8 @@ impl FabricPlanner {
             r#"SELECT n.overlay_type, n.vni, nds.desired_generation
                FROM networks n
                LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
-               WHERE n.network_id = ?"#,
+               WHERE n.network_id = ?
+                 AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')"#,
         )
         .bind(network_id)
         .fetch_optional(&self.pool)
@@ -622,5 +632,51 @@ mod tests {
         let planner = FabricPlanner::new(pool);
         let err = planner.compile_for_network("net-ghost").await.unwrap_err();
         assert!(matches!(err, ControlPlaneServiceError::NotFound(_)));
+    }
+
+    /// #499: a tombstoned (deleted) network is NotFound at the plan
+    /// fence — the physical row survives the delete as the tombstone's
+    /// anchor, so without `load_network`'s exclusion a deleted overlay
+    /// network would still compile fabric plans and (through the lazy
+    /// `allocate_vni`) mint a fresh VNI allocation on a dead network.
+    /// `load_network` is the gate between the vtep writers and the
+    /// tombstone; this pin keeps it closed.
+    #[tokio::test]
+    async fn compile_for_network_refuses_a_tombstoned_network() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_node(&pool, "node-b").await;
+        seed_network(&pool, "net-dead", 4).await;
+        seed_placement(&pool, "vm-a", "node-a", "net-dead").await;
+        seed_placement(&pool, "vm-b", "node-b", "net-dead").await;
+
+        // The tombstone the BFF delete route writes.
+        sqlx::query(
+            "UPDATE network_desired_state SET desired_status = 'Deleting', \
+             desired_generation = desired_generation + 1 WHERE network_id = 'net-dead'",
+        )
+        .execute(&pool)
+        .await
+        .expect("tombstone the network");
+
+        let planner = FabricPlanner::new(pool.clone());
+        let err = planner
+            .compile_for_network("net-dead")
+            .await
+            .expect_err("a tombstoned network must not compile fabric plans");
+        assert!(
+            matches!(err, ControlPlaneServiceError::NotFound(ref msg) if msg.contains("net-dead")),
+            "the refusal must be the NotFound from load_network, got: {err:?}"
+        );
+
+        // And no VNI was allocated on the dead network (the vtep writer
+        // interleaving the #499 census flagged).
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vni_allocations WHERE network_id = 'net-dead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(allocations, 0, "no VNI allocation may land for a tombstone");
     }
 }

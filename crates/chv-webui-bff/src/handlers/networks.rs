@@ -28,10 +28,20 @@ pub async fn list_networks(
     }
 
     let offset = (page - 1) * page_size;
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM networks")
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to count networks: {}", e)))?;
+    // #499: tombstoned networks (a delete keeps the rows with a terminal
+    // 'Deleting' NDS status) are excluded — the NULL-safe predicate is
+    // the #522 DP9 discipline byte-exactly. Row-absence no longer means
+    // deleted, so the exclusion is what keeps "deleted" meaning deleted.
+    let total_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to count networks: {}", e)))?;
     let total_pages = (total_count as u64).div_ceil(page_size);
 
     let rows = sqlx::query_as::<_, NetworkRow>(
@@ -67,6 +77,7 @@ pub async fn list_networks(
             WHERE status != 'resolved' AND resource_kind = 'network'
             GROUP BY resource_id
         ) alert_counts ON n.network_id = alert_counts.resource_id
+        WHERE (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
         ORDER BY n.network_id
         LIMIT ? OFFSET ?
         "#,
@@ -155,6 +166,9 @@ pub async fn get_network(
             GROUP BY resource_id
         ) alert_counts ON n.network_id = alert_counts.resource_id
         WHERE n.network_id = ?
+          -- #499: a tombstoned (deleted) network 404s on detail exactly
+          -- as it did when the delete removed the row outright.
+          AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
         "#,
     )
     .bind(network_id)
@@ -408,12 +422,22 @@ pub async fn delete_network(
         )));
     }
 
-    let exists =
-        sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
-            .bind(&network_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+    // #499: the existence check excludes tombstoned networks (LEFT JOIN
+    // + the NULL-safe predicate, the #522 DP9 discipline) — a repeat
+    // delete of an already-deleted network keeps today's contract
+    // (NotFound), it does not re-stamp the tombstone.
+    let exists = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT n.network_id FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE n.network_id = ?
+          AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .bind(&network_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
 
     if exists.is_none() {
         return Err(BffError::NotFound(format!(
@@ -423,10 +447,13 @@ pub async fn delete_network(
     }
 
     // Stale-row GC (#356): drop this network's nic rows whose VM is
-    // gone or deleting — required for the NIC table, not cosmetic:
-    // vm_nic_desired_state has network_id REFERENCES networks ON DELETE
-    // RESTRICT, so leaving them would turn the delete below into an FK
-    // violation (500) instead of the clean 409/200 contract.
+    // gone or deleting. Pre-#499 this was REQUIRED for the physical-row
+    // delete (vm_nic_desired_state has network_id REFERENCES networks ON
+    // DELETE RESTRICT, so leaving them FK-failed the DELETE); the row
+    // now survives as the tombstone's anchor, but the GC stays — nic
+    // rows of dead VMs on a deleted network are stale data nothing else
+    // would ever clean, and keeping them would leave the delete gate's
+    // liveness predicate doing permanent work against a dead network.
     sqlx::query(
         r#"
         DELETE FROM vm_nic_desired_state
@@ -445,23 +472,25 @@ pub async fn delete_network(
 
     // VNI allocations (#356, the last FK hazard): vni_allocations
     // references networks(network_id) with no ON DELETE action, so ANY
-    // row — soft-released or not — FK-failed the delete below; overlay
-    // networks that ever allocated a VNI could never be deleted. Two
-    // statements, in order:
+    // row — soft-released or not — FK-failed the pre-#499 physical-row
+    // delete; overlay networks that ever allocated a VNI could never be
+    // deleted. Two statements, in order:
     //   1. soft-release active rows (same bookkeeping as
     //      Store::release_vni: allocation history keeps its release
     //      timestamp);
-    //   2. delete the rows — the FK leaves no other choice under this
-    //      schema (network_id is NOT NULL, so ON DELETE SET NULL is not
-    //      expressible either).
+    //   2. delete the rows — kept under #499's tombstone shape even
+    //      though the physical row now survives (the FK no longer
+    //      forces it): dropping the rows preserves the delete's exact
+    //      pre-#499 VNI-reuse semantics, and the #499 census confirmed
+    //      no remaining reader keys off a tombstoned network's
+    //      allocation history.
     // Tradeoff, accepted and documented: the 24h VNI-reuse quarantine
     // (the allocation query's released_at window) cannot survive the
-    // network's deletion under this schema — the rows ARE the
-    // quarantine. Network delete is an explicit operator action gated
-    // on zero live attachments and preceded by the last-detach host
-    // teardown (#362), so immediate reuse is the bounded residual; a
-    // schema change (nullable reference or a side quarantine table)
-    // would be needed to do better.
+    // network's deletion — the rows ARE the quarantine. Network delete
+    // is an explicit operator action gated on zero live attachments and
+    // preceded by the last-detach host teardown (#362), so immediate
+    // reuse is the bounded residual; a schema change (nullable reference
+    // or a side quarantine table) would be needed to do better.
     sqlx::query(
         r#"
         UPDATE vni_allocations
@@ -480,11 +509,52 @@ pub async fn delete_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete vni allocations: {}", e)))?;
 
-    sqlx::query("DELETE FROM networks WHERE network_id = ?")
+    // Derived-state cleanup that the pre-#499 `DELETE FROM networks`
+    // got for free from the FK cascade (network_exposures REFERENCES
+    // networks ON DELETE CASCADE): the physical row now survives as the
+    // tombstone's anchor, so the exposure rows are dropped explicitly —
+    // nothing else ever would (they have no read surface today, but a
+    // future one must not see a deleted network's exposures).
+    sqlx::query("DELETE FROM network_exposures WHERE network_id = ?")
         .bind(&network_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| BffError::Internal(format!("failed to delete network: {}", e)))?;
+        .map_err(|e| BffError::Internal(format!("failed to delete network exposures: {}", e)))?;
+
+    // #499: the tombstone. The NDS row is KEPT with a terminal
+    // 'Deleting' status and a generation bump (the #522 volume-tombstone
+    // pattern, network-shaped) instead of cascading away with the
+    // physical row — the FK runs the other way
+    // (`network_desired_state.network_id REFERENCES networks ON DELETE
+    // CASCADE`), so the tombstone requires the physical `networks` row
+    // to survive too. With a row present, a late agent fragment hits
+    // the conflict arm of the fragment upsert, whose
+    // `IS NOT 'Deleting'` term refuses to journal over the tombstone —
+    // closing the INSERT-path resurrection of #499 (no row meant no
+    // guard). The upsert shape tolerates a legacy network with no NDS
+    // row (a plain tombstone INSERT at generation 1). The generation
+    // bump dominates every fragment the agent can still deliver for
+    // this network (fragments echo the generation of the intent they
+    // applied, which is at most the pre-delete generation).
+    sqlx::query(
+        r#"
+        INSERT INTO network_desired_state (
+            network_id, desired_generation, desired_status, updated_by,
+            requested_at, updated_at
+        )
+        VALUES (?, 1, 'Deleting', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        ON CONFLICT (network_id) DO UPDATE SET
+            desired_status = 'Deleting',
+            desired_generation = network_desired_state.desired_generation + 1,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(&network_id)
+    .bind(&claims.sub)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to tombstone network: {}", e)))?;
 
     tx.commit()
         .await
@@ -519,12 +589,21 @@ pub async fn update_network(
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_network_owner(&mut conn, &network_id, &claims.sub, claims.role == "admin").await?;
 
-    let exists =
-        sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
-            .bind(&network_id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+    // #499: the existence check excludes tombstoned networks (the
+    // NULL-safe DP9 predicate) — updating a deleted network 404s
+    // exactly as it did when the delete removed the row outright.
+    let exists = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT n.network_id FROM networks n
+        LEFT JOIN network_desired_state nds ON nds.network_id = n.network_id
+        WHERE n.network_id = ?
+          AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
+        "#,
+    )
+    .bind(&network_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
     // Release the pooled connection before opening the write transaction —
     // single-connection pools (tests) would otherwise deadlock the begin().
     drop(conn);

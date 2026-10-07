@@ -141,6 +141,14 @@ impl Orchestrator {
             SELECT COUNT(*) FROM network_desired_state nds
             LEFT JOIN network_observed_state nos ON nds.network_id = nos.network_id
             WHERE nds.desired_generation != COALESCE(nos.observed_generation, -1)
+              -- #499: a 'Deleting' tombstone never converges (network
+              -- delete is BFF-direct with no agent dispatch, so no
+              -- fragment ever reports the tombstone's generation) —
+              -- without this exclusion every deleted network would
+              -- count as permanent drift. Unlike the VM/volume
+              -- tombstones, whose dispatches do converge the observed
+              -- generation, there is nothing to wait for.
+              AND (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
             "#,
         )
         .fetch_one(&self.pool)

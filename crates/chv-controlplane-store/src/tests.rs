@@ -1385,3 +1385,229 @@ async fn volume_patch_stale_generation_is_still_the_stale_generation_error() {
         "the refused stale patch must not touch the row"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// #499 — the network delete tombstone vs. the fragment upsert
+// ─────────────────────────────────────────────────────────────────────
+
+/// Seed a network with a `network_desired_state` row in the given shape.
+/// The tombstone case is `('Deleting'`, a small integer generation) —
+/// exactly what the BFF delete route's one-tx tombstone writes (a
+/// network created by the route carries generation 1; the tombstone
+/// bumps it to 2).
+async fn seed_nds_network(
+    pool: &StorePool,
+    network_id: &str,
+    generation: i64,
+    status: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO networks (network_id, display_name, network_class) VALUES ($1, $1, 'bridge')",
+    )
+    .bind(network_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_desired_state (network_id, desired_generation, desired_status) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(network_id)
+    .bind(generation)
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn nds_shape(pool: &StorePool, network_id: &str) -> (i64, Option<String>) {
+    sqlx::query_as(
+        "SELECT desired_generation, desired_status \
+         FROM network_desired_state WHERE network_id = $1",
+    )
+    .bind(network_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn networks_row_shape(pool: &StorePool, network_id: &str) -> (Option<String>, String) {
+    sqlx::query_as("SELECT node_id, display_name FROM networks WHERE network_id = $1")
+        .bind(network_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn fragment_input(network_id: &str, generation: i64) -> NetworkDesiredStateInput {
+    NetworkDesiredStateInput {
+        network_id: ResourceId::new(network_id).unwrap(),
+        node_id: None,
+        display_name: format!("resurrected-{network_id}"),
+        network_class: Some("bridge".into()),
+        desired_generation: Generation::new(generation as u64),
+        desired_status: None,
+        requested_by: Some("agent".into()),
+        updated_by: Some("agent".into()),
+        firewall_rules_json: None,
+        nat_rules_json: None,
+        dhcp_scope_json: None,
+        dns_enabled: None,
+        dns_scope_json: None,
+        requested_unix_ms: generation,
+    }
+}
+
+fn fragment_exposures(network_id: &str) -> Vec<NetworkExposureInput> {
+    vec![NetworkExposureInput {
+        network_id: ResourceId::new(network_id).unwrap(),
+        service_name: "web".into(),
+        protocol: "tcp".into(),
+        listen_address: None,
+        listen_port: Some(80),
+        target_address: None,
+        target_port: Some(8080),
+        exposure_policy: None,
+        updated_unix_ms: 1_000,
+    }]
+}
+
+/// The #499 resurrection pin, store tier: a fragment upsert against a
+/// tombstoned network is refused (the loud Conflict), the tombstone
+/// survives byte-for-byte, the physical `networks` row is NOT
+/// re-asserted, and no exposure row lands. The wall-clock generation is
+/// the shape that would beat the tombstone's small integer if the
+/// `IS NOT 'Deleting'` term were absent.
+#[tokio::test]
+async fn network_fragment_upsert_refuses_to_journal_over_a_deleting_tombstone() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_nds_network(&pool, "net-499-dead", 2, Some("Deleting")).await;
+
+    let err = repo
+        .upsert_network_with_exposures(
+            &fragment_input("net-499-dead", CP_WALL_CLOCK_GENERATION),
+            &fragment_exposures("net-499-dead"),
+        )
+        .await
+        .expect_err("a fragment upsert over a tombstone must fail");
+    assert!(
+        matches!(err, StoreError::Conflict { .. }),
+        "the refusal must be the loud Conflict, got: {err:?}"
+    );
+    assert_eq!(
+        nds_shape(&pool, "net-499-dead").await,
+        (2, Some("Deleting".into())),
+        "the tombstone must survive the refused fragment byte-for-byte"
+    );
+    assert_eq!(
+        networks_row_shape(&pool, "net-499-dead").await,
+        (None, "net-499-dead".into()),
+        "the physical row must not be re-asserted by the refused \
+         fragment (the tx coupling rolls it back with the intent)"
+    );
+    let exposures: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM network_exposures WHERE network_id = $1")
+            .bind("net-499-dead")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(exposures, 0, "no exposure row may land for a tombstone");
+}
+
+/// The regression pin: the same fragment upsert on a LIVE network
+/// journals exactly as before the guard (row updated, exposures land).
+#[tokio::test]
+async fn network_fragment_upsert_still_applies_to_a_live_network() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_nds_network(&pool, "net-499-live", 1, Some("Pending")).await;
+
+    repo.upsert_network_with_exposures(
+        &fragment_input("net-499-live", CP_WALL_CLOCK_GENERATION),
+        &fragment_exposures("net-499-live"),
+    )
+    .await
+    .expect("a fragment upsert on a live network must still apply");
+
+    assert_eq!(
+        nds_shape(&pool, "net-499-live").await,
+        (CP_WALL_CLOCK_GENERATION, None),
+        "the live control case must journal exactly as before the guard"
+    );
+    assert_eq!(
+        networks_row_shape(&pool, "net-499-live").await,
+        (None, "resurrected-net-499-live".into()),
+        "the physical row follows the fragment on the live path"
+    );
+    let exposures: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM network_exposures WHERE network_id = $1")
+            .bind("net-499-live")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(exposures, 1, "the live fragment's exposure must land");
+}
+
+/// The disambiguation pin: a stale generation on a LIVE network stays
+/// the StaleGeneration refusal, not a misreported delete conflict.
+#[tokio::test]
+async fn network_fragment_stale_generation_is_still_the_stale_generation_error() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_nds_network(&pool, "net-499-stale", 100, Some("Active")).await;
+
+    let err = repo
+        .upsert_network_with_exposures(
+            &fragment_input("net-499-stale", 50),
+            &fragment_exposures("net-499-stale"),
+        )
+        .await
+        .expect_err("a stale-generation fragment must still fail");
+    assert!(
+        matches!(err, StoreError::StaleGeneration { .. }),
+        "the stale-generation semantic must be unchanged, got: {err:?}"
+    );
+    assert_eq!(
+        nds_shape(&pool, "net-499-stale").await,
+        (100, Some("Active".into())),
+        "the refused stale fragment must not touch the row"
+    );
+}
+
+/// The sibling-verb pin (#499, the #522 review-S1 guard network-shaped):
+/// a start/stop/restart status patch over a tombstone is refused with
+/// the loud Conflict and the tombstone survives — the mutation verbs
+/// carry wall-clock generations that would otherwise always beat the
+/// tombstone's small integer.
+#[tokio::test]
+async fn network_status_patch_refuses_to_journal_over_a_deleting_tombstone() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+    seed_nds_network(&pool, "net-499-verb", 2, Some("Deleting")).await;
+
+    let err = repo
+        .set_network_status(&NetworkStatusPatchInput {
+            network_id: ResourceId::new("net-499-verb").unwrap(),
+            desired_generation: Generation::new(CP_WALL_CLOCK_GENERATION as u64),
+            desired_status: Some("Active".into()),
+            requested_by: Some("test".into()),
+            updated_by: None,
+            requested_unix_ms: CP_WALL_CLOCK_GENERATION,
+        })
+        .await
+        .expect_err("a status patch over a tombstone must fail");
+    assert!(
+        matches!(err, StoreError::Conflict { .. }),
+        "the refusal must be the loud Conflict, got: {err:?}"
+    );
+    assert_eq!(
+        nds_shape(&pool, "net-499-verb").await,
+        (2, Some("Deleting".into())),
+        "the tombstone must survive the refused status patch byte-for-byte"
+    );
+}
