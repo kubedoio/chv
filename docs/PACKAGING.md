@@ -38,19 +38,23 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 ```
 
 > **Note: the packaged UI tree is not served by the package (#423, resolved
-> as D3 interim).** No packaged component serves `/usr/share/chv/ui/`.
-> `chv-controlplane`'s HTTP listener (loopback `:8080`) exposes the BFF API
-> only — there is no static file server in the binary, and the packages
-> install no web server. The package ships an example nginx configuration
-> at `/usr/share/chv/examples/chv-example.conf`, and
+> as D3 interim).** No packaged component serves `/usr/share/chv/ui/`
+> *by default* — since #447 (D3 target) the `chv-controlplane` binary CAN
+> serve it, opt-in via the `[webui]` config section (disabled by default,
+> fail-closed; the packaged `controlplane.toml` documents the section).
+> When enabled, the control plane's HTTP listener (loopback `:8080`)
+> serves the static tree alongside the BFF API; when disabled it exposes
+> the BFF API only. The packages still install no web server: the shipped
+> example nginx configuration (`/usr/share/chv/examples/chv-example.conf`)
+> is a proxy-only edge pointing at the control plane, and
 > [DEPLOYMENT.md](DEPLOYMENT.md) ("Serving the Web UI in package mode")
 > documents how to use it; that serving path is
-> [CODE-SUPPORTED, UNQUALIFIED]. The qualified UI path is still
-> `scripts/install.sh`, which installs and configures nginx serving
-> `/opt/chv/ui`. Decision D3 in
+> [CODE-SUPPORTED, UNQUALIFIED] (the #447 container package-smoke leg is
+> the gate). The qualified UI path is still
+> `scripts/install.sh`, which enables `[webui]` for `/opt/chv/ui` and
+> configures nginx as a proxy-only edge. Decision D3 in
 > [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) (§5 UC-3, §8 D3)
-> is resolved as interim (b), target (d) — the target (serving from the
-> binary) is tracked in #447.
+> is resolved as interim (b), target (d) — target (d) landed in #447.
 
 ### `chv-node`
 

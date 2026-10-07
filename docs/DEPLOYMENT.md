@@ -94,7 +94,7 @@ in the install output. You will be required to change it on first login.
 │           ▲                        │                        │
 │           │                        ├─► chv-stord (daemon)   │
 │           │                        └─► chv-nwd   (daemon)   │
-│      nginx :80 (UI + API proxy)                             │
+│      nginx :80 (proxy edge — the binary serves the UI)      │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  chvbr0 (10.200.0.1/24) ──NAT──► ens19 ──► internet │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -123,8 +123,8 @@ in the install output. You will be required to change it on first login.
 | Port | Service | Bound To |
 |------|---------|----------|
 | 8443 | gRPC (control plane ↔ agent) | `127.0.0.1` |
-| 8080 | HTTP admin API | `127.0.0.1` |
-| 80 | Web UI (nginx) | `0.0.0.0` |
+| 8080 | HTTP admin API (+ Web UI when `[webui]` is enabled) | `127.0.0.1` |
+| 80 | Edge proxy (nginx; Web UI + API) | `0.0.0.0` |
 | 9901 | Agent metrics (optional) | `127.0.0.1` |
 
 ### Verification
@@ -571,15 +571,20 @@ The static `map` approach is production-standard for small-to-medium clusters (t
 
 ## Serving the Web UI in package mode
 
-> **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. The packages
-> install no web server and start no listener. Serving the packaged UI
-> tree is an operator-provided step. `scripts/install.sh` remains the
-> qualified deployment path.
+> **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. Serving the
+> packaged UI tree is an operator-provided step — no qualification leg
+> exercises it yet (the container package-smoke leg tracked in #447).
+> `scripts/install.sh` remains the qualified deployment path.
 
 The `chv-controlplane` package ships the Web UI static tree at
-`/usr/share/chv/ui`. The package also ships an example nginx
-configuration at
-`/usr/share/chv/examples/chv-example.conf`.
+`/usr/share/chv/ui`, and the control plane can serve it directly from
+its own HTTP listener (`http_bind`, `127.0.0.1:8080` by default) —
+decision D3 target, issue #447. Serving is **opt-in and disabled by
+default** (fail-closed): no static assets are served unless the
+operator enables the `[webui]` section. The package also ships an
+example proxy-only nginx configuration at
+`/usr/share/chv/examples/chv-example.conf` for operators who want an
+edge (TLS termination, gzip, the `/ws/` console proxy) in front.
 
 ### Prerequisites
 
@@ -589,44 +594,76 @@ configuration at
    [PACKAGING.md](PACKAGING.md) "Post-Install Steps".
 2. Start the CHV services and verify the loopback listeners: the BFF
    on `127.0.0.1:8080`, the agent serial console on `127.0.0.1:8444`.
-   Do not expose either listener directly; nginx is the edge.
+   Do not expose either listener directly; an edge proxy is the only
+   supported front door.
 
 ### Steps
 
-1. Install nginx.
-2. Install the example configuration:
+1. Enable the Web UI in `/etc/chv/controlplane.toml`:
+
+   ```toml
+   [webui]
+   enabled = true
+   # dir = "/usr/share/chv/ui"   # the package default
+   ```
+
+2. Restart the control plane and verify it serves the UI shell:
+
+   ```bash
+   sudo systemctl restart chv-controlplane
+   curl -s http://127.0.0.1:8080/ | head
+   ```
+
+3. Optional edge: install the example proxy-only configuration (TLS
+   termination, gzip, and the `/ws/` serial-console proxy):
+
    ```bash
    sudo cp /usr/share/chv/examples/chv-example.conf \
         /etc/nginx/sites-available/chv
    sudo ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
    sudo rm -f /etc/nginx/sites-enabled/default
-   ```
-3. Test and start nginx:
-   ```bash
    sudo nginx -t
    sudo systemctl enable --now nginx
    ```
 
-The example configuration serves `/usr/share/chv/ui`. It proxies
-`/api/` and `/v1/` to the BFF on `127.0.0.1:8080`.
+### What the binary serves (and what it does not)
+
+- Request paths outside the reserved API prefixes (`/v1`, `/api`,
+  `/admin`, `/health*`, `/ready`, `/internal`, `/metrics`) are served
+  from `dir`; unmatched ones fall back to `index.html` (the SPA
+  fallback, `try_files $uri $uri/ /index.html`). Reserved prefixes
+  keep the JSON 404 — an API miss stays machine-readable.
+- Cache posture mirrors the previous nginx edge: `index.html` (and
+  the SPA fallback) is served `no-cache, no-store, must-revalidate`;
+  `/_app/immutable/` (SvelteKit's content-hashed assets) is served
+  `public, max-age=31536000, immutable`; other assets carry no
+  `Cache-Control`.
+- The router's security headers (CSP, `x-content-type-options`,
+  `x-frame-options`, `referrer-policy`) apply to served assets.
+- Static assets are unauthenticated (the login page must load before
+  login); every API route keeps its existing auth and CSRF posture.
 
 ### Serial console requires the `/ws/` proxy
 
 In proxied mode the BFF returns console URLs of the form
 `/ws/vms/{node_id}/{vm_id}/console?token=...`. These URLs work only
-through an edge that proxies `/ws/` to the agent on `127.0.0.1:8444`.
-The example configuration includes this proxy. Do not remove it; the
-VM serial console stops working without it.
+through an edge that proxies `/ws/` to the agent on `127.0.0.1:8444`:
+**the control plane binary does not proxy `/ws/`** (the #447 decision —
+documented, not implemented; maintainer-ratified 2026-10-07; see the
+issue). The example configuration includes this proxy. Do not remove
+it; the VM serial console stops working without it.
 
 ### Notes
 
 - TLS termination at the edge is an operator concern. See
   [DEPLOYMENT-ARCHITECTURE.md](DEPLOYMENT-ARCHITECTURE.md) §8 D7.
 - The example configuration mirrors the one written by
-  `scripts/install.sh`. The two copies can drift. Convergence is
-  tracked in the D3 target issue (#447).
-- The target state is to serve the UI from `chv-controlplane` itself
-  (decision D3, option (d)). See issue #447.
+  `scripts/install.sh` (both are proxy-only edges since #447; the
+  binary owns static serving). The two copies can still drift.
+- The tier label for serving-from-packages stays
+  [CODE-SUPPORTED, UNQUALIFIED] until the container package-smoke leg
+  (#447) runs: enabling `[webui]` and starting the binary in a clean
+  container, asserting the UI is served.
 
 ---
 

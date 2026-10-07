@@ -15,6 +15,7 @@ chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 chv-common = { path = "../chv-common" }
+chv-config = { path = "../chv-config" }
 chv-observability = { path = "../chv-observability" }
 tokio = { workspace = true }
 tonic = { workspace = true }
@@ -27,6 +28,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+tower-http = { workspace = true }
 hyper-util = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }

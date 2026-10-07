@@ -27,3 +27,18 @@ server_cert_path = "/etc/chv/certs/server.crt"
 server_key_path = "/etc/chv/certs/server.key"
 # Client CA for mTLS verification (agents present certs signed by this CA)
 client_ca_path = "/etc/chv/certs/ca.crt"
+
+# Web UI static serving (issue #447, decision D3 target). Disabled by
+# default — fail-closed: no static assets are served unless enabled.
+# When enabled, the control plane serves the UI from its HTTP listener
+# (http_bind): request paths outside the reserved API prefixes
+# (/v1, /api, /admin, /health*, /ready, /internal, /metrics) are served
+# from `dir`, with an SPA fallback to index.html; index.html is served
+# no-cache and /_app/immutable/ with a 1-year immutable Cache-Control.
+# The serial console (/ws/...) still requires an edge proxy — see
+# docs/DEPLOYMENT.md "Serving the Web UI in package mode".
+[webui]
+enabled = false
+# Default: where the .deb/.rpm installs the tree. scripts/install.sh
+# uses /opt/chv/ui and enables this section for its own tree.
+dir = "/usr/share/chv/ui"

@@ -386,7 +386,11 @@ install_binaries_and_assets() {
     info "Installing Web UI assets..."
     rm -rf "$CHV_UI_DIR"/*
     cp -r "${EXTRACT_DIR}/ui/"* "$CHV_UI_DIR/"
-    chown -R www-data:www-data "$CHV_UI_DIR"
+    # Owned by the control plane user since #447: the binary serves the
+    # tree ([webui] in controlplane.toml), not nginx. Files/dirs stay
+    # world-readable (cp under the default umask), so any edge can
+    # still read them too.
+    chown -R "$CHV_USER:$CHV_USER" "$CHV_UI_DIR"
 
     info "Installing database migrations..."
     cp -r "${EXTRACT_DIR}/migrations/"* "$CHV_MIGRATIONS_DIR/"
@@ -984,6 +988,12 @@ ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
 server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
 server_key_path = "${CHV_CONFIG_DIR}/certs/server.key"
 client_ca_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
+
+# Web UI static serving (#447, D3 target): the control plane serves
+# the UI itself; nginx (install_nginx below) is a proxy-only edge.
+[webui]
+enabled = true
+dir = "${CHV_UI_DIR}"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
@@ -1184,36 +1194,21 @@ map $http_upgrade $connection_upgrade {
 }
 EOF
 
+    # D3 target (#447): the control plane binary serves the UI itself
+    # ([webui] enabled in the generated controlplane.toml), so nginx is
+    # a PROXY-ONLY edge — the static root, try_files/SPA fallback, and
+    # Cache-Control locations now live in the binary
+    # (crates/chv-controlplane-service/src/api/router.rs). The /ws/
+    # serial-console proxy stays here: the binary does not proxy /ws/
+    # (the #447 decision — documented in docs/DEPLOYMENT.md, not
+    # implemented; maintainer-ratified 2026-10-07).
     cat > /etc/nginx/sites-available/chv <<'EOF'
 server {
     listen 80;
     server_name _;
 
-    root /opt/chv/ui;
-    index index.html;
-
+    # Everything (UI + BFF/API) from the control plane binary.
     location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
-
-    location /_app/immutable/ {
-        add_header Cache-Control "public, max-age=31536000, immutable";
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location /v1/ {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

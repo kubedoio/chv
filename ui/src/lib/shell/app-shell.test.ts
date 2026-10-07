@@ -32,6 +32,6 @@ describe('app shell definitions', () => {
 		expect(getPageDefinition('/backup-jobs').title).toBe('Backups');
 		expect(getPageDefinition('/maintenance').title).toBe('Backups');
 		expect(getPageDefinition('/quotas').title).toBe('Settings');
-		expect(getPageDefinition('/metrics').title).toBe('Overview');
+		expect(getPageDefinition('/observability').title).toBe('Overview');
 	});
 });

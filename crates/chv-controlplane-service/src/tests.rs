@@ -102,6 +102,7 @@ async fn test_health_endpoint() {
     let app = crate::api::router::admin_router(
         test_app_state(test_db.pool.clone()),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let response = app
@@ -124,6 +125,7 @@ async fn test_ready_endpoint() {
     let app = crate::api::router::admin_router(
         test_app_state(test_db.pool.clone()),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let response = app
@@ -148,7 +150,11 @@ async fn test_deep_health_endpoint() {
     let mut app_state = test_app_state(test_db.pool.clone());
     let temp_dir = tempfile::tempdir().unwrap();
     app_state.agent_runtime_dir = temp_dir.path().to_path_buf();
-    let app = crate::api::router::admin_router(app_state, crate::convergence_metrics::new_shared());
+    let app = crate::api::router::admin_router(
+        app_state,
+        crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
+    );
 
     let response = app
         .oneshot(
@@ -178,8 +184,11 @@ async fn test_deep_health_endpoint() {
     // Scenario 2: directory does not exist -> degraded
     let mut app_state2 = test_app_state(test_db.pool.clone());
     app_state2.agent_runtime_dir = std::path::PathBuf::from("/nonexistent/chv/agent/dir");
-    let app2 =
-        crate::api::router::admin_router(app_state2, crate::convergence_metrics::new_shared());
+    let app2 = crate::api::router::admin_router(
+        app_state2,
+        crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
+    );
 
     let response2 = app2
         .oneshot(
@@ -224,6 +233,7 @@ async fn test_admin_nodes_endpoint() {
     let app = crate::api::router::admin_router(
         test_app_state(pool),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let token = test_admin_token();
@@ -253,6 +263,7 @@ async fn test_admin_node_not_found() {
     let app = crate::api::router::admin_router(
         test_app_state(test_db.pool.clone()),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let token = test_admin_token();
@@ -294,6 +305,7 @@ async fn test_admin_node_get_by_id_resolves() {
     let app = crate::api::router::admin_router(
         test_app_state(pool),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let token = test_admin_token();
@@ -334,6 +346,7 @@ async fn test_admin_operation_get_by_id_resolves() {
     let app = crate::api::router::admin_router(
         test_app_state(pool),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     let token = test_admin_token();
@@ -3689,6 +3702,7 @@ async fn test_logout_clears_session_cookie() {
     let app = crate::api::router::admin_router(
         test_app_state(test_db.pool.clone()),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
 
     // Logout must terminate the cookie session: clear chv_session with
@@ -5266,6 +5280,7 @@ async fn volume_snapshot_rejected_over_http_on_core_managed_node() {
     let app = crate::api::router::admin_router(
         test_app_state(pool.clone()),
         crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
     );
     let token = test_admin_token();
 
@@ -5523,4 +5538,532 @@ async fn late_network_fragment_cannot_resurrect_a_deleted_network() {
         rejected > 0,
         "the refused fragment must leave a desired_state_rejected event"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Static Web UI serving (issue #447 — decision D3 target)
+// ---------------------------------------------------------------------------
+
+/// A minimal built-UI-tree fixture: the SPA shell, one content-hashed
+/// immutable asset, and one plain asset — enough to pin the ServeDir
+/// route, the SPA fallback, and both Cache-Control postures without a
+/// real `ui/build` (which is gitignored, hence ServeDir-from-disk
+/// rather than rust-embed in the first place).
+fn fixture_ui_tree() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("ui tempdir");
+    std::fs::write(
+        dir.path().join("index.html"),
+        "<!doctype html><html><body>chv-ui-fixture-shell</body></html>",
+    )
+    .expect("write index.html");
+    let immutable = dir.path().join("_app").join("immutable");
+    std::fs::create_dir_all(&immutable).expect("mkdir _app/immutable");
+    std::fs::write(
+        immutable.join("app.HASH1234.js"),
+        "// chv-ui-fixture-immutable-asset",
+    )
+    .expect("write immutable asset");
+    std::fs::write(
+        dir.path().join("favicon.svg"),
+        "<svg><!-- chv-ui-fixture-favicon --></svg>",
+    )
+    .expect("write favicon");
+    dir
+}
+
+fn webui_enabled_at(dir: &std::path::Path) -> chv_config::WebUiConfig {
+    chv_config::WebUiConfig {
+        enabled: true,
+        dir: dir.to_path_buf(),
+    }
+}
+
+#[tokio::test]
+async fn webui_root_serves_index_html_with_no_cache() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // ServeDir guesses the content type from the extension.
+    assert!(response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html")));
+    // nginx parity (`location = /index.html`): the shell is never
+    // cached, or an upgrade serves a stale shell against new hashed
+    // assets.
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache, no-store, must-revalidate")
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("chv-ui-fixture-shell"),
+        "the served bytes must be the fixture index.html"
+    );
+}
+
+#[tokio::test]
+async fn webui_spa_fallback_serves_index_html() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // A client-side route that has no file behind it — the
+    // `try_files … /index.html` leg.
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/vms/some-vm/console-history")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache, no-store, must-revalidate"),
+        "the SPA fallback serves index.html, so it gets index.html's no-cache header"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("chv-ui-fixture-shell"));
+}
+
+#[tokio::test]
+async fn webui_immutable_asset_served_with_one_year_cache() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/_app/immutable/app.HASH1234.js")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // nginx parity (`location /_app/immutable/`): content-hashed
+    // filenames make the response permanently cacheable.
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        "// chv-ui-fixture-immutable-asset",
+        "the served bytes must be the fixture asset's real bytes"
+    );
+}
+
+#[tokio::test]
+async fn webui_plain_asset_carries_no_cache_control() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // nginx parity: only the shell and the immutable tree carry
+    // Cache-Control; every other asset gets none.
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/favicon.svg")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("cache-control"), None);
+}
+
+#[tokio::test]
+async fn webui_reserved_prefixes_keep_the_json_404() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // Issue #447's reserved list, verbatim: /v1, /api, /admin, /health*,
+    // /ready, /internal, /metrics. An unmatched path under one of these
+    // is an API miss and must stay machine-readable JSON — never the
+    // SPA's index.html.
+    for path in [
+        "/v1/does-not-exist",
+        "/api/v1/does-not-exist",
+        "/admin/does-not-exist",
+        "/internal/does-not-exist",
+        "/metrics/does-not-exist",
+        "/healthnothing",
+        "/ready/does-not-exist",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "GET {path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"], "NOT_IMPLEMENTED",
+            "GET {path} must keep the JSON 404 shape"
+        );
+    }
+}
+
+#[tokio::test]
+async fn webui_disabled_keeps_the_json_404_everywhere() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    // The fail-closed default ([webui] absent / enabled = false): the
+    // router is byte-identical to the pre-#447 fallback.
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
+    );
+
+    for path in ["/", "/vms/some-vm"] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "GET {path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_IMPLEMENTED");
+    }
+}
+
+#[tokio::test]
+async fn webui_assets_get_the_security_headers() {
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // The router-level security_headers layer wraps the fallback too —
+    // a served asset must carry the same CSP/nosniff/DENY/referrer set
+    // as every API response (issue #447's verification requirement).
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let headers = response.headers();
+    assert!(headers.get("content-security-policy").is_some());
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers.get("x-frame-options").and_then(|v| v.to_str().ok()),
+        Some("DENY")
+    );
+    assert!(headers.get("referrer-policy").is_some());
+}
+
+#[tokio::test]
+async fn webui_enabled_does_not_change_v1_auth_or_csrf() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // Forbidden outcome unchanged (issue #447's verification
+    // requirement): a matched /v1 route still demands authentication —
+    // the static fallback never shields API routes.
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::post("/v1/vms")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "UNAUTHORIZED");
+
+    // And the CSRF middleware's content-type gate is untouched: a
+    // form-native POST to a matched legacy route still dies in the
+    // middleware with 415 before any handler runs.
+    let response = app
+        .oneshot(
+            axum::http::Request::post("/api/v1/backup-jobs")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "CSRF_REJECTED");
+}
+
+#[tokio::test]
+async fn webui_matched_routes_still_win_over_the_fallback() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // The fallback only fires when NO route matches: the real /health
+    // route keeps answering JSON, not the UI shell.
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/health")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.get("status").is_some());
+}
+
+#[tokio::test]
+async fn webui_missing_dir_is_a_404_not_a_crash() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    // enabled = true with a directory that does not exist: every UI
+    // route 404s (ServeDir/ServeFile find nothing) — fail-closed, no
+    // panic, no 500. The startup warn names the directory.
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(std::path::Path::new("/nonexistent/chv/ui-fixture")),
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn webui_non_get_static_request_is_method_not_allowed() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // ServeDir answers non-GET/HEAD with 405 (nginx parity: static
+    // files reject POST). Disclosed, not specced by #447 — the issue
+    // only specifies GET serving.
+    let response = app
+        .oneshot(
+            axum::http::Request::post("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn webui_metrics_stays_prometheus_and_renamed_ui_route_serves_the_spa() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    // #447 review ruling 2 (2026-10-07): the UI's former top-level
+    // /metrics page (an Overview alias, ui/src/routes/metrics) was
+    // shadowed by this matched admin prometheus route on every hard
+    // load — F5/deep-link returned 401 or prometheus text and the SPA's
+    // client-side redirect never ran. The SvelteKit route is renamed to
+    // /observability; this pin is the fix's proof: /metrics keeps the
+    // admin-gated prometheus route (untouched, per the ruling), and the
+    // renamed path is a non-reserved SPA route served the shell.
+    let ui = fixture_ui_tree();
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        webui_enabled_at(ui.path()),
+    );
+
+    // /metrics without a token: still the admin gate's 401 — the static
+    // fallback never shields the matched route.
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::get("/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // /metrics with a valid admin token: the prometheus handler itself
+    // (200 with the exposition, or 503 "metrics recorder not
+    // initialized" in this test process — either proves the route
+    // matched and auth passed; what it must never be is the SPA shell).
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::get("/metrics")
+                .header("authorization", format!("Bearer {}", test_admin_token()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.status() == StatusCode::OK || response.status() == StatusCode::SERVICE_UNAVAILABLE,
+        "an authenticated /metrics request must reach the prometheus handler"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !std::str::from_utf8(&body)
+            .unwrap()
+            .contains("chv-ui-fixture-shell"),
+        "/metrics must never serve the SPA shell"
+    );
+
+    // The renamed UI route: a non-reserved path, so the SPA fallback
+    // serves the shell and the client-side redirect to / can run.
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/observability")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(std::str::from_utf8(&body)
+        .unwrap()
+        .contains("chv-ui-fixture-shell"));
 }

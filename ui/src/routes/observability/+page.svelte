@@ -13,7 +13,7 @@
   import { getPageDefinition } from '$lib/shell/app-shell';
   
   const client = createAPIClient();
-  const pageDef = getPageDefinition('/metrics');
+  const pageDef = getPageDefinition('/observability');
   
   let vmStats = $state({ total: 0, running: 0, stopped: 0, error: 0 });
   let nodeHealth = $state<Node[]>([]);

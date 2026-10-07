@@ -298,8 +298,11 @@ pub async fn build_service(
 
     let convergence_metrics = chv_controlplane_service::convergence_metrics::new_shared();
 
-    let router =
-        chv_controlplane_service::api::router::admin_router(bff_state, convergence_metrics.clone());
+    let router = chv_controlplane_service::api::router::admin_router(
+        bff_state,
+        convergence_metrics.clone(),
+        config.webui.clone(),
+    );
     let http_listener = tokio::net::TcpListener::bind(config.http_bind)
         .await
         .map_err(|e| {

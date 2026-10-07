@@ -38,7 +38,12 @@ const pageDefinitions: PageDefinition[] = [
 		description:
 			'Fleet health, capacity pressure, active tasks, and alerts requiring attention.',
 		icon: House,
-		aliases: ['/metrics'],
+		// #447 review ruling 2 (2026-10-07): the former alias path
+		// `/metrics` was shadowed by the control plane's matched admin
+		// prometheus route on every hard load (F5/deep link → 401 or
+		// prometheus text, the SPA redirect never ran) — renamed to a
+		// non-colliding top-level segment.
+		aliases: ['/observability'],
 		badges: [
 			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Task-linked', tone: 'unknown' }
