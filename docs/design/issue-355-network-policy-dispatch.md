@@ -1,7 +1,9 @@
 # Design: network firewall-policy dispatch (issue #355)
 
-Status: **PROPOSED — awaiting maintainer ruling on the options (§3) and
-decision points (§4).** Not adopted; nothing here is implemented.
+Status: **ADOPTED 2026-10-08 (maintainer ruling, recorded on the
+issue).** Option A + Option B's baseline half; DP4 ruled as
+baseline + default-deny; DP1-DP3, DP5-DP7 adopted as recommended;
+Option C rejected. Decomposition: 3 PRs, carrier-first (§5).
 
 ## 1. The finding, restated against current main
 
