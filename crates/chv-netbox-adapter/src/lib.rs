@@ -47,16 +47,17 @@ pub mod ownership;
 pub mod plan;
 
 pub use mapping::{
-    build_objects, validate_netbox_name, DeviceStatus, MappingError, MappingIssue, MappingOutput,
-    NetBoxDevice, NetBoxInterface, NetBoxIpAddress, NetBoxKind, NetBoxObject, NetBoxPrefix,
-    NetBoxVirtualMachine, NetBoxVlan, ProjectionConfigView, ProjectionInput, VmStatus,
-    NETBOX_NAME_MAX_LEN,
+    build_objects, validate_netbox_name, validate_netbox_slug, DeviceStatus, MappingError,
+    MappingIssue, MappingOutput, NetBoxDevice, NetBoxInterface, NetBoxIpAddress, NetBoxKind,
+    NetBoxObject, NetBoxPrefix, NetBoxVirtualMachine, NetBoxVlan, ProjectionConfigView,
+    ProjectionInput, VmStatus, NETBOX_NAME_MAX_LEN,
 };
 pub use ownership::{
-    external_id, CustomFieldNames, ManagedMarker, ManagedState, DEFAULT_CUSTOM_FIELD_PREFIX,
-    MANAGED_BY_CHV, MAPPING_VERSION,
+    external_id, validate_custom_field_prefix, CustomFieldNames, ManagedMarker, ManagedState,
+    DEFAULT_CUSTOM_FIELD_PREFIX, MANAGED_BY_CHV, MAPPING_VERSION, RESOURCE_SLUG_INSTANCE,
+    RESOURCE_SLUG_NETWORK, RESOURCE_SLUG_SERVER,
 };
 pub use plan::{
     compute_plan, NetBoxRemoteObject, NetboxPlanAction, NetboxProjectionPlan,
-    NetboxProjectionPlanEntry, PlanContext, PlanSummary, RetentionPolicy,
+    NetboxProjectionPlanEntry, PlanContext, PlanError, PlanSummary, RetentionPolicy,
 };

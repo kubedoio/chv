@@ -36,6 +36,22 @@ pub const DEFAULT_CUSTOM_FIELD_PREFIX: &str = "chv_";
 /// Objects whose `chv_managed_by` differs from this are never written.
 pub const MANAGED_BY_CHV: &str = "chv";
 
+/// Resource-type slugs used in external-id construction.
+///
+/// **Cross-crate contract:** these MUST stay in sync with
+/// `resource_type_as_str` in `chv-architecture-reconcile/src/apply/mod.rs`
+/// — the reconcile plan builds its resource refs / correlation ids from
+/// the same slugs, and external ids are joined against them (see
+/// [`resource_ref_from_external_id`](crate::plan) consumers). A
+/// divergence would silently break that join; the
+/// `external_id_resource_slugs_are_pinned` test in `mapping.rs` pins
+/// the exact set so any change surfaces in review of this crate.
+pub const RESOURCE_SLUG_SERVER: &str = "server";
+/// See [`RESOURCE_SLUG_SERVER`].
+pub const RESOURCE_SLUG_NETWORK: &str = "network";
+/// See [`RESOURCE_SLUG_SERVER`].
+pub const RESOURCE_SLUG_INSTANCE: &str = "instance";
+
 /// The ownership custom-field names for one prefix.
 ///
 /// The six struct fields are the stable contract surface; the prefix is
@@ -100,6 +116,21 @@ impl CustomFieldNames {
     pub fn datastores(&self) -> String {
         format!("{}datastores", self.prefix)
     }
+
+    /// Device-enrichment custom field carrying the CPU fact (live
+    /// snapshot wins over declared, contract rule 4). Mapping contract,
+    /// object-mapping table: "CPU/memory as custom fields when live
+    /// facts exist".
+    pub fn cpu_cores(&self) -> String {
+        format!("{}cpu_cores", self.prefix)
+    }
+
+    /// Device-enrichment custom field carrying the memory fact in GiB
+    /// (live snapshot wins over declared, contract rule 4). See
+    /// [`CustomFieldNames::cpu_cores`].
+    pub fn memory_gb(&self) -> String {
+        format!("{}memory_gb", self.prefix)
+    }
 }
 
 impl Default for CustomFieldNames {
@@ -118,6 +149,62 @@ impl Default for CustomFieldNames {
 /// `arch:arch_01HX:instance/vm-01/backend:3` for a VM interface.
 pub fn external_id(architecture_id: &str, kind: &str, name: &str, version: u64) -> String {
     format!("arch:{architecture_id}:{kind}/{name}:{version}")
+}
+
+/// Custom-field name fragments that mark a field as a secret carrier
+/// (contract rule 5: `secret_ref`, `password`, `token`,
+/// `ssh_keys.public_key`, `User.auth` material).
+///
+/// Shared by the fail-closed scrubber in [`crate::mapping`] and by
+/// [`validate_custom_field_prefix`] so a configured prefix can never
+/// generate scrubber-tripping field names of our own.
+pub const SECRET_FIELD_NAME_PATTERNS: &[&str] = &[
+    "secret_ref",
+    "password",
+    "token",
+    "public_key",
+    "private_key",
+    "ssh_key",
+    "auth",
+];
+
+/// `true` when a custom-field *name* marks it as a secret carrier.
+pub fn is_secret_field_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    SECRET_FIELD_NAME_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// Validate a configurable custom-field name prefix.
+///
+/// Rejects:
+///
+/// - the empty prefix — every custom-field name starts with `""`, so
+///   the removal-diff loop in [`crate::plan::content_changes`] would
+///   treat *every* remote custom field (foreign ones included) as a
+///   projected field pending removal;
+/// - prefixes containing any [`SECRET_FIELD_NAME_PATTERNS`] fragment —
+///   the six ownership fields derived from such a prefix
+///   (`token_managed_by`, …) would trip the fail-closed secret
+///   scrubber on our own output.
+///
+/// Enforced at the entry points ([`crate::mapping::build_objects`] and
+/// [`crate::plan::compute_plan`]) because the config structs have
+/// public fields; the config layer (PR 3) may also call this directly.
+pub fn validate_custom_field_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err("custom-field prefix must not be empty (every remote custom field would be treated as projected)".to_string());
+    }
+    let lower = prefix.to_ascii_lowercase();
+    if let Some(pattern) = SECRET_FIELD_NAME_PATTERNS
+        .iter()
+        .find(|p| lower.contains(*p))
+    {
+        return Err(format!(
+            "custom-field prefix {prefix:?} matches the secret-name pattern {pattern:?}; \
+             derived ownership fields would trip the fail-closed secret scrubber"
+        ));
+    }
+    Ok(())
 }
 
 /// Retention marker carried on every projected object.
@@ -157,6 +244,14 @@ pub struct ManagedMarker {
 impl ManagedMarker {
     /// Parse a marker out of a NetBox object's custom fields. `None` when
     /// any of the six fields is missing or malformed.
+    ///
+    /// A marker whose `chv_mapping_version` differs from
+    /// [`MAPPING_VERSION`] still parses — as a *foreign* marker — but
+    /// [`ManagedMarker::is_owned_by_chv`] then returns `false`, so the
+    /// planner emits a `conflict` and never a write. Fail-closed by
+    /// design: a future v2 writer's objects must not be silently
+    /// rewritten by a v1 adapter, and a v1 adapter cannot know what
+    /// semantics a v2 marker carries.
     pub fn parse(
         custom_fields: &BTreeMap<String, String>,
         names: &CustomFieldNames,
@@ -179,9 +274,17 @@ impl ManagedMarker {
         })
     }
 
-    /// The write guard: `true` only when `chv_managed_by == "chv"`.
+    /// The write guard: `true` only when `chv_managed_by == "chv"` and
+    /// the marker was written by this mapping contract version
+    /// ([`MAPPING_VERSION`]).
+    ///
+    /// An object with `chv_managed_by == "chv"` but a different
+    /// `chv_mapping_version` (a future v2 writer's object) is **not**
+    /// ours to rewrite: this adapter cannot interpret v2 semantics, so
+    /// it fails closed — the planner turns such objects into
+    /// `conflict` entries, never writes.
     pub fn is_owned_by_chv(&self) -> bool {
-        self.managed_by == MANAGED_BY_CHV
+        self.managed_by == MANAGED_BY_CHV && self.mapping_version == MAPPING_VERSION
     }
 
     /// Render the marker back into the six custom fields.
@@ -232,6 +335,8 @@ mod tests {
         assert_eq!(names.mapping_version, "chv_mapping_version");
         assert_eq!(names.owner(), "chv_owner");
         assert_eq!(names.datastores(), "chv_datastores");
+        assert_eq!(names.cpu_cores(), "chv_cpu_cores");
+        assert_eq!(names.memory_gb(), "chv_memory_gb");
     }
 
     #[test]
@@ -303,5 +408,44 @@ mod tests {
         let mut bad = full;
         bad.insert(names.managed_state.clone(), "half-baked".to_string());
         assert_eq!(ManagedMarker::parse(&bad, &names), None);
+    }
+
+    #[test]
+    fn marker_with_foreign_mapping_version_parses_but_is_not_owned() {
+        // Fail-closed (F7): a v2 writer's marker is a well-formed
+        // *foreign* marker — it parses (so the planner can emit a
+        // conflict naming it) but is never treated as chv-owned, so no
+        // write is ever proposed against it.
+        let names = CustomFieldNames::default();
+        let fields = ManagedMarker {
+            external_id: "arch:a:server/n:1".to_string(),
+            architecture_id: "a".to_string(),
+            managed_by: MANAGED_BY_CHV.to_string(),
+            managed_state: ManagedState::Active,
+            architecture_version: 1,
+            mapping_version: "v2".to_string(),
+        }
+        .to_custom_fields(&names);
+        let parsed = ManagedMarker::parse(&fields, &names).expect("foreign marker parses");
+        assert!(!parsed.is_owned_by_chv());
+    }
+
+    #[test]
+    fn custom_field_prefix_validation_rejects_empty_and_secret_shaped() {
+        assert!(validate_custom_field_prefix("chv_").is_ok());
+        assert!(validate_custom_field_prefix("acme_").is_ok());
+        // Empty: the removal-diff loop would match every remote field.
+        assert_eq!(
+            validate_custom_field_prefix("").unwrap_err(),
+            "custom-field prefix must not be empty (every remote custom field would be treated as projected)"
+        );
+        // Secret-shaped prefixes would trip the fail-closed scrubber on
+        // our own derived field names.
+        for prefix in ["token_", "auth_", "SECRET_REF_", "my_password_", "ssh_key_"] {
+            assert!(
+                validate_custom_field_prefix(prefix).is_err(),
+                "prefix {prefix:?} must be rejected"
+            );
+        }
     }
 }

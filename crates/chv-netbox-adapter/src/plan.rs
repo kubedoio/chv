@@ -11,11 +11,14 @@
 //! # Collision semantics (implemented exactly)
 //!
 //! ```text
-//! lookup by chv_external_id (fully-marked remote object)
-//!   ├─ found, chv_managed_by == "chv"
+//! lookup by chv_external_id (remote objects of the same kind)
+//!   ├─ exactly one, chv_owned (managed_by "chv", mapping version v1)
 //!   │     ├─ content equal          → no_op
 //!   │     └─ content differs        → update
-//!   └─ found, foreign/absent owner  → conflict (never write)
+//!   ├─ exactly one, foreign/absent owner
+//!   │     or foreign mapping version → conflict (never write)
+//!   └─ more than one (duplicate external id /
+//!        ambiguous remote state)     → conflict (never write)
 //! not found by external id
 //!   ├─ natural key free                 → create
 //!   ├─ natural key occupied, foreign    → conflict (never write)
@@ -25,10 +28,12 @@
 //! ```
 //!
 //! The "found by external id" lookup models NetBox's custom-field filter
-//! (`?cf_chv_external_id=…`): it matches remote objects carrying a
-//! **complete** [`ManagedMarker`] with our external id. A partially
-//! written object (create succeeded, custom fields incomplete) is missed
-//! by that lookup but recovered by the natural-key branch, which
+//! (`?cf_chv_external_id=…`): it matches remote objects of the **same
+//! kind** carrying a complete [`ManagedMarker`] with our external id —
+//! a wrong-kind object that happens to carry our external id cannot
+//! shadow the natural-key conflict detection. A partially written
+//! object (create succeeded, custom fields incomplete) is missed by
+//! that lookup but recovered by the natural-key branch, which
 //! recognises it by its raw external id + `chv_managed_by` and resumes
 //! as an `update` — no duplicate create.
 //!
@@ -38,12 +43,20 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use thiserror::Error;
 
 use crate::mapping::{MappingIssue, MappingOutput, NetBoxKind, NetBoxObject};
-use crate::ownership::{CustomFieldNames, ManagedMarker, MANAGED_BY_CHV};
+use crate::ownership::{
+    validate_custom_field_prefix, CustomFieldNames, ManagedMarker, MANAGED_BY_CHV, MAPPING_VERSION,
+};
 
 /// Placeholder shown for a field that is unset on one side of a diff.
 const UNSET: &str = "(unset)";
+
+/// Rendered instead of the remote value for prefixed custom fields
+/// this adapter does not project: their content is foreign (possibly
+/// tampered) and must not be echoed into `changes`.
+const REDACTED: &str = "<redacted>";
 
 /// Plan action, per the mapping contract's plan-entry shape. Named
 /// `NetboxPlanAction` (not `PlanAction`) to avoid confusion with the
@@ -136,6 +149,12 @@ pub struct NetboxProjectionPlan {
     pub architecture_version: u64,
     /// Retention policy in effect; recorded so runners (PR 4) and the
     /// UI can render `stale` handling without re-reading config.
+    ///
+    /// **Wire status:** this field is additive beyond the API
+    /// contract's dry-run response shape
+    /// (`netbox-api-contract.md`). PR 5 (BFF) must NOT drop it when
+    /// relaying the plan — the UI and the runner rely on it to explain
+    /// what `stale` entries mean operationally.
     pub retention: RetentionPolicy,
     pub summary: PlanSummary,
     /// Ordered by (kind rank, name, action rank).
@@ -174,6 +193,10 @@ pub struct PlanContext {
 impl PlanContext {
     /// Context with default (`chv_`) custom-field names and the
     /// `mark_stale` retention default.
+    ///
+    /// The custom-field prefix carried by `names` is validated when
+    /// [`compute_plan`] runs (the struct has public fields, so
+    /// construction itself cannot reject bad prefixes).
     pub fn new(architecture_id: impl Into<String>, architecture_version: u64) -> Self {
         Self {
             architecture_id: architecture_id.into(),
@@ -184,17 +207,38 @@ impl PlanContext {
     }
 }
 
+/// Hard failures of [`compute_plan`]. Remote-state ambiguity is *not*
+/// an error — it becomes `conflict` entries — only an unusable context
+/// fails here.
+#[derive(Debug, Error)]
+pub enum PlanError {
+    /// The configured custom-field prefix is unusable (empty, or
+    /// secret-shaped); see
+    /// [`crate::ownership::validate_custom_field_prefix`].
+    #[error("invalid custom-field prefix {prefix:?}: {reason}")]
+    InvalidCustomFieldPrefix { prefix: String, reason: String },
+}
+
 /// Compute the projection plan: desired objects + reported mapping
 /// issues versus the remote NetBox state view.
 ///
 /// Deterministic: entry order is (kind rank, name, action rank) and all
 /// serialized shapes use BTreeMaps, so the same inputs always produce a
-/// byte-identical plan.
+/// byte-identical plan. Returns [`PlanError`] only for an unusable
+/// context (e.g. an invalid custom-field prefix); remote-state
+/// ambiguity degrades to `conflict` entries, never an error.
 pub fn compute_plan(
     desired: &MappingOutput,
     remote: &[NetBoxRemoteObject],
     context: &PlanContext,
-) -> NetboxProjectionPlan {
+) -> Result<NetboxProjectionPlan, PlanError> {
+    if let Err(reason) = validate_custom_field_prefix(&context.names.prefix) {
+        return Err(PlanError::InvalidCustomFieldPrefix {
+            prefix: context.names.prefix.clone(),
+            reason,
+        });
+    }
+
     let names = &context.names;
     let mut entries = Vec::new();
 
@@ -207,16 +251,43 @@ pub fn compute_plan(
         };
         let natural_key = object.natural_key();
 
-        // 1. Lookup by external id: a fully-marked remote object
-        //    carrying our external id.
-        let ext_match = remote.iter().find(|r| {
-            ManagedMarker::parse(&r.custom_fields, names)
-                .map(|marker| marker.external_id == ext_id)
-                .unwrap_or(false)
-        });
-        if let Some(remote_object) = ext_match {
-            let marker =
-                ManagedMarker::parse(&remote_object.custom_fields, names).expect("parsed above");
+        // 1. Lookup by external id: fully-marked remote objects **of
+        //    the same kind** carrying our external id. The kind filter
+        //    keeps a wrong-kind object that happens to carry our
+        //    external id from shadowing the natural-key conflict
+        //    detection below; collecting all matches (not just the
+        //    first) makes a duplicate external id observable instead of
+        //    order-dependent.
+        let ext_matches: Vec<(&NetBoxRemoteObject, ManagedMarker)> = remote
+            .iter()
+            .filter_map(|r| {
+                let marker = ManagedMarker::parse(&r.custom_fields, names)?;
+                if r.kind == object.kind() && marker.external_id == ext_id {
+                    Some((r, marker))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if ext_matches.len() > 1 {
+            // Ambiguous remote state: more than one remote object of
+            // this kind claims our external id. Never propose a write.
+            entries.push(entry(
+                NetboxPlanAction::Conflict,
+                object,
+                natural_key,
+                ext_id,
+                format!(
+                    "{} remote objects of kind {} carry this external id \
+                     (duplicate external id / ambiguous remote state); refusing to write",
+                    ext_matches.len(),
+                    object.kind().as_str()
+                ),
+                Vec::new(),
+            ));
+            continue;
+        }
+        if let Some((remote_object, marker)) = ext_matches.into_iter().next() {
             if marker.is_owned_by_chv() && marker.architecture_id == context.architecture_id {
                 let changes = content_changes(object, remote_object, names);
                 let (action, reason) = if changes.is_empty() {
@@ -238,8 +309,9 @@ pub fn compute_plan(
                     natural_key,
                     ext_id,
                     format!(
-                        "external id matches a NetBox object not owned by this chv architecture (chv_managed_by={:?})",
-                        marker.managed_by
+                        "external id matches a NetBox object not owned by this chv architecture \
+                         (chv_managed_by={:?}, chv_mapping_version={:?})",
+                        marker.managed_by, marker.mapping_version
                     ),
                     Vec::new(),
                 ));
@@ -276,13 +348,40 @@ pub fn compute_plan(
                     .get(&names.architecture_id)
                     .map(|v| v == &context.architecture_id)
                     .unwrap_or(false);
+                // Fail-closed (see `ManagedMarker::is_owned_by_chv`):
+                // an object written by a different mapping contract
+                // version is never resumed, even at our natural key —
+                // an absent version field is a partial write and stays
+                // resumable.
+                let remote_mapping_version = remote_object
+                    .custom_fields
+                    .get(&names.mapping_version)
+                    .cloned();
+                let foreign_mapping_version = remote_mapping_version
+                    .as_deref()
+                    .map(|v| v != MAPPING_VERSION)
+                    .unwrap_or(false);
 
-                // Partial-failure resume (chv-owned object carrying our
-                // external id — the id itself embeds the architecture id,
-                // which is sufficient proof even when the marker is
-                // incomplete) or version bump (external id changed, object
-                // still ours and still this architecture).
-                if chv_owned && (carries_ext_id || same_architecture) {
+                if foreign_mapping_version {
+                    entries.push(entry(
+                        NetboxPlanAction::Conflict,
+                        object,
+                        natural_key,
+                        ext_id,
+                        format!(
+                            "natural key occupied by an object written by mapping contract \
+                             version {remote_mapping_version:?} (this adapter implements \
+                             {MAPPING_VERSION:?}); refusing to write"
+                        ),
+                        Vec::new(),
+                    ));
+                } else if chv_owned && (carries_ext_id || same_architecture) {
+                    // Partial-failure resume (chv-owned object carrying
+                    // our external id — the id itself embeds the
+                    // architecture id, which is sufficient proof even
+                    // when the marker is incomplete) or version bump
+                    // (external id changed, object still ours and still
+                    // this architecture).
                     let reason = if carries_ext_id {
                         "partial-failure resume: natural key occupied by a chv-owned object carrying this external id".to_string()
                     } else {
@@ -361,14 +460,14 @@ pub fn compute_plan(
         }
     }
 
-    NetboxProjectionPlan {
+    Ok(NetboxProjectionPlan {
         mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
         architecture_id: context.architecture_id.clone(),
         architecture_version: context.architecture_version,
         retention: context.retention,
         summary,
         entries,
-    }
+    })
 }
 
 fn entry(
@@ -398,7 +497,7 @@ fn resource_ref(object: &NetBoxObject) -> String {
         O::Device(d) => format!("servers/{}", d.name),
         O::VirtualMachine(v) => format!("instances/{}", v.name),
         O::Interface(i) => format!("instances/{}/networks/{}", i.virtual_machine, i.name),
-        O::Prefix(p) => format!("networks/{}", p.description),
+        O::Prefix(p) => format!("networks/{}", p.network_name),
         O::Vlan(v) => format!("networks/{}", v.name),
         O::IpAddress(a) => match &a.assigned_to_interface {
             Some(interface) => format!("instances/{interface}"),
@@ -408,10 +507,28 @@ fn resource_ref(object: &NetBoxObject) -> String {
 }
 
 /// Best-effort `chv_resource_ref` for a remote object whose CHV source
-/// disappeared: recover the `<kind>/<name>` segment of the external id.
+/// disappeared: recover the `<kind>/<name>` segment of the external id,
+/// pluralizing the kind slug so the ref matches the live-entry form
+/// (`servers/x`, not `server/x`).
 fn resource_ref_from_external_id(ext_id: &str) -> String {
     // arch:<architecture_id>:<kind>/<name>:<version>
-    ext_id.split(':').nth(2).unwrap_or_default().to_string()
+    let segment = ext_id.split(':').nth(2).unwrap_or_default();
+    match segment.split_once('/') {
+        Some((kind, rest)) => format!("{}/{}", plural_kind_slug(kind), rest),
+        None => segment.to_string(),
+    }
+}
+
+/// Plural form of a resource slug, so refs recovered from external ids
+/// match the plural refs of live entries. Unknown slugs pass through
+/// unchanged (never fabricated, never a panic).
+fn plural_kind_slug(kind: &str) -> &str {
+    match kind {
+        crate::ownership::RESOURCE_SLUG_SERVER => "servers",
+        crate::ownership::RESOURCE_SLUG_NETWORK => "networks",
+        crate::ownership::RESOURCE_SLUG_INSTANCE => "instances",
+        other => other,
+    }
 }
 
 fn issue_conflict_entry(issue: &MappingIssue) -> NetboxProjectionPlanEntry {
@@ -455,12 +572,32 @@ fn content_changes(
     }
     // Prefixed custom fields present remotely but no longer projected
     // count as removals; foreign (non-prefixed) fields are ignored.
+    // Only fields this adapter projects render their remote value —
+    // anything else under our prefix is foreign (possibly tampered)
+    // data whose value must not be echoed into `changes`.
     for (key, old) in &remote.custom_fields {
         if key.starts_with(&names.prefix) && !desired.contains_key(key) {
-            changes.push(format!("{key}: {old} → {UNSET}"));
+            let rendered = if is_projected_custom_field(key, names) {
+                old.as_str()
+            } else {
+                REDACTED
+            };
+            changes.push(format!("{key}: {rendered} → {UNSET}"));
         }
     }
     changes
+}
+
+/// `true` for custom-field names this adapter projects: the six
+/// ownership fields plus derived enrichment (owner, datastores, device
+/// cpu/memory). Any other prefixed name on a remote object is foreign
+/// and its value is redacted in removal diffs.
+fn is_projected_custom_field(key: &str, names: &CustomFieldNames) -> bool {
+    names.ownership_fields().contains(&key)
+        || key == names.owner()
+        || key == names.datastores()
+        || key == names.cpu_cores()
+        || key == names.memory_gb()
 }
 
 fn entry_sort_key(entry: &NetboxProjectionPlanEntry) -> (u8, String, u8) {
@@ -485,7 +622,8 @@ mod tests {
     use super::*;
     use crate::mapping::build_objects;
     use crate::mapping::testsupport::{
-        architecture_with_extra_server, projection_input, test_architecture, ARCH_ID,
+        architecture_with_extra_server, empty_architecture, projection_input, test_architecture,
+        ARCH_ID,
     };
 
     /// Simulate "NetBox currently mirrors exactly these objects".
@@ -519,7 +657,7 @@ mod tests {
     fn identical_reprojection_is_all_no_op() {
         let desired = desired(3);
         let remote = mirror(&desired.objects);
-        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3)).expect("plan");
 
         assert!(!plan.entries.is_empty());
         assert!(plan
@@ -547,7 +685,7 @@ mod tests {
         });
         let new = build_objects(&projection_input(&arch, 4, None)).expect("builds");
 
-        let plan = compute_plan(&new, &remote, &PlanContext::new(ARCH_ID, 4));
+        let plan = compute_plan(&new, &remote, &PlanContext::new(ARCH_ID, 4)).expect("plan");
         assert_eq!(plan.summary.update as usize, plan.entries.len());
         assert_eq!(plan.summary.no_op, 0);
 
@@ -557,8 +695,13 @@ mod tests {
             .find(|e| e.kind == NetBoxKind::Device)
             .expect("device entry");
         assert_eq!(device_entry.action, NetboxPlanAction::Update);
+        // CPU/memory are custom fields now — they diff under their
+        // prefixed names.
         assert!(
-            device_entry.changes.iter().any(|c| c == "cpu_cores: 4 → 8"),
+            device_entry
+                .changes
+                .iter()
+                .any(|c| c == "chv_cpu_cores: 4 → 8"),
             "expected cpu diff in {:?}",
             device_entry.changes
         );
@@ -566,7 +709,7 @@ mod tests {
             device_entry
                 .changes
                 .iter()
-                .any(|c| c == "memory_gb: 8 → 16"),
+                .any(|c| c == "chv_memory_gb: 8 → 16"),
             "expected memory diff in {:?}",
             device_entry.changes
         );
@@ -589,7 +732,7 @@ mod tests {
             custom_fields: BTreeMap::new(),
             content: [("name".to_string(), "chv-node-01".to_string())].into(),
         };
-        let plan = compute_plan(&desired, &[foreign], &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&desired, &[foreign], &PlanContext::new(ARCH_ID, 3)).expect("plan");
 
         let device_entry = plan
             .entries
@@ -623,7 +766,7 @@ mod tests {
             custom_fields,
             content: BTreeMap::new(),
         };
-        let plan = compute_plan(&desired, &[foreign], &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&desired, &[foreign], &PlanContext::new(ARCH_ID, 3)).expect("plan");
 
         let device_entry = plan
             .entries
@@ -654,7 +797,7 @@ mod tests {
             .into(),
             content: BTreeMap::new(),
         };
-        let plan = compute_plan(&desired, &[partial], &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&desired, &[partial], &PlanContext::new(ARCH_ID, 3)).expect("plan");
 
         let device_entry = plan
             .entries
@@ -700,7 +843,7 @@ mod tests {
 
         // Desired state without that server.
         let desired = desired(3);
-        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3)).expect("plan");
 
         let stale_entry = plan
             .entries
@@ -716,8 +859,8 @@ mod tests {
             Some("chv-node-02")
         );
         assert_eq!(
-            stale_entry.chv_resource_ref, "server/chv-node-02",
-            "resource ref recovered from the external id"
+            stale_entry.chv_resource_ref, "servers/chv-node-02",
+            "resource ref recovered from the external id, pluralized to match live entries"
         );
         assert!(stale_entry.reason.contains("mark_stale"));
         assert_eq!(plan.summary.stale, 1);
@@ -735,7 +878,7 @@ mod tests {
 
         let mut context = PlanContext::new(ARCH_ID, 3);
         context.retention = RetentionPolicy::Delete;
-        let plan = compute_plan(&desired, &remote, &context);
+        let plan = compute_plan(&desired, &remote, &context).expect("plan");
 
         assert_eq!(plan.summary.stale, 1);
         assert_eq!(plan.retention, RetentionPolicy::Delete);
@@ -751,8 +894,8 @@ mod tests {
         let remote = mirror(&desired.objects);
         let context = PlanContext::new(ARCH_ID, 3);
 
-        let plan_a = compute_plan(&desired, &remote, &context);
-        let plan_b = compute_plan(&desired, &remote, &context);
+        let plan_a = compute_plan(&desired, &remote, &context).expect("plan");
+        let plan_b = compute_plan(&desired, &remote, &context).expect("plan");
         assert_eq!(
             serde_json::to_string(&plan_a).unwrap(),
             serde_json::to_string(&plan_b).unwrap()
@@ -761,7 +904,7 @@ mod tests {
         // Remote order must not influence the output.
         let mut shuffled = remote.clone();
         shuffled.reverse();
-        let plan_c = compute_plan(&desired, &shuffled, &context);
+        let plan_c = compute_plan(&desired, &shuffled, &context).expect("plan");
         assert_eq!(
             serde_json::to_string(&plan_a).unwrap(),
             serde_json::to_string(&plan_c).unwrap()
@@ -788,7 +931,7 @@ mod tests {
         let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
         assert_eq!(output.issues.len(), 1);
 
-        let plan = compute_plan(&output, &[], &PlanContext::new(ARCH_ID, 3));
+        let plan = compute_plan(&output, &[], &PlanContext::new(ARCH_ID, 3)).expect("plan");
         let conflict = plan
             .entries
             .iter()
@@ -828,7 +971,8 @@ mod tests {
             .to_custom_fields(&CustomFieldNames::default()),
             content: BTreeMap::new(),
         };
-        let plan = compute_plan(&desired, &[foreign_arch], &PlanContext::new(ARCH_ID, 3));
+        let plan =
+            compute_plan(&desired, &[foreign_arch], &PlanContext::new(ARCH_ID, 3)).expect("plan");
         let device_entry = plan
             .entries
             .iter()
@@ -847,7 +991,7 @@ mod tests {
         let old = desired(3);
         let remote = mirror(&old.objects);
         let new = desired(4);
-        let plan = compute_plan(&new, &remote, &PlanContext::new(ARCH_ID, 4));
+        let plan = compute_plan(&new, &remote, &PlanContext::new(ARCH_ID, 4)).expect("plan");
         assert_eq!(plan.summary.stale, 0);
         assert_eq!(plan.summary.update as usize, new.objects.len());
     }
@@ -870,7 +1014,7 @@ mod tests {
 
         let mut context = PlanContext::new(ARCH_ID, 3);
         context.names = CustomFieldNames::new("acme_");
-        let plan = compute_plan(&desired, &remote, &context);
+        let plan = compute_plan(&desired, &remote, &context).expect("plan");
         assert!(plan
             .entries
             .iter()
@@ -879,10 +1023,280 @@ mod tests {
         // Under the default prefix the same remote state is invisible:
         // markers do not parse, natural keys are free → creates.
         let default_context = PlanContext::new(ARCH_ID, 3);
-        let plan = compute_plan(&desired, &remote, &default_context);
+        let plan = compute_plan(&desired, &remote, &default_context).expect("plan");
         assert!(plan
             .entries
             .iter()
             .all(|e| e.action == NetboxPlanAction::Create));
+    }
+
+    #[test]
+    fn wrong_kind_external_id_match_does_not_shadow_natural_key() {
+        // A VLAN carrying the *device's* external id must not be treated
+        // as the device's remote counterpart: the external-id lookup is
+        // kind-filtered, so the device falls through to its (free)
+        // natural key and creates.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let wrong_kind = NetBoxRemoteObject {
+            kind: NetBoxKind::Vlan,
+            natural_key: [("vid".to_string(), "42".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id,
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+        let plan =
+            compute_plan(&desired, &[wrong_kind], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Create);
+        assert_eq!(plan.summary.stale, 0);
+    }
+
+    #[test]
+    fn duplicate_external_id_matches_are_conflict_never_write() {
+        // Two remote devices of the same kind carrying our external id:
+        // ambiguous remote state — a conflict naming the duplication,
+        // never a write.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let duplicate = || NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-01".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id.clone(),
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+        let plan = compute_plan(
+            &desired,
+            &[duplicate(), duplicate()],
+            &PlanContext::new(ARCH_ID, 3),
+        )
+        .expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Conflict);
+        assert!(device_entry.reason.contains("ambiguous remote state"));
+        assert!(device_entry.changes.is_empty());
+        // Nothing was proposed to write for the device.
+        assert!(!plan.entries.iter().any(|e| e.kind == NetBoxKind::Device
+            && matches!(
+                e.action,
+                NetboxPlanAction::Create | NetboxPlanAction::Update
+            )));
+    }
+
+    #[test]
+    fn foreign_mapping_version_marker_is_conflict_never_write() {
+        // Fail-closed (F7): a full marker with our external id but
+        // mapping version v2 parses as a foreign marker — the planner
+        // must conflict, never write, so a future v2 writer's objects
+        // are not silently rewritten by this v1 adapter.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let v2 = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-01".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id,
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: "v2".to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+        let plan = compute_plan(&desired, &[v2], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Conflict);
+        assert!(device_entry.reason.contains("v2"));
+        assert!(device_entry.changes.is_empty());
+        // And it is not reported stale either (not owned by v1).
+        assert_eq!(plan.summary.stale, 0);
+    }
+
+    #[test]
+    fn foreign_mapping_version_at_natural_key_is_conflict() {
+        // Same guard on the natural-key (partial-failure resume) path:
+        // a partially-marked object whose mapping version is not ours
+        // is never resumed.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let partial = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-01".to_string())].into(),
+            custom_fields: [
+                ("chv_external_id".to_string(), ext_id),
+                ("chv_managed_by".to_string(), MANAGED_BY_CHV.to_string()),
+                ("chv_mapping_version".to_string(), "v2".to_string()),
+            ]
+            .into(),
+            content: BTreeMap::new(),
+        };
+        let plan = compute_plan(&desired, &[partial], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Conflict);
+        assert!(device_entry.reason.contains("mapping contract"));
+        assert!(device_entry.changes.is_empty());
+    }
+
+    #[test]
+    fn foreign_prefixed_custom_field_value_is_redacted_in_removal_diff() {
+        let desired = desired(3);
+        let mut remote = mirror(&desired.objects);
+        // Tamper: a foreign field under our prefix, plus a projected
+        // enrichment field that is no longer desired.
+        let device_remote = remote
+            .iter_mut()
+            .find(|r| r.kind == NetBoxKind::Device)
+            .expect("device remote");
+        device_remote
+            .custom_fields
+            .insert("chv_evil".to_string(), "SECRET-EVIL-VALUE".to_string());
+        device_remote
+            .custom_fields
+            .insert("chv_datastores".to_string(), "ds-old:nfs".to_string());
+
+        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3)).expect("plan");
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Update);
+        // Foreign prefixed field: removed, value redacted.
+        assert!(
+            device_entry
+                .changes
+                .iter()
+                .any(|c| c == "chv_evil: <redacted> → (unset)"),
+            "expected redacted removal in {:?}",
+            device_entry.changes
+        );
+        // Projected enrichment field: removed, value rendered.
+        assert!(
+            device_entry
+                .changes
+                .iter()
+                .any(|c| c == "chv_datastores: ds-old:nfs → (unset)"),
+            "expected plain removal in {:?}",
+            device_entry.changes
+        );
+        // The tampered value never reaches the (serializable) plan.
+        let serialized = serde_json::to_string(&plan).expect("serializable");
+        assert!(
+            !serialized.contains("SECRET-EVIL-VALUE"),
+            "foreign prefixed value leaked into the plan"
+        );
+    }
+
+    #[test]
+    fn invalid_custom_field_prefix_is_rejected_at_plan_entry() {
+        let desired = desired(3);
+        let mut context = PlanContext::new(ARCH_ID, 3);
+        context.names = CustomFieldNames::new("");
+        assert!(matches!(
+            compute_plan(&desired, &[], &context),
+            Err(PlanError::InvalidCustomFieldPrefix { .. })
+        ));
+        context.names = CustomFieldNames::new("secret_ref_");
+        assert!(matches!(
+            compute_plan(&desired, &[], &context),
+            Err(PlanError::InvalidCustomFieldPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_architecture_and_empty_remote_produce_empty_plan() {
+        let arch = empty_architecture();
+        let desired = build_objects(&projection_input(&arch, 1, None)).expect("builds");
+        assert!(desired.objects.is_empty());
+        assert!(desired.issues.is_empty());
+
+        let plan = compute_plan(&desired, &[], &PlanContext::new(ARCH_ID, 1)).expect("plan");
+        assert!(plan.entries.is_empty());
+        assert_eq!(plan.summary, PlanSummary::default());
+        assert_eq!(plan.summary.create, 0);
+        assert_eq!(plan.summary.update, 0);
+        assert_eq!(plan.summary.no_op, 0);
+        assert_eq!(plan.summary.conflict, 0);
+        assert_eq!(plan.summary.stale, 0);
+    }
+
+    #[test]
+    fn duplicate_server_names_both_map_and_plan_carries_both() {
+        // Current behavior, documented: the mapping does not
+        // deduplicate names within one architecture — name uniqueness
+        // is validated upstream (chv-architecture-validate). Two
+        // servers with the same name both project (identical natural
+        // keys and external ids), and the plan carries an entry for
+        // each; against an empty remote both are creates.
+        let mut arch = test_architecture();
+        arch.servers.push(chv_architecture_validate::model::Server {
+            name: "chv-node-01".to_string(),
+            management_ip: None,
+            role: None,
+            labels: BTreeMap::new(),
+            resources: None,
+            networks: None,
+        });
+        let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
+        assert_eq!(
+            output
+                .objects
+                .iter()
+                .filter(|o| o.kind() == NetBoxKind::Device)
+                .count(),
+            2
+        );
+
+        let plan = compute_plan(&output, &[], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+        let device_entries: Vec<&NetboxProjectionPlanEntry> = plan
+            .entries
+            .iter()
+            .filter(|e| e.kind == NetBoxKind::Device)
+            .collect();
+        assert_eq!(device_entries.len(), 2, "both duplicates are planned");
+        assert!(device_entries
+            .iter()
+            .all(|e| e.action == NetboxPlanAction::Create));
+        assert_eq!(
+            device_entries[0].external_id, device_entries[1].external_id,
+            "same name + version → same external id"
+        );
     }
 }

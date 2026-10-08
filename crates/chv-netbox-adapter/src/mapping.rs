@@ -29,7 +29,9 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::ownership::{
-    external_id, CustomFieldNames, ManagedMarker, ManagedState, MANAGED_BY_CHV, MAPPING_VERSION,
+    external_id, is_secret_field_name, validate_custom_field_prefix, CustomFieldNames,
+    ManagedMarker, ManagedState, MANAGED_BY_CHV, MAPPING_VERSION, RESOURCE_SLUG_INSTANCE,
+    RESOURCE_SLUG_NETWORK, RESOURCE_SLUG_SERVER,
 };
 
 /// Maximum length of a NetBox object name / slug.
@@ -122,17 +124,17 @@ impl VmStatus {
 // ---------------------------------------------------------------------------
 
 /// DCIM Device projected from `servers[]` (+ live node facts).
+///
+/// CPU and memory are **not** top-level content fields: per the mapping
+/// contract ("CPU/memory as custom fields when live facts exist") they
+/// ride in [`NetBoxDevice::custom_fields`] under the prefixed names
+/// [`CustomFieldNames::cpu_cores`] / [`CustomFieldNames::memory_gb`],
+/// and therefore diff as custom-field changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetBoxDevice {
     pub name: String,
     pub site: Option<String>,
     pub status: DeviceStatus,
-    /// Live CPU fact when the snapshot reports one, else the declared
-    /// `servers[].resources.cpu_cores` (contract rule 4).
-    pub cpu_cores: Option<u32>,
-    /// Live memory fact when the snapshot reports one, else declared
-    /// `servers[].resources.memory_gb`.
-    pub memory_gb: Option<u32>,
     /// Deterministic, sorted NetBox tags derived from `metadata`.
     pub tags: Vec<String>,
     pub custom_fields: BTreeMap<String, String>,
@@ -179,6 +181,12 @@ pub struct NetBoxPrefix {
     /// Linked VLAN vid when the network carries `vlan_id`.
     pub vlan: Option<u32>,
     pub description: String,
+    /// The CHV source network name. Kept so `chv_resource_ref` can be
+    /// built as `networks/<network_name>` (the `description` only
+    /// carries "name (type)" and would produce malformed refs). **Not**
+    /// projected as content: excluded from `content_fields()` and from
+    /// the natural key.
+    pub network_name: String,
     pub tags: Vec<String>,
     pub custom_fields: BTreeMap<String, String>,
 }
@@ -296,8 +304,6 @@ impl NetBoxObject {
                 fields.insert("name".to_string(), d.name.clone());
                 fields.insert("site".to_string(), opt_str(&d.site));
                 fields.insert("status".to_string(), d.status.as_str().to_string());
-                fields.insert("cpu_cores".to_string(), opt_u32(d.cpu_cores));
-                fields.insert("memory_gb".to_string(), opt_u32(d.memory_gb));
                 fields.insert("tags".to_string(), tags(&d.tags));
             }
             Self::VirtualMachine(v) => {
@@ -424,6 +430,14 @@ pub enum MappingError {
     #[error("invalid projection input: {reason}")]
     InvalidInput { reason: String },
 
+    /// The configured custom-field prefix is unusable: empty (the
+    /// removal-diff loop would treat every remote custom field as
+    /// projected) or secret-shaped (derived field names would trip the
+    /// fail-closed scrubber). See
+    /// [`crate::ownership::validate_custom_field_prefix`].
+    #[error("invalid custom-field prefix {prefix:?}: {reason}")]
+    InvalidCustomFieldPrefix { prefix: String, reason: String },
+
     /// A custom-field name carrying secret material reached the output.
     /// Fail-closed: the builders only write contract-named fields, so
     /// this variant firing means a builder bug, and scrubbing silently
@@ -457,27 +471,36 @@ pub fn validate_netbox_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a name against the strict NetBox **slug** charset:
+/// non-empty, at most [`NETBOX_NAME_MAX_LEN`] characters, lowercase
+/// alphanumerics plus `-` and `_` — no `.`.
+///
+/// NetBox VLAN `name`/`slug` fields are strict slugs, so a network
+/// named `backend.v2` with a `vlan_id` fails here and produces a
+/// mapping issue (contract rule 1: conflict, never a silent rename).
+/// Device, VM and interface names allow dots — use
+/// [`validate_netbox_name`] for those.
+pub fn validate_netbox_slug(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name is empty".to_string());
+    }
+    if name.len() > NETBOX_NAME_MAX_LEN {
+        return Err(format!("name exceeds {NETBOX_NAME_MAX_LEN} characters"));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_'))
+    {
+        return Err(format!(
+            "character {bad:?} is not allowed (VLAN names are NetBox slugs: lowercase alphanumerics, '-' and '_')"
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Secret exclusion (contract rule 5)
 // ---------------------------------------------------------------------------
-
-/// Custom-field name fragments that mark a field as a secret carrier
-/// (contract rule 5: `secret_ref`, `password`, `token`,
-/// `ssh_keys.public_key`, `User.auth` material).
-const SECRET_FIELD_NAME_PATTERNS: &[&str] = &[
-    "secret_ref",
-    "password",
-    "token",
-    "public_key",
-    "private_key",
-    "ssh_key",
-    "auth",
-];
-
-fn is_secret_field_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    SECRET_FIELD_NAME_PATTERNS.iter().any(|p| lower.contains(p))
-}
 
 /// Scrub helper enforcing contract rule 5 on the built objects: any
 /// custom field whose *name* marks it as a secret carrier aborts the
@@ -516,6 +539,12 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
             reason: "architecture_id must not be empty".to_string(),
         });
     }
+    if let Err(reason) = validate_custom_field_prefix(&input.config.custom_field_prefix) {
+        return Err(MappingError::InvalidCustomFieldPrefix {
+            prefix: input.config.custom_field_prefix.clone(),
+            reason,
+        });
+    }
 
     let names = CustomFieldNames::new(&input.config.custom_field_prefix);
     let arch = input.architecture;
@@ -529,7 +558,7 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
 
     // servers[] → devices (live node facts win over declared resources).
     for server in &arch.servers {
-        let ext = external_id(arch_id, "server", &server.name, version);
+        let ext = external_id(arch_id, RESOURCE_SLUG_SERVER, &server.name, version);
         let resource_ref = format!("servers/{}", server.name);
         if let Err(reason) = validate_netbox_name(&server.name) {
             issues.push(MappingIssue {
@@ -554,6 +583,15 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
         };
 
         let mut custom_fields = ownership_custom_fields(&names, &ext, arch_id, version, arch);
+        // CPU/memory project as custom fields (mapping contract,
+        // object-mapping table), only when a fact exists — contract
+        // rule 2: nullable facts stay unset, no placeholder values.
+        if let Some(cpu) = cpu_cores {
+            custom_fields.insert(names.cpu_cores(), cpu.to_string());
+        }
+        if let Some(memory) = memory_gb {
+            custom_fields.insert(names.memory_gb(), memory.to_string());
+        }
         if let Some(snap) = input.snapshot {
             let mut stores: Vec<String> = snap
                 .datastores
@@ -575,8 +613,6 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
                 .clone()
                 .or_else(|| arch.metadata.environment.as_deref().map(slugify)),
             status: DeviceStatus::Active,
-            cpu_cores,
-            memory_gb,
             tags: tags.clone(),
             custom_fields,
         }));
@@ -584,7 +620,7 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
 
     // instances[] → virtual machines (+ interfaces, + ip addresses).
     for instance in &arch.instances {
-        let ext = external_id(arch_id, "instance", &instance.name, version);
+        let ext = external_id(arch_id, RESOURCE_SLUG_INSTANCE, &instance.name, version);
         let resource_ref = format!("instances/{}", instance.name);
         if let Err(reason) = validate_netbox_name(&instance.name) {
             // The VM name is part of every child natural key — report the
@@ -612,11 +648,11 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
                 if let Some(ip) = &net.ip {
                     issues.push(MappingIssue {
                         kind: NetBoxKind::IpAddress,
-                        chv_resource_ref: format!("{resource_ref}/networks/{}", net.name),
+                        chv_resource_ref: format!("{resource_ref}/{}", net.name),
                         name: ip.clone(),
                         external_id: external_id(
                             arch_id,
-                            "instance",
+                            RESOURCE_SLUG_INSTANCE,
                             &format!("{}/{}#{}", instance.name, net.name, ip),
                             version,
                         ),
@@ -647,7 +683,7 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
         for net in &instance.networks {
             let iface_ext = external_id(
                 arch_id,
-                "instance",
+                RESOURCE_SLUG_INSTANCE,
                 &format!("{}/{}", instance.name, net.name),
                 version,
             );
@@ -663,11 +699,14 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
                 if let Some(ip) = &net.ip {
                     issues.push(MappingIssue {
                         kind: NetBoxKind::IpAddress,
-                        chv_resource_ref: iface_ref.clone(),
+                        // Same ref form as the live IP object
+                        // (`instances/<vm>/<net>`), not the interface's
+                        // `instances/<vm>/networks/<net>`.
+                        chv_resource_ref: format!("{resource_ref}/{}", net.name),
                         name: ip.clone(),
                         external_id: external_id(
                             arch_id,
-                            "instance",
+                            RESOURCE_SLUG_INSTANCE,
                             &format!("{}/{}#{}", instance.name, net.name, ip),
                             version,
                         ),
@@ -694,7 +733,7 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
                         &names,
                         &external_id(
                             arch_id,
-                            "instance",
+                            RESOURCE_SLUG_INSTANCE,
                             &format!("{}/{}#{}", instance.name, net.name, ip),
                             version,
                         ),
@@ -721,19 +760,27 @@ pub fn build_objects(input: &ProjectionInput) -> Result<MappingOutput, MappingEr
         let vlan_id = net.vlan_id.or_else(|| snap_net.and_then(|n| n.vlan_id));
 
         if let Some(cidr) = cidr {
-            let ext = external_id(arch_id, "network", &net.name, version);
+            let ext = external_id(arch_id, RESOURCE_SLUG_NETWORK, &net.name, version);
             objects.push(NetBoxObject::Prefix(NetBoxPrefix {
                 prefix: cidr,
                 vlan: vlan_id,
                 description: format!("{} ({})", net.name, network_type_str(&net.network_type)),
+                network_name: net.name.clone(),
                 tags: tags.clone(),
                 custom_fields: ownership_custom_fields(&names, &ext, arch_id, version, arch),
             }));
         }
 
         if let Some(vid) = vlan_id {
-            let ext = external_id(arch_id, "network", &format!("{}#vlan", net.name), version);
-            match validate_netbox_name(&net.name) {
+            let ext = external_id(
+                arch_id,
+                RESOURCE_SLUG_NETWORK,
+                &format!("{}#vlan", net.name),
+                version,
+            );
+            // NetBox VLAN name/slug is a strict slug (no dots), unlike
+            // device/VM/interface names — see `validate_netbox_slug`.
+            match validate_netbox_slug(&net.name) {
                 Ok(()) => objects.push(NetBoxObject::Vlan(NetBoxVlan {
                     vid,
                     name: net.name.clone(),
@@ -966,6 +1013,36 @@ pub(crate) mod testsupport {
             networks: None,
         });
         arch
+    }
+
+    /// An architecture with no projectable resources at all (empty
+    /// topology); used for the empty-plan edge case.
+    pub(crate) fn empty_architecture() -> CHVArchitecture {
+        CHVArchitecture {
+            api_version: "chv.kubedo.io/v1alpha1".to_string(),
+            kind: "CHVArchitecture".to_string(),
+            metadata: Metadata {
+                name: "empty".to_string(),
+                display_name: None,
+                description: None,
+                environment: None,
+                owner: None,
+                labels: BTreeMap::new(),
+            },
+            servers: Vec::new(),
+            networks: Vec::new(),
+            datastores: Vec::new(),
+            backup_targets: Vec::new(),
+            backup_policies: Vec::new(),
+            images: Vec::new(),
+            templates: Vec::new(),
+            instances: Vec::new(),
+            ssh_keys: Vec::new(),
+            instance_users: Vec::new(),
+            roles: Vec::new(),
+            users: Vec::new(),
+            projects: Vec::new(),
+        }
     }
 
     /// Snapshot whose node facts differ from the declared resources, so
@@ -1262,6 +1339,8 @@ mod tests {
         .to_custom_fields(&names);
         ok.insert(names.owner(), "alice".to_string());
         ok.insert(names.datastores(), "ds:nfs".to_string());
+        ok.insert(names.cpu_cores(), "8".to_string());
+        ok.insert(names.memory_gb(), "16".to_string());
         assert!(scrub_secret_fields(&ok).is_ok());
     }
 
@@ -1279,8 +1358,16 @@ mod tests {
                 _ => None,
             })
             .expect("device");
-        assert_eq!(device.cpu_cores, Some(8));
-        assert_eq!(device.memory_gb, Some(16));
+        // CPU/memory are custom fields (mapping contract), with live
+        // facts winning over declared (contract rule 4).
+        assert_eq!(
+            device.custom_fields.get("chv_cpu_cores"),
+            Some(&"8".to_string())
+        );
+        assert_eq!(
+            device.custom_fields.get("chv_memory_gb"),
+            Some(&"16".to_string())
+        );
         // Datastore facts ride along as device custom-field enrichment.
         assert_eq!(
             device.custom_fields.get("chv_datastores"),
@@ -1297,9 +1384,34 @@ mod tests {
                 _ => None,
             })
             .expect("device");
-        assert_eq!(device.cpu_cores, Some(4));
-        assert_eq!(device.memory_gb, Some(8));
+        assert_eq!(
+            device.custom_fields.get("chv_cpu_cores"),
+            Some(&"4".to_string())
+        );
+        assert_eq!(
+            device.custom_fields.get("chv_memory_gb"),
+            Some(&"8".to_string())
+        );
         assert!(!device.custom_fields.contains_key("chv_datastores"));
+    }
+
+    #[test]
+    fn missing_facts_leave_cpu_memory_custom_fields_unset() {
+        // Contract rule 2: nullable facts stay unset — no placeholder
+        // values, no zero-valued custom fields.
+        let mut arch = test_architecture();
+        arch.servers[0].resources = None;
+        let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
+        let device = output
+            .objects
+            .iter()
+            .find_map(|o| match o {
+                NetBoxObject::Device(d) => Some(d),
+                _ => None,
+            })
+            .expect("device");
+        assert!(!device.custom_fields.contains_key("chv_cpu_cores"));
+        assert!(!device.custom_fields.contains_key("chv_memory_gb"));
     }
 
     #[test]
@@ -1606,5 +1718,165 @@ mod tests {
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap()
         );
+    }
+
+    #[test]
+    fn invalid_custom_field_prefixes_are_rejected() {
+        let arch = test_architecture();
+        for prefix in ["", "token_", "auth_", "MY_PASSWORD_", "ssh_key_"] {
+            let input = ProjectionInput {
+                architecture: &arch,
+                architecture_id: ARCH_ID,
+                architecture_version: 3,
+                snapshot: None,
+                config: ProjectionConfigView {
+                    custom_field_prefix: prefix.to_string(),
+                    site_name: None,
+                },
+            };
+            assert!(
+                matches!(
+                    build_objects(&input),
+                    Err(MappingError::InvalidCustomFieldPrefix { .. })
+                ),
+                "prefix {prefix:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn vlan_name_with_dot_is_an_issue_and_a_plan_conflict() {
+        // NetBox VLAN name/slug is a strict slug: `backend.v2` is legal
+        // for a prefix-bearing network but must not pass VLAN name
+        // validation — it becomes a mapping issue (conflict path),
+        // never a silent rename.
+        let mut arch = test_architecture();
+        arch.networks[0].name = "backend.v2".to_string();
+        let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
+
+        let issue = output
+            .issues
+            .iter()
+            .find(|i| i.kind == NetBoxKind::Vlan)
+            .expect("vlan issue for the dotted name");
+        assert_eq!(issue.name, "backend.v2");
+        assert!(issue.reason.contains("not allowed"));
+        assert!(!output.objects.iter().any(|o| o.kind() == NetBoxKind::Vlan));
+
+        // The prefix still projects (dots are legal outside VLAN
+        // names), carrying the source name for the resource ref.
+        assert!(output.objects.iter().any(|o| matches!(
+            &o,
+            NetBoxObject::Prefix(p) if p.network_name == "backend.v2"
+        )));
+
+        // Conflict path: the issue becomes a conflict plan entry, never
+        // a write.
+        let plan =
+            crate::plan::compute_plan(&output, &[], &crate::plan::PlanContext::new(ARCH_ID, 3))
+                .expect("plan");
+        let conflict = plan
+            .entries
+            .iter()
+            .find(|e| {
+                e.kind == NetBoxKind::Vlan && e.action == crate::plan::NetboxPlanAction::Conflict
+            })
+            .expect("conflict entry for the vlan name");
+        assert_eq!(
+            conflict.netbox_natural_key.get("name").map(String::as_str),
+            Some("backend.v2")
+        );
+        assert!(conflict
+            .reason
+            .contains("name fails NetBox charset validation"));
+    }
+
+    #[test]
+    fn vlan_id_without_cidr_emits_vlan_but_no_prefix() {
+        let mut arch = test_architecture();
+        arch.networks.push(Network {
+            name: "vlan-only".to_string(),
+            network_type: NetworkType::Vlan,
+            bridge: None,
+            vlan_id: Some(99),
+            cidr: None,
+            gateway: None,
+            dns: Vec::new(),
+            dhcp: None,
+        });
+        let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
+        assert!(output
+            .objects
+            .iter()
+            .any(|o| matches!(&o, NetBoxObject::Vlan(v) if v.vid == 99)));
+        assert!(!output
+            .objects
+            .iter()
+            .any(|o| matches!(&o, NetBoxObject::Prefix(p) if p.network_name == "vlan-only")));
+        assert!(output.issues.is_empty());
+    }
+
+    #[test]
+    fn version_zero_external_ids_format_correctly() {
+        assert_eq!(
+            external_id("arch_01HX", "server", "chv-node-01", 0),
+            "arch:arch_01HX:server/chv-node-01:0"
+        );
+        let arch = test_architecture();
+        let output = build_objects(&projection_input(&arch, 0, None)).expect("builds");
+        let device = output
+            .objects
+            .iter()
+            .find(|o| o.kind() == NetBoxKind::Device)
+            .expect("device");
+        assert_eq!(
+            device.custom_fields().get("chv_external_id"),
+            Some(&"arch:arch_01HX:server/chv-node-01:0".to_string())
+        );
+        assert_eq!(
+            device.custom_fields().get("chv_architecture_version"),
+            Some(&"0".to_string())
+        );
+        // Version 0 still parses and round-trips through the marker.
+        let marker = ManagedMarker::parse(device.custom_fields(), &CustomFieldNames::default())
+            .expect("marker parses");
+        assert_eq!(marker.architecture_version, 0);
+    }
+
+    #[test]
+    fn external_id_resource_slugs_are_pinned() {
+        // Cross-crate contract: the external-id kind slugs must be
+        // exactly this set, matching `resource_type_as_str` in
+        // chv-architecture-reconcile/src/apply/mod.rs. A divergence
+        // breaks external-id ↔ resource-ref joins and must be a
+        // deliberate, reviewed change in both crates.
+        assert_eq!(RESOURCE_SLUG_SERVER, "server");
+        assert_eq!(RESOURCE_SLUG_NETWORK, "network");
+        assert_eq!(RESOURCE_SLUG_INSTANCE, "instance");
+
+        // And the builders only ever use these three slugs.
+        let arch = test_architecture();
+        let output = build_objects(&projection_input(&arch, 3, None)).expect("builds");
+        let names = CustomFieldNames::default();
+        for object in &output.objects {
+            let ext_id = object
+                .custom_fields()
+                .get(&names.external_id)
+                .expect("external id");
+            let kind = ext_id
+                .split(':')
+                .nth(2)
+                .and_then(|segment| segment.split('/').next())
+                .expect("kind slug");
+            assert!(
+                [
+                    RESOURCE_SLUG_SERVER,
+                    RESOURCE_SLUG_NETWORK,
+                    RESOURCE_SLUG_INSTANCE
+                ]
+                .contains(&kind),
+                "unexpected resource slug {kind:?} in {ext_id:?}"
+            );
+        }
     }
 }
