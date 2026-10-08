@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getMaintenance } from '$lib/bff/maintenance';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getMaintenance } from '#lib/bff/maintenance.ts';
 
 export const load: PageLoad = async () => {
 	const token = getStoredToken() ?? undefined;

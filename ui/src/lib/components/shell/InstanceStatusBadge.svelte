@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { InstanceStatus } from '$lib/api/types';
+	import type { InstanceStatus } from '#lib/api/types.ts';
 
 	interface Props {
 		status: InstanceStatus;

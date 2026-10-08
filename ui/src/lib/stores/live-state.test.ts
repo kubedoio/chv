@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
 vi.mock('$app/navigation', () => ({
-	invalidateAll: vi.fn()
+	refreshAll: vi.fn()
 }));
 
-import { invalidateAll } from '$app/navigation';
+import { refreshAll } from '$app/navigation';
 import { liveState } from './live-state.svelte';
 
 describe('liveState', () => {
@@ -63,9 +63,9 @@ describe('liveState', () => {
 
 	describe('invalidateAndRefresh', () => {
 		beforeEach(() => {
-			// invalidateAll is the imported reference to the mocked $app/navigation export.
-			(invalidateAll as ReturnType<typeof vi.fn>).mockClear();
-			(invalidateAll as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+			// refreshAll is the imported reference to the mocked $app/navigation export.
+			(refreshAll as ReturnType<typeof vi.fn>).mockClear();
+			(refreshAll as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 		});
 
 		it('invalidates each pattern via invalidateCachePattern', async () => {
@@ -120,12 +120,12 @@ describe('liveState', () => {
 			expect(inventorySpy).not.toHaveBeenCalled();
 		});
 
-		it('always calls invalidateAll() from $app/navigation', async () => {
+		it('always calls refreshAll() from $app/navigation', async () => {
 			vi.spyOn(liveState, 'fetchInventory').mockResolvedValue(undefined);
 
 			await liveState.invalidateAndRefresh({ patterns: ['vms:'] });
 
-			expect(invalidateAll).toHaveBeenCalledTimes(1);
+			expect(refreshAll).toHaveBeenCalledTimes(1);
 		});
 
 		it('runs invalidation immediately and again after delayMs when delayMs > 0', async () => {
@@ -156,12 +156,12 @@ describe('liveState', () => {
 		});
 
 		it('is a no-op under SSR (browser=false)', async () => {
-			// Re-import the module with $app/environment.browser stubbed to false
+			// Re-import the module with $app/env.browser stubbed to false
 			// to exercise the SSR guard at the top of invalidateAndRefresh.
 			vi.resetModules();
-			vi.doMock('$app/environment', () => ({ browser: false }));
-			vi.doMock('$env/dynamic/public', () => ({ env: {} }));
-			const navMock = { invalidateAll: vi.fn() };
+			vi.doMock('$app/env', () => ({ browser: false }));
+			vi.doMock('$app/env/public', () => ({ PUBLIC_CHV_API_BASE_URL: '' }));
+			const navMock = { refreshAll: vi.fn() };
 			vi.doMock('$app/navigation', () => navMock);
 
 			try {
@@ -180,11 +180,11 @@ describe('liveState', () => {
 
 				expect(patternSpy).not.toHaveBeenCalled();
 				expect(inventorySpy).not.toHaveBeenCalled();
-				expect(navMock.invalidateAll).not.toHaveBeenCalled();
+				expect(navMock.refreshAll).not.toHaveBeenCalled();
 			} finally {
-				vi.doUnmock('$app/environment');
+				vi.doUnmock('$app/env');
 				vi.doUnmock('$app/navigation');
-				vi.doUnmock('$env/dynamic/public');
+				vi.doUnmock('$app/env/public');
 				vi.resetModules();
 			}
 		});

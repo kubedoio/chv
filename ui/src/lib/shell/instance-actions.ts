@@ -1,7 +1,7 @@
 import type {
 	InstanceActionDefinition,
 	InstanceStatus
-} from '$lib/api/types';
+} from '#lib/api/types.ts';
 
 /**
  * Build the complete list of instance actions with availability

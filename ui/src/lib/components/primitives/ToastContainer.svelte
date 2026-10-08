@@ -2,9 +2,9 @@
 	import { flip } from 'svelte/animate';
 	import { fly } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { toast } from '#lib/stores/toast.svelte.ts';
 	import Toast from './Toast.svelte';
-	import { announceToast } from '$lib/stores/a11y.svelte';
+	import { announceToast } from '#lib/stores/a11y.svelte.ts';
 
 	let lastAnnouncedId = $state<string | null>(null);
 

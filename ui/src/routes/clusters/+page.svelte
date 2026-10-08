@@ -1,18 +1,18 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/shared/FilterBar.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+import Button from '#lib/components/primitives/Button.svelte';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import FilterBar from '#lib/components/shared/FilterBar.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 	import type { PageData } from './$types';
 	import { Blocks, AlertTriangle, Activity, Plus, LayoutGrid } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { page as appPage } from '$app/stores';
+	import { page as appPage } from '$app/state';
 
 	let { data }: { data: PageData } = $props();
 
@@ -36,13 +36,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 	];
 
 	function handleFilterChange(key: string, value: any) {
-		const newParams = new URLSearchParams($appPage.url.searchParams);
+		const newParams = new URLSearchParams(appPage.url.searchParams.toString());
 		if (value === '' || value === 'all') {
 			newParams.delete(key);
 		} else {
 			newParams.set(key, String(value));
 		}
-		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+		goto(`?${newParams.toString()}`, { reset: false });
 	}
 
 	const columns = [
@@ -107,7 +107,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 			{filters} 
 			activeFilters={model.filters.current} 
 			onFilterChange={handleFilterChange}
-			onClearAll={() => goto($appPage.url.pathname)}
+			onClearAll={() => goto(appPage.url.pathname)}
 		/>
 	</div>
 

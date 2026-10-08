@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	interface Props {
 		label: string;

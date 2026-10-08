@@ -1,9 +1,9 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
 	import { Check, RotateCcw } from 'lucide-svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
-	import type { HypervisorProfile } from '$lib/bff/hypervisor-settings';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import ConfirmAction from '#lib/components/shared/ConfirmAction.svelte';
+	import type { HypervisorProfile } from '#lib/bff/hypervisor-settings.ts';
 
 	interface Props {
 		profiles: HypervisorProfile[];

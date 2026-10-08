@@ -2,12 +2,12 @@
 	import type { Snippet } from 'svelte';
 	import PageHeaderWithAction from './PageHeaderWithAction.svelte';
 	import InventoryTable from './InventoryTable.svelte';
-	import FilterBar from '$lib/components/shared/FilterBar.svelte';
+	import FilterBar from '#lib/components/shared/FilterBar.svelte';
 	import ErrorState from './ErrorState.svelte';
 	import EmptyInfrastructureState from './EmptyInfrastructureState.svelte';
 	import SectionCard from './SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import type { PageDefinition } from '$lib/shell/app-shell';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import type { PageDefinition } from '#lib/shell/app-shell.ts';
 
 	interface FilterDef {
 		key: string;

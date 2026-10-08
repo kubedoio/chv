@@ -3,23 +3,23 @@
 		Cpu, MemoryStick, Plug, Shield, Monitor,
 		Settings, Activity
 	} from 'lucide-svelte';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import HypervisorToggle from '$lib/components/settings/HypervisorToggle.svelte';
-	import HypervisorSelectField from '$lib/components/settings/HypervisorSelectField.svelte';
-	import HypervisorTextField from '$lib/components/settings/HypervisorTextField.svelte';
-	import HypervisorProfilePanel from '$lib/components/settings/HypervisorProfilePanel.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import { getStoredToken } from '$lib/api/client';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import HypervisorToggle from '#lib/components/settings/HypervisorToggle.svelte';
+	import HypervisorSelectField from '#lib/components/settings/HypervisorSelectField.svelte';
+	import HypervisorTextField from '#lib/components/settings/HypervisorTextField.svelte';
+	import HypervisorProfilePanel from '#lib/components/settings/HypervisorProfilePanel.svelte';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
 	import {
 		updateHypervisorSettings,
 		applyHypervisorProfile,
 		type HypervisorSettings,
 		type HypervisorProfile
-	} from '$lib/bff/hypervisor-settings';
+	} from '#lib/bff/hypervisor-settings.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();

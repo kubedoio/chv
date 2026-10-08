@@ -1,7 +1,7 @@
 <script lang="ts">
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Modal from '$lib/components/primitives/Modal.svelte';
-  import type { VmListItem } from '$lib/bff/types';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Modal from '#lib/components/primitives/Modal.svelte';
+  import type { VmListItem } from '#lib/bff/types.ts';
 
   interface Props {
     open: boolean;

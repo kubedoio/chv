@@ -1,16 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { Activity, Server, Cpu, Clock, BarChart3, LineChart, PieChart, ShieldAlert } from 'lucide-svelte';
-  import { createAPIClient } from '$lib/api/client';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import ChartJS from '$lib/components/shared/charts/ChartJS.svelte';
+  import { createAPIClient } from '#lib/api/client.ts';
+  import SectionCard from '#lib/components/shell/SectionCard.svelte';
+  import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+  import ChartJS from '#lib/components/shared/charts/ChartJS.svelte';
   import type { ChartData } from 'chart.js';
-  import type { VM, Node } from '$lib/api/types';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-  import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import { getPageDefinition } from '$lib/shell/app-shell';
+  import type { VM, Node } from '#lib/api/types.ts';
+  import ErrorState from '#lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+  import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+  import { getPageDefinition } from '#lib/shell/app-shell.ts';
   
   const client = createAPIClient();
   const pageDef = getPageDefinition('/observability');

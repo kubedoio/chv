@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { DriftFinding } from '$lib/bff/architectures';
+	import type { DriftFinding } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		finding: DriftFinding;

@@ -1,8 +1,8 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listNodes } from '$lib/bff/nodes';
-import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
-import type { ListNodesRequest, NodeListItem } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listNodes } from '#lib/bff/nodes.ts';
+import { cachedFetch, LIST_TTL } from '#lib/stores/api-cache.svelte.ts';
+import type { ListNodesRequest, NodeListItem } from '#lib/bff/types.ts';
 
 export type { NodeListItem };
 

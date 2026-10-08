@@ -1,14 +1,14 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
-	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CreateVMModal from '$lib/components/vms/CreateVMModal.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
-	import { mapPowerTone } from '$lib/shell/power-tone';
+	import InventoryListPage from '#lib/components/shell/InventoryListPage.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import CreateVMModal from '#lib/components/vms/CreateVMModal.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
+	import { mapPowerTone } from '#lib/shell/power-tone.ts';
 	import { Plus, Activity, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { page as appPage } from '$app/stores';
+	import { page as appPage } from '$app/state';
 
 	let { data }: { data: PageData } = $props();
 
@@ -44,17 +44,17 @@ import Button from '$lib/components/primitives/Button.svelte';
 	];
 
 	function handleFilterChange(key: string, value: unknown) {
-		const newParams = new URLSearchParams($appPage.url.searchParams);
+		const newParams = new URLSearchParams(appPage.url.searchParams.toString());
 		if (value === '' || value === 'all') {
 			newParams.delete(key);
 		} else {
 			newParams.set(key, String(value));
 		}
-		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+		goto(`?${newParams.toString()}`, { reset: false });
 	}
 
 	function handleClearFilters() {
-		goto($appPage.url.pathname);
+		goto(appPage.url.pathname);
 	}
 
 	const columns = [

@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listNetworks } from '$lib/bff/networks';
-import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listNetworks } from '#lib/bff/networks.ts';
+import { cachedFetch, LIST_TTL } from '#lib/stores/api-cache.svelte.ts';
 
 export type NetworkListItem = {
 	network_id: string;

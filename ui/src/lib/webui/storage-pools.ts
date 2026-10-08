@@ -1,6 +1,6 @@
-import { listStoragePools } from '$lib/bff/storage';
-import type { StoragePoolItem } from '$lib/bff/types';
-import type { StoragePool } from '$lib/api/types';
+import { listStoragePools } from '#lib/bff/storage.ts';
+import type { StoragePoolItem } from '#lib/bff/types.ts';
+import type { StoragePool } from '#lib/api/types.ts';
 
 export function mapStoragePoolItem(pool: StoragePoolItem): StoragePool {
 	return {

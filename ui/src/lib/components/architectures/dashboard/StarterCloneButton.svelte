@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 
 	/**
 	 * Starter-specific affordances for the architecture detail page.

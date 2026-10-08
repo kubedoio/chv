@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ShieldCheck, Activity } from 'lucide-svelte';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import type { BackupHistory } from '$lib/bff/types';
+  import SectionCard from '#lib/components/shell/SectionCard.svelte';
+  import type { BackupHistory } from '#lib/bff/types.ts';
 
   interface Props {
     backupHistory: BackupHistory[];

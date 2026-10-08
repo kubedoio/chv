@@ -1,11 +1,11 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import ValidationFindingsPanel from './ValidationFindingsPanel.svelte';
 	import type {
 		FleetCheckResult,
 		ValidationResult,
 		ValidationStatus
-	} from '$lib/bff/architectures';
+	} from '#lib/bff/architectures.ts';
 
 	interface Props {
 		/** The latest fleet-check result. `null` means "not yet run". */

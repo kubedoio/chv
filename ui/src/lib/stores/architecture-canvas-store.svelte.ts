@@ -6,7 +6,7 @@ import {
 	isEdgeAllowed,
 	type EdgeType,
 	type NodeKind
-} from '$lib/components/architectures/canvas/edge-rules';
+} from '#lib/components/architectures/canvas/edge-rules.ts';
 
 /**
  * Reactive Svelte 5 store backing the Architecture Designer canvas.
@@ -24,7 +24,7 @@ import {
  *   - both `design_graph_json` and `latest_yaml` save in a single request.
  *
  * SSR/test safety: this module must not import `$app/*` at top level; only
- * `$lib/...` and external packages. (`architecture-store` already mocks
+ * `#lib/...` and external packages. (`architecture-store` already mocks
  * `$app/navigation` in its own tests; we don't reach for it directly.)
  */
 

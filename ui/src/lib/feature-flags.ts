@@ -1,7 +1,8 @@
 /**
  * Feature flag helpers.
  *
- * Flags are read from SvelteKit's `$env/dynamic/public` module so the same
+ * Flags are read from SvelteKit's `$app/env/public` module (SvelteKit 3's
+ * successor to `$env/dynamic/public`; declared in `src/env.ts`) so the same
  * compiled bundle responds to env changes without rebuilding. All flags here
  * follow a single rule: a flag is *flipped* only when its env var is the
  * literal string `'1'`. `'true'`, `'on'`, `1` (number), and `true` (boolean)
@@ -9,7 +10,7 @@
  * accepted truthy value.
  */
 
-import { env } from '$env/dynamic/public';
+import { PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED } from '$app/env/public';
 
 /**
  * Returns true when the architecture designer Svelte Flow canvas should
@@ -24,10 +25,10 @@ import { env } from '$env/dynamic/public';
  * "set the var or see a placeholder" footgun that hid the canvas from real
  * users while CI quietly passed.
  *
- * Uses `$env/dynamic/public` (read at runtime) so a single compiled bundle
+ * Uses `$app/env/public` (read at runtime) so a single compiled bundle
  * supports both states across deployments and lets Playwright's web server
  * toggle without a rebuild.
  */
 export function architectureDesignerCanvasEnabled(): boolean {
-	return env.PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED !== '1';
+	return PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED !== '1';
 }

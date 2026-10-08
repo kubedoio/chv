@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { Activity, Server, Cpu, HardDrive, AlertCircle, CheckCircle, Clock } from 'lucide-svelte';
-  import { createAPIClient } from '$lib/api/client';
-  import type { Node, NodeWithResources } from '$lib/api/types';
+  import { createAPIClient } from '#lib/api/client.ts';
+  import type { Node, NodeWithResources } from '#lib/api/types.ts';
   import Sparkline from '../shared/charts/Sparkline.svelte';
 
   interface NodeMetrics {

@@ -1,9 +1,9 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import { listNodes } from '$lib/bff/nodes';
-	import { getStoredToken } from '$lib/api/client';
-	import type { NodeListItem } from '$lib/bff/types';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import { listNodes } from '#lib/bff/nodes.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import type { NodeListItem } from '#lib/bff/types.ts';
 	import { AlertCircle } from 'lucide-svelte';
 
 	interface Props {

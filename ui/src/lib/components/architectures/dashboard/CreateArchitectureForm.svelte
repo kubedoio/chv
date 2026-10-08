@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import { architectureStore } from '$lib/stores/architecture-store.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import { architectureStore } from '#lib/stores/architecture-store.svelte.ts';
 	import {
 		KNOWN_ARCHITECTURE_ENVIRONMENTS,
 		type ArchitectureEnvironment
-	} from '$lib/bff/architectures';
+	} from '#lib/bff/architectures.ts';
 
 	let name = $state('');
 	let description = $state('');

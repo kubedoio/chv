@@ -1,11 +1,11 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import FormField from '$lib/components/shared/FormField.svelte';
-	import Input from '$lib/components/primitives/TextInput.svelte';
-	import Select from '$lib/components/primitives/Select.svelte';
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import type { CreateStoragePoolInput } from '$lib/api/types';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import FormField from '#lib/components/shared/FormField.svelte';
+	import Input from '#lib/components/primitives/TextInput.svelte';
+	import Select from '#lib/components/primitives/Select.svelte';
+	import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import type { CreateStoragePoolInput } from '#lib/api/types.ts';
 
 	interface Props {
 		open?: boolean;

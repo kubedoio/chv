@@ -47,7 +47,7 @@ export async function mutateVolume(req: MutateVolumeRequest, token?: string): Pr
 
 // #522 DP12 (PR 4): the volume-delete route PR 2 landed (#535). The
 // one-key body is built by `buildDeleteVolumePayload`
-// (`$lib/webui/volume-delete`) so the contract is pinned by tests.
+// (`#lib/webui/volume-delete.ts`) so the contract is pinned by tests.
 export async function deleteVolume(req: DeleteVolumeRequest, token?: string): Promise<DeleteVolumeResponse> {
 	return bffFetch<DeleteVolumeResponse>(BFFEndpoints.deleteVolume, {
 		method: 'POST',

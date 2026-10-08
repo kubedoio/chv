@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
-import { APIError, clearToken, createAPIClient, getStoredRole, getStoredToken, storeToken } from '$lib/api/client';
+import { APIError, clearToken, createAPIClient, getStoredRole, getStoredToken, storeToken } from '#lib/api/client.ts';
 
 function makeJwt(payload: Record<string, unknown>): string {
 	const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));

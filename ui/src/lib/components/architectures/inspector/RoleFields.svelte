@@ -8,7 +8,7 @@
 	 * A future Phase will swap this for a chip/multiselect, but Phase-2 keeps
 	 * the inspector trivial.
 	 */
-	import type { CanvasNodeData } from '$lib/stores/architecture-canvas-store.svelte';
+	import type { CanvasNodeData } from '#lib/stores/architecture-canvas-store.svelte.ts';
 	import './field-styles.css';
 
 	interface Props {

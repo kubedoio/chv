@@ -2,9 +2,9 @@
   import Modal from '../primitives/Modal.svelte';
   import FormField from '../shared/FormField.svelte';
   import Input from '../primitives/Input.svelte';
-  import { createAPIClient } from '$lib/api/client';
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-  import type { Quota, UserInfo } from '$lib/api/types';
+  import { createAPIClient } from '#lib/api/client.ts';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+  import type { Quota, UserInfo } from '#lib/api/types.ts';
 
   interface Props {
     open?: boolean;

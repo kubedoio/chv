@@ -1,14 +1,14 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import PlanChangeRow from './PlanChangeRow.svelte';
 	import PlanTtlBadge from './PlanTtlBadge.svelte';
-	import ApplyConfirmDialog from '$lib/components/architectures/runs/ApplyConfirmDialog.svelte';
+	import ApplyConfirmDialog from '#lib/components/architectures/runs/ApplyConfirmDialog.svelte';
 	import type {
 		Architecture,
 		PlanChange,
 		PlanMode,
 		PlanResult
-	} from '$lib/bff/architectures';
+	} from '#lib/bff/architectures.ts';
 
 	interface Props {
 		/** Architecture row whose plan is being reviewed. */

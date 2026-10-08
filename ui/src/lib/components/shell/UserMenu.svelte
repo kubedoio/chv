@@ -2,10 +2,10 @@
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
   import { User, Settings, LogOut, Sun, Moon } from 'lucide-svelte';
-  import { theme } from '$lib/stores/theme.svelte';
+  import { theme } from '#lib/stores/theme.svelte.ts';
   import { goto } from '$app/navigation';
-  import { createAPIClient, clearToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
+  import { createAPIClient, clearToken } from '#lib/api/client.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
   
   interface Props {
     userName?: string;

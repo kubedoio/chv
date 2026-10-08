@@ -1,6 +1,6 @@
 <script lang="ts">
 	import StatusBadge from './StatusBadge.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 	import { ChevronRight } from 'lucide-svelte';
 
 	interface Props {

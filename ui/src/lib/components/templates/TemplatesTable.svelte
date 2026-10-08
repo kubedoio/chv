@@ -1,10 +1,10 @@
 <script lang="ts">
   import { Copy, FileCode } from 'lucide-svelte';
-  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import type { ShellTone } from '$lib/shell/app-shell';
-  import type { VMTemplate, CloudInitTemplate, Image } from '$lib/api/types';
+  import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+  import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+  import ErrorState from '#lib/components/shell/ErrorState.svelte';
+  import type { ShellTone } from '#lib/shell/app-shell.ts';
+  import type { VMTemplate, CloudInitTemplate, Image } from '#lib/api/types.ts';
 
   type Column = { key: string; label: string; align?: 'left' | 'right' | 'center' };
 

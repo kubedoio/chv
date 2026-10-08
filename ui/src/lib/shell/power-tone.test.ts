@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapPowerTone } from '$lib/shell/power-tone';
+import { mapPowerTone } from '#lib/shell/power-tone.ts';
 
 describe('mapPowerTone', () => {
 	it.each([

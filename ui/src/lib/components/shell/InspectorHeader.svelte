@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Info, X } from 'lucide-svelte';
-	import { selection } from '$lib/stores/selection.svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import { selection } from '#lib/stores/selection.svelte.ts';
+	import Button from '#lib/components/primitives/Button.svelte';
 </script>
 
 <header class="px-3 py-2 border-b border-[var(--border-subtle)] flex justify-between items-center bg-[var(--bg-surface-muted)]">

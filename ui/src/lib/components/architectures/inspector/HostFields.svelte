@@ -6,7 +6,7 @@
 	 * memory_gb. All edits flow back through `architectureCanvasStore.updateNodeData`,
 	 * which the parent Inspector wires up via the `update` callback.
 	 */
-	import type { CanvasNodeData } from '$lib/stores/architecture-canvas-store.svelte';
+	import type { CanvasNodeData } from '#lib/stores/architecture-canvas-store.svelte.ts';
 	import './field-styles.css';
 
 	interface Props {

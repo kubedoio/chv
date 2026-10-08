@@ -5,7 +5,7 @@
 // the confirm copy are pinned by tests instead of living only in the
 // page component (the repo's vitest tier renders leaf components, not
 // route pages — the #513 PR 4 coverage story).
-import type { DeleteVolumeRequest } from '$lib/bff/types';
+import type { DeleteVolumeRequest } from '#lib/bff/types.ts';
 
 // Builds the wire payload: exactly the one contract key. DP5's
 // no-force stance is structural — a `force` flag exists nowhere in

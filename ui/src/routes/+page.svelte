@@ -1,16 +1,16 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { browser } from '$app/environment';
+	import { browser } from '$app/env';
 	import type { PageData } from './$types';
 	import './+page.css';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
-	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import LoadingState from '$lib/components/shell/LoadingState.svelte';
-	import TopologyCanvas from '$lib/components/shared/TopologyCanvas.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import TaskTimeline from '#lib/components/shell/TaskTimeline.svelte';
+	import SeverityShield from '#lib/components/shell/SeverityShield.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+	import LoadingState from '#lib/components/shell/LoadingState.svelte';
+	import TopologyCanvas from '#lib/components/shared/TopologyCanvas.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
 	import {
 		Activity,
 		AlertCircle,
@@ -21,8 +21,8 @@
 		X,
 		Zap
 	} from 'lucide-svelte';
-	import { inventory } from '$lib/stores/inventory.svelte';
-	import { dashboard } from '$lib/stores/dashboard.svelte';
+	import { inventory } from '#lib/stores/inventory.svelte.ts';
+	import { dashboard } from '#lib/stores/dashboard.svelte.ts';
 	import {
 		dashboardPanels,
 		defaultPanelState,
@@ -32,7 +32,7 @@
 		buildFleetBriefing,
 		buildPressureCards,
 		type PanelId
-	} from '$lib/helpers/dashboard';
+	} from '#lib/helpers/dashboard.ts';
 
 	let { data }: { data: PageData } = $props();
 

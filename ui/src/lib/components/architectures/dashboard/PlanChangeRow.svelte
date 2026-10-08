@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { PlanAction, PlanChange, PlanRisk } from '$lib/bff/architectures';
+	import type { PlanAction, PlanChange, PlanRisk } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		change: PlanChange;

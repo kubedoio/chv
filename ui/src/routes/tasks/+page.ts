@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listTasks } from '$lib/bff/tasks';
-import type { ListTasksRequest, TaskListItem } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listTasks } from '#lib/bff/tasks.ts';
+import type { ListTasksRequest, TaskListItem } from '#lib/bff/types.ts';
 
 const PAGE_SIZE = 50;
 const DEFAULT_WINDOW = '7d';

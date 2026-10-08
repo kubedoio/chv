@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { DriftStatus } from '$lib/bff/architectures';
+	import type { DriftStatus } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		status: DriftStatus;

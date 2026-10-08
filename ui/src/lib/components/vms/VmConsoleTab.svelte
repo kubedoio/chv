@@ -1,12 +1,12 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
 	import { Terminal } from 'lucide-svelte';
 
 	interface Props {
 		vmId: string;
 		consoleLoading: boolean;
 		liveConsoleUrl: string | undefined;
-		VmConsoleComponent: typeof import('$lib/components/vms/VmConsole.svelte').default | null;
+		VmConsoleComponent: typeof import('#lib/components/vms/VmConsole.svelte').default | null;
 		running: boolean;
 		getConsoleUrl: () => Promise<string>;
 		consoleExpiresAt?: string;

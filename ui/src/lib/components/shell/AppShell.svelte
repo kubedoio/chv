@@ -1,16 +1,16 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import { page } from '$app/stores';
-	import MobileNav from '$lib/components/shell/MobileNav.svelte';
-	import SidebarNav from '$lib/components/shell/SidebarNav.svelte';
-	import TopCommandBar from '$lib/components/shell/TopCommandBar.svelte';
-	import InspectDrawer from '$lib/components/shell/InspectDrawer.svelte';
-	import { selection } from '$lib/stores/selection.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+	import { page } from '$app/state';
+	import MobileNav from '#lib/components/shell/MobileNav.svelte';
+	import SidebarNav from '#lib/components/shell/SidebarNav.svelte';
+	import TopCommandBar from '#lib/components/shell/TopCommandBar.svelte';
+	import InspectDrawer from '#lib/components/shell/InspectDrawer.svelte';
+	import { selection } from '#lib/stores/selection.svelte.ts';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 
 	let { children }: { children?: Snippet } = $props();
 
-	const currentPage = $derived(getPageDefinition($page.url.pathname));
+	const currentPage = $derived(getPageDefinition(page.url.pathname));
 	const showInspector = $derived(Boolean(selection.active.id));
 </script>
 

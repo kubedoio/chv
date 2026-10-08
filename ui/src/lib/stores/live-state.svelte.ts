@@ -1,10 +1,10 @@
-import { browser } from '$app/environment';
-import { invalidateAll } from '$app/navigation';
-import { getStoredToken } from '$lib/api/client';
-import type { NodeWithResources, VM } from '$lib/api/types';
-import { listNodes } from '$lib/bff/nodes';
-import { listVms } from '$lib/bff/vms';
-import type { NodeListItem, VmListItem } from '$lib/bff/types';
+import { browser } from '$app/env';
+import { refreshAll } from '$app/navigation';
+import { getStoredToken } from '#lib/api/client.ts';
+import type { NodeWithResources, VM } from '#lib/api/types.ts';
+import { listNodes } from '#lib/bff/nodes.ts';
+import { listVms } from '#lib/bff/vms.ts';
+import type { NodeListItem, VmListItem } from '#lib/bff/types.ts';
 import { taskStream, type TaskUpdate } from './task-stream.svelte';
 
 export interface InvalidateOpts {
@@ -225,7 +225,7 @@ class LiveState {
 			await this.fetchInventory();
 		}
 
-		await invalidateAll();
+		await refreshAll();
 
 		if (opts.delayMs && opts.delayMs > 0) {
 			setTimeout(() => {
@@ -241,7 +241,7 @@ class LiveState {
 				if (opts.sidebar) {
 					tasks.push(this.fetchInventory());
 				}
-				tasks.push(invalidateAll());
+				tasks.push(refreshAll());
 				Promise.all(tasks).catch((err) => {
 					// TODO: integrate structured logger instead of console
 					// eslint-disable-next-line no-console

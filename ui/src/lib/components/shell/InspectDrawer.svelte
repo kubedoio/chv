@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { selection } from '$lib/stores/selection.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { getVm } from '$lib/bff/vms';
-	import { getNode } from '$lib/bff/nodes';
-	import type { VmSummary, NodeSummary } from '$lib/bff/types';
+	import { selection } from '#lib/stores/selection.svelte.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { getVm } from '#lib/bff/vms.ts';
+	import { getNode } from '#lib/bff/nodes.ts';
+	import type { VmSummary, NodeSummary } from '#lib/bff/types.ts';
 	import { fade } from 'svelte/transition';
 	import { ChevronRight, Loader2 } from 'lucide-svelte';
 	import InspectorHeader from './InspectorHeader.svelte';

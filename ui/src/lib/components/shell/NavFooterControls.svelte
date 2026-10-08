@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Moon, Sun, Settings, LogOut } from 'lucide-svelte';
-	import { theme } from '$lib/stores/theme.svelte';
+	import { theme } from '#lib/stores/theme.svelte.ts';
 
 	interface Props {
 		onLogout: () => void;

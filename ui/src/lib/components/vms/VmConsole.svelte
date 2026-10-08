@@ -88,7 +88,9 @@
 		if (
 			socket &&
 			activeSocketUrl === wsUrl &&
-			(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+			// `CONNECTING` is unreachable here: connectWith returns early above
+			// when the existing socket is still connecting.
+			socket.readyState === WebSocket.OPEN
 		) {
 			return;
 		}

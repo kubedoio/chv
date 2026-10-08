@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 
 	/**
 	 * Confirmation dialog for `apply` and `destroy` actions.

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Download, Tag } from 'lucide-svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
 
 	interface PendingImage {
 		name: string;

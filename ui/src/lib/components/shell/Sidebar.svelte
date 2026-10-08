@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { page } from '$app/stores';
-  import { createAPIClient } from '$lib/api/client';
+  import { page } from '$app/state';
+  import { createAPIClient } from '#lib/api/client.ts';
   import { 
     LayoutDashboard, 
     Wrench, 
@@ -72,7 +72,7 @@
   }
 
   // Clear badge when navigating to events page
-  $: if ($page?.url?.pathname === '/events') {
+  $: if (page?.url?.pathname === '/events') {
     clearBadge();
   }
 </script>

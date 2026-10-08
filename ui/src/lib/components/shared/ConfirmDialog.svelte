@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
 	import { AlertTriangle } from 'lucide-svelte';
 
 	interface Props {

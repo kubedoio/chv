@@ -1,10 +1,10 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import DriftStatusBadge from './DriftStatusBadge.svelte';
 	import DriftSummaryChips from './DriftSummaryChips.svelte';
 	import DriftFindingRow from './DriftFindingRow.svelte';
-	import { architectureDriftStore } from '$lib/stores/architecture-drift-store.svelte';
-	import type { DriftFinding } from '$lib/bff/architectures';
+	import { architectureDriftStore } from '#lib/stores/architecture-drift-store.svelte.ts';
+	import type { DriftFinding } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		architectureId: string;

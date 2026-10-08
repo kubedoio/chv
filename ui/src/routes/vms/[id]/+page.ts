@@ -1,8 +1,8 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getVm, getVmConsoleUrl } from '$lib/bff/vms';
-import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
-import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getVm, getVmConsoleUrl } from '#lib/bff/vms.ts';
+import { cachedFetch, DETAIL_TTL } from '#lib/stores/api-cache.svelte.ts';
+import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '#lib/bff/types.ts';
 
 export type VmDetailModel = {
 	state: 'ready' | 'empty' | 'error';

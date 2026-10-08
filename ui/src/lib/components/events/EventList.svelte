@@ -14,7 +14,7 @@
     X
   } from 'lucide-svelte';
   import StateBadge from '../shared/StateBadge.svelte';
-  import type { Event } from '$lib/api/types';
+  import type { Event } from '#lib/api/types.ts';
 
   interface Props {
     events: Event[];

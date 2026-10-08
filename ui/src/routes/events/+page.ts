@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listEvents } from '$lib/bff/events';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listEvents } from '#lib/bff/events.ts';
 
 export type EventListItem = {
 	event_id: string;

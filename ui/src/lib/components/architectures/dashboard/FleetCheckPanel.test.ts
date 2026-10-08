@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
 import FleetCheckPanel from './FleetCheckPanel.svelte';
-import type { Finding, FleetCheckResult } from '$lib/bff/architectures';
+import type { Finding, FleetCheckResult } from '#lib/bff/architectures.ts';
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
 	return {

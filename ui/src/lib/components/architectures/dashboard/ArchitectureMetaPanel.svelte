@@ -1,10 +1,10 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
-	import { architectureStore, StaleVersionError } from '$lib/stores/architecture-store.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import { architectureStore, StaleVersionError } from '#lib/stores/architecture-store.svelte.ts';
 	import {
 		KNOWN_ARCHITECTURE_ENVIRONMENTS,
 		type Architecture
-	} from '$lib/bff/architectures';
+	} from '#lib/bff/architectures.ts';
 
 	interface Props {
 		architecture: Architecture;

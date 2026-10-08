@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listImages } from '$lib/bff/images';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listImages } from '#lib/bff/images.ts';
 
 export type ImageListItem = {
 	image_id: string;

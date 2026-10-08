@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { PageDefinition } from '$lib/shell/app-shell';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import type { PageDefinition } from '#lib/shell/app-shell.ts';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
 
 	interface Props {
 		page: PageDefinition;

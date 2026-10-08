@@ -1,7 +1,7 @@
 <script lang="ts">
 	import StatusBadge from './StatusBadge.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
-	import { getTaskFailureCause } from '$lib/webui/task-failure';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
+	import { getTaskFailureCause } from '#lib/webui/task-failure.ts';
 	import { ExternalLink } from 'lucide-svelte';
 
 	interface Task {

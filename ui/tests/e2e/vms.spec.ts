@@ -17,6 +17,11 @@ test.describe('VM Management', () => {
 	});
 
 	test('filters VM list by search query', async ({ page }) => {
+		// Wait for a data-driven row before interacting: the initial SPA
+		// navigation must settle first — a fill that lands while the router
+		// is still mid-navigation gets its goto() dropped (a pre-existing
+		// flake, reproducible on the pre-migration toolchain as well).
+		await expect(page.getByRole('link', { name: 'web-server' })).toBeVisible();
 		const searchInput = page.getByPlaceholder(/name or node/i);
 		await searchInput.fill('web');
 		await page.waitForURL(/query=web/, { timeout: 10000 });
@@ -24,6 +29,7 @@ test.describe('VM Management', () => {
 	});
 
 	test('clears VM filters', async ({ page }) => {
+		await expect(page.getByRole('link', { name: 'web-server' })).toBeVisible();
 		const searchInput = page.getByPlaceholder(/name or node/i);
 		await searchInput.fill('web');
 		await page.waitForURL(/query=web/, { timeout: 10000 });

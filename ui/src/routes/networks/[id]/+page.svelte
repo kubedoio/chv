@@ -1,17 +1,17 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
-	import { getPageDefinition } from '$lib/shell/app-shell';
-	import type { ShellTone } from '$lib/shell/app-shell';
-	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
+	import ResourceDetailHeader from '#lib/components/shell/ResourceDetailHeader.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
+	import ActionStrip from '#lib/components/shell/ActionStrip.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle, Pencil } from 'lucide-svelte';
-	import CreateNetworkModal from '$lib/components/networks/CreateNetworkModal.svelte';
+	import CreateNetworkModal from '#lib/components/networks/CreateNetworkModal.svelte';
 
 	let { data }: { data: PageData } = $props();
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getModifierKey } from '$lib/stores/keyboard.svelte';
+  import { getModifierKey } from '#lib/stores/keyboard.svelte.ts';
 </script>
 
 <div class="px-4 py-2 bg-gray-50 border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">

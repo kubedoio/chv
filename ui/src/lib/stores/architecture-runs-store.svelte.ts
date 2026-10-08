@@ -1,5 +1,5 @@
 import { goto } from '$app/navigation';
-import { getStoredToken } from '$lib/api/client';
+import { getStoredToken } from '#lib/api/client.ts';
 import {
 	apply as bffApply,
 	destroy as bffDestroy,
@@ -10,7 +10,7 @@ import {
 	type ApplyRunResult,
 	type ConfirmationToken,
 	type PlanMode
-} from '$lib/bff/architectures';
+} from '#lib/bff/architectures.ts';
 import { mutateWithRefresh } from './mutation.svelte';
 
 /**

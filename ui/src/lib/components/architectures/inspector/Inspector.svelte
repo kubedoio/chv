@@ -17,7 +17,7 @@
 	 * which sets `dirty=true`. The name input is debounced to 250ms so that
 	 * typing doesn't churn the store on every keystroke.
 	 */
-	import { architectureCanvasStore } from '$lib/stores/architecture-canvas-store.svelte';
+	import { architectureCanvasStore } from '#lib/stores/architecture-canvas-store.svelte.ts';
 	import HostFields from './HostFields.svelte';
 	import NetworkFields from './NetworkFields.svelte';
 	import DatastoreFields from './DatastoreFields.svelte';
@@ -27,7 +27,7 @@
 	import UserFields from './UserFields.svelte';
 	import RoleFields from './RoleFields.svelte';
 	import './field-styles.css';
-	import type { NodeKind } from '$lib/components/architectures/canvas/edge-rules';
+	import type { NodeKind } from '#lib/components/architectures/canvas/edge-rules.ts';
 
 	const KIND_LABEL: Record<NodeKind, string> = {
 		host: 'Host',

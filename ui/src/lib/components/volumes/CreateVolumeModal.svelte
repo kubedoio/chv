@@ -1,18 +1,18 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import FormField from '$lib/components/shared/FormField.svelte';
-	import Input from '$lib/components/primitives/TextInput.svelte';
-	import Select from '$lib/components/primitives/Select.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { listNodes } from '$lib/bff/nodes';
-	import { createVolume } from '$lib/bff/volumes';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import FormField from '#lib/components/shared/FormField.svelte';
+	import Input from '#lib/components/primitives/TextInput.svelte';
+	import Select from '#lib/components/primitives/Select.svelte';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { listNodes } from '#lib/bff/nodes.ts';
+	import { createVolume } from '#lib/bff/volumes.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
 	import {
 		STORAGE_CLASSES,
 		buildCreateVolumePayload,
 		validateVolumeCreateInput,
 		type VolumeCreateFieldErrors
-	} from '$lib/webui/volume-create';
+	} from '#lib/webui/volume-create.ts';
 
 	interface Props {
 		open?: boolean;

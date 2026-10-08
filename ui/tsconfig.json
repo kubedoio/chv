@@ -1,5 +1,7 @@
 {
-  "extends": "./.svelte-kit/tsconfig.json",
+  "extends": "$app/tsconfig",
+  "include": ["src", "tests", "*.ts", "*.cjs"],
+  "exclude": ["node_modules", "build"],
   "compilerOptions": {
     "allowJs": true,
     "checkJs": false,
@@ -8,7 +10,7 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "strict": true
+    "strict": true,
+    "types": ["node", "$app/types"]
   }
 }
-

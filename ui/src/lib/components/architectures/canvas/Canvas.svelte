@@ -21,9 +21,9 @@
 	import '@xyflow/svelte/dist/style.css';
 	import { SvelteFlowProvider, type Node as FlowNode, type NodeTypes } from '@xyflow/svelte';
 
-	import { architectureCanvasStore } from '$lib/stores/architecture-canvas-store.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
-	import type { Finding } from '$lib/bff/architectures';
+	import { architectureCanvasStore } from '#lib/stores/architecture-canvas-store.svelte.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import type { Finding } from '#lib/bff/architectures.ts';
 
 	import HostNode from '../nodes/HostNode.svelte';
 	import NetworkNode from '../nodes/NetworkNode.svelte';

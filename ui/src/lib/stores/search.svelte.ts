@@ -1,7 +1,7 @@
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import Fuse from 'fuse.js';
 import type { FuseResultMatch } from 'fuse.js';
-import type { VM, Image, Network, StoragePool } from '$lib/api/types';
+import type { VM, Image, Network, StoragePool } from '#lib/api/types.ts';
 
 // Types
 export type SearchItemType = 'vm' | 'image' | 'network' | 'storage' | 'page';

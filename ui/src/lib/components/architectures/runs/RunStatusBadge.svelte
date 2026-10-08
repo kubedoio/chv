@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { RunStatus } from '$lib/bff/architectures';
+	import type { RunStatus } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		status: RunStatus;

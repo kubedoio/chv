@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getVolume } from '$lib/bff/volumes';
-import type { VolumeSummary, RelatedTask } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getVolume } from '#lib/bff/volumes.ts';
+import type { VolumeSummary, RelatedTask } from '#lib/bff/types.ts';
 
 export type VolumeDetailModel = {
 	state: 'ready' | 'empty' | 'error';

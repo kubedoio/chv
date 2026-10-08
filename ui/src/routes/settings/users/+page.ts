@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listUsers, type UserItem } from '$lib/bff/users';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listUsers, type UserItem } from '#lib/bff/users.ts';
 
 export type UsersPageModel = {
 	users: UserItem[];

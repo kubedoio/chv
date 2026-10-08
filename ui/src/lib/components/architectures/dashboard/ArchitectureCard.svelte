@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { ArchitectureSummary, DriftStatus } from '$lib/bff/architectures';
-	import DriftStatusBadge from '$lib/components/architectures/drift/DriftStatusBadge.svelte';
+	import type { ArchitectureSummary, DriftStatus } from '#lib/bff/architectures.ts';
+	import DriftStatusBadge from '#lib/components/architectures/drift/DriftStatusBadge.svelte';
 
 	interface Props {
 		architecture: ArchitectureSummary;

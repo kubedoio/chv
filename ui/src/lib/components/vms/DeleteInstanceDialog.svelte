@@ -1,7 +1,7 @@
 <script lang="ts">
 	import Modal from '../primitives/Modal.svelte';
 	import { AlertTriangle } from 'lucide-svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 
 	interface Props {
 		open?: boolean;

@@ -1,7 +1,7 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import FindingItem from './FindingItem.svelte';
-	import type { Finding, ValidationResult, ValidationStatus } from '$lib/bff/architectures';
+	import type { Finding, ValidationResult, ValidationStatus } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		/** The result to render. `null` means "not yet run" → show CTA. */

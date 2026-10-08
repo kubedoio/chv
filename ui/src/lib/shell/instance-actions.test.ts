@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildInstanceActions } from '$lib/shell/instance-actions';
+import { buildInstanceActions } from '#lib/shell/instance-actions.ts';
 
 describe('buildInstanceActions', () => {
 	it('returns correct actions for a RUNNING instance', () => {

@@ -7,11 +7,11 @@ async function importRootLoad(options: {
 	overviewError?: Error;
 }) {
 	vi.resetModules();
-	vi.doMock('$app/environment', () => ({ browser: options.browser }));
-	vi.doMock('$lib/api/client', () => ({
+	vi.doMock('$app/env', () => ({ browser: options.browser }));
+	vi.doMock('#lib/api/client.ts', () => ({
 		getStoredToken: vi.fn().mockReturnValue(options.token ?? null)
 	}));
-	vi.doMock('$lib/bff/overview', () => ({
+	vi.doMock('#lib/bff/overview.ts', () => ({
 		loadOverview: options.overviewError
 			? vi.fn().mockRejectedValue(options.overviewError)
 			: vi.fn().mockResolvedValue(options.overviewResult ?? {})

@@ -3,23 +3,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // architecture-store imports mutation.svelte which transitively pulls in
 // live-state.svelte (and SvelteKit's $app/navigation). Mirror the mocks
 // already used by mutation.test.ts so this suite runs cleanly under jsdom.
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
 vi.mock('$app/navigation', () => ({
 	goto: vi.fn(),
-	invalidateAll: vi.fn()
+	refreshAll: vi.fn()
 }));
 
-vi.mock('$lib/api/client', () => ({
+vi.mock('#lib/api/client.ts', () => ({
 	getStoredToken: vi.fn(() => 'test-token'),
 	clearToken: vi.fn()
 }));
 
-vi.mock('$lib/bff/architectures', async () => {
-	const actual = await vi.importActual<typeof import('$lib/bff/architectures')>(
-		'$lib/bff/architectures'
+vi.mock('#lib/bff/architectures.ts', async () => {
+	const actual = await vi.importActual<typeof import('#lib/bff/architectures.ts')>(
+		'#lib/bff/architectures.ts'
 	);
 	return {
 		...actual,
@@ -53,7 +53,7 @@ import {
 	type FleetCheckResult,
 	type PlanResult,
 	type ValidationResult
-} from '$lib/bff/architectures';
+} from '#lib/bff/architectures.ts';
 import { liveState } from './live-state.svelte';
 import { architectureStore } from './architecture-store.svelte';
 import { toast } from './toast.svelte';

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
 	import { BarChart3 } from 'lucide-svelte';
 
 	interface Props {

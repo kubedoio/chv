@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { inventory } from '$lib/stores/inventory.svelte';
-	import { selection } from '$lib/stores/selection.svelte';
+	import { inventory } from '#lib/stores/inventory.svelte.ts';
+	import { selection } from '#lib/stores/selection.svelte.ts';
 	import { Loader2 } from 'lucide-svelte';
 	import {
 		getDisplayNodes,

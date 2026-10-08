@@ -1,16 +1,16 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+import Button from '#lib/components/primitives/Button.svelte';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
+	import ProgressBar from '#lib/components/shell/ProgressBar.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 	import type { PageData } from './$types';
 	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, Clock } from 'lucide-svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
 
 	let { data }: { data: PageData } = $props();
 

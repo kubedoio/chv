@@ -7,7 +7,7 @@
 	 * and reassemble them in `architecture-canvas-store.generateYaml()` when
 	 * the contract grows. For Phase-2 the inspector simply edits the flat keys.
 	 */
-	import type { CanvasNodeData } from '$lib/stores/architecture-canvas-store.svelte';
+	import type { CanvasNodeData } from '#lib/stores/architecture-canvas-store.svelte.ts';
 	import './field-styles.css';
 
 	interface Props {

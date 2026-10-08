@@ -1,4 +1,4 @@
-import type { ShellTone } from '$lib/shell/app-shell';
+import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 export function normalizeTone(status: string): ShellTone {
 	const s = status.trim().toLowerCase();

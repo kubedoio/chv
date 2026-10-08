@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mock `$env/dynamic/public` because vitest doesn't run inside SvelteKit's
-// vite plugin pipeline. We expose a mutable `env` object and tweak its
-// flag fields per test.
+// Mock `$app/env/public` because vitest doesn't run inside SvelteKit's
+// vite plugin pipeline. The getter keeps the binding live so tests can
+// tweak the flag between assertions (the old `$env/dynamic/public` mock
+// exposed a mutable `env` object; named exports need the getter instead).
 const mockEnv: {
 	PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED?: string;
 } = {};
 
-vi.mock('$env/dynamic/public', () => ({
-	env: mockEnv
+vi.mock('$app/env/public', () => ({
+	get PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED() {
+		return mockEnv.PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED;
+	}
 }));
 
 // Import AFTER vi.mock so the module sees the stub.

@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
 import { buildVmsLoad } from './vms-load';
-import { clearCache } from '$lib/stores/api-cache.svelte';
+import { clearCache } from '#lib/stores/api-cache.svelte.ts';
 
-vi.mock('$lib/bff/vms', () => ({
+vi.mock('#lib/bff/vms.ts', () => ({
 	listVms: vi.fn()
 }));
 
-import { listVms } from '$lib/bff/vms';
+import { listVms } from '#lib/bff/vms.ts';
 
 describe('buildVmsLoad', () => {
 	beforeEach(() => {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ShieldCheck, ArrowRight } from 'lucide-svelte';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
+  import SectionCard from '#lib/components/shell/SectionCard.svelte';
 </script>
 
 <aside class="support-area">

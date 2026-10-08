@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import ArchitectureCard from '$lib/components/architectures/dashboard/ArchitectureCard.svelte';
-	import EmptyState from '$lib/components/architectures/dashboard/EmptyState.svelte';
-	import { getArchitectureDrift, type DriftStatus } from '$lib/bff/architectures';
-	import { getStoredToken } from '$lib/api/client';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import ArchitectureCard from '#lib/components/architectures/dashboard/ArchitectureCard.svelte';
+	import EmptyState from '#lib/components/architectures/dashboard/EmptyState.svelte';
+	import { getArchitectureDrift, type DriftStatus } from '#lib/bff/architectures.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();

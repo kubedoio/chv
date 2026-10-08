@@ -4,7 +4,7 @@
 // client-side mirrors exist so a typo fails locally with the same rule
 // instead of a server round-trip (the chvctl `--storage-class`
 // discipline).
-import type { CreateVolumeRequest } from '$lib/bff/types';
+import type { CreateVolumeRequest } from '#lib/bff/types.ts';
 
 // Mirror of chv_hypervisor_api::resources::MAX_VOLUME_BYTES (64 TiB) —
 // the single Rust-side constant of record (consolidated in #513 PR 3).

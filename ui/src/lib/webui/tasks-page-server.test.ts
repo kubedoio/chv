@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { load } from '../../routes/tasks/+page';
 
-vi.mock('$lib/bff/tasks', () => ({
+vi.mock('#lib/bff/tasks.ts', () => ({
 	listTasks: vi.fn()
 }));
 
-vi.mock('$lib/api/client', () => ({
+vi.mock('#lib/api/client.ts', () => ({
 	getStoredToken: vi.fn().mockReturnValue('token-123')
 }));
 
-import { listTasks } from '$lib/bff/tasks';
+import { listTasks } from '#lib/bff/tasks.ts';
 
 describe('tasks page server load', () => {
 	it('returns ready state with tasks when listTasks succeeds', async () => {

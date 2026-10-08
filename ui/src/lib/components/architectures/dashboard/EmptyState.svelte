@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { LayoutGrid } from 'lucide-svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import { goto } from '$app/navigation';
 
 	let { ctaHref = '/architectures/new' }: { ctaHref?: string } = $props();

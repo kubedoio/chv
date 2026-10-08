@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { browser } from '$app/environment';
+	import { browser } from '$app/env';
 	import { slide, fade } from 'svelte/transition';
 	import {
 		Database,
@@ -11,14 +11,14 @@
 		Network,
 		Settings
 	} from 'lucide-svelte';
-	import { clearToken } from '$lib/api/client';
-	import MobileNavHeader from '$lib/components/shell/MobileNavHeader.svelte';
-	import MobileNavList from '$lib/components/shell/MobileNavList.svelte';
-	import MobileNavFooter from '$lib/components/shell/MobileNavFooter.svelte';
+	import { clearToken } from '#lib/api/client.ts';
+	import MobileNavHeader from '#lib/components/shell/MobileNavHeader.svelte';
+	import MobileNavList from '#lib/components/shell/MobileNavList.svelte';
+	import MobileNavFooter from '#lib/components/shell/MobileNavFooter.svelte';
 
 	// Props
 	interface Props {
-		nodes?: import('$lib/api/nodes').Node[];
+		nodes?: import('#lib/api/nodes.ts').Node[];
 		userName?: string;
 		userEmail?: string;
 	}
@@ -32,7 +32,7 @@
 	let isOpen = $state(false);
 	let expandedNodes = $state<Set<string>>(new Set(['datacenter']));
 
-	let currentPath = $derived($page.url.pathname);
+	let currentPath = $derived(page.url.pathname);
 
 	const navItems = [
 		{ id: 'overview', label: 'Overview', icon: LayoutGrid, href: '/' },

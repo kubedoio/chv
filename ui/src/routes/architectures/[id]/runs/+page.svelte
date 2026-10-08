@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import RunStatusBadge from '$lib/components/architectures/runs/RunStatusBadge.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import RunStatusBadge from '#lib/components/architectures/runs/RunStatusBadge.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();

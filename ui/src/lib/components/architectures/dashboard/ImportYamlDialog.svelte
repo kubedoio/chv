@@ -1,10 +1,10 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
-	import Modal from '$lib/components/primitives/Modal.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
 	import FindingItem from './FindingItem.svelte';
-	import { architectureStore } from '$lib/stores/architecture-store.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
-	import type { Finding, ValidationResult } from '$lib/bff/architectures';
+	import { architectureStore } from '#lib/stores/architecture-store.svelte.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import type { Finding, ValidationResult } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		open: boolean;

@@ -1,23 +1,23 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
-	import KeyboardShortcutsHelp from '$lib/components/shared/KeyboardShortcutsHelp.svelte';
-	import QuickActions from '$lib/components/shared/QuickActions.svelte';
-	import SearchModal from '$lib/components/shell/SearchModal.svelte';
-	import AppShell from '$lib/components/shell/AppShell.svelte';
-	import ToastContainer from '$lib/components/primitives/ToastContainer.svelte';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { syncAuthCookieFromLocalStorage } from '#lib/bff/auth-cookie.ts';
+	import KeyboardShortcutsHelp from '#lib/components/shared/KeyboardShortcutsHelp.svelte';
+	import QuickActions from '#lib/components/shared/QuickActions.svelte';
+	import SearchModal from '#lib/components/shell/SearchModal.svelte';
+	import AppShell from '#lib/components/shell/AppShell.svelte';
+	import ToastContainer from '#lib/components/primitives/ToastContainer.svelte';
 	import {
 		createGlobalShortcuts,
 		initKeyboardShortcuts,
 		registerShortcuts,
 		setActiveContext
-	} from '$lib/stores/keyboard.svelte';
-	import { openCommandPalette } from '$lib/stores/commandPalette.svelte';
-	import { buildSearchIndex, loadRecentSearches } from '$lib/stores/search.svelte';
-	import { theme } from '$lib/stores/theme.svelte';
+	} from '#lib/stores/keyboard.svelte.ts';
+	import { openCommandPalette } from '#lib/stores/commandPalette.svelte.ts';
+	import { buildSearchIndex, loadRecentSearches } from '#lib/stores/search.svelte.ts';
+	import { theme } from '#lib/stores/theme.svelte.ts';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import '../app.css';
 
@@ -27,7 +27,7 @@
 	let quickActionsOpen = $state(false);
 
 	const isPublicRoute = $derived(
-		publicPaths.some((publicPath) => $page.url.pathname.startsWith(publicPath))
+		publicPaths.some((publicPath) => page.url.pathname.startsWith(publicPath))
 	);
 
 	function getContextFromPath(pathname: string): string {
@@ -37,7 +37,7 @@
 	}
 
 	$effect(() => {
-		setActiveContext(getContextFromPath($page.url.pathname));
+		setActiveContext(getContextFromPath(page.url.pathname));
 	});
 
 	onMount(() => {

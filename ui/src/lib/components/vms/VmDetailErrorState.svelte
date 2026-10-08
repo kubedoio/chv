@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import ResourceDetailHeader from '#lib/components/shell/ResourceDetailHeader.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
 	import {
 		AlertTriangle,
 		ChevronRight,

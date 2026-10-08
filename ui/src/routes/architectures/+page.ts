@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listArchitectures, type ArchitectureSummary } from '$lib/bff/architectures';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listArchitectures, type ArchitectureSummary } from '#lib/bff/architectures.ts';
 
 export type ArchitecturesListModel = {
 	items: ArchitectureSummary[];
