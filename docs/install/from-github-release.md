@@ -2,17 +2,20 @@
 
 This guide covers installing CHV by downloading artifacts directly from GitHub Releases. This method works on any Linux distribution that supports `.deb` or `.rpm` packages.
 
-> **Status:** the version-pinned URLs and the release tarball described below
-> become available with the **first stable release** — none has been published
-> yet, so `releases/latest` and `releases/download/v<version>/...` currently
-> return 404. Today's supported install paths are the `.deb`/`.rpm` packages
-> from the rolling [`nightly` pre-release](https://github.com/kubedoio/chv/releases/tag/nightly)
-> (development only) or building from source (`make build-release`, then
+> **Status:** live — v0.3.0 is the current **stable** release (published,
+> not a pre-release; its assets include the `.deb`/`.rpm` packages,
+> `SHA256SUMS`, and the `chv-0.3.0-linux-amd64.tar.gz` tarball with its
+> `.sha256` sidecar), so the version-pinned URLs and the release tarball
+> described below are available today: `releases/latest` resolves v0.3.0 and
+> `releases/download/v0.3.0/...` serves its assets. The rolling
+> [`nightly` pre-release](https://github.com/kubedoio/chv/releases/tag/nightly)
+> remains development-only. The all-in-one installer's default `latest` path
+> resolves v0.3.0 and installs it; with an explicit `INSTALL_CHV_VERSION`
+> pinned to a tag that has no Release, it fails at the tarball download with
+> per-tag diagnostics. Building from source (`make build-release`, then
 > `INSTALL_CHV_TARBALL_PATH=dist/chv-<version>-linux-amd64.tar.gz ./scripts/install.sh`;
-> see [DEPLOYMENT](../DEPLOYMENT.md#build--package-a-release)). The all-in-one
-> installer exits early with this same guidance on its default `latest` path
-> until a stable release exists; with an explicit `INSTALL_CHV_VERSION` it
-> instead fails at the tarball download with per-tag diagnostics.
+> see [DEPLOYMENT](../DEPLOYMENT.md#build--package-a-release)) remains the
+> offline alternative.
 
 ## Choose your release
 
