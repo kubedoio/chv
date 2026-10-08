@@ -120,6 +120,9 @@ scripts/build-packages.sh ──▶ nfpm package -f config.yaml -p deb/rpm
 ```
 scripts/package/smoke-deb.sh     → installs .deb in clean Debian container, checks binaries
 scripts/package/smoke-rpm.sh     → installs .rpm in clean Rocky container, checks binaries
+scripts/package/smoke-webui.sh   → builds the converged WebUI container image from the .debs
+                                   (proxy-only nginx edge + [webui] enabled + packaged UI tree)
+                                   and smoke-tests the single-listener shape end to end (#549)
 scripts/package/lifecycle-deb.sh → install → upgrade → remove → reinstall with sentinel files
 scripts/package/lifecycle-rpm.sh → same for RPM
 ```
@@ -131,7 +134,7 @@ scripts/package/lifecycle-rpm.sh → same for RPM
 | Workflow | Trigger | What it does | Runner |
 |----------|---------|--------------|--------|
 | `ci.yml` | push/PR to `main` | fmt, clippy, test, version check | `ubuntu-latest` |
-| `package-pr.yml` | PR to `main`, push to other branches | build, package, smoke deb/rpm | `ubuntu-22.04` (glibc 2.35 pin — oldest smoke target is debian:12/glibc 2.36) |
+| `package-pr.yml` | PR to `main`, push to other branches | build, package, smoke deb/rpm/webui | `ubuntu-22.04` (glibc 2.35 pin — oldest smoke target is debian:12/glibc 2.36) |
 | `package-nightly.yml` | push to `main`, dispatch | build, package, smoke, lifecycle, publish pre-release | `ubuntu-22.04` (build job; same glibc pin) |
 | `release.yml` | tag `v*`, dispatch | full pipeline + SBOM + signing + GitHub Release | build job `ubuntu-22.04` (glibc pin); package/release jobs `ubuntu-latest` (binaries only run in containers) |
 | `integration-kvm.yml` | dispatch, PR label, push `main` | host diagnostics, KVM tests, package install | self-hosted `chv-kvm` |
@@ -189,6 +192,7 @@ make package-local  # both formats
 # Run smoke tests (requires Docker)
 make package-smoke-deb
 make package-smoke-rpm
+make package-smoke-webui
 
 # Run lifecycle tests (requires Docker)
 make package-lifecycle-deb
@@ -276,7 +280,7 @@ git push origin v<version>-rc.1
 
 **If the user asks you to:**
 - "Build packages" → run `make package-local` or `make package-deb` / `make package-rpm`
-- "Run smoke tests" → run `make package-smoke-deb` and `make package-smoke-rpm` (requires Docker)
+- "Run smoke tests" → run `make package-smoke-deb` and `make package-smoke-rpm` (requires Docker); `make package-smoke-webui` for the converged WebUI container leg
 - "Cut a release" → bump VERSION, update CHANGELOG, commit, tag `vX.Y.Z`, push tag
 - "Fix the install script" → edit `scripts/install.sh` (not the hosting scripts unless explicitly asked)
 - "Update version everywhere" → run `make bump-version BUMP_TYPE=<major|minor|patch>`

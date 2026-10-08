@@ -73,6 +73,11 @@ package-smoke-deb:
 package-smoke-rpm:
 	./scripts/package/smoke-rpm.sh dist/packages
 
+# #549: the converged WebUI serving shape's container package-smoke leg
+# (proxy-only nginx edge + [webui] enabled, from the built .debs).
+package-smoke-webui:
+	./scripts/package/smoke-webui.sh dist/packages
+
 integration-kvm: build-release package-deb
 	sudo ./scripts/integration/kvm-smoke.sh --packages dist/packages
 
