@@ -1668,11 +1668,19 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         .map_err(|e| Status::internal(e.to_string()))?;
         // DP7: the fence advances ONLY on a successful apply — a
         // failed generation must not block a subsequent dispatch of an
-        // older generation that still matches the last applied state.
-        self.network_policy_fence
-            .lock()
-            .await
-            .insert(inner.network_id.clone(), requested_generation);
+        // older generation that still matches the last applied state —
+        // and MONOTONICALLY (max, never plain insert): the read above
+        // is separated from this write by the awaited nwd apply, so
+        // two concurrent dispatches to the same network could both
+        // have read the old mark; a plain insert would let the slower,
+        // older generation regress the high-water mark.
+        {
+            let mut fence = self.network_policy_fence.lock().await;
+            let current = fence.get(&inner.network_id).copied().unwrap_or(0);
+            if requested_generation > current {
+                fence.insert(inner.network_id.clone(), requested_generation);
+            }
+        }
         let observed_generation = {
             let cache = self.cache.lock().await;
             cache.observed_generation.clone()

@@ -808,8 +808,11 @@ impl Reconciler {
                             // ruleset — nwd's engine engages default-deny even
                             // for an empty ruleset, which would cut a rule-less
                             // network's guests off entirely (including DHCP).
-                            // Same predicate the core-managed path (orchestrator
-                            // spec assembly) uses.
+                            // #355 PR 3 note: the core-managed paths no
+                            // longer share this predicate — they resolve
+                            // the DP4 baseline for empty rulesets — but
+                            // the legacy reconcile path keeps the #360
+                            // skip (design §6: legacy paths unchanged).
                             if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(
                                 &policy_json,
                             )) {
