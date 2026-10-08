@@ -652,7 +652,12 @@ pub async fn update_network(
     // updates of the same network must not both read generation N and
     // mint the same `update-network-policy-{id}-{N}` idempotency key —
     // the write lock makes the second transaction's UPDATE...RETURNING
-    // see N+1 and journal a distinct task.
+    // see N+1 and journal a distinct task. (Bounded, accepted race: the
+    // existence/ownership checks above run on a pooled connection
+    // released before this transaction opens, so a delete committing
+    // in that gap lets this update bump a tombstoned row's generation
+    // and journal an op the PR 1 arm completes as a no-op Succeeded —
+    // no data-plane hazard; the generation bump predates #355.)
     let mut tx = state
         .pool
         .begin_with("BEGIN IMMEDIATE;")

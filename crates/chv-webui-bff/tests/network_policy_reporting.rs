@@ -145,6 +145,39 @@ async fn build_state() -> AppState {
         .connect("sqlite::memory:")
         .await
         .expect("connect in-memory sqlite");
+    build_state_with_pool(pool).await
+}
+
+/// The race-pool shape for the #355 PR 2 concurrency pin: a temp-file
+/// SQLite database with the prod pragma profile (WAL, busy_timeout 5s)
+/// and multiple connections — the BFF quota-race suite's shape
+/// (vms.rs `build_test_pool`). The in-memory single-connection
+/// harness cannot express cross-connection write locking: the pool
+/// serializes everything before SQLite ever sees concurrent writers.
+async fn build_race_state() -> (tempfile::TempDir, AppState) {
+    use std::str::FromStr as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!(
+        "sqlite://{}",
+        dir.path().join("chv-policy-race.db").display()
+    );
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+        .expect("parse sqlite url")
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(opts)
+        .await
+        .expect("connect race pool");
+    let state = build_state_with_pool(pool).await;
+    (dir, state)
+}
+
+async fn build_state_with_pool(pool: sqlx::sqlite::SqlitePool) -> AppState {
     chv_controlplane_store::run_migrations(&pool, None)
         .await
         .expect("run migrations");
@@ -726,5 +759,92 @@ async fn update_network_without_policy_fields_carries_no_note() {
         body["detail"]["name"].as_str(),
         Some("renamed"),
         "rename applied: {body}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_policy_updates_journal_distinct_per_generation_tasks() {
+    // Round-2 review pin (the quota-race suite's shape): the update
+    // transaction opens BEGIN IMMEDIATE and reads the generation IN
+    // the transaction via UPDATE...RETURNING, so concurrent firewall
+    // updates serialize on the write lock — every mutation mints its
+    // own per-generation task, no request fails on lock contention,
+    // and the generation advances exactly once per update. Taking the
+    // write lock up front (vs a deferred BEGIN) also keeps the shape
+    // safe if a read ever lands inside the transaction before the
+    // write (the SQLITE_BUSY_SNAPSHOT upgrade class — SQLite cannot
+    // busy-wait out of that deadlock). Requires the race pool: the
+    // single-connection in-memory harness serializes at the pool
+    // before SQLite ever sees a concurrent writer.
+    let (_dir, state) = build_race_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    const ATTEMPTS: usize = 8;
+    let mut handles = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let state = state.clone();
+        let token = token.clone();
+        let net_id = net_id.clone();
+        handles.push(tokio::spawn(async move {
+            post_with_token(
+                state,
+                "/v1/networks/update",
+                &token,
+                &format!(
+                    r#"{{"network_id":"{net_id}","firewall_rules":[{{"direction":"inbound","action":"accept","protocol":"icmp"}}]}}"#
+                ),
+            )
+            .await
+        }));
+    }
+    let mut task_ids: Vec<String> = Vec::with_capacity(ATTEMPTS);
+    for h in handles {
+        let (status, body) = h.await.expect("join update task");
+        assert_eq!(status, StatusCode::OK, "concurrent update body: {body}");
+        task_ids.push(
+            body["task_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every concurrent update answers with its task: {body}"))
+                .to_string(),
+        );
+    }
+    let distinct: std::collections::HashSet<&String> = task_ids.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        ATTEMPTS,
+        "every mutation mints its own operation id"
+    );
+
+    // The observable contract: N ops with per-generation keys -2..-N+1,
+    // no UNIQUE(idempotency_key) collision (the silent-duplication
+    // backstop), generation advanced exactly N times.
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT idempotency_key FROM operations WHERE resource_id = ? ORDER BY desired_generation",
+    )
+    .bind(&net_id)
+    .fetch_all(&state.pool)
+    .await
+    .expect("query race ops");
+    assert_eq!(keys.len(), ATTEMPTS, "all concurrent updates journaled");
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(
+            key,
+            &format!("update-network-policy-{}-{}", net_id, i + 2),
+            "the serialized writers mint consecutive per-generation keys"
+        );
+    }
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT desired_generation FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("query generation");
+    assert_eq!(
+        generation,
+        ATTEMPTS as i64 + 1,
+        "the generation advanced exactly once per serialized update (create seeded 1)"
     );
 }

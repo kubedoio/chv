@@ -215,13 +215,14 @@ scopes stay out of scope (§6).
   topology teardown stays last-detach (#356 N5). The current
   "cleared: stays in force until teardown" `policy_application` note
   is replaced by the journaled operation's outcome.
-- **DP6 — reporting.** The `policy_application` prose notes
-  (`networks.rs:726-747`, pinned by
-  `tests/network_policy_reporting.rs`) are replaced by the standard
-  task surface: the update response carries `task_id`/operation
+- **DP6 — reporting.** The `policy_application` prose notes (pinned
+  pre-PR-2 by `tests/network_policy_reporting.rs`) are replaced by the
+  standard task surface: the update response carries `task_id`/operation
   outcome like every other mutation, and terminal failures surface
   their cause via #502. `last_task` on the network detail starts
-  resolving to policy operations.
+  resolving to policy operations. *(As-landed in PR 2: see the §5
+  note on the response-shape keying — the prose is gone, the detail's
+  `last_task` resolves, and the task reads carry the outcome.)*
 - **DP7 — dispatch fencing.** Reuse `desired_generation` as the
   fence: the agent applies a policy whose generation ≥ the topology's
   last-applied generation; stale generations are idempotent no-ops
