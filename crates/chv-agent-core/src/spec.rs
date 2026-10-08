@@ -74,8 +74,10 @@ pub struct NicSpec {
     pub gateway: String,
     /// Operator-configured firewall policy for the network (the CP's
     /// `firewall_rules_json` snapshot). Applied by the Core executor at
-    /// attach time when non-empty (#355); absent keeps the bare-table
-    /// behavior.
+    /// attach time (#355); an absent or empty snapshot resolves to the
+    /// shared DP4 baseline (DHCP/DNS/conntrack + default-deny) at the
+    /// attach path — there is no unfiltered "bare-table" outcome
+    /// anymore.
     #[serde(default)]
     pub firewall_policy_json: Option<String>,
 }

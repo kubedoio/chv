@@ -524,30 +524,42 @@ impl CloudHypervisorCoreRuntime {
         self.resources
             .ensure_network_topology(network_id, &bridge, &cidr, &gateway, Some(op_id))
             .await?;
-        // Attach-time policy application (#355): when the control plane's
-        // spec carried a non-empty policy snapshot for this network, apply
-        // it BEFORE the NIC attaches so no guest traffic can flow outside
-        // the CHV boundary (default-deny + the operator's rules). Only a
-        // semantically non-empty snapshot engages the policy: nwd's engine
-        // default-denies even an empty ruleset, which would cut a rule-less
-        // network's guests off entirely (including DHCP) — empty keeps the
-        // bare-table behavior. The version is content-derived so retries
-        // are idempotent; nwd records it for later policy re-scoping only.
+        // Attach-time policy application (#355): every network gets a
+        // filtered boundary BEFORE the NIC attaches so no guest traffic
+        // can flow outside the CHV boundary. DP4 (ruled 2026-10-08):
+        // a non-empty snapshot applies the operator's rules on top of
+        // default-deny; no snapshot, a blank, or an empty ruleset
+        // (`[]` = no user rules) applies the shared BASELINE (DHCP
+        // UDP 67/68, DNS UDP/TCP 53; established/related rides the
+        // engine's conntrack head rule) — replacing the pre-DP4 skip
+        // (rule-less networks were left unfiltered) and the #360
+        // cutoff (an empty ruleset was never applied because bare
+        // default-deny with zero allows cut a network's guests off
+        // entirely). The version is content-derived so retries are
+        // idempotent; nwd records it for later policy re-scoping only.
         // NOTE: a create that fails AFTER this point leaves the applied
         // policy in place — deliberately, exactly like the ensured
         // topology: both are network-scoped (not VM-scoped) state, the
         // create-unwind path only reverses VM-scoped effects, and nwd
         // removes the policy at network teardown.
-        if let Some(policy) = network
-            .firewall_policy_json
-            .as_deref()
-            .filter(|p| !chv_common::firewall_ruleset_is_empty(p))
-        {
-            let policy_version = format!("attach-{:016x}", chv_common::fnv1a_hash(policy));
-            self.resources
-                .set_firewall_policy(network_id, &policy_version, policy.as_bytes(), Some(op_id))
-                .await?;
-        }
+        // NOTE (pre-existing, unchanged): the HostResourceController
+        // seam calls the UNCHECKED nwd variant, so a semantic refusal
+        // here is swallowed and the attach proceeds — the follow-up
+        // flagged in #355 PR 1; the DP4 baseline does not widen it
+        // (a refused baseline leaves the network exactly as
+        // unfiltered as the pre-DP4 skip did).
+        let baseline = chv_common::firewall::baseline_policy_json();
+        let policy_json: &[u8] = match network.firewall_policy_json.as_deref() {
+            Some(p) if !chv_common::firewall_ruleset_is_empty(p) => p.as_bytes(),
+            _ => baseline.as_bytes(),
+        };
+        let policy_version = format!(
+            "attach-{:016x}",
+            chv_common::fnv1a_hash(&String::from_utf8_lossy(policy_json))
+        );
+        self.resources
+            .set_firewall_policy(network_id, &policy_version, policy_json, Some(op_id))
+            .await?;
         let mac_address = network.mac_address.clone().unwrap_or_default();
         let (_namespace_handle, tap_handle) = self
             .resources

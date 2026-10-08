@@ -352,8 +352,8 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
                     // Normalize a blank snapshot to None, matching the
                     // serde TryFrom path — the durable definition never
                     // carries Some("") sentinels. (Empty ARRAYS ride
-                    // through; the executor's emptiness gate is the
-                    // safety net for those.)
+                    // through; the executor's attach path resolves
+                    // those to the DP4 baseline, #355 PR 3.)
                     firewall_policy_json: nic.firewall_policy_json.filter(|p| !p.trim().is_empty()),
                 }
             })

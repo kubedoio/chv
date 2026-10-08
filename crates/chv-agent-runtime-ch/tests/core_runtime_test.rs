@@ -575,14 +575,16 @@ async fn policy_version_is_content_derived_and_stable_across_nics_and_retries() 
 }
 
 #[tokio::test]
-async fn create_vm_without_policy_snapshot_skips_policy_application() {
-    // The safety half of #355: no snapshot (or a SEMANTICALLY empty one —
-    // blank string, whitespace, or an empty JSON array) → NO policy
-    // call. nwd's engine engages default-deny even for an empty
-    // ruleset; applying one to a rule-less network would cut its guests
-    // off entirely (including DHCP). Rule-less networks keep the
-    // bare-table behavior.
+async fn create_vm_applies_the_dp4_baseline_without_user_rules() {
+    // The DP4 half of #355 (ruled 2026-10-08): no snapshot, a blank, or
+    // an empty ruleset (`[]` = no user rules) is NO LONGER a skip —
+    // rule-less networks get the shared BASELINE (DHCP/DNS/conntrack
+    // allows) on top of default-deny at attach, replacing both the
+    // pre-DP4 unfiltered skip and the #360 never-apply cutoff. Every
+    // VM create on such a network records exactly one baseline policy
+    // application per NIC, and its content-derived version is stable.
     let h = harness(None);
+    let baseline = chv_common::firewall::baseline_policy_json();
 
     for (vm_id, snapshot) in [
         ("vm-nopolicy", None),
@@ -605,9 +607,36 @@ async fn create_vm_without_policy_snapshot_skips_policy_application() {
     }
 
     let calls = h.controller.calls.lock().expect("calls lock").clone();
+    let policy_calls: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.starts_with("policy:") && c.ends_with(&baseline))
+        .collect();
+    assert_eq!(
+        policy_calls.len(),
+        4,
+        "one baseline policy application per create: {calls:?}"
+    );
     assert!(
-        !calls.iter().any(|c| c.starts_with("policy:")),
-        "no policy application without a non-empty snapshot: {calls:?}"
+        policy_calls
+            .iter()
+            .all(|c| c.starts_with("policy:net-0:attach-")),
+        "baseline applications carry the content-derived attach- version: {calls:?}"
+    );
+    // One version across all four — the baseline is a constant, so its
+    // content-derived version must be too (retry idempotency).
+    let versions: std::collections::HashSet<&str> = policy_calls
+        .iter()
+        .map(|c| {
+            let net_start = "policy:".len();
+            let net_end = net_start + c[net_start..].find(':').expect("network delimiter") + 1;
+            let suffix = format!(":{baseline}");
+            &c[net_end..c.len() - suffix.len()]
+        })
+        .collect();
+    assert_eq!(
+        versions.len(),
+        1,
+        "the baseline's content-derived version must be constant: {calls:?}"
     );
     assert_eq!(
         calls

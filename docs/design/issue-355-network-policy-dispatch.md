@@ -210,11 +210,26 @@ scopes stay out of scope (§6).
   and starts meaning "no *user* rules". Alternatives: keep `[]` = no
   policy (status quo — leaves (a) unfixed); `[]` = bare default-deny
   with no baseline (the #360 cutoff — rejected).
+  *(As-landed in PR 3: the baseline lives in
+  `chv_common::firewall::baseline_policy_json()` and is resolved by
+  every core-managed producer — the orchestrator's dispatch arm, the
+  agent's carrier handler (belt-and-suspenders), and the Core
+  executor's attach path (a never-set snapshot resolves to the
+  baseline too, closing (a)). Vocabulary delta: the rule language has
+  no destination CIDR and §7 rules the nwd engine unchanged, so the
+  allows are port-scoped on CHV-owned interfaces — a guest may also
+  reach a non-gateway DNS resolver on port 53; everything else inside
+  the boundary stays default-deny. The legacy `apply_network_desired_
+  state` and reconcile paths keep the #360 skip — design §6, legacy
+  paths unchanged.)*
 - **DP5 — clear semantics.** A ruleset cleared to `[]` under DP4
   becomes baseline-only (a live, filtered network), not a teardown —
   topology teardown stays last-detach (#356 N5). The current
   "cleared: stays in force until teardown" `policy_application` note
   is replaced by the journaled operation's outcome.
+  *(As-landed in PR 3: the BFF's clear summary names it — "cleared to
+  the baseline (DHCP/DNS/conntrack allowed, default-deny otherwise);
+  applies on every node with an attached VM".)*
 - **DP6 — reporting.** The `policy_application` prose notes (pinned
   pre-PR-2 by `tests/network_policy_reporting.rs`) are replaced by the
   standard task surface: the update response carries `task_id`/operation
@@ -229,6 +244,26 @@ scopes stay out of scope (§6).
   (nwd's `policy_state` + `refresh_policy_scope` already give
   idempotent re-apply). Prevents out-of-order fan-out results from
   regressing a newer policy with an older one.
+  *(As-landed in PR 3: an agent-side in-memory per-network fence
+  (`AgentServer::network_policy_fence`, network id → last APPLIED
+  generation). The generation is parsed NUMERICALLY from
+  `meta.desired_state_version` — never string-compared ("9" sorts
+  above "10" lexicographically) — and a non-numeric version fails
+  closed with invalid_argument. The fence advances ONLY on a
+  successful nwd apply, so a refused generation never blocks an older
+  one that still matches the last applied state. In-memory by design:
+  nwd's policy_state is not queryable over RPC; after an agent
+  restart the fence starts empty and the first dispatch applies
+  (safe — the CP journals per-generation and retries the newest, and
+  nwd's apply is idempotent). The advance is MONOTONIC (strictly-
+  bigger only, under the lock): the guard read is separated from the
+  advance write by the awaited nwd apply, so two concurrent
+  dispatches to the same network can both read the old mark — a
+  plain insert would let the slower, older generation regress the
+  high-water mark. The attach path needs no fence by
+  construction: the spec assembly reads the CURRENT NDS ruleset at
+  dispatch time, so an attach never applies anything older than the
+  last completed operation.)*
 
 ## 5. Decomposition (if Option A+B is adopted)
 
@@ -258,6 +293,29 @@ Mirroring the #513/#522 carrier-first pattern:
    (update a live network's rules → task Succeeded → nft chains
    changed on the target node — proven at the mock-nwd tier, with the
    qualification leg noted for M4.4's successor run).
+   *(As-landed: the baseline is `chv_common::firewall::baseline_
+   policy_json()`, resolved at three producer sites — the
+   orchestrator's dispatch arm (empty and never-set rulesets dispatch
+   the baseline instead of no-op'ing), the agent's carrier handler
+   (belt-and-suspenders for direct RPC callers), and the Core
+   executor's attach path (never-set and empty snapshots alike —
+   closing (a), rule-less networks get a filtered boundary at
+   materialization). The orchestrator's spec assembly stopped
+   filtering empty rulesets: `[]` rides the spec as-is and the
+   attach path resolves it. The end-to-end contract row is proven as
+   a byte-identity chain across the three mock tiers: the BFF tests
+   pin payload → NDS bytes + the journaled generation; the
+   orchestrator tests pin NDS bytes → RPC `policy_json` verbatim
+   (baseline for `[]`) + the generation riding
+   `meta.desired_state_version` + the op reaching Succeeded; the
+   agent tests pin RPC bytes → nwd `set_firewall_policy_checked`
+   bytes verbatim (with the DP7 fence no-op'ing stale generations);
+   the runtime-ch tests pin the attach-time baseline application
+   before the NIC attaches. The real-host leg (nft chains changed on
+   a live node) remains the M4.4 successor qualification run's
+   Leg B, whose post-PR-2 branch already detects the task surface
+   and treats an unchanged table within the window as a tick-paced
+   warn.)*
 
 ## 6. Non-goals
 
