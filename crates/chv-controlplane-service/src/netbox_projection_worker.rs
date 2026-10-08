@@ -21,8 +21,13 @@
 //!    store-free; this worker is the only place the two worlds meet.
 //! 4. **Persist** — `mark_succeeded` with the serialized outcome and
 //!    plan summary, or `mark_failed` with a redacted, secret-free
-//!    error message, plus an `EventType::Audit` event carrying the
-//!    run/architecture ids and summary (never the token).
+//!    error message (plus the per-entry outcome ledger when the run
+//!    partially executed), plus an `EventType::Audit` event carrying
+//!    the run/architecture ids and summary (never the token).
+//!    Transient failures (NetBox unreachable, auth rejected, server
+//!    5xx) are requeued for an automatic, exponentially backed-off
+//!    retry bounded by the store's attempt cap; permanent failures
+//!    stay `failed`.
 //!
 //! A NetBox outage never kills the worker: every error path marks the
 //! run failed, emits an event, and continues to the next tick.
@@ -36,7 +41,8 @@ use chv_controlplane_store::{
     NetboxProjectionRunRepository, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    NetboxProjectionMode, NetboxProjectionRun, NetboxRetentionPolicy, RunStatus,
+    ArchitectureVersionId, NetboxProjectionMode, NetboxProjectionRun, NetboxRetentionPolicy,
+    RunStatus,
 };
 use chv_controlplane_types::domain::{EventSeverity, EventType};
 use chv_errors::ChvError;
@@ -44,7 +50,8 @@ use chv_netbox_adapter::{
     ownership::CustomFieldNames, plan::RetentionPolicy, ClientError, NetBoxClient, NetBoxToken,
     NetboxProjectionInput, NetboxProjectionRunner,
 };
-use tracing::{info, warn};
+use serde::Serialize;
+use tracing::{debug, info, warn};
 
 /// How long a `running` run may execute before reclamation (the
 /// component spec's lease timeout; the client's 30s request timeout
@@ -222,6 +229,8 @@ impl NetboxProjectionWorker {
                 .fail_run(
                     run,
                     "netbox not configured for this architecture (NETBOX_NOT_CONFIGURED)",
+                    None,
+                    false,
                 )
                 .await;
         };
@@ -235,6 +244,8 @@ impl NetboxProjectionWorker {
                     .fail_run(
                         run,
                         "netbox token missing for this architecture (NETBOX_TOKEN_MISSING)",
+                        None,
+                        false,
                     )
                     .await;
             }
@@ -250,15 +261,20 @@ impl NetboxProjectionWorker {
                     .fail_run(
                         run,
                         "netbox token unreadable for this architecture (NETBOX_TOKEN_MISSING)",
+                        None,
+                        false,
                     )
                     .await;
             }
         };
 
-        // Applied version gate: the projection source is the most
-        // recent succeeded apply run's lineage, never the editable
-        // draft. `list_for_architecture` does not filter by status, so
-        // filter here; the list is newest-first.
+        // Applied-version gate (the projection source): the most
+        // recent `succeeded` apply run's version — never the editable
+        // draft, and never blindly the run row's enqueued version id
+        // (a newer apply may have succeeded between enqueue and
+        // execution). `list_for_architecture` orders `created_at DESC`
+        // (newest first) and does not filter by status, so the first
+        // `Succeeded` row here is provably the most recent one.
         let apply_runs = self
             .apply_run_repo
             .list_for_architecture(&run.architecture_id, None)
@@ -266,33 +282,64 @@ impl NetboxProjectionWorker {
             .map_err(|e| ChvError::Internal {
                 reason: format!("failed to list apply runs: {e}"),
             })?;
-        if !apply_runs
+        let Some(latest_succeeded) = apply_runs
             .iter()
-            .any(|apply| apply.status == RunStatus::Succeeded)
-        {
+            .find(|apply| apply.status == RunStatus::Succeeded)
+        else {
             return self
                 .fail_run(
                     run,
-                    "no succeeded apply run for this architecture (NETBOX_NOT_APPLIED)",
+                    "architecture has no succeeded apply run (NETBOX_NOT_APPLIED)",
+                    None,
+                    false,
                 )
                 .await;
+        };
+        let resolved_version_id = latest_succeeded.architecture_version_id.clone();
+        if resolved_version_id != run.architecture_version_id {
+            // The enqueue-time snapshot is stale: project the version
+            // that is actually applied. Provenance is recorded in the
+            // result envelope (`resolved_architecture_version_id`).
+            debug!(
+                run_id = %run.id,
+                architecture_id = %run.architecture_id,
+                enqueued_architecture_version_id = %run.architecture_version_id,
+                resolved_architecture_version_id = %resolved_version_id,
+                "projection source resolved to the most recent succeeded apply version"
+            );
         }
 
-        // Version: the run row's `architecture_version_id` is authoritative
-        // (set at enqueue time to the then-applied version); the succeeded
-        // apply run above is the gate proving the architecture was applied.
-        let version = self
-            .version_repo
-            .get(&run.architecture_version_id, None)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to load architecture version: {e}"),
-            })?;
+        // Version row: a missing or unreadable row fails THIS run
+        // inline — it must never propagate out of the run-processing
+        // path (a propagated error is only `warn!`ed by the claim loop
+        // and would leave the run stuck `running` until lease
+        // reclamation).
+        let version = match self.version_repo.get(&resolved_version_id, None).await {
+            Ok(version) => version,
+            Err(e) => {
+                warn!(
+                    run_id = %run.id,
+                    architecture_id = %run.architecture_id,
+                    error = %e,
+                    "architecture version row could not be loaded"
+                );
+                return self
+                    .fail_run(
+                        run,
+                        "architecture version row missing for the applied version (NETBOX_NOT_APPLIED)",
+                        None,
+                        false,
+                    )
+                    .await;
+            }
+        };
         let Some(model_json) = version.normalized_model_json.as_deref() else {
             return self
                 .fail_run(
                     run,
                     "applied architecture version carries no normalized model",
+                    None,
+                    false,
                 )
                 .await;
         };
@@ -303,6 +350,8 @@ impl NetboxProjectionWorker {
                     .fail_run(
                         run,
                         &format!("applied architecture model could not be parsed: {e}"),
+                        None,
+                        false,
                     )
                     .await;
             }
@@ -313,7 +362,9 @@ impl NetboxProjectionWorker {
         {
             Ok(client) => client,
             Err(e) => {
-                return self.fail_run(run, &redact(&e.to_string(), &token)).await;
+                return self
+                    .fail_run(run, &redact(&e.to_string(), &token), None, false)
+                    .await;
             }
         };
         let runner = NetboxProjectionRunner::new(client);
@@ -334,38 +385,60 @@ impl NetboxProjectionWorker {
         match run.mode {
             NetboxProjectionMode::DryRun => match runner.dry_run(&input).await {
                 Ok(plan) => {
-                    let result_json =
-                        Some(
-                            serde_json::to_string(&plan).map_err(|e| ChvError::Internal {
-                                reason: format!("failed to serialize dry-run plan: {e}"),
-                            })?,
-                        );
+                    let result_json = Some(self.result_envelope(&resolved_version_id, &plan)?);
                     let summary_json = serde_json::to_string(&plan.summary).ok();
                     self.finish_run(run, &plan.summary, result_json, summary_json)
                         .await
                 }
-                Err(e) => self.fail_run(run, &redact(&e.to_string(), &token)).await,
+                Err(e) => {
+                    let retryable = e.is_retryable();
+                    self.fail_run(run, &redact(&e.to_string(), &token), None, retryable)
+                        .await
+                }
             },
             NetboxProjectionMode::Export => match runner.run(&input).await {
                 Ok(outcome) => {
+                    // The outcome is persisted in BOTH terminal states:
+                    // on partial failure the per-entry ledger records
+                    // which entries succeeded / failed / were not
+                    // attempted, so the executed work stays inspectable
+                    // and resumable via the external-id match on retry.
+                    let result_json = Some(self.result_envelope(&resolved_version_id, &outcome)?);
                     if let Some(error) = &outcome.error {
-                        // Partial failure: the executed entries are
-                        // resumable via the external-id match on retry.
-                        return self.fail_run(run, &redact(&error.message, &token)).await;
+                        let message = redact(&error.message, &token);
+                        let retryable = error.retryable;
+                        return self.fail_run(run, &message, result_json, retryable).await;
                     }
-                    let result_json =
-                        Some(
-                            serde_json::to_string(&outcome).map_err(|e| ChvError::Internal {
-                                reason: format!("failed to serialize projection outcome: {e}"),
-                            })?,
-                        );
                     let summary_json = serde_json::to_string(&outcome.plan.summary).ok();
                     self.finish_run(run, &outcome.plan.summary, result_json, summary_json)
                         .await
                 }
-                Err(e) => self.fail_run(run, &redact(&e.to_string(), &token)).await,
+                Err(e) => {
+                    let retryable = e.is_retryable();
+                    self.fail_run(run, &redact(&e.to_string(), &token), None, retryable)
+                        .await
+                }
             },
         }
+    }
+
+    /// Serialize a run result inside its provenance envelope: the
+    /// architecture version that was actually projected
+    /// (`resolved_architecture_version_id` — the most recent succeeded
+    /// apply run's version, see `process_run`) alongside the plan or
+    /// outcome itself. BTree-ordered and secret-free by construction.
+    fn result_envelope(
+        &self,
+        resolved_version_id: &ArchitectureVersionId,
+        result: &impl Serialize,
+    ) -> Result<String, ChvError> {
+        serde_json::to_string(&serde_json::json!({
+            "resolved_architecture_version_id": resolved_version_id.as_str(),
+            "result": result,
+        }))
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to serialize netbox projection result: {e}"),
+        })
     }
 
     /// Terminal `running → succeeded` + success event.
@@ -407,10 +480,30 @@ impl NetboxProjectionWorker {
     }
 
     /// Terminal `running → failed` + failure event. `message` must
-    /// already be redacted by the caller.
-    async fn fail_run(&self, run: &NetboxProjectionRun, message: &str) -> Result<(), ChvError> {
+    /// already be redacted by the caller. `result_json` optionally
+    /// persists the per-entry outcome ledger of a partially executed
+    /// run.
+    ///
+    /// **Bounded auto-retry**: when the failure class is transient
+    /// (`retryable` — NetBox unreachable, auth rejected mid-run, or a
+    /// server-side 5xx) the run is requeued after being marked failed,
+    /// with the store's exponential backoff gating the next claim. The
+    /// requeued row keeps the failure history (`error_message` /
+    /// `result_json`) until the retry overwrites it. Permanent
+    /// failures — not configured, not applied, bad config, contract or
+    /// model violations — stay `failed` for operator inspection.
+    /// Retrying is additionally bounded by the store's `MAX_ATTEMPTS`
+    /// cap and the one-active-run index; a requeue refused for either
+    /// reason is logged and leaves the run failed.
+    async fn fail_run(
+        &self,
+        run: &NetboxProjectionRun,
+        message: &str,
+        result_json: Option<String>,
+        retryable: bool,
+    ) -> Result<(), ChvError> {
         self.run_repo
-            .mark_failed(&run.id, Some(message.to_string()))
+            .mark_failed(&run.id, Some(message.to_string()), result_json)
             .await
             .map_err(|e| ChvError::Internal {
                 reason: format!("failed to mark netbox projection run failed: {e}"),
@@ -419,6 +512,7 @@ impl NetboxProjectionWorker {
             run_id = %run.id,
             architecture_id = %run.architecture_id,
             error = %message,
+            retryable,
             "netbox projection run failed"
         );
         let (event_name, severity) = match run.mode {
@@ -435,9 +529,34 @@ impl NetboxProjectionWorker {
                 "run_id": run.id.to_string(),
                 "architecture_id": run.architecture_id.to_string(),
                 "error": message,
+                "retryable": retryable,
             }),
         )
         .await;
+        if retryable {
+            match self.run_repo.requeue(&run.id).await {
+                Ok(requeued) => {
+                    info!(
+                        run_id = %run.id,
+                        architecture_id = %run.architecture_id,
+                        attempt_count = requeued.attempt_count,
+                        next_attempt_at = ?requeued.next_attempt_at,
+                        "transient netbox failure; run requeued with backoff"
+                    );
+                }
+                Err(e) => {
+                    // Attempt cap exhausted or another run became
+                    // active — the run stays failed; that is a normal
+                    // bounded-retry outcome, not a worker error.
+                    warn!(
+                        run_id = %run.id,
+                        architecture_id = %run.architecture_id,
+                        error = %e,
+                        "failed run was not requeued (attempt cap or active run)"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

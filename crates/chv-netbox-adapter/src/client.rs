@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use thiserror::Error;
+use tracing::debug;
 
 use crate::mapping::{NetBoxKind, NetBoxObject};
 use crate::plan::NetBoxRemoteObject;
@@ -118,11 +119,24 @@ pub enum ClientError {
     #[error("netbox pagination exceeded {max_pages} pages; refusing to continue")]
     PaginationLimit { max_pages: usize },
 
-    #[error("netbox lookup for {query} matched more than one object (ambiguous remote state)")]
-    AmbiguousLookup { query: String },
-
     #[error("failed to build http client: {reason}")]
     ClientBuild { reason: String },
+}
+
+impl ClientError {
+    /// `true` for failure classes that justify an automatic retry of
+    /// the run: transport-level unreachability, authentication
+    /// rejections (a token rotated mid-run, or an LB-manufactured
+    /// 401/403), and server-side 5xx. Everything else — endpoint
+    /// configuration, contract violations, 4xx semantics — is
+    /// permanent: retrying would fail identically.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Unreachable { .. } | Self::AuthFailed => true,
+            Self::Api { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,9 +214,23 @@ impl NetBoxClient {
     }
 
     fn with_base(base: String, token: NetBoxToken) -> Result<Self, ClientError> {
+        // Transport hardening:
+        // - **No redirects**: reqwest 0.12 follows up to 10 by default
+        //   and would happily follow an `https → http` downgrade on the
+        //   same host:port, replaying the `Authorization: Token …`
+        //   header in cleartext. Pagination uses JSON `next` links
+        //   (validated in [`Self::pagination_target`]), never HTTP
+        //   redirects, so nothing legitimate breaks by refusing them.
+        // - **`https_only`** on HTTPS endpoints: belt-and-braces so no
+        //   request URL can ever leave the encrypted transport. Plain
+        //   HTTP is only reachable through the test-only constructor,
+        //   which keeps `https_only` off so wiremock suites work.
+        let https_only = base.starts_with("https://");
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(https_only)
             .build()
             .map_err(|err| ClientError::ClientBuild {
                 reason: err.to_string(),
@@ -221,6 +249,11 @@ impl NetBoxClient {
         url: &str,
         body: Option<&Value>,
     ) -> Result<Value, ClientError> {
+        // Debug-level, token-free telemetry: method + path only (never
+        // headers, query values, or bodies).
+        let path = url.split('?').next().unwrap_or(url);
+        debug!(method = %method, path, "netbox request");
+        let started = std::time::Instant::now();
         let mut request = self.http.request(method, url).header(
             reqwest::header::AUTHORIZATION,
             format!("Token {}", self.token.expose()),
@@ -235,6 +268,11 @@ impl NetBoxClient {
                 reason: err.to_string(),
             })?;
         let status = response.status().as_u16();
+        debug!(
+            status,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "netbox response"
+        );
         if (200..300).contains(&status) {
             let bytes = response
                 .bytes()
@@ -294,13 +332,12 @@ impl NetBoxClient {
             match page.next {
                 Some(next) => {
                     // The `next` link is server-controlled: only follow
-                    // links that stay inside our endpoint.
-                    if !next.starts_with(&self.base) {
-                        return Err(ClientError::MalformedResponse {
-                            reason: format!("pagination 'next' link escapes the endpoint: {next}"),
-                        });
-                    }
-                    url = next;
+                    // links that provably stay on our endpoint (same
+                    // scheme, host, and port, and no userinfo — see
+                    // [`Self::pagination_target`]). A string prefix
+                    // check would let `https://netbox.example.com@evil.com/…`
+                    // through and send the token elsewhere.
+                    url = self.pagination_target(&next)?;
                 }
                 None => return Ok(objects),
             }
@@ -310,15 +347,39 @@ impl NetBoxClient {
         })
     }
 
-    /// Natural-key lookup: `None` when nothing matches, an error when
-    /// the query is ambiguous (more than one match — fail closed, the
-    /// natural key must identify at most one object).
-    async fn lookup_one(
+    /// Validate a server-controlled pagination `next` link before it is
+    /// requested: it must parse as an absolute URL, carry **no
+    /// userinfo**, and match the configured endpoint's scheme, host,
+    /// and port exactly. Anything else — a cross-origin link, a scheme
+    /// downgrade, an embedded `user@host` trick — is rejected
+    /// fail-closed and no request is sent.
+    fn pagination_target(&self, next: &str) -> Result<String, ClientError> {
+        let reject = || ClientError::MalformedResponse {
+            reason: format!("pagination 'next' link escapes the endpoint: {next}"),
+        };
+        let base = reqwest::Url::parse(&self.base).map_err(|_| reject())?;
+        let target = reqwest::Url::parse(next).map_err(|_| reject())?;
+        let same_origin = target.scheme() == base.scheme()
+            && target.host_str() == base.host_str()
+            && target.port_or_known_default() == base.port_or_known_default();
+        let has_userinfo = !target.username().is_empty() || target.password().is_some();
+        if has_userinfo || !same_origin {
+            return Err(reject());
+        }
+        Ok(next.to_string())
+    }
+
+    /// Natural-key probe returning **all** matches (bounded at one page
+    /// of [`PAGE_LIMIT`]). A natural key matching several remote
+    /// objects is remote-state ambiguity: per the component spec the
+    /// runner must surface every match to the pure core, which degrades
+    /// them to per-entry `conflict`s — so this never errors on
+    /// multiplicity.
+    async fn lookup_all(
         &self,
         kind: NetBoxKind,
         params: &[(&str, &str)],
-        query: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
         let limit = PAGE_LIMIT.to_string();
         let mut all = params.to_vec();
         all.push(("limit", limit.as_str()));
@@ -327,15 +388,10 @@ impl NetBoxClient {
             .request(reqwest::Method::GET, &url, None)
             .await
             .and_then(|body| parse_list_page(&body))?;
-        if page.results.len() > 1 || page.results.len() >= PAGE_LIMIT {
-            return Err(ClientError::AmbiguousLookup {
-                query: query.to_string(),
-            });
-        }
-        match page.results.first() {
-            None => Ok(None),
-            Some(row) => Ok(Some(parse_remote(kind, row)?)),
-        }
+        page.results
+            .iter()
+            .map(|row| parse_remote(kind, row))
+            .collect()
     }
 
     // -- list by architecture (owned + stale candidates) -------------------
@@ -423,90 +479,70 @@ impl NetBoxClient {
 
     // -- natural-key lookups (foreign-occupancy detection) ------------------
 
-    /// Device by `name` (the Device natural key).
-    pub async fn get_device_by_name(
+    /// Devices matching `name` (the Device natural key). All matches are
+    /// returned — see [`NetBoxClient::lookup_all`].
+    pub async fn get_devices_by_name(
         &self,
         name: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
-            NetBoxKind::Device,
-            &[("name", name)],
-            &format!("device name={name}"),
-        )
-        .await
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(NetBoxKind::Device, &[("name", name)]).await
     }
 
-    /// VirtualMachine by `name` (the VM natural key).
-    pub async fn get_virtual_machine_by_name(
+    /// Virtual machines matching `name` (the VM natural key). All
+    /// matches are returned.
+    pub async fn get_virtual_machines_by_name(
         &self,
         name: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
-            NetBoxKind::VirtualMachine,
-            &[("name", name)],
-            &format!("virtual machine name={name}"),
-        )
-        .await
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(NetBoxKind::VirtualMachine, &[("name", name)])
+            .await
     }
 
-    /// Interface by `name` + parent virtual machine name (the Interface
-    /// natural key).
-    pub async fn get_interface_by_name(
+    /// Interfaces matching `name` + parent virtual machine name (the
+    /// Interface natural key). All matches are returned.
+    pub async fn get_interfaces_by_name(
         &self,
         name: &str,
         virtual_machine: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(
             NetBoxKind::Interface,
             &[("name", name), ("virtual_machine", virtual_machine)],
-            &format!("interface name={name} virtual_machine={virtual_machine}"),
         )
         .await
     }
 
-    /// Prefix by CIDR (the Prefix natural key).
-    pub async fn get_prefix_by_cidr(
+    /// Prefixes matching the CIDR (the Prefix natural key). All matches
+    /// are returned.
+    pub async fn get_prefixes_by_cidr(
         &self,
         prefix: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
-            NetBoxKind::Prefix,
-            &[("prefix", prefix)],
-            &format!("prefix={prefix}"),
-        )
-        .await
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(NetBoxKind::Prefix, &[("prefix", prefix)])
+            .await
     }
 
-    /// VLAN by `vid`. The pure core's VLAN natural key is the vid alone
-    /// (mapping contract: `vid` (+ group)), so the occupancy probe must
-    /// filter on vid only — a `name` filter would miss a foreign VLAN
-    /// squatting on the same vid and turn a detectable conflict into a
-    /// doomed create.
-    pub async fn get_vlan_by_vid(
-        &self,
-        vid: u32,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
-            NetBoxKind::Vlan,
-            &[("vid", &vid.to_string())],
-            &format!("vlan vid={vid}"),
-        )
-        .await
+    /// VLANs matching `vid`. The pure core's VLAN natural key is the vid
+    /// alone (mapping contract: `vid` (+ group)), so the occupancy probe
+    /// must filter on vid only — a `name` filter would miss a foreign
+    /// VLAN squatting on the same vid and turn a detectable conflict
+    /// into a doomed create. All matches are returned.
+    pub async fn get_vlans_by_vid(&self, vid: u32) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(NetBoxKind::Vlan, &[("vid", &vid.to_string())])
+            .await
     }
 
-    /// IPAddress by `address` (maskless). Remote addresses carry a
-    /// NetBox mask suffix; parsing normalizes both sides so the natural
-    /// key comparison is mask-independent.
-    pub async fn get_ip_address_by_address(
+    /// IP addresses matching `address` (maskless). Remote addresses
+    /// carry a NetBox mask suffix; parsing normalizes both sides so the
+    /// natural key comparison is mask-independent — which is exactly
+    /// why one probe can match several remote rows (`10.42.0.5/24` and
+    /// `10.42.0.5/32`), so all matches are returned.
+    pub async fn get_ip_addresses_by_address(
         &self,
         address: &str,
-    ) -> Result<Option<RemoteNetBoxObject>, ClientError> {
-        self.lookup_one(
-            NetBoxKind::IpAddress,
-            &[("address", address)],
-            &format!("ip address={address}"),
-        )
-        .await
+    ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
+        self.lookup_all(NetBoxKind::IpAddress, &[("address", address)])
+            .await
     }
 
     // -- mutations -----------------------------------------------------------
@@ -627,10 +663,21 @@ impl NetBoxClient {
                 });
                 if let Some(assigned) = &a.assigned_to_interface {
                     // "<vm>/<interface>" → the interface's NetBox id.
+                    // Only an unambiguous match may be assigned — with
+                    // zero or several matching interfaces the address
+                    // is left unassigned (fail-safe: never guess an
+                    // interface) and a later run re-diffs it.
                     if let Some((vm, iface)) = assigned.split_once('/') {
-                        if let Some(remote) = self.get_interface_by_name(iface, vm).await? {
+                        let matches = self.get_interfaces_by_name(iface, vm).await?;
+                        if matches.len() == 1 {
+                            let remote = &matches[0];
                             body["assigned_object_type"] = json!("virtualization.vminterface");
                             body["assigned_object_id"] = json!(remote.netbox_id);
+                        } else if matches.len() > 1 {
+                            debug!(
+                                count = matches.len(),
+                                "ambiguous interface match; leaving ip address unassigned"
+                            );
                         }
                     }
                 }

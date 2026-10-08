@@ -31,8 +31,9 @@ use chv_architecture_validate::model::CHVArchitecture;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
+use tracing::debug;
 
-use crate::client::{ClientError, NetBoxClient};
+use crate::client::{ClientError, NetBoxClient, RemoteNetBoxObject};
 use crate::mapping::{
     build_objects, MappingError, MappingOutput, NetBoxKind, NetBoxObject, ProjectionConfigView,
     ProjectionInput as MappingProjectionInput,
@@ -77,6 +78,19 @@ pub enum RunnerError {
     Plan(#[from] PlanError),
     #[error("netbox client error: {0}")]
     Client(#[from] ClientError),
+}
+
+impl RunnerError {
+    /// `true` when the failure looks transient (transport, auth, or a
+    /// server-side 5xx) and an automatic retry of the run is
+    /// reasonable; mapping/plan failures are deterministic and never
+    /// retryable.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Mapping(_) | Self::Plan(_) => false,
+            Self::Client(err) => err.is_transient(),
+        }
+    }
 }
 
 /// Per-entry execution status.
@@ -128,6 +142,11 @@ pub struct NetboxRunnerErrorSummary {
     pub message: String,
     /// The entry that failed, when the failure maps to one.
     pub failed_chv_resource_ref: Option<String>,
+    /// Whether the failure class is transient (transport / auth /
+    /// server 5xx) and the run may be retried automatically. Older
+    /// persisted outcomes predate the field and default to `false`.
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// The full export outcome: the plan, per-entry results, counts, and
@@ -168,6 +187,11 @@ impl NetboxProjectionRunner {
         &self,
         input: &NetboxProjectionInput<'_>,
     ) -> Result<NetboxProjectionOutcome, RunnerError> {
+        debug!(
+            architecture_id = input.architecture_id,
+            architecture_version = input.architecture_version,
+            "netbox projection execution starting"
+        );
         let (desired, plan, remote_by_id) = self.prepare(input).await?;
 
         // Resolution indexes: (kind rank, natural key) and (kind rank,
@@ -178,7 +202,12 @@ impl NetboxProjectionRunner {
         let mut remote_by_ext: BTreeMap<(u8, String), i64> = BTreeMap::new();
         for (netbox_id, remote) in &remote_by_id {
             let key = (remote.kind.rank(), natural_key_string(&remote.natural_key));
-            remote_by_key.insert(key, *netbox_id);
+            // `remote_by_id` iterates in ascending NetBox-id order, the
+            // same order `compute_plan` saw — on a natural key occupied
+            // by several objects, keep the first (lowest-id) match so
+            // the runner resolves exactly the object the pure core
+            // planned against.
+            remote_by_key.entry(key).or_insert(*netbox_id);
             if let Some(ext) = remote.custom_fields.get(&input.names.external_id) {
                 remote_by_ext.insert((remote.kind.rank(), ext.clone()), *netbox_id);
             }
@@ -262,7 +291,17 @@ impl NetboxProjectionRunner {
                         entry.kind.rank(),
                         natural_key_string(&entry.netbox_natural_key),
                     );
-                    let netbox_id = remote_by_key.get(&key).or_else(|| remote_by_ext.get(&key));
+                    // Primary resolution is the natural key; the
+                    // fallback is the **external-id** index — the
+                    // renamed-object case, where the plan's `update`
+                    // refers to a chv-owned remote whose natural key no
+                    // longer matches (the object was renamed in NetBox
+                    // and the desired natural key is free). Both maps
+                    // are keyed by (kind rank, …); mixing them up would
+                    // make the fallback unmatchable.
+                    let netbox_id = remote_by_key.get(&key).or_else(|| {
+                        remote_by_ext.get(&(entry.kind.rank(), entry.external_id.clone()))
+                    });
                     match (desired_by_key.get(&key), netbox_id) {
                         (Some(object), Some(&netbox_id)) => {
                             match self.client.update_object(netbox_id, object).await {
@@ -294,6 +333,7 @@ impl NetboxProjectionRunner {
                             error = Some(NetboxRunnerErrorSummary {
                                 message: message.clone(),
                                 failed_chv_resource_ref: Some(entry.chv_resource_ref.clone()),
+                                retryable: false,
                             });
                             entry_outcome(entry, NetboxEntryStatus::Failed, Some(message))
                         }
@@ -314,6 +354,7 @@ impl NetboxProjectionRunner {
                             error = Some(NetboxRunnerErrorSummary {
                                 message: message.clone(),
                                 failed_chv_resource_ref: Some(entry.chv_resource_ref.clone()),
+                                retryable: false,
                             });
                             entry_outcome(entry, NetboxEntryStatus::Failed, Some(message))
                         }
@@ -396,6 +437,7 @@ impl NetboxProjectionRunner {
                         failed_chv_resource_ref: Some(
                             outcomes[outcome_index].chv_resource_ref.clone(),
                         ),
+                        retryable: err.is_transient(),
                     });
                     outcomes[outcome_index].status = NetboxEntryStatus::Failed;
                     outcomes[outcome_index].error = Some(err.to_string());
@@ -412,6 +454,15 @@ impl NetboxProjectionRunner {
                 NetboxEntryStatus::NotAttempted => summary.not_attempted += 1,
             }
         }
+
+        debug!(
+            succeeded = summary.succeeded,
+            failed = summary.failed,
+            skipped = summary.skipped,
+            not_attempted = summary.not_attempted,
+            aborted = error.is_some(),
+            "netbox projection execution finished"
+        );
 
         Ok(NetboxProjectionOutcome {
             plan,
@@ -460,17 +511,35 @@ impl NetboxProjectionRunner {
                 retention: input.retention,
             },
         )?;
+        debug!(
+            create = plan.summary.create,
+            update = plan.summary.update,
+            no_op = plan.summary.no_op,
+            conflict = plan.summary.conflict,
+            stale = plan.summary.stale,
+            "netbox projection plan computed"
+        );
         Ok((desired, plan, remote_by_id))
     }
 
     /// Fetch the remote state view: per kind, all objects of this
     /// architecture (owned + stale candidates, via the custom-field
-    /// filter) **plus** a natural-key lookup for every desired object
+    /// filter) **plus** a natural-key probe for every desired object
     /// (foreign-occupancy detection — a foreign object squatting on a
     /// desired natural key is invisible to the architecture filter but
-    /// must produce a `conflict`, never a doomed create). Results are
-    /// deduplicated by NetBox id; the BTreeMap yields a deterministic
-    /// order for `compute_plan`.
+    /// must produce a `conflict`, never a doomed create).
+    ///
+    /// The six per-kind lists are fetched **concurrently** (each is a
+    /// full paginated query that can take up to the request timeout);
+    /// the natural-key probes stay sequential — they are per-object and
+    /// bounded by the plan size. Results are deduplicated by NetBox id
+    /// into a `BTreeMap`, so the order handed to `compute_plan` stays
+    /// deterministic regardless of completion order.
+    ///
+    /// Natural-key ambiguity (a probe matching several remote objects,
+    /// e.g. `10.42.0.5/24` and `10.42.0.5/32`) is **not** an error:
+    /// every match enters the remote state, and the pure core degrades
+    /// the collision to a per-entry `conflict` — the run continues.
     async fn fetch_remote_state(
         &self,
         desired: &[NetBoxObject],
@@ -479,26 +548,37 @@ impl NetboxProjectionRunner {
     ) -> Result<BTreeMap<i64, NetBoxRemoteObject>, ClientError> {
         let mut by_id: BTreeMap<i64, NetBoxRemoteObject> = BTreeMap::new();
 
-        for list in [
-            self.client
-                .list_vlans_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-            self.client
-                .list_prefixes_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-            self.client
-                .list_ip_addresses_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-            self.client
-                .list_interfaces_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-            self.client
-                .list_virtual_machines_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-            self.client
-                .list_devices_by_architecture(&names.architecture_id, architecture_id)
-                .await?,
-        ] {
+        // The six list methods have distinct opaque future types, so
+        // they are boxed to share one `try_join_all` input.
+        let kind_lists: Vec<
+            futures_util::future::BoxFuture<'_, Result<Vec<RemoteNetBoxObject>, ClientError>>,
+        > = vec![
+            Box::pin(
+                self.client
+                    .list_vlans_by_architecture(&names.architecture_id, architecture_id),
+            ),
+            Box::pin(
+                self.client
+                    .list_prefixes_by_architecture(&names.architecture_id, architecture_id),
+            ),
+            Box::pin(
+                self.client
+                    .list_ip_addresses_by_architecture(&names.architecture_id, architecture_id),
+            ),
+            Box::pin(
+                self.client
+                    .list_interfaces_by_architecture(&names.architecture_id, architecture_id),
+            ),
+            Box::pin(
+                self.client
+                    .list_virtual_machines_by_architecture(&names.architecture_id, architecture_id),
+            ),
+            Box::pin(
+                self.client
+                    .list_devices_by_architecture(&names.architecture_id, architecture_id),
+            ),
+        ];
+        for list in futures_util::future::try_join_all(kind_lists).await? {
             for entry in list {
                 by_id.insert(entry.netbox_id, entry.object);
             }
@@ -506,22 +586,22 @@ impl NetboxProjectionRunner {
 
         for object in desired {
             let found = match object {
-                NetBoxObject::Device(d) => self.client.get_device_by_name(&d.name).await?,
+                NetBoxObject::Device(d) => self.client.get_devices_by_name(&d.name).await?,
                 NetBoxObject::VirtualMachine(v) => {
-                    self.client.get_virtual_machine_by_name(&v.name).await?
+                    self.client.get_virtual_machines_by_name(&v.name).await?
                 }
                 NetBoxObject::Interface(i) => {
                     self.client
-                        .get_interface_by_name(&i.name, &i.virtual_machine)
+                        .get_interfaces_by_name(&i.name, &i.virtual_machine)
                         .await?
                 }
-                NetBoxObject::Prefix(p) => self.client.get_prefix_by_cidr(&p.prefix).await?,
-                NetBoxObject::Vlan(v) => self.client.get_vlan_by_vid(v.vid).await?,
+                NetBoxObject::Prefix(p) => self.client.get_prefixes_by_cidr(&p.prefix).await?,
+                NetBoxObject::Vlan(v) => self.client.get_vlans_by_vid(v.vid).await?,
                 NetBoxObject::IpAddress(a) => {
-                    self.client.get_ip_address_by_address(&a.address).await?
+                    self.client.get_ip_addresses_by_address(&a.address).await?
                 }
             };
-            if let Some(entry) = found {
+            for entry in found {
                 by_id.insert(entry.netbox_id, entry.object);
             }
         }
@@ -550,6 +630,7 @@ fn runner_error(err: &ClientError, entry: &NetboxProjectionPlanEntry) -> NetboxR
     NetboxRunnerErrorSummary {
         message: err.to_string(),
         failed_chv_resource_ref: Some(entry.chv_resource_ref.clone()),
+        retryable: err.is_transient(),
     }
 }
 

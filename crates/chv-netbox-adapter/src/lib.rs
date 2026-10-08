@@ -49,6 +49,8 @@
 #![deny(unsafe_code)]
 
 pub mod client;
+#[cfg(test)]
+mod client_wire_tests;
 pub mod mapping;
 pub mod ownership;
 pub mod plan;

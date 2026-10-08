@@ -27,6 +27,22 @@ const ENTITY: &str = "netbox_projection_run";
 /// dispatch-retry bounds used elsewhere in the control plane.
 pub const MAX_ATTEMPTS: i64 = 5;
 
+/// Exponential retry backoff applied by [`Self::requeue`]:
+/// `30s · 2^min(attempt_count, 6)`, capped at 30 minutes.
+///
+/// Computed here (the store) rather than in the worker so the schedule
+/// is pinned by tests: attempt 1 → 60s, 2 → 120s, 3 → 240s, 4 → 480s,
+/// 5 → 960s, ≥6 → 1800s (capped; 30·2⁶ = 1920s exceeds the cap). The
+/// cap only matters if [`MAX_ATTEMPTS`] is ever raised past 6; with the
+/// current bound the reachable schedule tops out at 960s.
+pub(crate) fn retry_backoff(attempt_count: i64) -> chrono::Duration {
+    const BASE_SECS: i64 = 30;
+    const CAP_SECS: i64 = 30 * 60;
+    let exponent = attempt_count.clamp(0, 6) as u32;
+    let secs = BASE_SECS.saturating_mul(1_i64 << exponent).min(CAP_SECS);
+    chrono::Duration::seconds(secs)
+}
+
 #[derive(Clone, Debug)]
 pub struct NetboxProjectionRunCreateInput {
     pub id: NetboxProjectionRunId,
@@ -134,6 +150,11 @@ impl NetboxProjectionRunRepository {
     /// (`queued → running` in a single statement, mirroring the backup
     /// worker's claim) so concurrent workers cannot double-claim.
     /// Returns `None` when nothing is queued.
+    ///
+    /// A queued run whose retry backoff has not elapsed yet
+    /// (`next_attempt_at` in the future, set by [`Self::requeue`]) is
+    /// not claimable — the worker tick simply skips it until the
+    /// backoff passes.
     pub async fn claim_next_queued(
         &self,
         architecture_id: &ArchitectureId,
@@ -146,6 +167,7 @@ impl NetboxProjectionRunRepository {
             WHERE id = (
                 SELECT id FROM netbox_projection_runs
                 WHERE status = 'queued' AND architecture_id = $1
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
                 ORDER BY created_at
                 LIMIT 1
             )
@@ -153,6 +175,7 @@ impl NetboxProjectionRunRepository {
             "#,
         )
         .bind(architecture_id.as_str())
+        .bind(format_ts(chrono::Utc::now()))
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(row_to_run).transpose()
@@ -163,6 +186,8 @@ impl NetboxProjectionRunRepository {
     /// Guarded by `status = 'running'` (compare-and-set) so a stale worker
     /// cannot overwrite a terminal state; guard failures map to
     /// [`StoreError::Conflict`] (missing runs to [`StoreError::NotFound`]).
+    /// A success clears any failure bookkeeping (`error_message` from a
+    /// previous retried attempt, stale retry backoff).
     pub async fn mark_succeeded(
         &self,
         run_id: &NetboxProjectionRunId,
@@ -175,6 +200,8 @@ impl NetboxProjectionRunRepository {
                 status = 'succeeded',
                 result_json = $2,
                 summary_json = $3,
+                error_message = NULL,
+                next_attempt_at = NULL,
                 finished_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE id = $1 AND status = 'running'
             RETURNING *
@@ -196,20 +223,26 @@ impl NetboxProjectionRunRepository {
 
     /// Terminal transition `running → failed` with `attempt_count + 1`.
     ///
-    /// Error messages are redacted by CALLERS (the projection worker) —
-    /// the store does not scrub. Same `running` CAS guard as
-    /// [`Self::mark_succeeded`].
+    /// `result_json` optionally persists the per-entry outcome ledger of
+    /// a partially executed run (which entries succeeded / failed /
+    /// were not attempted) so a failed run's partial work stays
+    /// inspectable and resumable. Error messages are redacted by
+    /// CALLERS (the projection worker) — the store does not scrub. Same
+    /// `running` CAS guard as [`Self::mark_succeeded`].
     pub async fn mark_failed(
         &self,
         run_id: &NetboxProjectionRunId,
         error_message: Option<String>,
+        result_json: Option<String>,
     ) -> Result<NetboxProjectionRun, StoreError> {
         let row = sqlx::query(
             r#"
             UPDATE netbox_projection_runs SET
                 status = 'failed',
                 error_message = $2,
+                result_json = $3,
                 attempt_count = attempt_count + 1,
+                next_attempt_at = NULL,
                 finished_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE id = $1 AND status = 'running'
             RETURNING *
@@ -217,6 +250,7 @@ impl NetboxProjectionRunRepository {
         )
         .bind(run_id.as_str())
         .bind(&error_message)
+        .bind(&result_json)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -229,7 +263,15 @@ impl NetboxProjectionRunRepository {
     }
 
     /// Retry enqueue: `failed → queued`, keeping `attempt_count` and
-    /// clearing `finished_at`. Only allowed while the run is `failed` and
+    /// clearing `finished_at`, and scheduling the retry no earlier than
+    /// `now + backoff` (see [`retry_backoff`]; exponential, capped at
+    /// 30 minutes) via `next_attempt_at` — [`Self::claim_next_queued`]
+    /// will not claim the run until that time passes. The failure
+    /// history (`error_message`, `result_json`) is deliberately kept:
+    /// the requeued row shows the last attempt's outcome until the
+    /// retry overwrites it.
+    ///
+    /// Only allowed while the run is `failed` and
     /// `attempt_count < MAX_ATTEMPTS`; guard violations map to
     /// [`StoreError::Conflict`].
     ///
@@ -242,17 +284,26 @@ impl NetboxProjectionRunRepository {
         &self,
         run_id: &NetboxProjectionRunId,
     ) -> Result<NetboxProjectionRun, StoreError> {
+        // The backoff is derived from the attempt count the failure
+        // consumed, so read it before the (state-guarded) update; the
+        // CAS guards make the count immutable between the two reads.
+        let current = self.get(run_id).await?;
+        let attempt_count = current.as_ref().map(|run| run.attempt_count).unwrap_or(0);
+        let next_attempt_at = chrono::Utc::now() + retry_backoff(attempt_count);
+
         let row = sqlx::query(
             r#"
             UPDATE netbox_projection_runs SET
                 status = 'queued',
-                finished_at = NULL
+                finished_at = NULL,
+                next_attempt_at = $3
             WHERE id = $1 AND status = 'failed' AND attempt_count < $2
             RETURNING *
             "#,
         )
         .bind(run_id.as_str())
         .bind(MAX_ATTEMPTS)
+        .bind(format_ts(next_attempt_at))
         .fetch_optional(&self.pool)
         .await
         .map_err(|err| map_requeue_error(err, run_id))?;
@@ -260,7 +311,7 @@ impl NetboxProjectionRunRepository {
         match row {
             Some(row) => row_to_run(&row),
             None => {
-                let reason = match self.get(run_id).await? {
+                let reason = match current {
                     None => {
                         return Err(StoreError::NotFound {
                             entity: ENTITY,
@@ -324,6 +375,7 @@ impl NetboxProjectionRunRepository {
                 status = 'failed',
                 error_message = 'run reclaimed: execution lease expired (worker crash or stall); retry re-enters idempotently',
                 attempt_count = attempt_count + 1,
+                next_attempt_at = NULL,
                 finished_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE status = 'running' AND started_at IS NOT NULL AND started_at < $1
             RETURNING *
@@ -471,6 +523,7 @@ fn row_to_run(row: &sqlx::sqlite::SqliteRow) -> Result<NetboxProjectionRun, Stor
     let status_str: String = row.try_get("status")?;
     let started_at: Option<String> = row.try_get("started_at")?;
     let finished_at: Option<String> = row.try_get("finished_at")?;
+    let next_attempt_at: Option<String> = row.try_get("next_attempt_at")?;
     let created_at: String = row.try_get("created_at")?;
 
     Ok(NetboxProjectionRun {
@@ -488,6 +541,7 @@ fn row_to_run(row: &sqlx::sqlite::SqliteRow) -> Result<NetboxProjectionRun, Stor
         requested_by: row.try_get("requested_by")?,
         started_at: parse_ts_opt(started_at.as_deref(), "started_at")?,
         finished_at: parse_ts_opt(finished_at.as_deref(), "finished_at")?,
+        next_attempt_at: parse_ts_opt(next_attempt_at.as_deref(), "next_attempt_at")?,
         created_at: parse_ts(&created_at, "created_at")?,
     })
 }

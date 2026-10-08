@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS netbox_projection_runs (
     requested_by text,
     started_at text,
     finished_at text,
+    -- Earliest time a requeued (auto-retried) run may be claimed again;
+    -- NULL for freshly enqueued runs and terminal states. Set by the
+    -- repository's `requeue` to `now + backoff` (exponential, capped at
+    -- 30 minutes); `claim_next_queued` skips queued runs whose backoff
+    -- has not elapsed yet.
+    next_attempt_at text,
     created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 

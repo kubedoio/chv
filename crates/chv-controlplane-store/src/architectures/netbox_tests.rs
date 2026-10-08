@@ -6,6 +6,7 @@
 //! runtime), so `upsert`/`get` cannot leak token material; only
 //! `read_token` ever decrypts.
 
+use crate::architectures::netbox_run::retry_backoff;
 use crate::architectures::*;
 use crate::test_util::TestDb;
 use crate::StoreError;
@@ -579,17 +580,21 @@ async fn netbox_run_mark_failed_increments_attempts() {
         .unwrap();
 
     let failed = repo
-        .mark_failed(&claimed.id, Some("netbox unreachable".to_string()))
+        .mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
         .await
         .unwrap();
     assert_eq!(failed.status, NetboxProjectionRunStatus::Failed);
     assert_eq!(failed.attempt_count, 1);
     assert!(failed.finished_at.is_some());
     assert_eq!(failed.error_message.as_deref(), Some("netbox unreachable"));
+    assert!(
+        failed.next_attempt_at.is_none(),
+        "a failed run is not scheduled for retry until requeue"
+    );
 
     // CAS guard: a terminal state cannot be re-failed.
     let err = repo
-        .mark_failed(&claimed.id, Some("stale".to_string()))
+        .mark_failed(&claimed.id, Some("stale".to_string()), None)
         .await
         .unwrap_err();
     assert!(
@@ -613,7 +618,7 @@ async fn netbox_run_requeue_from_failed() {
         .unwrap()
         .unwrap();
     let failed = repo
-        .mark_failed(&claimed.id, Some("netbox unreachable".to_string()))
+        .mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
         .await
         .unwrap();
     assert_eq!(failed.attempt_count, 1);
@@ -622,6 +627,19 @@ async fn netbox_run_requeue_from_failed() {
     assert_eq!(requeued.status, NetboxProjectionRunStatus::Queued);
     assert_eq!(requeued.attempt_count, 1, "attempt_count is preserved");
     assert!(requeued.finished_at.is_none(), "finished_at is cleared");
+    assert!(
+        requeued.next_attempt_at.is_some(),
+        "requeue schedules the retry via next_attempt_at"
+    );
+
+    // The backoff gates the claim: nothing is claimable until it
+    // elapses (simulated here by backdating the timestamp directly).
+    assert!(repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .is_none());
+    clear_retry_backoff(&db, "netrun-1").await;
 
     // Requeue from a non-failed state must Conflict.
     let claimed_again = repo
@@ -661,7 +679,7 @@ async fn netbox_run_requeue_while_another_run_is_active_conflicts() {
         .await
         .unwrap()
         .unwrap();
-    repo.mark_failed(&claimed_a.id, Some("netbox unreachable".to_string()))
+    repo.mark_failed(&claimed_a.id, Some("netbox unreachable".to_string()), None)
         .await
         .unwrap();
 
@@ -690,6 +708,128 @@ async fn netbox_run_requeue_while_another_run_is_active_conflicts() {
     assert_eq!(b.status, NetboxProjectionRunStatus::Queued);
 }
 
+/// A failed run's per-entry outcome ledger round-trips through
+/// `result_json` (mark_failed) and `get` — the partial work of a failed
+/// run stays inspectable and resumable.
+#[tokio::test]
+async fn netbox_run_mark_failed_persists_result_ledger() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    repo.create(make_run_input("netrun-1", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    let claimed = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let ledger = r#"{"entries":[{"status":"succeeded"},{"status":"failed"},{"status":"not_attempted"}],"summary":{"succeeded":1,"failed":1,"not_attempted":1}}"#;
+    let failed = repo
+        .mark_failed(
+            &claimed.id,
+            Some("netbox api error (status 500)".to_string()),
+            Some(ledger.to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.result_json.as_deref(), Some(ledger));
+
+    // The ledger round-trips through get.
+    let fetched = repo.get(&nid("netrun-1")).await.unwrap().unwrap();
+    assert_eq!(fetched.result_json.as_deref(), Some(ledger));
+    assert_eq!(
+        fetched.error_message.as_deref(),
+        Some("netbox api error (status 500)")
+    );
+
+    // A later success clears the failure bookkeeping (the retry that
+    // succeeds must not keep showing the previous attempt's error).
+    repo.requeue(&claimed.id).await.unwrap();
+    clear_retry_backoff(&db, "netrun-1").await;
+    let claimed = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    let done = repo
+        .mark_succeeded(&claimed.id, Some("{}".to_string()), None)
+        .await
+        .unwrap();
+    assert_eq!(done.error_message, None);
+    assert_eq!(done.next_attempt_at, None);
+}
+
+/// Requeue schedules the retry via `next_attempt_at` on an exponential
+/// 30s·2^attempt curve capped at 30 minutes, and `claim_next_queued`
+/// honors the gate: a queued run whose backoff has not elapsed is not
+/// claimable.
+#[tokio::test]
+async fn netbox_run_requeue_sets_exponential_backoff_and_gates_claim() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    repo.create(make_run_input("netrun-1", "topo-1", "v-1"))
+        .await
+        .unwrap();
+
+    // Attempt 1 → 60s, attempt 2 → 120s.
+    for (attempt, expected_backoff_secs) in [(1, 60), (2, 120)] {
+        let claimed = repo
+            .claim_next_queued(&aid("topo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
+            .await
+            .unwrap();
+        let before = chrono::Utc::now();
+        let requeued = repo.requeue(&claimed.id).await.unwrap();
+        let after = chrono::Utc::now();
+        assert_eq!(requeued.attempt_count, attempt);
+        let next = requeued.next_attempt_at.expect("backoff scheduled");
+        let scheduled = next.timestamp() - before.timestamp();
+        let slack = (after - before).num_seconds() + 1;
+        assert!(
+            (expected_backoff_secs..=expected_backoff_secs + slack).contains(&scheduled),
+            "attempt {attempt}: expected ~{expected_backoff_secs}s backoff, got {scheduled}s"
+        );
+
+        // The backoff gates the claim.
+        assert!(
+            repo.claim_next_queued(&aid("topo-1"))
+                .await
+                .unwrap()
+                .is_none(),
+            "queued run must not be claimable before the backoff elapses"
+        );
+        clear_retry_backoff(&db, "netrun-1").await;
+    }
+
+    // The schedule itself (including the 30-minute cap, which the
+    // public API cannot reach while MAX_ATTEMPTS = 5) is pinned by the
+    // unit test below.
+}
+
+/// The backoff schedule is exponential and capped at 30 minutes.
+#[test]
+fn retry_backoff_schedule_is_exponential_and_capped() {
+    let secs = |attempt| retry_backoff(attempt).num_seconds();
+    assert_eq!(secs(0), 30);
+    assert_eq!(secs(1), 60);
+    assert_eq!(secs(2), 120);
+    assert_eq!(secs(3), 240);
+    assert_eq!(secs(4), 480);
+    assert_eq!(secs(5), 960);
+    // 30·2⁶ = 1920s would exceed the 30-minute cap.
+    assert_eq!(secs(6), 1800);
+    assert_eq!(secs(100), 1800);
+    assert_eq!(secs(-3), 30, "defensive: negative counts clamp to the base");
+}
+
 #[tokio::test]
 async fn netbox_run_requeue_at_attempt_cap_conflicts() {
     let db = TestDb::new().await;
@@ -709,12 +849,17 @@ async fn netbox_run_requeue_at_attempt_cap_conflicts() {
             .unwrap()
             .unwrap();
         let failed = repo
-            .mark_failed(&claimed.id, Some("netbox unreachable".to_string()))
+            .mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
             .await
             .unwrap();
         assert_eq!(failed.attempt_count, expected_attempt);
         if expected_attempt < MAX_ATTEMPTS {
             repo.requeue(&claimed.id).await.unwrap();
+            // The exponential backoff would otherwise gate the next
+            // claim for up to 30 minutes; clear it to keep the loop
+            // sequential (the gating itself is covered by
+            // `netbox_run_requeue_sets_exponential_backoff`).
+            clear_retry_backoff(&db, "netrun-1").await;
         }
     }
 
@@ -814,6 +959,17 @@ async fn backdate_started_at(db: &TestDb, run_id: &str, started_at: &str) {
     .execute(&db.pool)
     .await
     .unwrap();
+}
+
+/// Clear a requeued run's retry backoff so the next claim succeeds
+/// immediately (simulates the backoff having elapsed; the scheduling
+/// itself is covered by `netbox_run_requeue_sets_exponential_backoff`).
+async fn clear_retry_backoff(db: &TestDb, run_id: &str) {
+    sqlx::query("UPDATE netbox_projection_runs SET next_attempt_at = NULL WHERE id = $1")
+        .bind(run_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

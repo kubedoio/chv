@@ -349,7 +349,13 @@ fn page(results: Vec<Value>) -> Value {
 // Store + worker scaffolding
 // ---------------------------------------------------------------------------
 
-async fn setup_topology_and_version(db: &TestDb, topo_id: &str, version_id: &str, model: &str) {
+async fn setup_topology_and_version(
+    db: &TestDb,
+    topo_id: &str,
+    version_id: &str,
+    model: &str,
+    version_number: i64,
+) {
     TopologyRepository::new(db.pool.clone())
         .create(TopologyCreateInput {
             id: aid(topo_id),
@@ -368,7 +374,7 @@ async fn setup_topology_and_version(db: &TestDb, topo_id: &str, version_id: &str
         .create(VersionCreateInput {
             id: vid(version_id),
             architecture_id: aid(topo_id),
-            version_number: 1,
+            version_number,
             yaml_content: "x".to_string(),
             design_graph_json: None,
             normalized_model_json: Some(model.to_string()),
@@ -449,7 +455,7 @@ async fn setup_projection(
     retention: NetboxRetentionPolicy,
 ) {
     let model = model_json();
-    setup_topology_and_version(db, topo_id, version_id, &model).await;
+    setup_topology_and_version(db, topo_id, version_id, &model, 1).await;
     add_succeeded_apply_run(db, apply_id, topo_id, version_id).await;
     setup_config(db, endpoint, topo_id, retention).await;
     enqueue_run(
@@ -590,7 +596,22 @@ async fn request_paths(server: &MockServer, http_method: &str) -> Vec<String> {
 fn outcome_of(
     run: &chv_controlplane_types::architecture::NetboxProjectionRun,
 ) -> NetboxProjectionOutcome {
-    serde_json::from_str(run.result_json.as_deref().expect("result json")).expect("outcome parses")
+    serde_json::from_value(result_of(run)).expect("outcome parses")
+}
+
+/// The worker persists results inside a provenance envelope
+/// (`{ resolved_architecture_version_id, result }`); unwrap it.
+fn result_of(run: &chv_controlplane_types::architecture::NetboxProjectionRun) -> Value {
+    let envelope: Value = serde_json::from_str(run.result_json.as_deref().expect("result json"))
+        .expect("result envelope parses");
+    assert!(
+        envelope
+            .get("resolved_architecture_version_id")
+            .and_then(Value::as_str)
+            .is_some(),
+        "envelope carries the resolved version id: {envelope}"
+    );
+    envelope.get("result").cloned().expect("envelope result")
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +656,31 @@ async fn export_creates_all_objects_then_re_run_is_all_no_op() {
     assert_eq!(request_count(&server, "POST", "/api/").await, 6);
     assert_eq!(request_count(&server, "PATCH", "/api/").await, 1);
     assert_eq!(request_count(&server, "DELETE", "/api/").await, 0);
+
+    // Every request is authenticated: at least one GET and one POST
+    // carry the configured token as `Authorization: Token …`.
+    let requests = server.received_requests().await.expect("recording");
+    let auth_of = |method: &str| {
+        requests
+            .iter()
+            .find(|r| r.method.as_str() == method)
+            .and_then(|r| {
+                r.headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            })
+    };
+    assert_eq!(
+        auth_of("GET").as_deref(),
+        Some(format!("Token {TOKEN}").as_str()),
+        "GET requests must carry the token"
+    );
+    assert_eq!(
+        auth_of("POST").as_deref(),
+        Some(format!("Token {TOKEN}").as_str()),
+        "POST requests must carry the token"
+    );
 
     // The success audit event carries the run id and the summary.
     let events = audit_events(&db, "netrun-1").await;
@@ -709,10 +755,27 @@ async fn partial_failure_aborts_and_retry_resumes_without_duplicate_create() {
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-1").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Failed);
+    // A 5xx is a transient class: the run is auto-requeued (bounded
+    // retry with backoff) instead of staying failed.
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
     assert_eq!(run.attempt_count, 1, "failure consumed an attempt");
     let error = run.error_message.as_deref().expect("error message");
     assert!(error.contains("status 500"), "unexpected error: {error}");
+    assert!(
+        run.next_attempt_at
+            .is_some_and(|at| at > chrono::Utc::now()),
+        "retry backoff scheduled in the future: {:?}",
+        run.next_attempt_at
+    );
+    // F6: the partial outcome ledger (succeeded / failed /
+    // not_attempted) is persisted on the failed-then-requeued run.
+    let outcome = outcome_of(&run);
+    assert_eq!(outcome.summary.succeeded, 1, "the VLAN create landed");
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(
+        outcome.summary.not_attempted, 4,
+        "the rest was never attempted"
+    );
 
     // Exactly one create of each attempted kind before the abort.
     assert_eq!(request_count(&server, "POST", "/api/ipam/vlans/").await, 1);
@@ -722,10 +785,19 @@ async fn partial_failure_aborts_and_retry_resumes_without_duplicate_create() {
     );
     assert_eq!(request_count(&server, "POST", "/api/").await, 2);
 
-    // Retry: the VLAN written by the failed attempt is already remote
-    // (matched by external id — resume, not duplicate create).
-    let run_repo = NetboxProjectionRunRepository::new(db.pool.clone());
-    run_repo.requeue(&nid("netrun-1")).await.expect("requeue");
+    // While the backoff is pending, a further tick does not re-claim
+    // the run (nothing new is sent to NetBox).
+    worker_for(&db).tick().await.expect("backoff tick succeeds");
+    assert_eq!(request_count(&server, "POST", "/api/").await, 2);
+    assert_eq!(get_run(&db, "netrun-1").await.attempt_count, 1);
+
+    // Retry once the backoff elapses (simulated by backdating the
+    // schedule): the VLAN written by the failed attempt is already
+    // remote (matched by external id — resume, not duplicate create).
+    sqlx::query("UPDATE netbox_projection_runs SET next_attempt_at = '2020-01-01T00:00:00Z' WHERE id = 'netrun-1'")
+        .execute(&db.pool)
+        .await
+        .expect("backdate retry backoff");
     server.reset().await;
 
     let vlan_fixture = desired_objects("topo-1")
@@ -810,7 +882,9 @@ async fn auth_failure_fails_run_with_retryable_error() {
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-1").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Failed);
+    // Auth failure is a transient (retryable) class: the run failed,
+    // consumed an attempt, and was auto-requeued with a backoff.
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
     assert_eq!(run.attempt_count, 1);
     let error = run.error_message.as_deref().expect("error message");
     assert!(
@@ -818,6 +892,9 @@ async fn auth_failure_fails_run_with_retryable_error() {
         "expected NETBOX_AUTH_FAILED classification, got: {error}"
     );
     assert!(!error.contains(TOKEN), "error message must be token-free");
+    assert!(run
+        .next_attempt_at
+        .is_some_and(|at| at > chrono::Utc::now()));
 
     let events = audit_events(&db, "netrun-1").await;
     assert!(
@@ -827,15 +904,14 @@ async fn auth_failure_fails_run_with_retryable_error() {
         "expected export_failed event, got {events:?}"
     );
 
-    // The failed run stays retryable under the attempt cap.
-    NetboxProjectionRunRepository::new(db.pool.clone())
-        .requeue(&nid("netrun-1"))
-        .await
-        .expect("failed auth run is retryable");
+    // The requeued run stays bounded by the store's attempt cap (the
+    // requeue guard refusing at MAX_ATTEMPTS is covered by the store
+    // suite); here the auto-requeue facts are what matter: queued
+    // again, attempt consumed, backoff scheduled, history preserved.
 }
 
 #[tokio::test]
-async fn netbox_outage_fails_run_and_worker_survives() {
+async fn netbox_outage_fails_run_requeues_with_backoff_and_worker_survives() {
     let db = TestDb::new().await;
     // Nothing listens on port 1: every request is connection-refused.
     setup_projection(
@@ -852,22 +928,43 @@ async fn netbox_outage_fails_run_and_worker_survives() {
     let worker = worker_for(&db);
     worker.tick().await.expect("outage never kills the worker");
 
+    // An outage is transient: the run failed and was auto-requeued
+    // with a backoff (F8) — it is queued again, with the failure
+    // history preserved on the row.
     let run = get_run(&db, "netrun-1").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Failed);
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
     assert_eq!(run.attempt_count, 1);
     let error = run.error_message.as_deref().expect("error message");
     assert!(error.contains("unreachable"), "unexpected error: {error}");
+    assert!(run
+        .next_attempt_at
+        .is_some_and(|at| at > chrono::Utc::now()));
 
-    // The worker keeps ticking: requeue and fail again without bubbling.
-    NetboxProjectionRunRepository::new(db.pool.clone())
-        .requeue(&nid("netrun-1"))
-        .await
-        .expect("outage run is retryable");
+    // The worker keeps ticking, but the backoff gates the claim: the
+    // requeued run is not re-processed until the backoff elapses.
     worker.tick().await.expect("second tick survives too");
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
+    assert_eq!(run.attempt_count, 1, "backoff prevented an early retry");
+
+    // Once the backoff elapses (simulated by backdating the schedule)
+    // the run is claimed, fails again, and consumes another attempt.
+    sqlx::query(
+        "UPDATE netbox_projection_runs SET next_attempt_at = '2020-01-01T00:00:00Z' \
+         WHERE id = 'netrun-1'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("backdate retry backoff");
+
+    worker.tick().await.expect("third tick survives too");
 
     let run = get_run(&db, "netrun-1").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Failed);
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
     assert_eq!(run.attempt_count, 2);
+    assert!(run
+        .next_attempt_at
+        .is_some_and(|at| at > chrono::Utc::now()));
 }
 
 /// A foreign VLAN squatting on the desired VLAN's natural key (vid) is a
@@ -1049,7 +1146,7 @@ async fn worker_claims_one_run_per_architecture_and_tick_is_idempotent() {
         ("topo-a", "v-a", "apply-a", "netrun-a"),
         ("topo-b", "v-b", "apply-b", "netrun-b"),
     ] {
-        setup_topology_and_version(&db, topo, version, &model).await;
+        setup_topology_and_version(&db, topo, version, &model, 1).await;
         add_succeeded_apply_run(&db, apply, topo, version).await;
         setup_config(&db, &server.uri(), topo, NetboxRetentionPolicy::MarkStale).await;
         enqueue_run(&db, run, topo, version, NetboxProjectionMode::Export).await;
@@ -1078,7 +1175,7 @@ async fn dry_run_computes_plan_without_writes() {
     let db = TestDb::new().await;
     let server = MockServer::start().await;
     let model = model_json();
-    setup_topology_and_version(&db, "topo-1", "v-1", &model).await;
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
     add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
     setup_config(
         &db,
@@ -1104,8 +1201,7 @@ async fn dry_run_computes_plan_without_writes() {
     let run = get_run(&db, "netrun-1").await;
     assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
     let plan: NetboxProjectionPlan =
-        serde_json::from_str(run.result_json.as_deref().expect("result json"))
-            .expect("dry-run result is the serialized plan");
+        serde_json::from_value(result_of(&run)).expect("dry-run result is the serialized plan");
     assert_eq!(plan.summary.create, 6);
 
     // A dry run never mutates NetBox.
@@ -1130,7 +1226,7 @@ async fn reclamation_fails_stale_running_run_and_leaves_fresh_alone() {
     let run_repo = NetboxProjectionRunRepository::new(db.pool.clone());
 
     // A run claimed 20 minutes ago and never finished (worker crash).
-    setup_topology_and_version(&db, "topo-1", "v-1", &model).await;
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
     setup_config(
         &db,
         &server.uri(),
@@ -1160,7 +1256,7 @@ async fn reclamation_fails_stale_running_run_and_leaves_fresh_alone() {
     .expect("backdate started_at");
 
     // A run claimed just now (inside the 15-minute lease).
-    setup_topology_and_version(&db, "topo-2", "v-2", &model).await;
+    setup_topology_and_version(&db, "topo-2", "v-2", &model, 1).await;
     setup_config(
         &db,
         &server.uri(),
@@ -1224,7 +1320,7 @@ async fn missing_config_or_succeeded_apply_fails_closed() {
     let model = model_json();
 
     // Config deleted between enqueue and execution.
-    setup_topology_and_version(&db, "topo-1", "v-1", &model).await;
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
     add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
     enqueue_run(
         &db,
@@ -1236,7 +1332,7 @@ async fn missing_config_or_succeeded_apply_fails_closed() {
     .await;
 
     // Config present, but the architecture was never applied.
-    setup_topology_and_version(&db, "topo-2", "v-2", &model).await;
+    setup_topology_and_version(&db, "topo-2", "v-2", &model, 1).await;
     setup_config(
         &db,
         "https://netbox.example.internal",
@@ -1320,7 +1416,14 @@ async fn token_never_appears_in_logs_or_persisted_errors() {
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-tok").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Failed);
+    // The outage class is transient, so the run was auto-requeued —
+    // but the failure warning was still emitted, and the error
+    // history is on the row either way.
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
+    assert!(run
+        .error_message
+        .as_deref()
+        .is_some_and(|e| e.contains("unreachable")));
 
     // The collector saw this run's failure (the assertion below is not
     // vacuous).
@@ -1346,4 +1449,336 @@ async fn token_never_appears_in_logs_or_persisted_errors() {
         let details = details.unwrap_or_default();
         assert!(!details.contains(TOKEN), "token leaked into an event");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round-2 review-fix suites (rename path, version gate, ambiguity)
+// ---------------------------------------------------------------------------
+
+/// F2: a chv-owned remote renamed in NetBox (it carries our external
+/// id, the desired natural key is free) is updated **in place** — the
+/// PATCH goes to the renamed object's NetBox id, resolved through the
+/// external-id index, and the run succeeds.
+#[tokio::test]
+async fn renamed_chv_owned_remote_is_updated_in_place() {
+    let db = TestDb::new().await;
+    let server = MockServer::start().await;
+    setup_projection(
+        &db,
+        &server.uri(),
+        "topo-1",
+        "v-1",
+        "apply-1",
+        "netrun-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+
+    // Five kinds mirror the projection; the device kind needs split
+    // mocks (list-by-architecture vs. natural-key probe).
+    mount_mirror_remote(&server, "topo-1", Some("/api/dcim/devices/")).await;
+
+    let desired_device = desired_objects("topo-1")
+        .into_iter()
+        .find(|object| matches!(object, NetBoxObject::Device(_)))
+        .expect("desired device");
+    // Id 900: chv-owned, full marker of this architecture (external id
+    // included), but renamed away from the desired natural key.
+    let mut renamed = remote_fixture(900, &desired_device);
+    renamed["name"] = json!("chv-node-01-renamed");
+    Mock::given(method("GET"))
+        .and(path("/api/dcim/devices/"))
+        .and(query_param("cf_chv_architecture_id", "topo-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(vec![renamed])))
+        .mount(&server)
+        .await;
+    // The desired natural key is free.
+    Mock::given(method("GET"))
+        .and(path("/api/dcim/devices/"))
+        .and(query_param("name", "chv-node-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(Vec::new())))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/dcim/devices/900/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    let outcome = outcome_of(&run);
+    assert!(outcome.error.is_none());
+    let device_entry = outcome
+        .entries
+        .iter()
+        .find(|entry| entry.kind == NetBoxKind::Device)
+        .expect("device entry");
+    assert_eq!(device_entry.action, NetboxPlanAction::Update);
+    assert_eq!(device_entry.status, NetboxEntryStatus::Succeeded);
+
+    // The update PATCHed the renamed object's NetBox id (resolved via
+    // the external-id index) — no create, no other writes.
+    assert_eq!(
+        request_paths(&server, "PATCH").await,
+        vec!["/api/dcim/devices/900/"],
+        "the rename-update must PATCH the renamed object by its NetBox id"
+    );
+    assert_eq!(request_count(&server, "POST", "/api/").await, 0);
+}
+
+/// F3: a missing architecture-version row for the resolved applied
+/// version fails the run inline with NETBOX_NOT_APPLIED — it never
+/// propagates (which would strand the run in `running` until lease
+/// reclamation) and is not retried.
+#[tokio::test]
+async fn missing_version_row_fails_run_with_not_applied() {
+    let db = TestDb::new().await;
+    let server = MockServer::start().await;
+    setup_projection(
+        &db,
+        &server.uri(),
+        "topo-1",
+        "v-1",
+        "apply-1",
+        "netrun-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+
+    // Dangle the resolved version id: repoint the succeeded apply run
+    // at a version row that does not exist. (FK enforcement is
+    // bypassed on a held connection — with enforcement, ON DELETE
+    // CASCADE would remove the rows instead; the worker must be robust
+    // to either state.)
+    let mut conn = db.pool.acquire().await.expect("connection");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .expect("disable FK enforcement");
+    sqlx::query(
+        "UPDATE architecture_apply_runs SET architecture_version_id = 'v-missing' \
+         WHERE id = 'apply-1'",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("repoint apply run at a missing version");
+    drop(conn);
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(
+        run.status,
+        NetboxProjectionRunStatus::Failed,
+        "a missing version row is a permanent failure, not a retry"
+    );
+    assert_eq!(run.attempt_count, 1);
+    let error = run.error_message.as_deref().expect("error message");
+    assert!(
+        error.contains("version row missing") && error.contains("NETBOX_NOT_APPLIED"),
+        "unexpected error: {error}"
+    );
+    // NetBox was never reached.
+    assert!(server
+        .received_requests()
+        .await
+        .expect("recording")
+        .is_empty());
+}
+
+/// F4: the projection source is the most recent succeeded apply run's
+/// version. A run enqueued for V1 while V2 is the latest succeeded
+/// apply projects **V2** (recorded in the result envelope's
+/// `resolved_architecture_version_id`), never the draft and never the
+/// stale enqueued snapshot.
+#[tokio::test]
+async fn projection_source_is_most_recent_succeeded_apply_version() {
+    let db = TestDb::new().await;
+    let server = MockServer::start().await;
+
+    // V1: the fixture model. V2: the same topology with a richer VM —
+    // a distinguishable projection.
+    let model_v1 = model_json();
+    let mut arch = fixture_architecture();
+    arch.instances[0].resources = Some(InstanceResources {
+        cpu: Some(4),
+        memory_mb: Some(4096),
+    });
+    let model_v2 = serde_json::to_string(&arch).expect("model v2 serializes");
+
+    setup_topology_and_version(&db, "topo-1", "v-1", &model_v1, 1).await;
+    // Second version row for the same topology (the helper creates the
+    // topology too, and topology names are unique).
+    VersionRepository::new(db.pool.clone())
+        .create(VersionCreateInput {
+            id: vid("v-2"),
+            architecture_id: aid("topo-1"),
+            version_number: 2,
+            yaml_content: "x".to_string(),
+            design_graph_json: None,
+            normalized_model_json: Some(model_v2),
+            change_summary: None,
+            created_by: None,
+        })
+        .await
+        .expect("version v-2 created");
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    // created_at has second resolution: backdate the older apply run
+    // so "most recent succeeded" is deterministic.
+    sqlx::query("UPDATE architecture_apply_runs SET created_at = '2020-01-01T00:00:00Z' WHERE id = 'apply-1'")
+        .execute(&db.pool)
+        .await
+        .expect("backdate apply-1");
+    add_succeeded_apply_run(&db, "apply-2", "topo-1", "v-2").await;
+    setup_config(
+        &db,
+        &server.uri(),
+        "topo-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+    // Enqueued while V1 was applied — by execution time V2 is.
+    enqueue_run(
+        &db,
+        "netrun-1",
+        "topo-1",
+        "v-1",
+        NetboxProjectionMode::Export,
+    )
+    .await;
+
+    mount_empty_remote(&server).await;
+    mount_creates(&server, &CREATE_MOCKS).await;
+    mount_ip_fixup_patch(&server).await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+
+    // The envelope records the resolved (V2) version, not the enqueued
+    // V1 snapshot.
+    let envelope: Value = serde_json::from_str(run.result_json.as_deref().expect("result json"))
+        .expect("envelope parses");
+    assert_eq!(
+        envelope
+            .get("resolved_architecture_version_id")
+            .and_then(Value::as_str),
+        Some("v-2")
+    );
+
+    // The projected model is V2's: external ids embed version 2 and the
+    // VM create body carries V2's resources.
+    let outcome = outcome_of(&run);
+    assert!(outcome.error.is_none());
+    let vm_entry = outcome
+        .plan
+        .entries
+        .iter()
+        .find(|entry| entry.kind == NetBoxKind::VirtualMachine)
+        .expect("vm entry");
+    assert_eq!(vm_entry.external_id, "arch:topo-1:instance/vm-01:2");
+    let vm_create = server
+        .received_requests()
+        .await
+        .expect("recording")
+        .into_iter()
+        .find(|r| {
+            r.method.as_str() == "POST" && r.url.path() == "/api/virtualization/virtual-machines/"
+        })
+        .expect("vm create request");
+    let body: Value = serde_json::from_slice(&vm_create.body).expect("vm create body");
+    assert_eq!(body.get("vcpus").and_then(Value::as_i64), Some(4));
+    assert_eq!(body.get("memory").and_then(Value::as_i64), Some(4096));
+}
+
+/// F5: a natural-key probe matching several remote objects (here two
+/// foreign IP addresses, `10.42.0.5/24` and `10.42.0.5/32`, sharing the
+/// maskless natural key) degrades to a per-entry `conflict` — the run
+/// completes, the affected entry never writes, the others execute.
+#[tokio::test]
+async fn ambiguous_natural_key_is_per_entry_conflict_not_run_failure() {
+    let db = TestDb::new().await;
+    let server = MockServer::start().await;
+    setup_projection(
+        &db,
+        &server.uri(),
+        "topo-1",
+        "v-1",
+        "apply-1",
+        "netrun-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+
+    // Five kinds are empty (they create); the IP-address kind answers
+    // the architecture filter with nothing but the desired-address
+    // probe with TWO foreign squatters.
+    mount_empty_lists(
+        &server,
+        &[
+            "/api/ipam/vlans/",
+            "/api/ipam/prefixes/",
+            "/api/virtualization/interfaces/",
+            "/api/virtualization/virtual-machines/",
+            "/api/dcim/devices/",
+        ],
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/ipam/ip-addresses/"))
+        .and(query_param("cf_chv_architecture_id", "topo-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(Vec::new())))
+        .mount(&server)
+        .await;
+    let squatters = page(vec![
+        json!({ "id": 60, "address": "10.42.0.5/24", "assigned_object": null, "tags": [] }),
+        json!({ "id": 61, "address": "10.42.0.5/32", "assigned_object": null, "tags": [] }),
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/ipam/ip-addresses/"))
+        .and(query_param("address", "10.42.0.5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(squatters))
+        .mount(&server)
+        .await;
+    mount_creates(
+        &server,
+        &[
+            ("/api/ipam/vlans/", 101),
+            ("/api/ipam/prefixes/", 102),
+            ("/api/virtualization/interfaces/", 104),
+            ("/api/virtualization/virtual-machines/", 105),
+            ("/api/dcim/devices/", 106),
+        ],
+    )
+    .await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(
+        run.status,
+        NetboxProjectionRunStatus::Succeeded,
+        "ambiguity must not abort the run"
+    );
+    let outcome = outcome_of(&run);
+    assert!(outcome.error.is_none());
+    let ip_entry = outcome
+        .entries
+        .iter()
+        .find(|entry| entry.kind == NetBoxKind::IpAddress)
+        .expect("ip entry");
+    assert_eq!(ip_entry.action, NetboxPlanAction::Conflict);
+    assert_eq!(ip_entry.status, NetboxEntryStatus::Skipped);
+    // The other five kinds executed; the ambiguous address never wrote.
+    assert_eq!(outcome.summary.succeeded, 5);
+    assert_eq!(request_count(&server, "POST", "/api/").await, 5);
+    assert_eq!(
+        request_count(&server, "POST", "/api/ipam/ip-addresses/").await,
+        0,
+        "the ambiguous entry must never be written"
+    );
 }

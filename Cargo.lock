@@ -974,12 +974,14 @@ version = "0.3.0"
 dependencies = [
  "chrono",
  "chv-architecture-validate",
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
