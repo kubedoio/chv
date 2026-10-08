@@ -106,7 +106,13 @@ fn collect_host_resources() -> HostResources {
     let mut sys = System::new();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
-    let cpu_usage = sys.global_cpu_info().cpu_usage();
+    // sysinfo >= 0.31: `global_cpu_info()` was removed in favor of
+    // `global_cpu_usage()`. Same semantics for this call site: a fresh
+    // `System` with a single refresh yields the since-boot CPU average
+    // (verified identical under 0.30.13 and 0.39.6); a *second* refresh
+    // on the same `System` is what `MINIMUM_CPU_UPDATE_INTERVAL` bounds,
+    // and this per-scrape collector never performs one.
+    let cpu_usage = sys.global_cpu_usage();
     let memory_total = sys.total_memory();
     let memory_used = sys.used_memory();
 
