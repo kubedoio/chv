@@ -57,7 +57,7 @@ chain from the operator API to it does not exist.
 
 ## 2. Current-state map (the seams any fix must use)
 
-- **BFF** `update_network` (`crates/chv-webui-bff/src/handlers/networks.rs:573-749`):
+- **BFF** `update_network` (`crates/chv-webui-bff/src/handlers/networks.rs:573-833`, post-PR-2 span):
   one transaction writing `network_desired_state` (COALESCE per field,
   `desired_generation + 1`), no operation row, no dispatch. Save-time
   validation already enforces the single engine vocabulary

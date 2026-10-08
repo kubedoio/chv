@@ -747,7 +747,7 @@ pub async fn update_network(
             let operation_id = chv_common::gen_short_id();
             let idempotency_key =
                 format!("update-network-policy-{}-{}", network_id, new_generation);
-            sqlx::query(
+            let insert_operation = sqlx::query(
                 r#"
                 INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
                 VALUES (?, ?, 'network', ?, 'UpdateNetworkPolicy', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -759,8 +759,24 @@ pub async fn update_network(
             .bind(&claims.sub)
             .bind(new_generation)
             .execute(&mut *tx)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+            .await;
+            if let Err(e) = insert_operation {
+                // #406 (the DeleteVm/ResizeVm discipline): an
+                // idempotency-key collision must never surface as an
+                // opaque 500 — fail closed with a 409 naming the
+                // recorded operation (and the tx rolls back, so the
+                // generation bump is not re-executed). Unreachable
+                // defense-in-depth here: BEGIN IMMEDIATE serializes
+                // writers and the key's generation is read inside the
+                // serialized UPDATE...RETURNING, so a collision cannot
+                // be constructed by two concurrent updates.
+                return Err(crate::handlers::operations::map_operation_insert_error(
+                    &mut tx,
+                    &idempotency_key,
+                    e,
+                )
+                .await);
+            }
             Some(operation_id)
         } else {
             None
@@ -792,9 +808,10 @@ pub async fn update_network(
         let summary = if cleared {
             // Honest until PR 3 lands the ruled DP4 baseline: the
             // journaled task completes as a no-op, and a policy
-            // previously applied on a live node stays in force.
+            // previously applied on a live node (if any) stays in
+            // force.
             "Firewall policy cleared; empty rulesets apply no policy until the \
-             #355 baseline lands (a previously applied policy stays in force)"
+             #355 baseline lands (a previously applied policy, if any, stays in force)"
         } else {
             "Firewall policy update accepted; applies on every node with an \
              attached VM on this network"

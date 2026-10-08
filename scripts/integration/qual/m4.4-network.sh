@@ -48,15 +48,16 @@
 # builds — the N1 legs (A, F) flip from warn to pass once #354 ships.
 #
 # Post-fix flips (re-qualification): all four recorded defects are FIXED
-# on main — N1 (#354, PR #358), N2 (#355 part 1, PR #361, superseded
-# below), N4 (#356 part 1, PR #359), N5 (#356 part 2, PR #362:
-# last-detach host teardown fires on the VM delete of the network's
+# on main — N1 (#354, PR #358), N2 (#355 part 1, PR #361 — the
+# attach-time snapshot fix, superseded below), N4 (#356 part 1,
+# PR #359), N5 (#356 part 2, PR #362: last-detach host teardown
+# fires on the VM delete of the network's
 # last user — Leg E's residue check should find nothing). The warn
 # branches below remain for truth against the frozen candidate; a
 # post-fix build must flip them to passes.
 #
-# N2 eras (2026-10-08): #361 (PR #358-era fix) made the policy
-# snapshot ride the VM spec — Leg B's response carried
+# N2 eras (2026-10-08): #361 (the #355-part-1 attach-time fix) made
+# the policy snapshot ride the VM spec — Leg B's response carried
 # policy_application=pending and the table materialized on the NEXT
 # VM spec dispatch (observed in Leg C). #355 PR 2 (the journaling
 # route) superseded that: Leg B's response now carries the task
@@ -494,7 +495,7 @@ NFT_AFTER_B="$(nft list table inet "$VM1_NFT_TABLE" 2>/dev/null | sha256sum | cu
 POLICY_NOTE_B="$(python3 - "${EVIDENCE_DIR}/bff-update-leg-b.json" <<'PYEOF'
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get("policy_application", ""))
+    print(json.load(open(sys.argv[1])).get("policy_application") or "")
 except Exception:
     pass
 PYEOF
@@ -502,7 +503,7 @@ PYEOF
 POLICY_TASK_B="$(python3 - "${EVIDENCE_DIR}/bff-update-leg-b.json" <<'PYEOF'
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get("task_id", ""))
+    print(json.load(open(sys.argv[1])).get("task_id") or "")
 except Exception:
     pass
 PYEOF

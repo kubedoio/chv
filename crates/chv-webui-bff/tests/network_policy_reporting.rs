@@ -166,6 +166,7 @@ async fn build_race_state() -> (tempfile::TempDir, AppState) {
         .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .pragma("foreign_keys", "ON")
         .busy_timeout(std::time::Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -764,16 +765,17 @@ async fn update_network_without_policy_fields_carries_no_note() {
 
 #[tokio::test]
 async fn concurrent_policy_updates_journal_distinct_per_generation_tasks() {
-    // Round-2 review pin (the quota-race suite's shape): the update
-    // transaction opens BEGIN IMMEDIATE and reads the generation IN
-    // the transaction via UPDATE...RETURNING, so concurrent firewall
-    // updates serialize on the write lock — every mutation mints its
-    // own per-generation task, no request fails on lock contention,
-    // and the generation advances exactly once per update. Taking the
-    // write lock up front (vs a deferred BEGIN) also keeps the shape
-    // safe if a read ever lands inside the transaction before the
-    // write (the SQLITE_BUSY_SNAPSHOT upgrade class — SQLite cannot
-    // busy-wait out of that deadlock). Requires the race pool: the
+    // Round-2 review pin (the quota-race suite's shape): concurrent
+    // firewall updates through the real router must serialize — every
+    // mutation mints its own per-generation task (the generation is
+    // read IN the transaction via UPDATE...RETURNING), no request
+    // fails on lock contention, and the generation advances exactly
+    // once per update; the UNIQUE(idempotency_key) backstop never
+    // fires. (BEGIN IMMEDIATE additionally takes the write lock up
+    // front, keeping the shape safe if a read ever lands inside the
+    // transaction before the write — the SQLITE_BUSY_SNAPSHOT
+    // upgrade class; this test does not discriminate that mode, it
+    // pins the observable contract.) Requires the race pool: the
     // single-connection in-memory harness serializes at the pool
     // before SQLite ever sees a concurrent writer.
     let (_dir, state) = build_race_state().await;
