@@ -114,8 +114,8 @@ not matched by external id
   ├─ natural key occupied, foreign → conflict (never write)
   ├─ natural key occupied, chv-owned but mapping_version != v1
   │                                → conflict (never write)
-  └─ natural key occupied, chv-owned, same external id
-                                   → update (partial-failure resume)
+  └─ natural key occupied, chv-owned object of this architecture
+                                   → update (partial-failure resume / version bump)
 ```
 
 The write guard is unconditional: **no request is sent that would modify an

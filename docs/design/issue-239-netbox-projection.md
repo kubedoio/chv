@@ -300,8 +300,9 @@ Reconcile algorithm per object kind (pure `mapping`/`ownership`, then `plan`):
    prefix `prefix`/`vrf`, IP `address`/`vrf`):
    - free → *create* with `chv_external_id` + ownership CFs.
    - occupied by a non-CHV object → **conflict** (report; never take over).
-   - occupied but carries the same `chv_external_id` (create-after-partial-
-     failure) → *update* (idempotent re-entry).
+   - occupied by a chv-owned object of this architecture (create-after-partial-
+     failure with the same external id, or a version bump with a changed one)
+     → *update* (idempotent re-entry).
 3. Unmapped surface: no delete by default; see DP12 retention.
 
 **Decision:** ownership is expressed **only** through custom fields we create;
