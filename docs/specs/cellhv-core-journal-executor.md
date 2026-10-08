@@ -183,6 +183,16 @@ derived from Core execution** — never an independent authority.
   migration, live device hot-plug, and storage snapshot/clone are NOT available
   in core-managed until Core M1+ models them; a call fails loudly
   (`unimplemented`) instead of running behind the single authority.
+  *(Dated note, 2026-10-08 — #355 PR 1, the one exception to the enumeration
+  above: the network firewall-policy carrier `apply_network_policy` is a live
+  nwd-side-effect handler that is deliberately ACCEPTED in core-managed mode,
+  per the ruled design [`docs/design/issue-355-network-policy-dispatch.md`](../design/issue-355-network-policy-dispatch.md)
+  §3 DP3 — policy application already runs behind the Core authority at VM
+  attach (the core executor's `set_firewall_policy` call), the Core store
+  models no network state to journal into, and the CP `operations` row is the
+  journal; the handler writes no cache and does no unprompted topology ensure,
+  which are the two behaviors this gate exists to refuse. Pinned by the
+  agent-side test `apply_network_policy_accepted_in_core_managed_mode`.)*
 - **Power-op generation staleness residual.** `StartVm`/`StopVm`/`RebootVm`
   project only the desired-state patch (`update_vm_desired_state`); the VM's
   fragment `generation` and attachments are NOT re-projected by these power

@@ -1710,8 +1710,6 @@ impl Orchestrator {
         self.mark_network_policy_succeeded(operation_id).await
     }
 
-    /// The no-op/success terminal write shared by the #355 network
-    /// policy dispatch paths (`dispatch_update_network_policy`).
     /// The success terminal write shared by the #355 network policy
     /// dispatch paths (`dispatch_update_network_policy`). Carries no
     /// `error_message` by design — the #502 convention: a successful
@@ -4002,6 +4000,171 @@ mod tests {
                 "{op_id}'s terminal write stamps completed_at"
             );
         }
+    }
+
+    /// A `MockLifecycleAgent` preset for the #355 network-policy fan-out
+    /// tests: only the policy status varies; every sibling surface
+    /// stays at its inert default (snapshot/VM refusals, OK acks
+    /// elsewhere).
+    fn network_policy_mock_agent(network_policy_status: tonic::Status) -> MockLifecycleAgent {
+        MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status,
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        }
+    }
+
+    /// #355 PR 1 review round 2: the MIXED-failure branch — one node
+    /// acks, one node's transport is DOWN (a connect failure, not an
+    /// `Unimplemented` refusal) — must stay on the shared retry curve
+    /// (`RetryPending`, a scheduled retry), NOT go terminal: the
+    /// overlay arm's `update_overlay_fan_out_mixed_failure_keeps_retry_semantics`
+    /// discipline, now pinned for the network-policy leg too.
+    #[tokio::test]
+    async fn update_network_policy_mixed_failure_keeps_retry_semantics() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-mix",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        seed_vm_with_nic(&pool, "vm-np-mix-a", "node-np-mix-a", "net-np-mix", None).await;
+        seed_vm_with_nic(&pool, "vm-np-mix-b", "node-np-mix-b", "net-np-mix", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-mix",
+            "Network",
+            "net-np-mix",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Node A: a healthy agent. Node B: NO socket at all — the
+        // connect failure is a transport error, not a refusal, so the
+        // fan-out is MIXED (all_refusals = false).
+        let agent_a = network_policy_mock_agent(tonic::Status::ok(""));
+        spawn_mock_lifecycle_agent(&pattern, "node-np-mix-a", agent_a.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        // The healthy node dispatched exactly once...
+        assert_eq!(
+            agent_a.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the reachable node's dispatch happened"
+        );
+        // ...and the op sits on the retry curve, not terminal.
+        let (status, error_code, _, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-mix").await;
+        assert_eq!(
+            status, "RetryPending",
+            "a mixed failure retries — it does not go terminal"
+        );
+        assert_eq!(error_code, None, "no terminal cause is recorded mid-retry");
+        assert_eq!(retry_count, 1, "exactly one retry is scheduled");
+        assert!(
+            next_retry_at.is_some(),
+            "the retry is scheduled for the future"
+        );
+        assert_eq!(completed_at, None, "the op is not completed");
+    }
+
+    /// #355 PR 1 review round 2: the partial-success ALL-REFUSALS
+    /// shape — one node acks, one node refuses `unimplemented` (the
+    /// mixed-version fleet rollout shape) — goes terminal
+    /// `Failed`/`UNSUPPORTED_BY_AGENT` on the first dispatch AND the
+    /// #502 roll-up names the applied set alongside the refusing set.
+    #[tokio::test]
+    async fn update_network_policy_partial_refusal_names_the_applied_set() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-part",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        seed_vm_with_nic(&pool, "vm-np-part-a", "node-np-part-a", "net-np-part", None).await;
+        seed_vm_with_nic(&pool, "vm-np-part-b", "node-np-part-b", "net-np-part", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-part",
+            "Network",
+            "net-np-part",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent_a = network_policy_mock_agent(tonic::Status::ok(""));
+        let agent_b = network_policy_mock_agent(tonic::Status::unimplemented(
+            "apply_network_policy is not served by this agent version",
+        ));
+        spawn_mock_lifecycle_agent(&pattern, "node-np-part-a", agent_a.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-np-part-b", agent_b.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        // Both nodes were attempted...
+        assert_eq!(
+            agent_a.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the accepting node's dispatch happened"
+        );
+        assert_eq!(
+            agent_b.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the refusing node was attempted too"
+        );
+        // ...the op went terminal with the refusal cause...
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-part").await;
+        assert_eq!(status, "Failed", "an all-refusals fan-out is terminal");
+        assert_eq!(error_code.as_deref(), Some("UNSUPPORTED_BY_AGENT"));
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+        assert!(completed_at.is_some());
+        // ...and the roll-up names BOTH sets (the #502 discipline).
+        let message = error_message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("refused by all"),
+            "the all-refusals shape is named: {message:?}"
+        );
+        assert!(
+            message.contains("applied on 1 node(s): node-np-part-a"),
+            "the applied set is named beside the refusing set: {message:?}"
+        );
     }
 
     /// #355 PR 1: the #378 §7 fast-fail, network-policy leg — an

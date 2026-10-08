@@ -1563,7 +1563,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         // #355 decomposition flips this at the policy boundary (DP4,
         // ruled 2026-10-08: `[]` = no user rules → baseline
         // DHCP/DNS/conntrack allows + default-deny), which is where
-        // the empty case stops meaning "no policy".
+        // the empty case stops meaning "no policy". The orchestrator
+        // filters empty rulesets before dispatching, so this branch is
+        // unreachable from the CP fan-out — the redundancy is
+        // intentional belt-and-suspenders: a direct RPC caller (or a
+        // future second producer) gets the same fail-safe, not a
+        // network blackout.
         if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(&inner.policy_json)) {
             let observed_generation = {
                 let cache = self.cache.lock().await;
@@ -1593,7 +1598,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         // wrapping an err_result — an unchecked call would ack a false
         // success, the exact #355 lie in task form. The failure fails
         // the operation (retryable on the shared curve), never a
-        // silent drop.
+        // silent drop. The error's own Display already carries the
+        // full cause chain ("network unavailable: nwd —
+        // set_firewall_policy failed: {summary} ({code}))" — no
+        // wrapper prefix, no double-wrap. The CP flattens every
+        // non-Unimplemented code onto the shared retry curve, so the
+        // single Internal mapping is the deliberate PR-1 shape; PR 2/3
+        // may key off nwd's error_code if the surfaces ever need to
+        // distinguish permanent-absence from transient.
         nwd.set_firewall_policy_checked(
             &inner.network_id,
             &policy_version,
@@ -1601,7 +1613,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             Some(&meta.operation_id),
         )
         .await
-        .map_err(|e| Status::internal(format!("set_firewall_policy failed: {}", e)))?;
+        .map_err(|e| Status::internal(e.to_string()))?;
         let observed_generation = {
             let cache = self.cache.lock().await;
             cache.observed_generation.clone()
