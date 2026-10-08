@@ -1,6 +1,6 @@
 <script lang="ts">
-	import FormField from '$lib/components/shared/FormField.svelte';
-	import Input from '$lib/components/primitives/TextInput.svelte';
+	import FormField from '#lib/components/shared/FormField.svelte';
+	import Input from '#lib/components/primitives/TextInput.svelte';
 
 	interface Props {
 		name: string;

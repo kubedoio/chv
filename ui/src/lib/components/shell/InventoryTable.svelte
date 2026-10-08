@@ -1,7 +1,7 @@
 <script lang="ts" generics="T extends Record<string, unknown>">
 	import type { Snippet } from 'svelte';
 	import StatusBadge from './StatusBadge.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	interface Column {
 		key: string;

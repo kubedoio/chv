@@ -5,7 +5,7 @@ This document describes the commands available for building, testing, linting, a
 ## Prerequisites
 
 - Rust toolchain (pinned by `rust-toolchain.toml`; rustup resolves it automatically)
-- Node.js 22 + npm (for UI build)
+- Node.js 22.17+ + npm (for UI build)
 - `nfpm` (for packaging)
 - `envsubst` from gettext (for packaging)
 

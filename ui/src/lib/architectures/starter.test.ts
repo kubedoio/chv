@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Architecture } from '$lib/bff/architectures';
+import type { Architecture } from '#lib/bff/architectures.ts';
 import { buildCloneNames, isStarter } from './starter';
 
 /**

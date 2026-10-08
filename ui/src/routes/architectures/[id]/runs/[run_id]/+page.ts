@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getApplyRun, getArchitecture, type ApplyRunDetail, type Architecture } from '$lib/bff/architectures';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getApplyRun, getArchitecture, type ApplyRunDetail, type Architecture } from '#lib/bff/architectures.ts';
 
 export type RunDetailModel =
 	| { state: 'ready'; architecture: Architecture; run: ApplyRunDetail }

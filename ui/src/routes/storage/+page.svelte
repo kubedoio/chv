@@ -1,22 +1,22 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { HardDrive, Plus, Database, ShieldCheck } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
-  import { toast } from '$lib/stores/toast.svelte';
-  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import FilterBar from '$lib/components/shared/FilterBar.svelte';
-  import CreateStoragePoolModal from '$lib/components/storage/CreateStoragePoolModal.svelte';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import { formatBytes } from '$lib/utils/table.svelte';
-  import type { StoragePool } from '$lib/api/types';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-  import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import { getPageDefinition } from '$lib/shell/app-shell';
+  import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
+  import { loadStoragePoolsFromBff } from '#lib/webui/storage-pools.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
+  import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+  import FilterBar from '#lib/components/shared/FilterBar.svelte';
+  import CreateStoragePoolModal from '#lib/components/storage/CreateStoragePoolModal.svelte';
+  import SectionCard from '#lib/components/shell/SectionCard.svelte';
+  import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+  import { formatBytes } from '#lib/utils/table.svelte.ts';
+  import type { StoragePool } from '#lib/api/types.ts';
+  import ErrorState from '#lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+  import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+  import { getPageDefinition } from '#lib/shell/app-shell.ts';
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { InstanceActionDefinition } from '$lib/api/types';
+	import type { InstanceActionDefinition } from '#lib/api/types.ts';
 	import {
 		ExternalLink,
 		Terminal,

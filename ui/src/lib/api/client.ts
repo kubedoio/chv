@@ -1,6 +1,6 @@
-import { env } from '$env/dynamic/public';
+import { PUBLIC_CHV_API_BASE_URL } from '$app/env/public';
 import { goto } from '$app/navigation';
-import { toast } from '$lib/stores/toast.svelte';
+import { toast } from '#lib/stores/toast.svelte.ts';
 import type {
   APIErrorEnvelope,
   CreateStoragePoolInput,
@@ -21,9 +21,9 @@ import type {
   UsageWithQuota,
   SetQuotaInput,
   UpdateQuotaInput,
-} from '$lib/api/types';
+} from '#lib/api/types.ts';
 
-const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
+const DEFAULT_BASE_URL = PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
 const TOKEN_STORAGE_KEY = 'chv-api-token';
 
 function canUseStorage(): boolean {

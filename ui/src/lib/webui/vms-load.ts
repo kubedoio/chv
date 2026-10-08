@@ -1,6 +1,6 @@
-import { listVms } from '$lib/bff/vms';
-import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
-import type { ListVmsRequest, VmListItem } from '$lib/bff/types';
+import { listVms } from '#lib/bff/vms.ts';
+import { cachedFetch, LIST_TTL } from '#lib/stores/api-cache.svelte.ts';
+import type { ListVmsRequest, VmListItem } from '#lib/bff/types.ts';
 
 export type VmsListModel = {
 	items: VmListItem[];

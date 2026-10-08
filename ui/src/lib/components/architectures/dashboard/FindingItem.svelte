@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Finding, ValidationSeverity } from '$lib/bff/architectures';
+	import type { Finding, ValidationSeverity } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		finding: Finding;

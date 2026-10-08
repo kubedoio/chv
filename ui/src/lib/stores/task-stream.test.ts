@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// task-stream now imports getStoredToken from $lib/api/client, which transitively
-// pulls in SvelteKit's $env/dynamic/public and $app/navigation. Mock both so this
+// task-stream now imports getStoredToken from #lib/api/client, which transitively
+// pulls in SvelteKit's $app/env/public and $app/navigation. Mock both so this
 // suite can run under jsdom without a SvelteKit runtime.
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
 vi.mock('$app/navigation', () => ({
 	goto: vi.fn(),
-	invalidateAll: vi.fn()
+	refreshAll: vi.fn()
 }));
 
 import { TaskStreamStore, type TaskUpdate } from './task-stream.svelte';

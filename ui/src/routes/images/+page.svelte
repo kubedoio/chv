@@ -1,19 +1,19 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { deleteImage } from '$lib/bff/images';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import FilterBar from '$lib/components/shared/FilterBar.svelte';
-	import ImportImageModal from '$lib/components/storage/ImportImageModal.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+import Button from '#lib/components/primitives/Button.svelte';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { deleteImage } from '#lib/bff/images.ts';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import FilterBar from '#lib/components/shared/FilterBar.svelte';
+	import ImportImageModal from '#lib/components/storage/ImportImageModal.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 	import type { PageData } from './$types';
 	import { Plus } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import { page as appPage } from '$app/stores';
-	import ImagesTable from '$lib/components/images/ImagesTable.svelte';
-	import ImagesSidebar from '$lib/components/images/ImagesSidebar.svelte';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import { page as appPage } from '$app/state';
+	import ImagesTable from '#lib/components/images/ImagesTable.svelte';
+	import ImagesSidebar from '#lib/components/images/ImagesSidebar.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -40,17 +40,17 @@ import Button from '$lib/components/primitives/Button.svelte';
 	];
 
 	function handleFilterChange(key: string, value: any) {
-		const newParams = new URLSearchParams($appPage.url.searchParams);
+		const newParams = new URLSearchParams(appPage.url.searchParams.toString());
 		if (value === '' || value === 'all') {
 			newParams.delete(key);
 		} else {
 			newParams.set(key, String(value));
 		}
-		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+		goto(`?${newParams.toString()}`, { reset: false });
 	}
 
 	function handleClearFilters() {
-		goto($appPage.url.pathname);
+		goto(appPage.url.pathname);
 	}
 
 	const columns = [

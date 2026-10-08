@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import { toast } from '#lib/stores/toast.svelte.ts';
 
 	interface Props {
 		/** Pre-rendered YAML, or null when none has been generated yet. */

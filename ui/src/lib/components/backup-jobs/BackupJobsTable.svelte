@@ -1,9 +1,9 @@
 <script lang="ts">
   import { Play, Pause, Download } from 'lucide-svelte';
-  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import type { BackupJob, BackupHistory } from '$lib/bff/types';
+  import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+  import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+  import ErrorState from '#lib/components/shell/ErrorState.svelte';
+  import type { BackupJob, BackupHistory } from '#lib/bff/types.ts';
 
   type Column = { key: string; label: string; align?: 'left' | 'right' | 'center' };
 

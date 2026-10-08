@@ -10,12 +10,12 @@
 	//    populated detail page with the canonical `latest_yaml` and a
 	//    validation pill.
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import CreateArchitectureForm from '$lib/components/architectures/dashboard/CreateArchitectureForm.svelte';
-	import ImportYamlDialog from '$lib/components/architectures/dashboard/ImportYamlDialog.svelte';
-	import { architectureStore } from '$lib/stores/architecture-store.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
-	import type { ValidationResult } from '$lib/bff/architectures';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import CreateArchitectureForm from '#lib/components/architectures/dashboard/CreateArchitectureForm.svelte';
+	import ImportYamlDialog from '#lib/components/architectures/dashboard/ImportYamlDialog.svelte';
+	import { architectureStore } from '#lib/stores/architecture-store.svelte.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import type { ValidationResult } from '#lib/bff/architectures.ts';
 
 	let importOpen = $state(false);
 

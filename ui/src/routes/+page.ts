@@ -1,8 +1,8 @@
-import { browser } from '$app/environment';
-import { getStoredToken } from '$lib/api/client';
-import { loadOverview } from '$lib/bff/overview';
-import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
-import { createOverview, toOverviewModel } from '$lib/helpers/dashboard';
+import { browser } from '$app/env';
+import { getStoredToken } from '#lib/api/client.ts';
+import { loadOverview } from '#lib/bff/overview.ts';
+import { cachedFetch, LIST_TTL } from '#lib/stores/api-cache.svelte.ts';
+import { createOverview, toOverviewModel } from '#lib/helpers/dashboard.ts';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async () => {

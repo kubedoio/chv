@@ -1,12 +1,12 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import FormField from '$lib/components/shared/FormField.svelte';
-	import Input from '$lib/components/primitives/TextInput.svelte';
-	import Select from '$lib/components/primitives/Select.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { createNetwork, updateNetwork } from '$lib/bff/networks';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import type { CreateNetworkInput, NetworkDetailModel, UpdateNetworkInput } from '$lib/bff/types';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import FormField from '#lib/components/shared/FormField.svelte';
+	import Input from '#lib/components/primitives/TextInput.svelte';
+	import Select from '#lib/components/primitives/Select.svelte';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { createNetwork, updateNetwork } from '#lib/bff/networks.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import type { CreateNetworkInput, NetworkDetailModel, UpdateNetworkInput } from '#lib/bff/types.ts';
 
 	interface Props {
 		open?: boolean;

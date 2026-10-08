@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { load } from '../../routes/nodes/[id]/+page';
-import { clearCache } from '$lib/stores/api-cache.svelte';
+import { clearCache } from '#lib/stores/api-cache.svelte.ts';
 
-vi.mock('$lib/bff/nodes', () => ({
+vi.mock('#lib/bff/nodes.ts', () => ({
 	getNode: vi.fn()
 }));
 
-vi.mock('$lib/api/client', () => ({
+vi.mock('#lib/api/client.ts', () => ({
 	getStoredToken: vi.fn().mockReturnValue('token-123')
 }));
 
-import { getNode } from '$lib/bff/nodes';
+import { getNode } from '#lib/bff/nodes.ts';
 
 function createUrl(tab?: string) {
 	const url = new URL('http://localhost/nodes/node-1');
@@ -69,7 +69,7 @@ describe('node detail page server load', () => {
 				{ label: 'Node ID', value: 'node-1' },
 				{ label: 'Version', value: '1.0.0' }
 			]
-		} as import('$lib/bff/types').GetNodeResponse);
+		} as import('#lib/bff/types.ts').GetNodeResponse);
 
 		const result = (await load({
 			params: { id: 'node-1' },
@@ -114,7 +114,7 @@ describe('node detail page server load', () => {
 				storage: '1 TiB',
 				network: '10 Gbps'
 			}
-		} as import('$lib/bff/types').GetNodeResponse);
+		} as import('#lib/bff/types.ts').GetNodeResponse);
 
 		const result = (await load({
 			params: { id: 'node-1' },

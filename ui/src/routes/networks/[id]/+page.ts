@@ -1,8 +1,8 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
+import { getStoredToken } from '#lib/api/client.ts';
 import { error } from '@sveltejs/kit';
-import { getNetwork } from '$lib/bff/networks';
-import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
+import { getNetwork } from '#lib/bff/networks.ts';
+import { cachedFetch, DETAIL_TTL } from '#lib/stores/api-cache.svelte.ts';
 
 export type NetworkDetailModel = {
 	network_id: string;

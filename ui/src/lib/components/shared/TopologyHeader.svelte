@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Activity } from 'lucide-svelte';
-	import { selection } from '$lib/stores/selection.svelte';
+	import { selection } from '#lib/stores/selection.svelte.ts';
 
 	interface Props {
 		zoom: number;

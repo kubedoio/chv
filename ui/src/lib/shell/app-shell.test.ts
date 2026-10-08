@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { getPageDefinition, getTopLevelPageDefinitions } from '$lib/shell/app-shell';
+import { getPageDefinition, getTopLevelPageDefinitions } from '#lib/shell/app-shell.ts';
 
 describe('app shell definitions', () => {
 	it('matches the accepted top-level IA order', () => {

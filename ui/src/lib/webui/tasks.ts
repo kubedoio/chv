@@ -1,4 +1,4 @@
-import type { ShellTone } from '$lib/shell/app-shell';
+import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 export type TaskStatusKey =
 	| 'queued'

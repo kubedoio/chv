@@ -250,7 +250,7 @@ If you are developing CHV or want to host your own installer, use the build scri
 
 ### Prerequisites
 - Rust toolchain (`rustup`)
-- Node.js 22+ and `npm`
+- Node.js 22.17+ and `npm`
 - Ubuntu/Debian build host
 
 ### Build the Release Tarball
@@ -333,7 +333,7 @@ cloud-hypervisor --version
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
-# Node.js
+# Node.js (setup_22.x installs the latest 22.x release; CHV requires >= 22.17)
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 

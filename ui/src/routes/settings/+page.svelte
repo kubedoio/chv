@@ -1,16 +1,16 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
 	import { 
 		Settings, Shield, Fingerprint, Users as UsersIcon, 
 		History, Lock, Terminal, User, Cpu, Activity
 	} from 'lucide-svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();

@@ -1,20 +1,20 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import { Users, Plus } from 'lucide-svelte';
-	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { listUsers, createUser, updateUser, deleteUser, type UserItem } from '$lib/bff/users';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import ConfirmAction from '#lib/components/shared/ConfirmAction.svelte';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { listUsers, createUser, updateUser, deleteUser, type UserItem } from '#lib/bff/users.ts';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 	import type { PageData } from './$types';
-	import UserTable from '$lib/components/settings/UserTable.svelte';
-	import UserEditModal from '$lib/components/settings/UserEditModal.svelte';
-	import UserSupportPanel from '$lib/components/settings/UserSupportPanel.svelte';
+	import UserTable from '#lib/components/settings/UserTable.svelte';
+	import UserEditModal from '#lib/components/settings/UserEditModal.svelte';
+	import UserSupportPanel from '#lib/components/settings/UserSupportPanel.svelte';
 
 	let { data }: { data: PageData } = $props();
 

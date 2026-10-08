@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import {
 		House,
@@ -11,21 +11,21 @@
 		Compass,
 		ChevronDown
 	} from 'lucide-svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
-	import { taskStream } from '$lib/stores/task-stream.svelte';
-	import { selection } from '$lib/stores/selection.svelte';
-	import { clearToken, getStoredToken } from '$lib/api/client';
-	import { mutateVm, deleteVm } from '$lib/bff/vms';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import { buildInstanceActions } from '$lib/shell/instance-actions';
+	import { liveState } from '#lib/stores/live-state.svelte.ts';
+	import { taskStream } from '#lib/stores/task-stream.svelte.ts';
+	import { selection } from '#lib/stores/selection.svelte.ts';
+	import { clearToken, getStoredToken } from '#lib/api/client.ts';
+	import { mutateVm, deleteVm } from '#lib/bff/vms.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import { buildInstanceActions } from '#lib/shell/instance-actions.ts';
 	import InstanceContextMenu from './InstanceContextMenu.svelte';
-	import DeleteInstanceDialog from '$lib/components/vms/DeleteInstanceDialog.svelte';
-	import PowerOffInstanceDialog from '$lib/components/vms/PowerOffInstanceDialog.svelte';
+	import DeleteInstanceDialog from '#lib/components/vms/DeleteInstanceDialog.svelte';
+	import PowerOffInstanceDialog from '#lib/components/vms/PowerOffInstanceDialog.svelte';
 	import NavInfrastructureTree from './NavInfrastructureTree.svelte';
 	import NavGlobalLinks from './NavGlobalLinks.svelte';
 	import NavFooterControls from './NavFooterControls.svelte';
-	import type { InstanceTreeItem } from '$lib/api/types';
+	import type { InstanceTreeItem } from '#lib/api/types.ts';
 
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') return pathname === '/';
@@ -67,7 +67,7 @@
 
 	async function handleLogout() {
 		try {
-			const { createAPIClient } = await import('$lib/api/client');
+			const { createAPIClient } = await import('#lib/api/client.ts');
 			await createAPIClient().logout();
 		} catch {
 			// Best-effort
@@ -266,8 +266,8 @@
 					<a
 						href="/architectures/new"
 						data-testid="nav-architecture-designer"
-						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/architectures/new', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
-						aria-current={isActive('/architectures/new', $page.url.pathname) ? 'page' : undefined}
+						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/architectures/new', page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+						aria-current={isActive('/architectures/new', page.url.pathname) ? 'page' : undefined}
 					>
 						<Compass size={14} />
 						<span>Architecture Designer</span>
@@ -275,8 +275,8 @@
 					<a
 						href="/architectures"
 						data-testid="nav-saved-topologies"
-						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {$page.url.pathname === '/architectures' || ($page.url.pathname.startsWith('/architectures/') && !$page.url.pathname.startsWith('/architectures/new')) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
-						aria-current={$page.url.pathname === '/architectures' || ($page.url.pathname.startsWith('/architectures/') && !$page.url.pathname.startsWith('/architectures/new')) ? 'page' : undefined}
+						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {page.url.pathname === '/architectures' || (page.url.pathname.startsWith('/architectures/') && !page.url.pathname.startsWith('/architectures/new')) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+						aria-current={page.url.pathname === '/architectures' || (page.url.pathname.startsWith('/architectures/') && !page.url.pathname.startsWith('/architectures/new')) ? 'page' : undefined}
 					>
 						<LayoutGrid size={14} />
 						<span>Saved Topologies</span>
@@ -289,8 +289,8 @@
 		<div class="flex flex-col gap-1">
 			<a
 				href="/"
-				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
-				aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/', page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/', page.url.pathname) ? 'page' : undefined}
 			>
 				<House size={14} />
 				<span>Fleet Overview</span>

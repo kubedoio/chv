@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { Trash2 } from 'lucide-svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
 	import type { ImageListItem } from '../../../routes/images/+page';
 
 	type Column = { key: string; label: string; align?: 'left' | 'right' | 'center' };

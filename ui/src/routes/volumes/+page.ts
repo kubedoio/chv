@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { buildVolumesLoad, type VolumesListModel } from '$lib/webui/volumes-load';
+import { getStoredToken } from '#lib/api/client.ts';
+import { buildVolumesLoad, type VolumesListModel } from '#lib/webui/volumes-load.ts';
 
 export type { VolumesListModel };
 

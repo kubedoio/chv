@@ -1,16 +1,16 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
-	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import AddNodeModal from '$lib/components/nodes/AddNodeModal.svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
+	import InventoryListPage from '#lib/components/shell/InventoryListPage.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import AddNodeModal from '#lib/components/nodes/AddNodeModal.svelte';
+	import { getPageDefinition } from '#lib/shell/app-shell.ts';
 	import { Plus, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
-	import { toast } from '$lib/stores/toast.svelte';
-	import type { CreateNodeInput, CreateNodeResponse } from '$lib/api/types';
+	import { page } from '$app/state';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import type { CreateNodeInput, CreateNodeResponse } from '#lib/api/types.ts';
 
 	let { data }: { data: PageData } = $props();
 
@@ -37,17 +37,17 @@ import Button from '$lib/components/primitives/Button.svelte';
 	];
 
 	function handleFilterChange(key: string, value: unknown) {
-		const newParams = new URLSearchParams($page.url.searchParams);
+		const newParams = new URLSearchParams(page.url.searchParams.toString());
 		if (value === '' || value === 'all' || value === false) {
 			newParams.delete(key);
 		} else {
 			newParams.set(key, String(value));
 		}
-		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+		goto(`?${newParams.toString()}`, { reset: false });
 	}
 
 	function handleClearFilters() {
-		goto($page.url.pathname);
+		goto(page.url.pathname);
 	}
 
 	const columns = [

@@ -1,21 +1,21 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
-	import { getStoredToken } from '$lib/api/client';
-	import { mutateNode } from '$lib/bff/nodes';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { mutateNode } from '#lib/bff/nodes.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import ResourceDetailHeader from '#lib/components/shell/ResourceDetailHeader.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import TaskTimeline from '#lib/components/shell/TaskTimeline.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle, ShieldCheck } from 'lucide-svelte';
-	import NodeHealthDashboard from '$lib/components/nodes/NodeHealthDashboard.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import NodeHealthDashboard from '#lib/components/nodes/NodeHealthDashboard.svelte';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	let { data }: { data: PageData } = $props();
 

@@ -1,7 +1,7 @@
 <script lang="ts">
-	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
-	import VmDetailActions from '$lib/components/vms/VmDetailActions.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import ResourceDetailHeader from '#lib/components/shell/ResourceDetailHeader.svelte';
+	import VmDetailActions from '#lib/components/vms/VmDetailActions.svelte';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	interface Props {
 		title: string;

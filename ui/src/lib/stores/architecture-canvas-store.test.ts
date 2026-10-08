@@ -3,19 +3,19 @@ import { load } from 'js-yaml';
 
 // architecture-canvas-store imports architecture-store, which transitively
 // pulls in mutation.svelte → live-state.svelte → SvelteKit's $app/navigation
-// and $env/dynamic/public. Mirror the mocks already used by
+// and $app/env/public. Mirror the mocks already used by
 // architecture-store.test.ts so this suite runs cleanly under jsdom.
-vi.mock('$env/dynamic/public', () => ({ env: {} }));
+vi.mock('$app/env/public', () => ({ PUBLIC_CHV_API_BASE_URL: '' }));
 vi.mock('$app/navigation', () => ({
 	goto: vi.fn(),
-	invalidateAll: vi.fn()
+	refreshAll: vi.fn()
 }));
-vi.mock('$lib/api/client', () => ({
+vi.mock('#lib/api/client.ts', () => ({
 	getStoredToken: vi.fn(() => 'test-token'),
 	clearToken: vi.fn()
 }));
 
-vi.mock('$lib/stores/architecture-store.svelte', () => {
+vi.mock('#lib/stores/architecture-store.svelte.ts', () => {
 	return {
 		architectureStore: {
 			update: vi.fn()
@@ -23,7 +23,7 @@ vi.mock('$lib/stores/architecture-store.svelte', () => {
 	};
 });
 
-import { architectureStore } from '$lib/stores/architecture-store.svelte';
+import { architectureStore } from '#lib/stores/architecture-store.svelte.ts';
 import {
 	architectureCanvasStore,
 	type GraphPayload

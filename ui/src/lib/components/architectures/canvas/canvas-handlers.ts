@@ -7,8 +7,8 @@
  * Canvas component itself stays under the 300-line component budget.
  */
 
-import type { Finding } from '$lib/bff/architectures';
-import type { CanvasNode } from '$lib/stores/architecture-canvas-store.svelte';
+import type { Finding } from '#lib/bff/architectures.ts';
+import type { CanvasNode } from '#lib/stores/architecture-canvas-store.svelte.ts';
 import type { NodeKind } from './edge-rules';
 import { MVP_NODE_KINDS } from './edge-rules';
 

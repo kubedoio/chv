@@ -1,6 +1,6 @@
 <script lang="ts">
 	/** Inspector fields for `image` nodes. */
-	import type { CanvasNodeData } from '$lib/stores/architecture-canvas-store.svelte';
+	import type { CanvasNodeData } from '#lib/stores/architecture-canvas-store.svelte.ts';
 	import './field-styles.css';
 
 	interface Props {

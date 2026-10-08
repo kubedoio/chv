@@ -1,4 +1,4 @@
-import { getStoredToken } from '$lib/api/client';
+import { getStoredToken } from '#lib/api/client.ts';
 import {
 	createArchitecture,
 	updateArchitecture,
@@ -16,7 +16,7 @@ import {
 	type FleetCheckResult,
 	type PlanResult,
 	type ValidationResult
-} from '$lib/bff/architectures';
+} from '#lib/bff/architectures.ts';
 import type { MutateOpts } from './mutation.svelte';
 import { mutateWithRefresh } from './mutation.svelte';
 
@@ -27,7 +27,7 @@ import { mutateWithRefresh } from './mutation.svelte';
  *   1. live-state cache invalidation runs after success;
  *   2. errors surface as toasts (the same UX every other mutating page uses);
  *   3. the codebase stays compliant with `mutation-compliance.test.ts`, which
- *      forbids manual `invalidateAll()` / `invalidatePattern()` calls in
+ *      forbids manual `refreshAll()` / `invalidatePattern()` calls in
  *      page components.
  *
  * Optimistic concurrency (Q3 of the Phase 0 plan): `update` forwards the
@@ -53,8 +53,8 @@ export type {
 	ValidationStatus,
 	ValidationSeverity,
 	Finding
-} from '$lib/bff/architectures';
-export { StaleVersionError } from '$lib/bff/architectures';
+} from '#lib/bff/architectures.ts';
+export { StaleVersionError } from '#lib/bff/architectures.ts';
 
 /**
  * Editable subset for `update()`. Field names mirror the wire (display_name,

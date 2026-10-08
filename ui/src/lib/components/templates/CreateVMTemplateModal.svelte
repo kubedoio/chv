@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CloudInitTemplate, VM } from '$lib/api/types';
+  import type { CloudInitTemplate, VM } from '#lib/api/types.ts';
 
   interface Props {
     open: boolean;

@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { listClusters } from '$lib/bff/clusters';
+import { getStoredToken } from '#lib/api/client.ts';
+import { listClusters } from '#lib/bff/clusters.ts';
 
 type ClusterListItem = {
 	cluster_id: string;

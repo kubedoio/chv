@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { DRIFT_FINDING_CODES, type DriftFindingCode, type DriftSummary } from '$lib/bff/architectures';
+	import { DRIFT_FINDING_CODES, type DriftFindingCode, type DriftSummary } from '#lib/bff/architectures.ts';
 
 	interface Props {
 		summary: DriftSummary;

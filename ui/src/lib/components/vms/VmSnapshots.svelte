@@ -1,20 +1,20 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
-	import type { VmSnapshotItem } from '$lib/bff/types';
-	import { listVmSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot } from '$lib/bff/snapshots';
-	import { getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import LoadingState from '$lib/components/shell/LoadingState.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
+	import type { VmSnapshotItem } from '#lib/bff/types.ts';
+	import { listVmSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot } from '#lib/bff/snapshots.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+	import LoadingState from '#lib/components/shell/LoadingState.svelte';
+	import ErrorState from '#lib/components/shell/ErrorState.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import ConfirmAction from '#lib/components/shared/ConfirmAction.svelte';
 	import { Camera, RotateCcw, Trash2, MemoryStick, LoaderCircle } from 'lucide-svelte';
-	import { formatDateTimeLabel } from '$lib/webui/formatters';
+	import { formatDateTimeLabel } from '#lib/webui/formatters.ts';
 
 	interface Props {
 		vmId: string;
@@ -68,7 +68,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		status: { label: s.status, tone: normalizeTone(s.status) }
 	})));
 
-	function normalizeTone(status: string): import('$lib/shell/app-shell').ShellTone {
+	function normalizeTone(status: string): import('#lib/shell/app-shell.ts').ShellTone {
 		const s = status.toLowerCase();
 		if (['ready', 'completed', 'success'].includes(s)) return 'healthy';
 		if (['creating', 'pending', 'restoring'].includes(s)) return 'warning';

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import ValidationFindingsPanel from './ValidationFindingsPanel.svelte';
-import type { Finding, ValidationResult } from '$lib/bff/architectures';
+import type { Finding, ValidationResult } from '#lib/bff/architectures.ts';
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
 	return {

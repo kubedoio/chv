@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { AlertTriangle, RefreshCw } from 'lucide-svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 
 	let { onReload }: { onReload: () => void } = $props();
 </script>

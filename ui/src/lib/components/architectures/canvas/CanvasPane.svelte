@@ -20,8 +20,8 @@
 		type Edge as FlowEdge
 	} from '@xyflow/svelte';
 
-	import { architectureCanvasStore } from '$lib/stores/architecture-canvas-store.svelte';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { architectureCanvasStore } from '#lib/stores/architecture-canvas-store.svelte.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
 	import { nextDefaultName, readDraggedKind } from './canvas-handlers';
 
 	interface Props {

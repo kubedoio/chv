@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
-  import { toast } from '$lib/stores/toast.svelte';
+  import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
+  import { syncAuthCookieFromLocalStorage } from '#lib/bff/auth-cookie.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
 
   let username = '';
   let password = '';
@@ -81,8 +81,8 @@
       if (data.must_change_password) {
         toast.info('Password change required. Please set a new password.');
         await goto('/change-password', {
-          replaceState: true,
-          invalidateAll: true
+          replace: true,
+          refreshAll: true
         });
         return;
       }
@@ -90,8 +90,8 @@
       toast.success(`Welcome, ${data.user.username}!`);
 
       await goto('/', {
-        replaceState: true,
-        invalidateAll: true
+        replace: true,
+        refreshAll: true
       });
 
       // Fall back to a hard navigation if the client router still leaves us on

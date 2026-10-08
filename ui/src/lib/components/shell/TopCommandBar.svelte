@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { PageDefinition } from '$lib/shell/app-shell';
+	import type { PageDefinition } from '#lib/shell/app-shell.ts';
 	import { Search } from 'lucide-svelte';
 	import CommandPalette from './CommandPalette.svelte';
 

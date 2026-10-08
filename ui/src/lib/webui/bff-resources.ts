@@ -1,16 +1,16 @@
-import { listEvents } from '$lib/bff/events';
-import { listImages } from '$lib/bff/images';
-import { listNetworks } from '$lib/bff/networks';
-import { listNodes } from '$lib/bff/nodes';
-import { listTasks } from '$lib/bff/tasks';
-import { getVm, listVms } from '$lib/bff/vms';
+import { listEvents } from '#lib/bff/events.ts';
+import { listImages } from '#lib/bff/images.ts';
+import { listNetworks } from '#lib/bff/networks.ts';
+import { listNodes } from '#lib/bff/nodes.ts';
+import { listTasks } from '#lib/bff/tasks.ts';
+import { getVm, listVms } from '#lib/bff/vms.ts';
 import type {
 	InfrastructureEvent,
 	NodeListItem,
 	TaskListItem,
 	VmListItem
-} from '$lib/bff/types';
-import type { Event, Image, Network, NodeWithResources, Operation, VM } from '$lib/api/types';
+} from '#lib/bff/types.ts';
+import type { Event, Image, Network, NodeWithResources, Operation, VM } from '#lib/api/types.ts';
 
 const DEFAULT_PAGE = { page: 1, page_size: 200, filters: {} };
 

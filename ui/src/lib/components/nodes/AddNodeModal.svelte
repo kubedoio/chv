@@ -3,7 +3,7 @@
   import Modal from '../primitives/Modal.svelte';
   import Input from '../primitives/Input.svelte';
   import FormField from '../shared/FormField.svelte';
-  import type { CreateNodeInput, CreateNodeResponse } from '$lib/api/types';
+  import type { CreateNodeInput, CreateNodeResponse } from '#lib/api/types.ts';
 
   interface Props {
     open: boolean;

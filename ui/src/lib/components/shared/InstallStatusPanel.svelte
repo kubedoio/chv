@@ -1,6 +1,6 @@
 <script lang="ts">
-  import StateBadge from '$lib/components/shared/StateBadge.svelte';
-  import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
+  import StateBadge from '#lib/components/shared/StateBadge.svelte';
+  import type { InstallStatusResponse, InstallActionResponse } from '#lib/api/types.ts';
 
   export let status: InstallStatusResponse | null = null;
   export let loading = false;

@@ -1,5 +1,5 @@
-import { selection } from '$lib/stores/selection.svelte';
-import { inventory } from '$lib/stores/inventory.svelte';
+import { selection } from '#lib/stores/selection.svelte.ts';
+import { inventory } from '#lib/stores/inventory.svelte.ts';
 import { getDisplayNodes, getDisplayVms, getStatusColor } from './topology-layout.svelte';
 
 export { getStatusColor };

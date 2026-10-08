@@ -1,30 +1,30 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import {
     Plus, Calendar,
     Activity, Upload
   } from 'lucide-svelte';
-  import { getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import { getPageDefinition } from '$lib/shell/app-shell';
+  import { getStoredToken } from '#lib/api/client.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+  import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+  import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+  import { getPageDefinition } from '#lib/shell/app-shell.ts';
   import {
     listBackupJobs,
     listBackupHistory,
     createBackupJob,
     executeBackupJob,
     updateBackupJob
-  } from '$lib/bff/backups';
-  import { listVms } from '$lib/bff/vms';
-  import type { BackupJob, BackupHistory } from '$lib/bff/types';
-  import type { VmListItem } from '$lib/bff/types';
-  import BackupJobsTable from '$lib/components/backup-jobs/BackupJobsTable.svelte';
-  import BackupJobsSidebar from '$lib/components/backup-jobs/BackupJobsSidebar.svelte';
-  import BackupJobCreateModal from '$lib/components/backup-jobs/BackupJobCreateModal.svelte';
-  import BackupJobImportModal from '$lib/components/backup-jobs/BackupJobImportModal.svelte';
+  } from '#lib/bff/backups.ts';
+  import { listVms } from '#lib/bff/vms.ts';
+  import type { BackupJob, BackupHistory } from '#lib/bff/types.ts';
+  import type { VmListItem } from '#lib/bff/types.ts';
+  import BackupJobsTable from '#lib/components/backup-jobs/BackupJobsTable.svelte';
+  import BackupJobsSidebar from '#lib/components/backup-jobs/BackupJobsSidebar.svelte';
+  import BackupJobCreateModal from '#lib/components/backup-jobs/BackupJobCreateModal.svelte';
+  import BackupJobImportModal from '#lib/components/backup-jobs/BackupJobImportModal.svelte';
 
   const pageDef = getPageDefinition('/backups');
 

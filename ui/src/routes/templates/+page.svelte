@@ -1,28 +1,28 @@
 <script lang="ts">
-import Button from '$lib/components/primitives/Button.svelte';
+import Button from '#lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import {
     FileCode, Box, LayoutTemplate
   } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
   import {
     loadImagesFromBff,
     loadNetworksFromBff,
     loadVmsFromBff
-  } from '$lib/webui/bff-resources';
-  import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import CreateFromTemplate from '$lib/components/vms/CreateFromTemplate.svelte';
-  import CloudInitModalViewer from '$lib/components/shell/CloudInitModalViewer.svelte';
-  import CloudInitModalEditor from '$lib/components/shell/CloudInitModalEditor.svelte';
-  import { getPageDefinition } from '$lib/shell/app-shell';
-  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
-  import ConfirmDialog from '$lib/components/shared/ConfirmDialog.svelte';
-  import TemplatesTable from '$lib/components/templates/TemplatesTable.svelte';
-  import TemplatesSidebar from '$lib/components/templates/TemplatesSidebar.svelte';
-  import CreateVMTemplateModal from '$lib/components/templates/CreateVMTemplateModal.svelte';
+  } from '#lib/webui/bff-resources.ts';
+  import { loadStoragePoolsFromBff } from '#lib/webui/storage-pools.ts';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+  import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+  import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
+  import CreateFromTemplate from '#lib/components/vms/CreateFromTemplate.svelte';
+  import CloudInitModalViewer from '#lib/components/shell/CloudInitModalViewer.svelte';
+  import CloudInitModalEditor from '#lib/components/shell/CloudInitModalEditor.svelte';
+  import { getPageDefinition } from '#lib/shell/app-shell.ts';
+  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '#lib/api/types.ts';
+  import ConfirmDialog from '#lib/components/shared/ConfirmDialog.svelte';
+  import TemplatesTable from '#lib/components/templates/TemplatesTable.svelte';
+  import TemplatesSidebar from '#lib/components/templates/TemplatesSidebar.svelte';
+  import CreateVMTemplateModal from '#lib/components/templates/CreateVMTemplateModal.svelte';
 
   const client = createAPIClient();
   const pageDef = getPageDefinition('/images'); // Reusing Images definition as it covers library

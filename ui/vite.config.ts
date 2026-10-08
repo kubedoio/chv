@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
@@ -10,7 +11,20 @@ const bffProxyTarget =
 	'http://localhost:8888';
 
 export default defineConfig({
-	plugins: [sveltekit()],
+	plugins: [
+		// SvelteKit 3: project configuration lives in the sveltekit() plugin
+		// options (previously svelte.config.js's config.kit). The adapter
+		// options are the former svelte.config.js kit.adapter block verbatim.
+		sveltekit({
+			adapter: adapter({
+				fallback: 'index.html',
+				pages: 'build',
+				assets: 'build',
+				precompress: false,
+				strict: false
+			})
+		})
+	],
 	resolve:
 		typeof process !== 'undefined' && process.env?.VITEST
 			? {

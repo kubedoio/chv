@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onDestroy } from 'svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import RunStatusBadge from '$lib/components/architectures/runs/RunStatusBadge.svelte';
-	import OperationProgressRow from '$lib/components/architectures/runs/OperationProgressRow.svelte';
-	import type { OperationProgress } from '$lib/components/architectures/runs/types';
-	import { architectureRunsStore } from '$lib/stores/architecture-runs-store.svelte';
-	import { isTerminalRunStatus, type ApplyRunDetail } from '$lib/bff/architectures';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import RunStatusBadge from '#lib/components/architectures/runs/RunStatusBadge.svelte';
+	import OperationProgressRow from '#lib/components/architectures/runs/OperationProgressRow.svelte';
+	import type { OperationProgress } from '#lib/components/architectures/runs/types.ts';
+	import { architectureRunsStore } from '#lib/stores/architecture-runs-store.svelte.ts';
+	import { isTerminalRunStatus, type ApplyRunDetail } from '#lib/bff/architectures.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();

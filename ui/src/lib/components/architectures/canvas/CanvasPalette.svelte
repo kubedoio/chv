@@ -13,8 +13,8 @@
 	 * `palette.ts` — the agent A `palette.test.ts` enforces parity at compile
 	 * time.
 	 */
-	import { PALETTE } from '$lib/components/architectures/canvas/palette';
-	import type { NodeKind } from '$lib/components/architectures/canvas/edge-rules';
+	import { PALETTE } from '#lib/components/architectures/canvas/palette.ts';
+	import type { NodeKind } from '#lib/components/architectures/canvas/edge-rules.ts';
 	import type { ComponentType, SvelteComponent } from 'svelte';
 	import { Server, Network, HardDrive, Disc, Layers, Box, User, Shield } from 'lucide-svelte';
 

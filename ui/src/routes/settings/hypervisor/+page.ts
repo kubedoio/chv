@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getHypervisorSettings } from '$lib/bff/hypervisor-settings';
-import type { HypervisorSettingsResponse } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getHypervisorSettings } from '#lib/bff/hypervisor-settings.ts';
+import type { HypervisorSettingsResponse } from '#lib/bff/types.ts';
 
 export type HypervisorPageModel = {
 	settings: HypervisorSettingsResponse['settings'] | null;

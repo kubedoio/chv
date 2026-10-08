@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CloudInitTemplate } from '$lib/api/types';
+  import type { CloudInitTemplate } from '#lib/api/types.ts';
   
   let { open = $bindable(false), template }: { open?: boolean; template?: CloudInitTemplate | null } = $props();
 </script>

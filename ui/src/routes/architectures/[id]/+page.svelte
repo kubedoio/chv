@@ -1,28 +1,28 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import ArchitectureMetaPanel from '$lib/components/architectures/dashboard/ArchitectureMetaPanel.svelte';
-	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
-	import StarterBanner from '$lib/components/architectures/dashboard/StarterBanner.svelte';
-	import StarterCloneButton from '$lib/components/architectures/dashboard/StarterCloneButton.svelte';
-	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
-	import FleetCheckPanel from '$lib/components/architectures/dashboard/FleetCheckPanel.svelte';
-	import PlanReviewPanel from '$lib/components/architectures/dashboard/PlanReviewPanel.svelte';
-	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
-	import DriftReportPanel from '$lib/components/architectures/drift/DriftReportPanel.svelte';
-	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
-	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
-	import { isStarter, buildCloneNames } from '$lib/architectures/starter';
-	import { liveState } from '$lib/stores/live-state.svelte';
-	import { architectureStore, StaleVersionError } from '$lib/stores/architecture-store.svelte';
-	import { architectureRunsStore } from '$lib/stores/architecture-runs-store.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
+	import ArchitectureMetaPanel from '#lib/components/architectures/dashboard/ArchitectureMetaPanel.svelte';
+	import StaleVersionBanner from '#lib/components/architectures/dashboard/StaleVersionBanner.svelte';
+	import StarterBanner from '#lib/components/architectures/dashboard/StarterBanner.svelte';
+	import StarterCloneButton from '#lib/components/architectures/dashboard/StarterCloneButton.svelte';
+	import ValidationFindingsPanel from '#lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
+	import FleetCheckPanel from '#lib/components/architectures/dashboard/FleetCheckPanel.svelte';
+	import PlanReviewPanel from '#lib/components/architectures/dashboard/PlanReviewPanel.svelte';
+	import YamlSidePanel from '#lib/components/architectures/dashboard/YamlSidePanel.svelte';
+	import DriftReportPanel from '#lib/components/architectures/drift/DriftReportPanel.svelte';
+	import Canvas from '#lib/components/architectures/canvas/Canvas.svelte';
+	import Inspector from '#lib/components/architectures/inspector/Inspector.svelte';
+	import { isStarter, buildCloneNames } from '#lib/architectures/starter.ts';
+	import { liveState } from '#lib/stores/live-state.svelte.ts';
+	import { architectureStore, StaleVersionError } from '#lib/stores/architecture-store.svelte.ts';
+	import { architectureRunsStore } from '#lib/stores/architecture-runs-store.svelte.ts';
 	import {
 		architectureCanvasStore,
 		type GraphPayload
-	} from '$lib/stores/architecture-canvas-store.svelte';
-	import { architectureDesignerCanvasEnabled } from '$lib/feature-flags';
-	import { BFFError } from '$lib/bff/client';
-	import type { Architecture, FleetCheckResult, PlanMode, PlanResult, ValidationResult } from '$lib/bff/architectures';
+	} from '#lib/stores/architecture-canvas-store.svelte.ts';
+	import { architectureDesignerCanvasEnabled } from '#lib/feature-flags.ts';
+	import { BFFError } from '#lib/bff/client.ts';
+	import type { Architecture, FleetCheckResult, PlanMode, PlanResult, ValidationResult } from '#lib/bff/architectures.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -73,7 +73,7 @@
 
 	// Starter clone state. `isStarterArch` is derived from the current row's
 	// `name` + `owner_user_id` (the wire intentionally has no `labels`); see
-	// `$lib/architectures/starter`. `cloneError` surfaces inline next to the
+	// `#lib/architectures/starter.ts`. `cloneError` surfaces inline next to the
 	// button on failure rather than logging the user out or navigating away.
 	const isStarterArch = $derived(current ? isStarter(current) : false);
 	let cloning = $state(false);

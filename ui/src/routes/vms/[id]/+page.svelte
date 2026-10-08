@@ -1,27 +1,27 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
+	import { browser } from '$app/env';
 	import type { PageData } from './$types';
-	import { getStoredToken } from '$lib/api/client';
-	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
-	import { listVmSnapshots } from '$lib/bff/snapshots';
-	import { listVmEvents } from '$lib/bff/events';
-	import type { VmSnapshotItem, InfrastructureEvent } from '$lib/bff/types';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import DetailTabs from '$lib/components/shared/DetailTabs.svelte';
-	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
-	import VmDetailErrorState from '$lib/components/vms/VmDetailErrorState.svelte';
-	import VmDetailSupportRail from '$lib/components/vms/VmDetailSupportRail.svelte';
-	import VmMigrateModal from '$lib/components/vms/VmMigrateModal.svelte';
-	import VmDetailHeader from '$lib/components/vms/VmDetailHeader.svelte';
-	import VmDetailSummaryTab from '$lib/components/vms/VmDetailSummaryTab.svelte';
-	import VmConsoleTab from '$lib/components/vms/VmConsoleTab.svelte';
-	import VmMetricsTab from '$lib/components/vms/VmMetricsTab.svelte';
-	import VmTasksTab from '$lib/components/vms/VmTasksTab.svelte';
-	import VmBootLogTab from '$lib/components/vms/VmBootLogTab.svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '#lib/bff/vms.ts';
+	import { listVmSnapshots } from '#lib/bff/snapshots.ts';
+	import { listVmEvents } from '#lib/bff/events.ts';
+	import type { VmSnapshotItem, InfrastructureEvent } from '#lib/bff/types.ts';
+	import { toast } from '#lib/stores/toast.svelte.ts';
+	import { liveState } from '#lib/stores/live-state.svelte.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
+	import DetailTabs from '#lib/components/shared/DetailTabs.svelte';
+	import VmSnapshots from '#lib/components/vms/VmSnapshots.svelte';
+	import VmDetailErrorState from '#lib/components/vms/VmDetailErrorState.svelte';
+	import VmDetailSupportRail from '#lib/components/vms/VmDetailSupportRail.svelte';
+	import VmMigrateModal from '#lib/components/vms/VmMigrateModal.svelte';
+	import VmDetailHeader from '#lib/components/vms/VmDetailHeader.svelte';
+	import VmDetailSummaryTab from '#lib/components/vms/VmDetailSummaryTab.svelte';
+	import VmConsoleTab from '#lib/components/vms/VmConsoleTab.svelte';
+	import VmMetricsTab from '#lib/components/vms/VmMetricsTab.svelte';
+	import VmTasksTab from '#lib/components/vms/VmTasksTab.svelte';
+	import VmBootLogTab from '#lib/components/vms/VmBootLogTab.svelte';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	let { data }: { data: PageData } = $props();
 
@@ -29,7 +29,7 @@
 	let pendingAction = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
 	let liveConsoleExpiresAt = $state<string | undefined>(undefined);
-	let VmConsoleComponent = $state<typeof import('$lib/components/vms/VmConsole.svelte').default | null>(null);
+	let VmConsoleComponent = $state<typeof import('#lib/components/vms/VmConsole.svelte').default | null>(null);
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
 	let bootLogLoading = $state(false);
@@ -45,7 +45,7 @@
 
 	async function ensureVmConsole() {
 		if (!browser || VmConsoleComponent) return;
-		const module = await import('$lib/components/vms/VmConsole.svelte');
+		const module = await import('#lib/components/vms/VmConsole.svelte');
 		VmConsoleComponent = module.default;
 	}
 

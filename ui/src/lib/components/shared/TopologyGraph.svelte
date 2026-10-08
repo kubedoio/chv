@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Box, MoreHorizontal, Server } from 'lucide-svelte';
 	import { draw } from 'svelte/transition';
-	import { selection } from '$lib/stores/selection.svelte';
+	import { selection } from '#lib/stores/selection.svelte.ts';
 	import { getStatusColor } from './topology-layout.svelte';
 
 	interface Props {

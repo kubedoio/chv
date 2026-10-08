@@ -1,10 +1,10 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
 	import { UserCheck, Pencil, Trash2 } from 'lucide-svelte';
-	import type { UserItem } from '$lib/bff/users';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { UserItem } from '#lib/bff/users.ts';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	interface Props {
 		users?: UserItem[];

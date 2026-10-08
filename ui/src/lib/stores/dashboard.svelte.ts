@@ -1,7 +1,7 @@
-import { browser } from '$app/environment';
-import { getStoredToken } from '$lib/api/client';
-import { loadOverview } from '$lib/bff/overview';
-import { createOverview, toOverviewModel, type OverviewModel } from '$lib/helpers/dashboard';
+import { browser } from '$app/env';
+import { getStoredToken } from '#lib/api/client.ts';
+import { loadOverview } from '#lib/bff/overview.ts';
+import { createOverview, toOverviewModel, type OverviewModel } from '#lib/helpers/dashboard.ts';
 
 const POLL_INTERVAL_MS = 10_000;
 

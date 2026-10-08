@@ -1,5 +1,5 @@
-import { listVolumes } from '$lib/bff/volumes';
-import type { ListVolumesRequest, VolumeListItem } from '$lib/bff/types';
+import { listVolumes } from '#lib/bff/volumes.ts';
+import type { ListVolumesRequest, VolumeListItem } from '#lib/bff/types.ts';
 
 export type VolumesListModel = {
 	items: VolumeListItem[];

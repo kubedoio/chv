@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Button from '$lib/components/primitives/Button.svelte';
+	import Button from '#lib/components/primitives/Button.svelte';
 	import { Play, Square, RotateCcw, Trash2, Power, ArrowRightLeft } from 'lucide-svelte';
 
 	interface Props {

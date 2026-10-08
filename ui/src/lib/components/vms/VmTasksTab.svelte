@@ -1,7 +1,7 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
 	import { Activity } from 'lucide-svelte';
-	import type { InfrastructureEvent } from '$lib/bff/types';
+	import type { InfrastructureEvent } from '#lib/bff/types.ts';
 
 	interface Props {
 		eventsLoading: boolean;

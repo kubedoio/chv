@@ -1,10 +1,10 @@
 <script lang="ts">
-  import Modal from '$lib/components/primitives/Modal.svelte';
-  import FormField from '$lib/components/shared/FormField.svelte';
-  import Input from '$lib/components/primitives/TextInput.svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+  import Modal from '#lib/components/primitives/Modal.svelte';
+  import FormField from '#lib/components/shared/FormField.svelte';
+  import Input from '#lib/components/primitives/TextInput.svelte';
+  import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
   import { Copy, Check } from 'lucide-svelte';
   import { extractVariables } from './cloudinit-helpers';
   import CloudInitEditorSidebar from './CloudInitEditorSidebar.svelte';

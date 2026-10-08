@@ -44,6 +44,17 @@ updates:
 
   # ---------------------------------------------------------------------------
   # Web UI (SvelteKit) — npm in /ui
+  #
+  # Toolchain-matrix note (#234): the UI's build toolchain is a coupled
+  # matrix — @sveltejs/kit, vite, @sveltejs/vite-plugin-svelte, typescript,
+  # @sveltejs/adapter-node, @sveltejs/adapter-static, and the Node engines
+  # floor move together (peer/compat ranges are interlocking; a partial
+  # update either fails to install or silently regresses the other half).
+  # Major bumps for these packages must land as one coordinated PR
+  # (see #234 for the kit-3 matrix move that set this precedent); the
+  # parked majors in #488/#489/#490/#491 are superseded by that matrix.
+  # The minor-and-patch groups below deliberately exclude majors, so
+  # routine updates never fragment the matrix — no grouping change needed.
   # ---------------------------------------------------------------------------
   - package-ecosystem: "npm"
     directory: "/ui"

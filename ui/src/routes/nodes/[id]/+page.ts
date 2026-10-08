@@ -1,8 +1,8 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getNode } from '$lib/bff/nodes';
-import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
-import type { GetNodeResponse } from '$lib/bff/types';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getNode } from '#lib/bff/nodes.ts';
+import { cachedFetch, DETAIL_TTL } from '#lib/stores/api-cache.svelte.ts';
+import type { GetNodeResponse } from '#lib/bff/types.ts';
 
 export type NodeDetailModel = {
 	state: 'ready' | 'empty' | 'error';

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
 	import { ChevronRight, Info, ShieldCheck, ChevronLeft } from 'lucide-svelte';
 
 	interface ConfigProp {

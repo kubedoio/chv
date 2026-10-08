@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import FindingItem from './FindingItem.svelte';
-import type { Finding } from '$lib/bff/architectures';
+import type { Finding } from '#lib/bff/architectures.ts';
 
 const BASE_FINDING: Finding = {
 	severity: 'error',

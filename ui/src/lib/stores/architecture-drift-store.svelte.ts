@@ -2,8 +2,8 @@ import {
 	getArchitectureDrift,
 	type DriftReport,
 	type DriftStatus
-} from '$lib/bff/architectures';
-import { getStoredToken } from '$lib/api/client';
+} from '#lib/bff/architectures.ts';
+import { getStoredToken } from '#lib/api/client.ts';
 import { mutateWithRefresh } from './mutation.svelte';
 
 /**

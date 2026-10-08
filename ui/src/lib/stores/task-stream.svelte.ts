@@ -1,5 +1,5 @@
-import { browser } from '$app/environment';
-import { getStoredToken } from '$lib/api/client';
+import { browser } from '$app/env';
+import { getStoredToken } from '#lib/api/client.ts';
 
 export interface TaskUpdate {
 	task_id: string;

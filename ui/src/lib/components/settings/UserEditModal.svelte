@@ -1,8 +1,8 @@
 <script lang="ts">
-  import Modal from '$lib/components/primitives/Modal.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
+  import Modal from '#lib/components/primitives/Modal.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
   import { ShieldAlert } from 'lucide-svelte';
-  import type { UserItem } from '$lib/bff/users';
+  import type { UserItem } from '#lib/bff/users.ts';
 
   interface Props {
     user?: UserItem | null;

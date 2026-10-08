@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import InstallStatusPanel from '$lib/components/shared/InstallStatusPanel.svelte';
-  import { toast } from '$lib/stores/toast.svelte';
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
-  import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
+  import InstallStatusPanel from '#lib/components/shared/InstallStatusPanel.svelte';
+  import { toast } from '#lib/stores/toast.svelte.ts';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
+  import type { InstallStatusResponse, InstallActionResponse } from '#lib/api/types.ts';
+  import ErrorState from '#lib/components/shell/ErrorState.svelte';
 
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
 

@@ -121,7 +121,7 @@ export async function bffFetch<T>(
 		// Clear stale tokens so the user can re-authenticate
 		if (response.status === 401) {
 			try {
-				const { clearToken } = await import('$lib/api/client');
+				const { clearToken } = await import('#lib/api/client.ts');
 				clearToken();
 			} catch {
 				// ignore import failure

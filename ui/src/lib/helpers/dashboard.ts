@@ -1,7 +1,7 @@
-import type { NodeWithResources, VM } from '$lib/api/types';
-import type { OverviewResponse } from '$lib/bff/types';
-import type { ShellTone } from '$lib/shell/app-shell';
-import { getTaskStatusMeta } from '$lib/webui/tasks';
+import type { NodeWithResources, VM } from '#lib/api/types.ts';
+import type { OverviewResponse } from '#lib/bff/types.ts';
+import type { ShellTone } from '#lib/shell/app-shell.ts';
+import { getTaskStatusMeta } from '#lib/webui/tasks.ts';
 
 // ------------------------------------------------------------------
 // Overview model types

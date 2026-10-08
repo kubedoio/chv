@@ -1,4 +1,4 @@
-import type { Architecture } from '$lib/bff/architectures';
+import type { Architecture } from '#lib/bff/architectures.ts';
 
 /**
  * Detect a system-provided starter topology.
@@ -11,7 +11,7 @@ import type { Architecture } from '$lib/bff/architectures';
  *
  * NOTE on detection: the plan deliberately keeps `labels` off the wire (see
  * `docs/plans/2026-06-16-starter-topologies-and-auto-seed.md` §5 and the
- * `Architecture` wire type in `$lib/bff/architectures`). The two fields below
+ * `Architecture` wire type in `#lib/bff/architectures.ts`). The two fields below
  * are the only durable signal: a `starter-` prefixed name *and* a system-owned
  * row. A user-cloned starter loses the `null` owner so this returns false; a
  * hypothetical system-owned arch without the prefix also returns false.

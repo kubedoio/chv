@@ -1,12 +1,12 @@
 <script lang="ts">
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
+	import SectionCard from '#lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '#lib/components/shell/PropertyGrid.svelte';
+	import InventoryTable from '#lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '#lib/components/shell/StatusBadge.svelte';
+	import TaskTimeline from '#lib/components/shell/TaskTimeline.svelte';
 	import VMMetricsWidget from './VMMetricsWidget.svelte';
 	import { Database, Network, Activity } from 'lucide-svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	interface Props {
 		powerState: string;

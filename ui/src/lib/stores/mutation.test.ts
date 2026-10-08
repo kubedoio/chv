@@ -3,13 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // mutation.svelte.ts pulls in live-state.svelte.ts which transitively imports
 // SvelteKit modules. Mock both so this suite runs under jsdom without a
 // SvelteKit runtime, mirroring live-state.test.ts.
-vi.mock('$env/dynamic/public', () => ({
-	env: {}
+vi.mock('$app/env/public', () => ({
+	PUBLIC_CHV_API_BASE_URL: ''
 }));
 
 vi.mock('$app/navigation', () => ({
 	goto: vi.fn(),
-	invalidateAll: vi.fn()
+	refreshAll: vi.fn()
 }));
 
 import { liveState } from './live-state.svelte';

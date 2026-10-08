@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getStoredToken, clearToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
+  import { getStoredToken, clearToken } from '#lib/api/client.ts';
+  import { toast } from '#lib/stores/toast.svelte.ts';
 
   let currentPassword = '';
   let newPassword = '';
@@ -15,7 +15,7 @@
   // Redirect to login if no token is present
   onMount(() => {
     if (!getStoredToken()) {
-      goto('/login', { replaceState: true });
+      goto('/login', { replace: true });
     }
   });
 
@@ -40,7 +40,7 @@
     const token = getStoredToken();
     if (!token) {
       error = 'Session expired. Please log in again.';
-      goto('/login', { replaceState: true });
+      goto('/login', { replace: true });
       return;
     }
 
@@ -79,8 +79,8 @@
       clearToken();
 
       await goto('/login', {
-        replaceState: true,
-        invalidateAll: true
+        replace: true,
+        refreshAll: true
       });
 
       if (typeof window !== 'undefined' && window.location.pathname === '/change-password') {

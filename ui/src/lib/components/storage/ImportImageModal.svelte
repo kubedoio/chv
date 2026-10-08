@@ -2,9 +2,9 @@
 	import Modal from '../primitives/Modal.svelte';
 	import FormField from '../shared/FormField.svelte';
 	import Input from '../primitives/Input.svelte';
-	import { importImage } from '$lib/bff/images';
-	import { getStoredToken } from '$lib/api/client';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+	import { importImage } from '#lib/bff/images.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
 
 	interface Props {
 		open?: boolean;

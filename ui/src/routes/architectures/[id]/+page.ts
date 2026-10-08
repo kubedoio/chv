@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
 import { error } from '@sveltejs/kit';
-import { getStoredToken } from '$lib/api/client';
-import { getArchitecture, type Architecture } from '$lib/bff/architectures';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getArchitecture, type Architecture } from '#lib/bff/architectures.ts';
 
 export type ArchitectureDetailModel =
 	| {

@@ -1,10 +1,10 @@
 <script lang="ts">
-	import Modal from '$lib/components/primitives/Modal.svelte';
-	import { createVm } from '$lib/bff/vms';
-	import { listImages } from '$lib/bff/images';
-	import { listNetworks } from '$lib/bff/networks';
-	import { getStoredToken } from '$lib/api/client';
-	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+	import Modal from '#lib/components/primitives/Modal.svelte';
+	import { createVm } from '#lib/bff/vms.ts';
+	import { listImages } from '#lib/bff/images.ts';
+	import { listNetworks } from '#lib/bff/networks.ts';
+	import { getStoredToken } from '#lib/api/client.ts';
+	import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
 	import VmStep1Form from './VmStep1Form.svelte';
 	import VmStep2Form from './VmStep2Form.svelte';
 	import VmReviewPanel from './VmReviewPanel.svelte';

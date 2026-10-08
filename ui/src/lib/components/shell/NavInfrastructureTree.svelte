@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import {
 		ChevronDown,
 		Loader2,
@@ -8,10 +8,10 @@
 		Box,
 		MoreVertical
 	} from 'lucide-svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
-	import { selection } from '$lib/stores/selection.svelte';
+	import { liveState } from '#lib/stores/live-state.svelte.ts';
+	import { selection } from '#lib/stores/selection.svelte.ts';
 	import InstanceStatusBadge from './InstanceStatusBadge.svelte';
-	import type { InstanceTreeItem } from '$lib/api/types';
+	import type { InstanceTreeItem } from '#lib/api/types.ts';
 
 	interface Props {
 		openGroups: Record<string, boolean>;
@@ -151,7 +151,7 @@
 																{:else}
 																	{#each hostVms as vm}
 																		{@const inst = vmToTreeItem(vm)}
-																		{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
+																		{@const isVmActive = isActive(`/vms/${vm.id}`, page.url.pathname)}
 																		<div
 																			class="app-nav__instance-row group
 																			{isVmActive ? 'app-nav__tree-link--active' : 'hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] text-[var(--color-neutral-400)]'}"
@@ -188,8 +188,8 @@
 
 			<a
 				href="/vms"
-				class="app-nav__infrastructure-link {isActive('/vms', $page.url.pathname) ? 'app-nav__tree-link--active' : ''}"
-				aria-current={isActive('/vms', $page.url.pathname) ? 'page' : undefined}
+				class="app-nav__infrastructure-link {isActive('/vms', page.url.pathname) ? 'app-nav__tree-link--active' : ''}"
+				aria-current={isActive('/vms', page.url.pathname) ? 'page' : undefined}
 			>
 				<span class="app-nav__tree-spacer" aria-hidden="true"></span>
 				<Box size={12} />

@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
-import { getStoredToken } from '$lib/api/client';
-import { getSettings } from '$lib/bff/settings';
+import { getStoredToken } from '#lib/api/client.ts';
+import { getSettings } from '#lib/bff/settings.ts';
 
 export type SettingsModel = {
 	version: string;

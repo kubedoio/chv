@@ -1,4 +1,4 @@
-import { inventory } from '$lib/stores/inventory.svelte';
+import { inventory } from '#lib/stores/inventory.svelte.ts';
 
 function getVmNodeId(vm: { node_id?: string }): string {
 	return vm.node_id ?? 'unassigned';
