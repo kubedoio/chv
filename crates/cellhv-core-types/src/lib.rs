@@ -449,10 +449,11 @@ pub struct NetworkAttachmentRef {
     /// `network_desired_state.firewall_rules_json` snapshot taken when the
     /// control plane built this spec (#355). The executor applies it via nwd
     /// after the network's topology is ensured, so default-deny + the
-    /// operator's rules materialize when a network is used. Absent (or empty)
-    /// keeps the bare-table behavior: nwd's policy engine engages
-    /// default-deny even for an empty ruleset, which would cut a rule-less
-    /// network's guests off entirely (including DHCP).
+    /// operator's rules materialize when a network is used. An absent or
+    /// empty snapshot resolves to the shared DP4 baseline
+    /// (DHCP/DNS/conntrack allows + default-deny) at the attach path
+    /// (#355 PR 3) — the pre-DP4 bare-table skip and the #360
+    /// never-apply cutoff are both gone.
     ///
     /// Journal compatibility is upgrade-only: entries written by newer
     /// binaries (carrying this field) are rejected by older binaries

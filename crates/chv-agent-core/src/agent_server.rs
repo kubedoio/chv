@@ -6258,6 +6258,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_network_policy_concurrent_dispatches_cannot_regress_the_fence() {
+        // The round-1 fold's raison d'être, pinned: two concurrent
+        // dispatches to the SAME network both read the old fence mark
+        // (the guard lock is dropped across the awaited nwd apply), so
+        // a plain insert would let whichever apply finishes LAST —
+        // possibly the older generation — rewrite the high-water mark.
+        // The advance is monotonic (strictly-bigger only): whichever
+        // order the applies complete in, the fence ends at the max.
+        let (_dir, tracker, server) = policy_carrier_harness(false, None).await;
+        let rules = br#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+
+        let (newer, older) = tokio::join!(
+            drive_apply_network_policy(&server, rules, "8"),
+            drive_apply_network_policy(&server, rules, "7"),
+        );
+        newer.expect("the newer generation applies");
+        older.expect("the concurrent older dispatch acks (applies or no-ops, never fails)");
+
+        // Whichever landed, a subsequent stale dispatch must no-op:
+        // the fence must read 8, never 7.
+        let resp = drive_apply_network_policy(&server, rules, "7")
+            .await
+            .expect("the stale re-dispatch acks ok");
+        let meta = resp.into_inner().result.unwrap();
+        assert_eq!(meta.status, "ok");
+        assert!(
+            meta.human_summary.contains("stale"),
+            "generation 7 must be fenced out (the high-water mark is 8, not 7): {}",
+            meta.human_summary
+        );
+        assert!(
+            tracker.firewall_calls.lock().unwrap().len() <= 3,
+            "sanity: at most the two concurrent applies plus the fenced no-op's zero"
+        );
+    }
+
+    #[tokio::test]
     async fn apply_network_policy_failed_apply_does_not_advance_the_fence() {
         // DP7's failure half: the fence advances ONLY on a successful
         // nwd apply. A refused generation 10 must not block a

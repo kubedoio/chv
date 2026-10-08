@@ -2436,12 +2436,13 @@ mod tests {
         .expect("insert operation");
     }
 
-    /// #355: the VM spec fragment carries the network's firewall policy
-    /// snapshot — non-empty only, so the Core executor can apply
-    /// default-deny + the operator's rules at attach time. An empty
-    /// ruleset must NOT ride the spec: nwd engages default-deny even for
-    /// an empty ruleset, which would cut a rule-less network's guests
-    /// off entirely (including DHCP).
+    /// #355 DP4 (PR 3): the VM spec fragment carries the network's
+    /// firewall policy snapshot AS-IS — an empty ruleset (`[]` = no
+    /// user rules) rides the spec too, and the Core executor's attach
+    /// path resolves it (and a never-set snapshot) to the shared
+    /// BASELINE (DHCP/DNS/conntrack allows + default-deny). The
+    /// pre-DP4 filter here is what left rule-less networks
+    /// unfiltered.
     #[tokio::test]
     async fn build_agent_vm_spec_carries_network_firewall_policy_snapshot() {
         let pool = create_test_pool().await;
@@ -3821,6 +3822,23 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .await;
+        // The never-set (NULL) ruleset arm: same DP4 meaning ("no user
+        // rules" → baseline). Unreachable from the BFF producer (it
+        // journals only when firewall_rules rode the request), but the
+        // arm is generic — pin the resolution so a future producer
+        // cannot reintroduce an unfiltered skip for rule-less
+        // networks.
+        seed_network_policy_fixture(&pool, "net-np-null", None, 3).await;
+        seed_vm_with_nic(&pool, "vm-np-null", "node-np-null", "net-np-null", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-null",
+            "Network",
+            "net-np-null",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
 
         let dir = tempfile::tempdir().unwrap();
         let pattern = dir
@@ -3847,6 +3865,7 @@ mod tests {
             create_status: tonic::Status::ok(""),
         };
         spawn_mock_lifecycle_agent(&pattern, "node-np-empty", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-np-null", agent.clone());
 
         let orchestrator = test_orchestrator(&pool, &pattern);
         orchestrator.tick().await.expect("tick");
@@ -3855,27 +3874,32 @@ mod tests {
         // BASELINE + default-deny is dispatched to the attached node —
         // the pre-DP4 #360 no-op is gone, and the bytes the agent's
         // fence sees are the shared module's baseline verbatim (with
-        // the generation riding meta.desired_state_version).
+        // the generation riding meta.desired_state_version). The
+        // never-set (NULL) ruleset resolves identically.
         let calls = agent.network_policy_calls.lock().unwrap().clone();
         assert_eq!(
             calls.len(),
-            1,
-            "an empty ruleset dispatches the baseline (DP4), it does not skip"
+            2,
+            "the empty and never-set rulesets each dispatch the baseline (DP4): {calls:?}"
         );
-        assert_eq!(calls[0].network_id, "net-np-empty");
-        assert_eq!(
-            calls[0].policy_json,
-            chv_common::firewall::baseline_policy_json().into_bytes(),
-            "the dispatched bytes are the shared DP4 baseline verbatim"
-        );
-        assert_eq!(
-            calls[0]
-                .meta
-                .as_ref()
-                .map(|m| m.desired_state_version.as_str()),
-            Some("2"),
-            "the DP7 fence rides the NDS generation"
-        );
+        let mut by_network: std::collections::HashMap<&str, &proto::ApplyNetworkPolicyRequest> =
+            calls.iter().map(|c| (c.network_id.as_str(), c)).collect();
+        for (network_id, generation) in [("net-np-empty", "2"), ("net-np-null", "3")] {
+            let call = by_network
+                .remove(network_id)
+                .unwrap_or_else(|| panic!("no dispatch for {network_id}: {calls:?}"));
+            assert_eq!(
+                call.policy_json,
+                chv_common::firewall::baseline_policy_json().into_bytes(),
+                "{network_id}: the dispatched bytes are the shared DP4 baseline verbatim"
+            );
+            assert_eq!(
+                call.meta.as_ref().map(|m| m.desired_state_version.as_str()),
+                Some(generation),
+                "{network_id}: the DP7 fence rides the NDS generation"
+            );
+        }
+        assert!(by_network.is_empty(), "no unexpected dispatches: {calls:?}");
         let (status, _, _, retry_count, next_retry_at, completed_at) =
             op_row(&pool, "op-np-empty").await;
         assert_eq!(
@@ -3888,6 +3912,9 @@ mod tests {
             completed_at.is_some(),
             "the terminal write stamps completed_at"
         );
+        let (status, _, _, _, _, completed_at) = op_row(&pool, "op-np-null").await;
+        assert_eq!(status, "Succeeded", "the never-set dispatch completes too");
+        assert!(completed_at.is_some());
     }
 
     /// #355 PR 1 (DP2): a fleet network with rules but no attached VMs

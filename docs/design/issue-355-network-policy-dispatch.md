@@ -255,7 +255,12 @@ scopes stay out of scope (§6).
   nwd's policy_state is not queryable over RPC; after an agent
   restart the fence starts empty and the first dispatch applies
   (safe — the CP journals per-generation and retries the newest, and
-  nwd's apply is idempotent). The attach path needs no fence by
+  nwd's apply is idempotent). The advance is MONOTONIC (strictly-
+  bigger only, under the lock): the guard read is separated from the
+  advance write by the awaited nwd apply, so two concurrent
+  dispatches to the same network can both read the old mark — a
+  plain insert would let the slower, older generation regress the
+  high-water mark. The attach path needs no fence by
   construction: the spec assembly reads the CURRENT NDS ruleset at
   dispatch time, so an attach never applies anything older than the
   last completed operation.)*
