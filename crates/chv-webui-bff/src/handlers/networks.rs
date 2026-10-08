@@ -740,9 +740,9 @@ pub async fn update_network(
         // rode the request — other NDS-field updates (cidr, DHCP, ...)
         // bump the generation but mint no operations (they dispatch
         // nothing); a name-only update touches neither.
-        // An empty ruleset (`[]`) journals too: it is a real mutation,
-        // and the dispatch leg no-ops it (Succeeded) until PR 3 lands
-        // the ruled DP4 baseline.
+        // An empty ruleset (`[]`) journals too: it is a real mutation —
+        // the DP4 baseline dispatches (a cleared network is a live,
+        // FILTERED network, DP5), never a bare default-deny.
         policy_operation_id = if firewall_rules_json.is_some() {
             let operation_id = chv_common::gen_short_id();
             let idempotency_key =
@@ -806,12 +806,13 @@ pub async fn update_network(
             .map(chv_common::firewall_ruleset_is_empty)
             .unwrap_or(false);
         let summary = if cleared {
-            // Honest until PR 3 lands the ruled DP4 baseline: the
-            // journaled task completes as a no-op, and a policy
-            // previously applied on a live node (if any) stays in
-            // force.
-            "Firewall policy cleared; empty rulesets apply no policy until the \
-             #355 baseline lands (a previously applied policy, if any, stays in force)"
+            // DP5 (#355 PR 3): a clear to `[]` is baseline-only — a
+            // live, FILTERED network (DHCP/DNS/conntrack allowed,
+            // default-deny otherwise), not a teardown and not the
+            // pre-baseline stale-policy residual.
+            "Firewall policy cleared to the baseline (DHCP/DNS/conntrack allowed, \
+             default-deny otherwise); applies on every node with an attached VM \
+             on this network"
         } else {
             "Firewall policy update accepted; applies on every node with an \
              attached VM on this network"

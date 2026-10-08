@@ -16,9 +16,9 @@
 //! - an update carrying `firewall_rules` journals the per-generation
 //!   operation and answers with the task shape (field-by-field);
 //! - the network detail's `last_task` resolves to the policy operation;
-//! - clearing (`[]`) mints its own per-generation task with an honest
-//!   summary (the dispatch leg no-ops it until the DP4 baseline lands,
-//!   PR 3 — a previously applied policy stays in force);
+//! - clearing (`[]`) mints its own per-generation task whose dispatch
+//!   carries the DP4 baseline (DHCP/DNS/conntrack + default-deny), with
+//!   a summary naming the DP5 clear semantics;
 //! - an update without firewall fields journals nothing and keeps the
 //!   read-after-write detail response;
 //! - the save-time vocabulary/rejection gates (the M4.4 N7 class) are
@@ -404,12 +404,13 @@ async fn update_network_journals_and_returns_the_policy_task() {
 }
 
 #[tokio::test]
-async fn update_network_clearing_rules_journals_the_noop_task() {
-    // The clear story (#355 PR 2): `[]` is a real mutation — it
-    // journals an `UpdateNetworkPolicy` task (the PR 1 dispatch leg
-    // completes it as a no-op Succeeded until PR 3 lands the ruled
-    // DP4 baseline), and the response's summary says so honestly: a
-    // policy previously applied on a live node stays in force.
+async fn update_network_clearing_rules_journals_the_baseline_task() {
+    // The clear story (#355 PR 3, DP5): `[]` is a real mutation — it
+    // journals an `UpdateNetworkPolicy` task that dispatches the DP4
+    // BASELINE (DHCP/DNS/conntrack allows + default-deny) to every
+    // attached node, and the response's summary says so: a cleared
+    // network is a live, FILTERED network, not a teardown and not the
+    // pre-baseline stale-policy residual.
     let state = build_state().await;
     let token = seed_jwt(&state).await;
     seed_node(&state).await;
@@ -448,8 +449,12 @@ async fn update_network_clearing_rules_journals_the_noop_task() {
         "the summary must identify the update as a clear: {summary}"
     );
     assert!(
-        summary.contains("stays in force"),
-        "the summary must state the stale-policy residual (honest until the DP4 baseline lands): {summary}"
+        summary.contains("baseline"),
+        "the summary must name the DP5 semantics (baseline-only, not a teardown, not a stale residual): {summary}"
+    );
+    assert!(
+        summary.contains("applies on every node"),
+        "the summary states the dispatch semantics: {summary}"
     );
     // The clear journaled its own per-generation task.
     let ops: Vec<(String, String)> = sqlx::query_as(

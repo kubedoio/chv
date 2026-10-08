@@ -1554,20 +1554,19 @@ impl Orchestrator {
             );
             return self.mark_network_policy_succeeded(operation_id).await;
         }
-        // #360 discipline (unchanged by this PR): a semantically empty
-        // ruleset is never dispatched — nwd's engine would engage
-        // default-deny with zero allows and cut the network's guests
-        // off (including DHCP). PR 3 flips this at the policy boundary
-        // (DP4, ruled 2026-10-08: `[]` = no user rules → baseline
-        // allows + default-deny).
-        let ruleset = firewall_rules_json.filter(|p| !chv_common::firewall_ruleset_is_empty(p));
-        let Some(policy_json) = ruleset else {
-            info!(
-                operation_id = operation_id,
-                network_id = network_id,
-                "network policy update: empty ruleset; no-op success (until the #355 baseline lands)"
-            );
-            return self.mark_network_policy_succeeded(operation_id).await;
+        // DP4 (ruled 2026-10-08, #355 PR 3): `[]` — and a never-set
+        // ruleset — mean "no user rules", and the boundary is the
+        // shared BASELINE (DHCP UDP 67/68, DNS UDP/TCP 53, conntrack
+        // from the engine) on top of default-deny. This replaces the
+        // #360 workaround (a semantically empty ruleset was never
+        // dispatched, because nwd's engine engages default-deny with
+        // zero allows and would cut the network's guests off): the
+        // baseline keeps DHCP/DNS alive inside the boundary, so empty
+        // dispatches instead of skipping. The agent's carrier handler
+        // resolves the same baseline belt-and-suspenders.
+        let policy_json = match firewall_rules_json {
+            Some(p) if !chv_common::firewall_ruleset_is_empty(&p) => p,
+            _ => chv_common::firewall::baseline_policy_json(),
         };
 
         // DP2 target set: distinct nodes with at least one NIC of a
@@ -1968,12 +1967,15 @@ impl Orchestrator {
                     (
                         nr.cidr.unwrap_or_default(),
                         nr.gateway.unwrap_or_default(),
-                        // Only carry a SEMANTICALLY non-empty snapshot
-                        // (#355): an empty ruleset must not ride the spec
-                        // — nwd would engage default-deny with no allow
-                        // rules and cut the network's guests off.
-                        nr.firewall_rules_json
-                            .filter(|p| !chv_common::firewall_ruleset_is_empty(p)),
+                        // #355 DP4: the snapshot rides the spec AS-IS —
+                        // an empty ruleset (`[]` = no user rules) is no
+                        // longer filtered out here; the Core executor's
+                        // attach path resolves it (and a never-set
+                        // snapshot) to the shared BASELINE +
+                        // default-deny, so a rule-less network gets a
+                        // filtered boundary at materialization instead
+                        // of the pre-DP4 unfiltered skip.
+                        nr.firewall_rules_json,
                     ),
                 );
             }
@@ -2504,9 +2506,10 @@ mod tests {
         );
         assert_eq!(
             by_network("net-bare")["firewall_policy_json"].as_str(),
-            None,
-            "an empty ruleset must NOT ride the spec (default-deny with no allows \
-             would cut the network's guests off)"
+            Some("[]"),
+            "an empty ruleset rides the spec AS-IS (#355 DP4): the Core executor's \
+             attach path resolves it to the shared baseline + default-deny — the \
+             pre-DP4 filter here is what left rule-less networks unfiltered"
         );
     }
 
@@ -3805,7 +3808,7 @@ mod tests {
     /// semantics (DP4, ruled 2026-10-08: `[]` = baseline +
     /// default-deny).
     #[tokio::test]
-    async fn update_network_policy_empty_ruleset_is_a_noop_success() {
+    async fn update_network_policy_empty_ruleset_dispatches_the_dp4_baseline() {
         let pool = create_test_pool().await;
         seed_network_policy_fixture(&pool, "net-np-empty", Some("[]"), 2).await;
         seed_vm_with_nic(&pool, "vm-np-empty", "node-np-empty", "net-np-empty", None).await;
@@ -3848,13 +3851,37 @@ mod tests {
         let orchestrator = test_orchestrator(&pool, &pattern);
         orchestrator.tick().await.expect("tick");
 
-        assert!(
-            agent.network_policy_calls.lock().unwrap().is_empty(),
-            "an empty ruleset must never be dispatched (the #360 discipline)"
+        // DP4 (ruled 2026-10-08): `[]` = no user rules → the shared
+        // BASELINE + default-deny is dispatched to the attached node —
+        // the pre-DP4 #360 no-op is gone, and the bytes the agent's
+        // fence sees are the shared module's baseline verbatim (with
+        // the generation riding meta.desired_state_version).
+        let calls = agent.network_policy_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "an empty ruleset dispatches the baseline (DP4), it does not skip"
+        );
+        assert_eq!(calls[0].network_id, "net-np-empty");
+        assert_eq!(
+            calls[0].policy_json,
+            chv_common::firewall::baseline_policy_json().into_bytes(),
+            "the dispatched bytes are the shared DP4 baseline verbatim"
+        );
+        assert_eq!(
+            calls[0]
+                .meta
+                .as_ref()
+                .map(|m| m.desired_state_version.as_str()),
+            Some("2"),
+            "the DP7 fence rides the NDS generation"
         );
         let (status, _, _, retry_count, next_retry_at, completed_at) =
             op_row(&pool, "op-np-empty").await;
-        assert_eq!(status, "Succeeded", "the no-op completes, it does not fail");
+        assert_eq!(
+            status, "Succeeded",
+            "the dispatch completes, it does not fail"
+        );
         assert_eq!(retry_count, 0);
         assert_eq!(next_retry_at, None);
         assert!(

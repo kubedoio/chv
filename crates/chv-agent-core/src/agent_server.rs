@@ -14,7 +14,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct AgentServer {
@@ -36,6 +36,20 @@ pub struct AgentServer {
     /// observe failures of long-running migration tasks. The registry closes
     /// that gap. See [`MigrationTaskRegistry`] and ADR-008 / ADR-009.
     pub migration_tasks: Arc<MigrationTaskRegistry>,
+    /// #355 PR 3 (DP7 — dispatch fencing): the last APPLIED network
+    /// policy generation per network id. A dispatch whose
+    /// `meta.desired_state_version` parses below the recorded
+    /// generation is an idempotent no-op Ack, so an out-of-order
+    /// fan-out result (or a retry of an older operation after a newer
+    /// one succeeded) can never regress a newer policy with an older
+    /// one. In-memory by design (nwd's policy_state is not queryable
+    /// over RPC): after an agent restart the fence starts empty and
+    /// the first dispatch applies — safe, because the CP journals
+    /// operations per-generation and retries the newest, and nwd's
+    /// apply is idempotent. Entries advance ONLY on successful nwd
+    /// applies (a failed generation must not block an older one that
+    /// still matches the last applied state).
+    pub network_policy_fence: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
     pub core_authority: Option<cellhv_core_operations::AuthorityHandle>,
 }
 
@@ -57,6 +71,9 @@ impl AgentServer {
             runtime_dir,
             stord_backend: crate::stord_backend::StordBackendInfo::default(),
             migration_tasks: Arc::new(MigrationTaskRegistry::new()),
+            network_policy_fence: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             core_authority: None,
         }
     }
@@ -735,8 +752,11 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 // #360: only dispatch a SEMANTICALLY non-empty ruleset —
                 // nwd's engine engages default-deny even for an empty
                 // ruleset, which would cut a rule-less network's guests
-                // off entirely (including DHCP). Same predicate the
-                // core-managed path (orchestrator spec assembly) uses.
+                // off entirely (including DHCP). #355 PR 3 note: the
+                // core-managed paths no longer share this predicate —
+                // they resolve the DP4 baseline for empty rulesets —
+                // but the legacy path keeps the #360 skip (design §6:
+                // legacy paths unchanged).
                 if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(&policy_json)) {
                     warn!(network_id = %inner.network_id, "skipping empty firewall ruleset: applying it would engage default-deny with zero allows");
                 } else if let Err(e) = nwd
@@ -1556,20 +1576,51 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 "policy_json must be a JSON array of firewall rules",
             ));
         }
-        // #360 discipline (unchanged by this PR): a semantically empty
-        // ruleset is a NO-OP, never a bare default-deny — nwd's engine
-        // engages default-deny even for `[]`, which would cut the
-        // network's guests off entirely (including DHCP). PR 3 of the
-        // #355 decomposition flips this at the policy boundary (DP4,
-        // ruled 2026-10-08: `[]` = no user rules → baseline
-        // DHCP/DNS/conntrack allows + default-deny), which is where
-        // the empty case stops meaning "no policy". The orchestrator
-        // filters empty rulesets before dispatching, so this branch is
-        // unreachable from the CP fan-out — the redundancy is
-        // intentional belt-and-suspenders: a direct RPC caller (or a
-        // future second producer) gets the same fail-safe, not a
-        // network blackout.
-        if chv_common::firewall_ruleset_is_empty(&String::from_utf8_lossy(&inner.policy_json)) {
+        // DP4 (ruled 2026-10-08): `[]` = no user rules → the shared
+        // BASELINE (DHCP UDP 67/68, DNS UDP/TCP 53, conntrack from the
+        // engine) on top of default-deny — replacing the pre-DP4 no-op
+        // (the #360 cutoff: a bare default-deny with zero allows would
+        // cut the network's guests off entirely, which is why empty
+        // used to mean "never apply"). The orchestrator resolves the
+        // same baseline before dispatching, so this branch is
+        // belt-and-suspenders for a direct RPC caller (or a future
+        // second producer): everyone gets the DP4 boundary, never a
+        // blackout, never an unfiltered skip.
+        let policy_json: Vec<u8> = if chv_common::firewall_ruleset_is_empty(
+            &String::from_utf8_lossy(&inner.policy_json),
+        ) {
+            chv_common::firewall::baseline_policy_json().into_bytes()
+        } else {
+            inner.policy_json.clone()
+        };
+        // DP7 — dispatch fencing (#355 PR 3): `desired_state_version`
+        // carries the NDS generation (the carrier sends it numeric).
+        // Parse it AS A NUMBER — never string-compare ("policy-9" vs
+        // "policy-10" sorts the wrong way) — and no-op any dispatch
+        // below the last APPLIED generation for this network, so an
+        // out-of-order fan-out result or an older operation's retry
+        // cannot regress a newer policy. Unparseable versions fail
+        // closed (the CP is a trusted-but-buggy peer).
+        let requested_generation: u64 = meta.desired_state_version.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "desired_state_version '{}' is not a numeric generation (the DP7 fence)",
+                meta.desired_state_version
+            ))
+        })?;
+        let last_applied: u64 = self
+            .network_policy_fence
+            .lock()
+            .await
+            .get(&inner.network_id)
+            .copied()
+            .unwrap_or(0);
+        if requested_generation < last_applied {
+            info!(
+                network_id = %inner.network_id,
+                requested_generation,
+                last_applied,
+                "network policy dispatch is stale; idempotent no-op"
+            );
             let observed_generation = {
                 let cache = self.cache.lock().await;
                 cache.observed_generation.clone()
@@ -1580,9 +1631,10 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     status: "ok".to_string(),
                     node_observed_generation: observed_generation,
                     error_code: "".to_string(),
-                    human_summary:
-                        "network policy unchanged (empty ruleset is a no-op until the #355 baseline lands)"
-                            .to_string(),
+                    human_summary: format!(
+                        "network policy unchanged (generation {requested_generation} is stale; \
+                         generation {last_applied} is already applied)"
+                    ),
                 }),
             }));
         }
@@ -1609,11 +1661,18 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         nwd.set_firewall_policy_checked(
             &inner.network_id,
             &policy_version,
-            inner.policy_json.clone(),
+            policy_json,
             Some(&meta.operation_id),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        // DP7: the fence advances ONLY on a successful apply — a
+        // failed generation must not block a subsequent dispatch of an
+        // older generation that still matches the last applied state.
+        self.network_policy_fence
+            .lock()
+            .await
+            .insert(inner.network_id.clone(), requested_generation);
         let observed_generation = {
             let cache = self.cache.lock().await;
             cache.observed_generation.clone()
@@ -5695,8 +5754,10 @@ mod tests {
         /// answers the nwd semantic-failure shape — a gRPC `Ok`
         /// wrapping an `err_result` — so tests can pin that the
         /// carrier surfaces the refusal instead of acking a false
-        /// success.
-        firewall_failure: Option<(String, String)>,
+        /// success. PR 3: ONE-SHOT (taken on first fire) so a test
+        /// can pin recovery behavior — a refused apply followed by a
+        /// successful one.
+        firewall_failure: Arc<std::sync::Mutex<Option<(String, String)>>>,
     }
 
     #[tonic::async_trait]
@@ -5778,11 +5839,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((inner.network_id, policy_json));
-            if let Some((error_code, human_summary)) = &self.firewall_failure {
+            if let Some((error_code, human_summary)) = self.firewall_failure.lock().unwrap().take()
+            {
                 return Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                     status: "error".to_string(),
-                    error_code: error_code.clone(),
-                    human_summary: human_summary.clone(),
+                    error_code,
+                    human_summary,
                 }));
             }
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
@@ -5888,7 +5950,7 @@ mod tests {
                         chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
                             MockNetworkPolicyNwd {
                                 tracker,
-                                firewall_failure: None,
+                                firewall_failure: Arc::new(std::sync::Mutex::new(None)),
                             },
                         ),
                     )
@@ -5991,7 +6053,7 @@ mod tests {
         );
     }
 
-    /// Drives the #355 PR 1 carrier (`apply_network_policy`) against a
+    /// Drives the #355 carrier (`apply_network_policy`) against a
     /// recording mock nwd and returns the tracker plus the raw tonic
     /// result, so tests can pin both the applied bytes and the
     /// boundary failures. `core_managed` constructs the server with a
@@ -6006,6 +6068,20 @@ mod tests {
         NetworkPolicyTracker,
         Result<Response<proto::AckResponse>, Status>,
     ) {
+        let (_dir, tracker, server) = policy_carrier_harness(core_managed, nwd_rejects_with).await;
+        let result = drive_apply_network_policy(&server, firewall_rules, "7").await;
+        (tracker, result)
+    }
+
+    /// Builds the #355 PR 3 carrier harness: a recording mock nwd on a
+    /// temp socket plus an AgentServer wired to it. The DP7 fence tests
+    /// reuse the SAME server across multiple requests — the fence is
+    /// server state. The returned `TempDir` owns the socket; bind it
+    /// (`_dir`) for the test's duration.
+    async fn policy_carrier_harness(
+        core_managed: bool,
+        nwd_rejects_with: Option<(String, String)>,
+    ) -> (tempfile::TempDir, NetworkPolicyTracker, AgentServer) {
         let dir = tempfile::tempdir().unwrap();
         let nwd_socket = dir.path().join("nwd.sock");
         let tracker = NetworkPolicyTracker::default();
@@ -6019,7 +6095,7 @@ mod tests {
                         chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
                             MockNetworkPolicyNwd {
                                 tracker,
-                                firewall_failure: nwd_rejects_with,
+                                firewall_failure: Arc::new(std::sync::Mutex::new(nwd_rejects_with)),
                             },
                         ),
                     )
@@ -6045,19 +6121,27 @@ mod tests {
         if core_managed {
             server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
         }
+        (dir, tracker, server)
+    }
 
+    /// One `apply_network_policy` request against `server`, with a
+    /// controllable DP7 generation (`desired_state_version`).
+    async fn drive_apply_network_policy(
+        server: &AgentServer,
+        firewall_rules: &[u8],
+        generation: &str,
+    ) -> Result<Response<proto::AckResponse>, Status> {
         let req = proto::ApplyNetworkPolicyRequest {
-            meta: Some(test_meta("7")),
+            meta: Some(test_meta(generation)),
             node_id: "node-1".to_string(),
             network_id: "net-1".to_string(),
             policy_json: firewall_rules.to_vec(),
         };
-        let result = proto::lifecycle_service_server::LifecycleService::apply_network_policy(
-            &server,
+        proto::lifecycle_service_server::LifecycleService::apply_network_policy(
+            server,
             Request::new(req),
         )
-        .await;
-        (tracker, result)
+        .await
     }
 
     #[tokio::test]
@@ -6078,19 +6162,147 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_network_policy_skips_empty_ruleset() {
-        // #360 discipline (unchanged by PR 1): a semantically empty
-        // ruleset never reaches nwd — default-deny with zero allows
-        // would cut the network's guests off. The ack's summary pins
-        // the skip so an early abort cannot pass vacuously.
+    async fn apply_network_policy_applies_the_dp4_baseline_for_empty_rulesets() {
+        // DP4 (ruled 2026-10-08, #355 PR 3): `[]` is no longer a skip —
+        // it means "no user rules" and the shared BASELINE (DHCP
+        // UDP 67/68, DNS UDP/TCP 53) applies on top of default-deny,
+        // replacing the #360 never-apply cutoff. The applied bytes are
+        // the shared module's baseline verbatim, so every producer
+        // (orchestrator arm, direct RPC caller) feeds nwd the same
+        // policy.
         let (tracker, result) = apply_network_policy_with_rules(b"[]", false, None).await;
-        let resp = result.expect("an empty ruleset must still ack ok (a no-op, not a failure)");
+        let resp = result.expect("an empty ruleset must still ack ok (baseline, not a failure)");
         let result_meta = resp.into_inner().result.expect("ack carries result meta");
         assert_eq!(result_meta.status, "ok");
-        assert!(result_meta.human_summary.contains("empty ruleset"));
+        assert_eq!(result_meta.human_summary, "network policy applied");
+        let baseline = chv_common::firewall::baseline_policy_json();
+        let firewall_calls = tracker.firewall_calls.lock().unwrap();
+        assert_eq!(
+            firewall_calls.len(),
+            1,
+            "an empty ruleset dispatches the baseline to nwd"
+        );
+        assert_eq!(firewall_calls[0].0, "net-1");
+        assert_eq!(
+            firewall_calls[0].1,
+            baseline.into_bytes(),
+            "the applied bytes are the shared DP4 baseline verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_network_policy_noops_stale_generations() {
+        // DP7 (#355 PR 3): a dispatch whose generation is BELOW the
+        // last applied generation for the network is an idempotent
+        // no-op — an out-of-order fan-out result or an older
+        // operation's retry must never regress a newer policy. The
+        // generation is compared NUMERICALLY (never string-wise).
+        let (_dir, tracker, server) = policy_carrier_harness(false, None).await;
+        let rules = br#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+
+        // Generation 10 applies (fresh fence).
+        let resp = drive_apply_network_policy(&server, rules, "10")
+            .await
+            .expect("generation 10 must apply");
+        assert_eq!(
+            resp.into_inner().result.unwrap().human_summary,
+            "network policy applied"
+        );
+
+        // Generation 9 — numerically lower, LEXICOGRAPHICALLY higher
+        // ("9" > "10" as a string) — must no-op without touching nwd.
+        let resp = drive_apply_network_policy(&server, rules, "9")
+            .await
+            .expect("a stale dispatch acks ok (idempotent no-op, not a failure)");
+        let meta = resp.into_inner().result.unwrap();
+        assert_eq!(meta.status, "ok");
+        assert!(
+            meta.human_summary.contains("stale"),
+            "the ack names the fence: {}",
+            meta.human_summary
+        );
+
+        // Generation 10 again (equal) re-applies idempotently (nwd's
+        // apply is idempotent; the fence only blocks REGRESSION).
+        let resp = drive_apply_network_policy(&server, rules, "10")
+            .await
+            .expect("an equal generation re-applies");
+        assert_eq!(
+            resp.into_inner().result.unwrap().human_summary,
+            "network policy applied"
+        );
+
+        // Generation 11 applies (advance).
+        let resp = drive_apply_network_policy(&server, rules, "11")
+            .await
+            .expect("a newer generation applies");
+        assert_eq!(
+            resp.into_inner().result.unwrap().human_summary,
+            "network policy applied"
+        );
+
+        let firewall_calls = tracker.firewall_calls.lock().unwrap();
+        assert_eq!(
+            firewall_calls.len(),
+            3,
+            "exactly the non-stale dispatches reached nwd (10, 10, 11): {firewall_calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_network_policy_failed_apply_does_not_advance_the_fence() {
+        // DP7's failure half: the fence advances ONLY on a successful
+        // nwd apply. A refused generation 10 must not block a
+        // subsequent generation 9 (which still matches the last
+        // applied state) — the refusal surfaces, the fence stays.
+        let (_dir, tracker, server) = policy_carrier_harness(
+            false,
+            Some((
+                "policy_engine_failure".to_string(),
+                "engine refused".to_string(),
+            )),
+        )
+        .await;
+        let rules = br#"[{"direction":"inbound","action":"accept","protocol":"icmp"}]"#;
+
+        let err = drive_apply_network_policy(&server, rules, "10")
+            .await
+            .expect_err("the nwd refusal must surface (never a false ack)");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        // Generation 9 still applies: the failed 10 never became the
+        // fence.
+        let resp = drive_apply_network_policy(&server, rules, "9")
+            .await
+            .expect("generation 9 applies after 10's refusal");
+        assert_eq!(
+            resp.into_inner().result.unwrap().human_summary,
+            "network policy applied"
+        );
+        // Both calls reached nwd (the mock records the refused one
+        // too); the pin is the FENCE behavior, not the call count.
+        assert_eq!(
+            tracker.firewall_calls.lock().unwrap().len(),
+            2,
+            "the refused generation-10 apply and the successful generation-9 apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_network_policy_rejects_non_numeric_generation() {
+        // DP7 fail-closed: `desired_state_version` must parse as a
+        // numeric generation — the carrier sends the NDS generation.
+        // A non-numeric version is a buggy peer and gets an
+        // invalid_argument BEFORE any nwd call (never a string
+        // comparison, never a silent apply).
+        let (_dir, tracker, server) = policy_carrier_harness(false, None).await;
+        let err = drive_apply_network_policy(&server, b"[]", "policy-abc")
+            .await
+            .expect_err("a non-numeric generation must fail closed");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(
             tracker.firewall_calls.lock().unwrap().is_empty(),
-            "an empty ruleset must never be dispatched to nwd's set_firewall_policy"
+            "a rejected generation must never reach nwd"
         );
     }
 
