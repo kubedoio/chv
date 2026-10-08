@@ -6,7 +6,9 @@ use chv_stord_api::chv_stord_api::{
     BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
     RoundStart,
 };
-use chv_stord_backends::{StorageBackend, DIRTY_TRACKING_BLOCK_SIZE};
+use chv_stord_backends::{
+    StorageBackend, WriteCanaryCapability, WriteCanaryFingerprint, DIRTY_TRACKING_BLOCK_SIZE,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -15,6 +17,13 @@ use tracing::{debug, error, info, warn};
 // Metric names for storage migration operations.
 const STORD_MIGRATION_BYTES_SENT_TOTAL: &str = "chv_stord_migration_bytes_sent_total";
 const STORD_MIGRATION_ERRORS_TOTAL: &str = "chv_stord_migration_errors_total";
+
+/// Distinct error token for the write-canary failure (issue #394,
+/// Option A). Surfaces in the task's `error_message` and the agent's
+/// migration-failure log line, so operators can tell "the source was
+/// written during migration" (retry with the VM quiesced) apart from a
+/// finalize-time digest mismatch.
+const SOURCE_MODIFIED_CODE: &str = "source_modified_during_migration";
 
 /// Default migration block size: must equal the backends' dirty-tracking
 /// block size so bitmap bits map 1:1 to migration chunks.
@@ -64,6 +73,13 @@ pub struct MigrationSender<B: StorageBackend> {
     backpressure_factor: f32,
     /// Optional shared task state for progress reporting and VM-pause coordination.
     task: Option<Arc<MigrationTask>>,
+    /// Migration-start stat fingerprint of the source's backing store
+    /// (issue #394, Option A). `None` means the backend reported
+    /// [`WriteCanaryCapability::Unavailable`] (or the migration has not
+    /// sampled yet): no early write detection, the #392 finalize digest
+    /// remains the only (late) correctness gate — the pre-canary
+    /// behavior.
+    canary_baseline: Option<WriteCanaryFingerprint>,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -78,6 +94,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             tls_config: None,
             backpressure_factor: 1.0,
             task: None,
+            canary_baseline: None,
         }
     }
 
@@ -252,6 +269,49 @@ impl<B: StorageBackend> MigrationSender<B> {
             }
         }
 
+        // Write canary baseline (issue #394, Option A): sample the
+        // source's backing-store stat immediately before any bytes are
+        // read. Every later re-check (dirty-round boundaries, the
+        // pre-pause gate) compares against this sample; a change means
+        // the source was written during the migration — writes the
+        // dirty bitmap provably cannot account for (#394 R1) — and the
+        // migration fails *here*, not after a full wasted transfer.
+        // Backends that cannot stat-observe writes (block devices,
+        // RADOS) report Unavailable and we proceed exactly as before:
+        // the #392 finalize digest remains the correctness gate.
+        let baseline = self
+            .backend
+            .write_canary_probe(&self.volume_id, &self.handle)
+            .await
+            .map_err(|e| {
+                // Fail closed: a probe error means the backing store
+                // cannot be stat'ed, in which case bulk copy's reads
+                // would fail too. Never silently disable the canary.
+                let status =
+                    tonic::Status::internal(format!("failed to probe source write canary: {e}"));
+                if let Some(ref task) = self.task {
+                    task.mark_failed(status.message().to_string());
+                }
+                status
+            })?;
+        match baseline.capability {
+            WriteCanaryCapability::FileStat => {
+                self.canary_baseline = Some(baseline);
+                info!(
+                    volume_id = %self.volume_id,
+                    "source write canary armed (file-stat fingerprint)"
+                );
+            }
+            WriteCanaryCapability::Unavailable { ref reason } => {
+                warn!(
+                    volume_id = %self.volume_id,
+                    reason = %reason,
+                    "source write canary unavailable on this backend; concurrent source writes \
+                     will only be caught by the finalize digest (fail-late, #394 R3)"
+                );
+            }
+        }
+
         // Bulk copy phase
         if let Some(ref task) = self.task {
             let mut state = task.state.write().await;
@@ -280,6 +340,16 @@ impl<B: StorageBackend> MigrationSender<B> {
             dirty_chunks,
             "dirty sync rounds complete"
         );
+
+        // Pre-pause gate (issue #394, Option A): the last canary
+        // re-check, immediately before the pause handshake is
+        // requested. Failing here means the VM was never paused — no
+        // resume is needed, the agent's failure handling observes the
+        // Failed phase. The residual window *after* this check (writes
+        // landing between here and the pause completing) is covered by
+        // the post-pause whole-volume digest below: fail-closed, just
+        // later.
+        self.verify_source_canary().await?;
 
         // If a task is attached, we coordinate with the agent: wait for VM pause
         // before sending FinalSync.
@@ -527,6 +597,15 @@ impl<B: StorageBackend> MigrationSender<B> {
     /// Each round fetches the dirty bitmap, sends dirty blocks, waits for acknowledgment,
     /// then clears the bitmap. Repeats until dirty count drops below DIRTY_THRESHOLD
     /// or MAX_DIRTY_ROUNDS is reached.
+    ///
+    /// **What these rounds can and cannot see (#394 R1):** the bitmap is
+    /// stord-private state marked only by the backend's `write_block`,
+    /// and in production nothing calls `write_block` on a *source*
+    /// volume during migration (the only product caller is the
+    /// migration receiver, on the destination). Guest or host writes
+    /// that bypass stord are invisible to these rounds — which is why
+    /// every round boundary (and the pre-pause gate) re-checks the
+    /// write canary and fails the migration if the source's stat moved.
     async fn dirty_sync_rounds(
         &mut self,
         tx: &mpsc::Sender<MigrationMessage>,
@@ -537,6 +616,11 @@ impl<B: StorageBackend> MigrationSender<B> {
         let mut total_dirty_chunks: u32 = 0;
 
         for round in 1..=MAX_DIRTY_ROUNDS {
+            // Round boundary (issue #394, Option A): re-check the write
+            // canary before snapshotting the bitmap. Round 1's check is
+            // the end-of-bulk-copy boundary.
+            self.verify_source_canary().await?;
+
             if let Some(ref task) = self.task {
                 let mut state = task.state.write().await;
                 state.convergence_round = round;
@@ -701,6 +785,59 @@ impl<B: StorageBackend> MigrationSender<B> {
         }
 
         Ok(total_dirty_chunks)
+    }
+
+    /// Re-check the source write canary against the migration-start
+    /// baseline (issue #394, Option A).
+    ///
+    /// A no-op when the canary is unavailable on this backend (no
+    /// baseline was sampled). A stat change fails the migration with
+    /// `failed_precondition` carrying the distinct
+    /// [`SOURCE_MODIFIED_CODE`] token; a probe error fails closed with
+    /// `internal` rather than silently disarming the canary.
+    async fn verify_source_canary(&self) -> Result<(), tonic::Status> {
+        let Some(baseline) = self.canary_baseline.as_ref() else {
+            return Ok(());
+        };
+        let current = self
+            .backend
+            .write_canary_probe(&self.volume_id, &self.handle)
+            .await
+            .map_err(|e| {
+                // `mark_failed` (try_write) rather than the async-lock
+                // write the stat-change branch uses: this closure is
+                // not async. Both paths end Failed; if the lock is
+                // contended the handlers' spawn wrapper re-marks the
+                // task from the returned status.
+                let status =
+                    tonic::Status::internal(format!("failed to probe source write canary: {e}"));
+                if let Some(ref task) = self.task {
+                    task.mark_failed(status.message().to_string());
+                }
+                status
+            })?;
+        if current.stat_matches(baseline) {
+            return Ok(());
+        }
+        metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => SOURCE_MODIFIED_CODE)
+            .increment(1);
+        let status = tonic::Status::failed_precondition(format!(
+            "{SOURCE_MODIFIED_CODE}: the source volume's backing store changed during migration \
+             (stat differs from the migration-start sample) — concurrent-write (live) migration \
+             is unsupported; the migration was aborted before the VM pause instead of failing \
+             at the finalize digest after a full transfer. Retry with the source quiesced."
+        ));
+        error!(
+            volume_id = %self.volume_id,
+            code = SOURCE_MODIFIED_CODE,
+            "source modified during migration; failing fast"
+        );
+        if let Some(ref task) = self.task {
+            let mut state = task.state.write().await;
+            state.phase = MigrationPhase::Failed;
+            state.error_message = status.message().to_string();
+        }
+        Err(status)
     }
 
     /// Block until an Ack is received from the inbound stream.
@@ -871,7 +1008,32 @@ mod tests {
     use chv_stord_backends::{BackendHealth, StorageBackend, VolumeExport};
 
     /// Minimal mock backend for testing the MigrationSender without real I/O.
-    struct MockBackend;
+    struct MockBackend {
+        /// Fingerprint returned by `write_canary_probe`; defaults to
+        /// Unavailable so canary-unaware tests behave as before.
+        canary_probe: std::sync::Mutex<WriteCanaryFingerprint>,
+    }
+
+    impl MockBackend {
+        fn new() -> Self {
+            Self {
+                canary_probe: std::sync::Mutex::new(WriteCanaryFingerprint {
+                    capability: WriteCanaryCapability::Unavailable {
+                        reason: "mock backend has no canary".to_string(),
+                    },
+                    mtime_sec: 0,
+                    mtime_nsec: 0,
+                    ctime_sec: 0,
+                    ctime_nsec: 0,
+                    size: 0,
+                }),
+            }
+        }
+
+        fn set_canary_probe(&self, fingerprint: WriteCanaryFingerprint) {
+            *self.canary_probe.lock().unwrap() = fingerprint;
+        }
+    }
 
     #[async_trait]
     impl StorageBackend for MockBackend {
@@ -1015,11 +1177,19 @@ mod tests {
         ) -> Result<VolumeExport, ChvError> {
             unimplemented!("not needed for sender tests")
         }
+
+        async fn write_canary_probe(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+        ) -> Result<WriteCanaryFingerprint, ChvError> {
+            Ok(self.canary_probe.lock().unwrap().clone())
+        }
     }
 
     #[tokio::test]
     async fn test_mtls_required_for_migration() {
-        let backend = Arc::new(MockBackend);
+        let backend = Arc::new(MockBackend::new());
         let sender = MigrationSender::new(backend, "vol-123".to_string(), "handle-abc".to_string());
 
         // Attempt migration without TLS configured
@@ -1073,7 +1243,7 @@ mod tests {
 
     #[test]
     fn test_backpressure_factor_initialization() {
-        let backend = Arc::new(MockBackend);
+        let backend = Arc::new(MockBackend::new());
         let sender = MigrationSender::new(backend, "vol-456".to_string(), "handle-def".to_string());
 
         // backpressure_factor is private, but we can verify behavior through
@@ -1085,7 +1255,7 @@ mod tests {
 
     #[test]
     fn test_sender_with_block_size() {
-        let backend = Arc::new(MockBackend);
+        let backend = Arc::new(MockBackend::new());
         let sender = MigrationSender::new(backend, "vol-789".to_string(), "handle-ghi".to_string())
             .with_block_size(8_388_608); // 8 MB
 
@@ -1130,5 +1300,102 @@ mod tests {
         assert!(is_all_zeros(&[]));
         assert!(!is_all_zeros(&[0, 0, 1, 0]));
         assert!(!is_all_zeros(&[255]));
+    }
+
+    // -----------------------------------------------------------------
+    // Write canary (#394, Option A)
+    // -----------------------------------------------------------------
+
+    fn file_stat_fingerprint(mtime_sec: i64, size: u64) -> WriteCanaryFingerprint {
+        WriteCanaryFingerprint {
+            capability: WriteCanaryCapability::FileStat,
+            mtime_sec,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            size,
+        }
+    }
+
+    /// No baseline (backend reported Unavailable) ⇒ the canary is a
+    /// no-op: pre-#394 behavior, the finalize digest is the only gate.
+    #[tokio::test]
+    async fn canary_is_noop_when_backend_unavailable() {
+        let backend = Arc::new(MockBackend::new());
+        let mut sender = MigrationSender::new(backend, "vol-c".to_string(), "handle-c".to_string());
+        sender.canary_baseline = None;
+        assert!(
+            sender.verify_source_canary().await.is_ok(),
+            "unavailable canary must not fail the migration"
+        );
+    }
+
+    /// Unchanged stat ⇒ pass.
+    #[tokio::test]
+    async fn canary_passes_when_stat_unchanged() {
+        let backend = Arc::new(MockBackend::new());
+        backend.set_canary_probe(file_stat_fingerprint(1000, 4096));
+        let mut sender =
+            MigrationSender::new(backend.clone(), "vol-c".to_string(), "handle-c".to_string());
+        sender.canary_baseline = Some(file_stat_fingerprint(1000, 4096));
+        assert!(
+            sender.verify_source_canary().await.is_ok(),
+            "identical fingerprint must pass"
+        );
+    }
+
+    /// Stat change ⇒ `failed_precondition` carrying the distinct
+    /// `source_modified_during_migration` token, and the task (when
+    /// attached) is marked Failed with that message — the agent's
+    /// status poll sees the failure and resumes the VM if paused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canary_fails_fast_with_distinct_code_and_marks_task() {
+        let backend = Arc::new(MockBackend::new());
+        backend.set_canary_probe(file_stat_fingerprint(2000, 4096));
+        let (task, _pause_rx) =
+            MigrationTask::new("vol-c".to_string(), "handle-c".to_string(), String::new());
+        let mut sender = MigrationSender::new(backend, "vol-c".to_string(), "handle-c".to_string())
+            .with_task(task.clone());
+        // Baseline sampled at migration start; the source is then
+        // written (mtime 1000 -> 2000).
+        sender.canary_baseline = Some(file_stat_fingerprint(1000, 4096));
+
+        let err = sender
+            .verify_source_canary()
+            .await
+            .expect_err("a changed stat must fail the migration");
+        assert_eq!(
+            err.code(),
+            tonic::Code::FailedPrecondition,
+            "canary failure must be failed_precondition, got {:?}",
+            err.code()
+        );
+        assert!(
+            err.message().contains(SOURCE_MODIFIED_CODE),
+            "error must carry the {SOURCE_MODIFIED_CODE} token: {}",
+            err.message()
+        );
+        let state = task.state.read().await;
+        assert_eq!(state.phase, MigrationPhase::Failed);
+        assert!(
+            state.error_message.contains(SOURCE_MODIFIED_CODE),
+            "task error_message must carry the token: {}",
+            state.error_message
+        );
+    }
+
+    /// A size change alone (e.g. an out-of-band resize) also trips the
+    /// canary: any stat movement means the source moved under the
+    /// migration.
+    #[tokio::test]
+    async fn canary_trips_on_size_change_alone() {
+        let backend = Arc::new(MockBackend::new());
+        backend.set_canary_probe(file_stat_fingerprint(1000, 8192));
+        let mut sender = MigrationSender::new(backend, "vol-c".to_string(), "handle-c".to_string());
+        sender.canary_baseline = Some(file_stat_fingerprint(1000, 4096));
+        assert!(
+            sender.verify_source_canary().await.is_err(),
+            "a size change must trip the canary"
+        );
     }
 }

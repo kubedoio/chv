@@ -56,6 +56,53 @@ pub struct VolumeExport {
     pub attachment_handle: String,
 }
 
+/// Whether a backend can provide a write canary for a volume's backing
+/// store (issue #394, Option A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteCanaryCapability {
+    /// Regular-file backing: every `write(2)` through *any* file
+    /// descriptor — including the hypervisor's — updates the file's
+    /// mtime/ctime, so a stat fingerprint is a reliable tripwire for
+    /// *whether* the source was written. It deliberately does not claim
+    /// *where*; that remains the #392 finalize digest's job.
+    FileStat,
+    /// Device- or object-backed store: data writes do not update the
+    /// backing node's timestamps (block devices) or there is no local
+    /// path to stat at all (RADOS objects). The sender proceeds without
+    /// early detection and the #392 finalize digest remains the
+    /// (late) correctness gate.
+    Unavailable { reason: String },
+}
+
+/// A stat fingerprint of a volume's backing store, sampled by the
+/// migration sender as its write canary (issue #394, Option A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteCanaryFingerprint {
+    pub capability: WriteCanaryCapability,
+    pub mtime_sec: i64,
+    pub mtime_nsec: i64,
+    pub ctime_sec: i64,
+    pub ctime_nsec: i64,
+    pub size: u64,
+}
+
+impl WriteCanaryFingerprint {
+    /// Whether the stat-observable parts of two fingerprints match.
+    ///
+    /// The capability is deliberately excluded: two probes of the same
+    /// volume through the same backend report the same capability by
+    /// construction, and the sender's tripwire is the (mtime, ctime,
+    /// size) triple. `atime` is deliberately not sampled — the sender's
+    /// own `read_block` reads would trip a canary that included it.
+    pub fn stat_matches(&self, other: &WriteCanaryFingerprint) -> bool {
+        self.mtime_sec == other.mtime_sec
+            && self.mtime_nsec == other.mtime_nsec
+            && self.ctime_sec == other.ctime_sec
+            && self.ctime_nsec == other.ctime_nsec
+            && self.size == other.size
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BackendHealth {
     pub status: String,
@@ -198,6 +245,20 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// dirty-sync rounds can always snapshot a bitmap for an open volume
     /// (an empty one when nothing was written yet).
     ///
+    /// **What this bitmap is — and is not (#394, R1).** It is stord-private
+    /// userspace state, marked exclusively by this crate's `write_block`.
+    /// The write interception the original migration plan envisioned
+    /// (io_uring / handle wrapping, plan §2.2) was never implemented, so
+    /// the bitmap **cannot observe guest or host writes** that bypass
+    /// stord — which on a *source* volume is every write that matters
+    /// (in production, nothing calls `write_block` on a source volume
+    /// during migration; the only product caller is the migration
+    /// *receiver*, on the destination). The dirty-sync rounds are
+    /// protocol machinery for stord-visible writes, not live-migration
+    /// support; concurrent-write migration is rejected early by the
+    /// sender's write canary (`write_canary_probe`) and fail-closed by
+    /// the #392 finalize digest.
+    ///
     /// The default implementation is a no-op: backends without dirty
     /// tracking accept the call and simply don't track writes.
     async fn enable_dirty_tracking(
@@ -225,6 +286,41 @@ pub trait StorageBackend: Send + Sync + 'static {
         Err(ChvError::NotFound {
             resource: "dirty_tracker".to_string(),
             id: handle.to_string(),
+        })
+    }
+
+    /// Probe a volume's backing store for the migration write canary
+    /// (issue #394, Option A).
+    ///
+    /// The migration sender samples a fingerprint immediately before
+    /// bulk copy and re-checks it at every dirty-round boundary and at
+    /// the pre-pause gate. On a backend with
+    /// [`WriteCanaryCapability::FileStat`], any stat change means the
+    /// source was written during the migration — writes the dirty
+    /// bitmap provably cannot account for — and the sender fails the
+    /// migration *early* with `source_modified_during_migration`
+    /// (VM never paused) instead of wasting a full transfer and failing
+    /// late at the #392 finalize digest.
+    ///
+    /// The default implementation reports
+    /// [`WriteCanaryCapability::Unavailable`]: backends whose backing
+    /// store cannot be stat-observed (block devices, RADOS objects) opt
+    /// out, and the sender falls back to finalize-digest verification
+    /// only (the pre-#394 behavior).
+    async fn write_canary_probe(
+        &self,
+        _volume_id: &str,
+        _handle: &str,
+    ) -> Result<WriteCanaryFingerprint, ChvError> {
+        Ok(WriteCanaryFingerprint {
+            capability: WriteCanaryCapability::Unavailable {
+                reason: "backend does not expose a write-observable backing file".to_string(),
+            },
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            size: 0,
         })
     }
 }
@@ -391,6 +487,14 @@ impl StorageBackend for Box<dyn StorageBackend> {
         (**self)
             .snapshot_and_clear_dirty_bitmap(volume_id, handle)
             .await
+    }
+
+    async fn write_canary_probe(
+        &self,
+        volume_id: &str,
+        handle: &str,
+    ) -> Result<WriteCanaryFingerprint, ChvError> {
+        (**self).write_canary_probe(volume_id, handle).await
     }
 }
 
