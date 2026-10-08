@@ -101,7 +101,7 @@ describe('Mutation compliance — all pages must use mutateWithRefresh()', async
 
 	it('pages importing from #lib/api must also import mutateWithRefresh', () => {
 		// Pages that are strictly read-only (no mutations) are exempt from importing
-		// mutateWithRefresh even if they import from $lib/api.
+		// mutateWithRefresh even if they import from #lib/api.
 		const EXEMPT_READ_ONLY_PAGES: string[] = [];
 
 		const offenders = files.filter((f) => {

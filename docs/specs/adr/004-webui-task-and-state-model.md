@@ -32,6 +32,8 @@ All mutating actions MUST flow through `liveState.invalidateAndRefresh()` (or th
 
 > **No page component may call `invalidateAll()` or `invalidatePattern()` directly.**
 > Use `mutateWithRefresh()` instead.
+>
+> **[Corrected 2026-10-08, #561:]** `invalidateAll` was renamed `refreshAll` in the kit-3 toolchain migration (#559, edec9d76); the invariant's intent is unchanged.
 
 #### Implementation
 

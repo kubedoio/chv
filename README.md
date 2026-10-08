@@ -63,7 +63,7 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
 ```
 
 - **Backend / Control Plane**: Rust (Tokio, tonic, axum, sqlx/SQLite)
-- **Frontend**: SvelteKit 2 + Svelte 5 + TailwindCSS + Vite
+- **Frontend**: SvelteKit 3 + Svelte 5 + TailwindCSS + Vite
 - **Contracts**: gRPC/protobuf
 - **Metrics**: Prometheus endpoint
 

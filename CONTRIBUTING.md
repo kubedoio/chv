@@ -72,12 +72,12 @@ cd ui && npm run check
 
 ### State Management
 
-All mutating actions MUST use `mutateWithRefresh()` from `$lib/stores/mutation.svelte`. This ensures page cache, sidebar inventory, and task stream stay in sync.
+All mutating actions MUST use `mutateWithRefresh()` from `#lib/stores/mutation.svelte.ts`. This ensures page cache, sidebar inventory, and task stream stay in sync.
 
 ```svelte
 <!-- ✅ Correct -->
 <script>
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
   async function handleAction() {
     await mutateWithRefresh(
       () => myBffCall(args, token),
@@ -88,19 +88,19 @@ All mutating actions MUST use `mutateWithRefresh()` from `$lib/stores/mutation.s
 
 <!-- ❌ Incorrect -->
 <script>
-  import { invalidateAll } from '$app/navigation';
-  import { invalidatePattern } from '$lib/stores/api-cache.svelte.ts';
+  import { refreshAll } from '$app/navigation';
+  import { invalidatePattern } from '#lib/stores/api-cache.svelte.ts';
   async function handleAction() {
     await myBffCall(args, token);
     invalidatePattern('my-resource:');
-    await invalidateAll();  // DON'T DO THIS
+    await refreshAll();  // DON'T DO THIS
   }
 </script>
 ```
 
 ### Compliance
 
-CI runs `mutation-compliance.test.ts` which scans all `+page.svelte` files. Adding direct `invalidateAll` or `invalidatePattern` imports breaks the build.
+CI runs `mutation-compliance.test.ts` which scans all `+page.svelte` files. Adding direct `refreshAll` or `invalidatePattern` imports breaks the build.
 
 ### New Resource Types
 
