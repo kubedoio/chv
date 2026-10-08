@@ -28,6 +28,8 @@
 //! not found by external id
 //!   ├─ natural key free                 → create
 //!   ├─ natural key occupied, foreign    → conflict (never write)
+//!   ├─ natural key occupied, chv-owned but
+//!   │     foreign mapping_version       → conflict (never write)
 //!   └─ natural key occupied, chv-owned
 //!        object of this architecture     → update (partial-failure
 //!                                          resume / version bump)
