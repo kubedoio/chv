@@ -1,17 +1,28 @@
 //! Integration tests for `POST /v1/networks/update` policy reporting
 //! (issue kubedoio/chv#355).
 //!
-//! The firewall_rules update is persisted to the CP DB but is NOT
-//! dispatched to a live node: the policy travels with the VM spec and the
-//! Core executor applies it at attach time (default-deny + the operator's
-//! rules). The update response must SAY so (`policy_application` field)
-//! instead of implying the rules are live on the node — the "dead config"
-//! half of the defect was precisely that a 200 implied applied state.
+//! #355 PR 2 (DP1 + DP6): a firewall-carrying update is a real
+//! mutation — it journals an `Accepted` `UpdateNetworkPolicy`
+//! operation in the same transaction as the desired-state write (the
+//! CreateVolume journaling precedent), which the PR 1 orchestrator
+//! arm claims and fans out to every node with a live attached VM on
+//! the network. The response is the standard mutation task surface
+//! (`{accepted, task_id, network_id, summary, next_refresh_path}`),
+//! replacing the pre-#355 `policy_application` prose notes — the
+//! task's terminal state (and its #502 cause, on failure) is the
+//! honest reporting now.
 //!
 //! Pinned here:
-//! - an update carrying `firewall_rules` reports attach-time application;
-//! - an update without policy fields carries no such note (nothing policy
-//!   -related was touched).
+//! - an update carrying `firewall_rules` journals the per-generation
+//!   operation and answers with the task shape (field-by-field);
+//! - the network detail's `last_task` resolves to the policy operation;
+//! - clearing (`[]`) mints its own per-generation task with an honest
+//!   summary (the dispatch leg no-ops it until the DP4 baseline lands,
+//!   PR 3 — a previously applied policy stays in force);
+//! - an update without firewall fields journals nothing and keeps the
+//!   read-after-write detail response;
+//! - the save-time vocabulary/rejection gates (the M4.4 N7 class) are
+//!   unchanged.
 
 use std::sync::Arc;
 

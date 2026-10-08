@@ -58,6 +58,13 @@
 # for truth against the frozen candidate; a post-fix build must flip
 # them to passes.
 #
+# (2026-10-08, #355 PR 2: the journaling route landed — Leg B's response
+# no longer carries policy_application; it carries the task surface
+# {accepted, task_id, ...}, and the dispatch to already-attached VMs
+# happens on the ORCHESTRATOR'S TICK, no longer only at the next VM
+# spec dispatch. The leg below detects the response shape and asserts
+# each era truthfully: frozen candidate / post-#361 / post-#355-PR-2.)
+#
 # Non-claims (inherited from prompt 01, restated): coexistence with
 # Kubernetes/CNI, Docker-forwarded traffic, or multiple bridge-owning
 # network stacks is NOT claimed. Single node, single default bridge
@@ -472,24 +479,37 @@ FWRULES_AFTER_B="$(net_field "$VM1_NET" firewall_rules_json)"
     && qual_pass "firewall_rules persisted to CP DB (generation ${GEN_BEFORE_B} → ${GEN_AFTER_B})" \
     || qual_error "firewall_rules NOT persisted to the CP DB"
 
-# Observation window: on post-#355 main the table is EXPECTED to be
-# unchanged here — the update alone dispatches nothing; the response
-# says so honestly (policy_application=pending, applied at the next VM
-# spec dispatch). The dispatch observation happens in Leg C (vm-2's
-# create is the first dispatch after this update). On the frozen
-# candidate the table is unchanged because no policy path exists at
-# all (defect N2).
+# Observation window: three eras, detected from the saved response.
+# - post-#355 PR 2 (journaling route): the response carries the task
+#   surface {accepted, task_id, ...} and the dispatch to already-
+#   attached VMs happens on the ORCHESTRATOR'S TICK — the table is
+#   EXPECTED to change inside the window (timing-dependent: tick pace
+#   vs the wait below).
+# - post-#361 (the snapshot fix): the response carries
+#   policy_application=pending, the table is unchanged here (applied
+#   at the next VM spec dispatch — observed in Leg C, vm-2's create).
+# - frozen candidate: no policy path exists at all (defect N2).
 sleep "$POLICY_DISPATCH_WAIT"
 NFT_AFTER_B="$(nft list table inet "$VM1_NFT_TABLE" 2>/dev/null | sha256sum | cut -c1-16)"
 POLICY_NOTE_B="$(python3 -c \
     "import json; print(json.load(open('${EVIDENCE_DIR}/bff-update-leg-b.json')).get('policy_application', ''))" \
     2>/dev/null || true)"
-if [ -n "$POLICY_NOTE_B" ]; then
-    qual_pass "update honestly reports pending application (post-#355): ${POLICY_NOTE_B}"
+POLICY_TASK_B="$(python3 -c \
+    "import json; print(json.load(open('${EVIDENCE_DIR}/bff-update-leg-b.json')).get('task_id', ''))" \
+    2>/dev/null || true)"
+if [ -n "$POLICY_TASK_B" ]; then
+    qual_pass "update journals the policy task (post-#355 PR 2): ${POLICY_TASK_B}"
+    if [ "$NFT_BEFORE_B" != "$NFT_AFTER_B" ]; then
+        qual_pass "nft table changed after the update (fan-out dispatch observed)"
+    else
+        qual_warn "nft table unchanged ${POLICY_DISPATCH_WAIT}s after the journaled update — dispatch is orchestrator-tick-paced; check the task (chvctl task watch ${POLICY_TASK_B}) before treating this as a defect"
+    fi
+elif [ -n "$POLICY_NOTE_B" ]; then
+    qual_pass "update honestly reports pending application (post-#361): ${POLICY_NOTE_B}"
     if [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
         qual_pass "nft table unchanged until the next dispatch (by design)"
     else
-        qual_warn "nft table changed ${POLICY_DISPATCH_WAIT}s after the update with no dispatch (unexpected on post-#355 main)"
+        qual_warn "nft table changed ${POLICY_DISPATCH_WAIT}s after the update with no dispatch (unexpected on post-#361 main)"
     fi
 elif [ "$NFT_BEFORE_B" = "$NFT_AFTER_B" ]; then
     qual_warn "nft table UNCHANGED ${POLICY_DISPATCH_WAIT}s after the accepted update — no operator-reachable policy path in the candidate (defect N2, issue filed; policy allow/deny proven at the nwd layer by host-safety.sh)"

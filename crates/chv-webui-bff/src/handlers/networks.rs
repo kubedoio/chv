@@ -647,9 +647,15 @@ pub async fn update_network(
         || dns_enabled.is_some()
         || dns_scope_json.is_some();
 
+    // BEGIN IMMEDIATE: serialize concurrent writers (the network_delete
+    // precedent, operations.rs's replay discipline). Two concurrent
+    // updates of the same network must not both read generation N and
+    // mint the same `update-network-policy-{id}-{N}` idempotency key —
+    // the write lock makes the second transaction's UPDATE...RETURNING
+    // see N+1 and journal a distinct task.
     let mut tx = state
         .pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE;")
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
@@ -701,10 +707,22 @@ pub async fn update_network(
         .bind(dns_enabled)
         .bind(&dns_scope_json)
         .bind(&network_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
             BffError::Internal(format!("failed to update network desired state: {}", e))
+        })?
+        .ok_or_else(|| {
+            // The existence check above passed (the networks row exists
+            // and is not tombstoned), but its desired-state row does not
+            // — legacy residue a pre-migration install could carry.
+            // The pre-#355 route silently no-opped this UPDATE (execute
+            // on 0 rows); fail loud and clear instead of minting a
+            // generation-less policy operation downstream.
+            BffError::Internal(format!(
+                "network {} has no desired-state row to update (legacy residue; re-create the network)",
+                network_id
+            ))
         })?;
 
         // #355 PR 2 (DP1, the CreateVolume journaling precedent): a
@@ -714,8 +732,9 @@ pub async fn update_network(
         // The PR 1 orchestrator arm claims it and fans the stored
         // ruleset out to every node with a live attached VM on the
         // network. Deliberately journaled ONLY when the firewall field
-        // rode the request — name/cidr/DHCP-only updates bump the
-        // generation but mint no operations (they dispatch nothing).
+        // rode the request — other NDS-field updates (cidr, DHCP, ...)
+        // bump the generation but mint no operations (they dispatch
+        // nothing); a name-only update touches neither.
         // An empty ruleset (`[]`) journals too: it is a real mutation,
         // and the dispatch leg no-ops it (Succeeded) until PR 3 lands
         // the ruled DP4 baseline.
