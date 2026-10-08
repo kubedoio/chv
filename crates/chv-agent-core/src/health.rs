@@ -342,4 +342,91 @@ mod tests {
         h.update_core_journal(false);
         assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::Degraded);
     }
+
+    // #562: the pressure arms the main-loop wiring feeds — previously
+    // reachable only in tests because nothing called
+    // `update_resource_pressure` (the dormant-gauges finding).
+    fn pressure(disk: bool, memory: bool) -> ResourcePressure {
+        ResourcePressure {
+            disk_pressure: disk,
+            memory_pressure: memory,
+            disk_available_bytes: 0,
+            memory_usage_percent: 0.0,
+        }
+    }
+
+    #[test]
+    fn health_resource_pressure_degrades_tenant_ready() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(true);
+        h.update_resource_pressure(pressure(false, true));
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::Degraded
+        );
+    }
+
+    #[test]
+    fn health_disk_pressure_alone_degrades_tenant_ready() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_resource_pressure(pressure(true, false));
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::Degraded
+        );
+    }
+
+    #[test]
+    fn health_resource_pressure_cleared_recovers_tenant_ready() {
+        // The recovery arm, same-instance: pressure degrades a TenantReady
+        // node, and clearing the input (the flap's floor, not a ratchet —
+        // `update_resource_pressure` replaces the value) recovers it.
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(true);
+        h.update_resource_pressure(pressure(true, false));
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::Degraded
+        );
+        h.update_resource_pressure(pressure(false, false));
+        assert_eq!(
+            h.derive_node_state(NodeState::Degraded),
+            NodeState::TenantReady
+        );
+    }
+
+    #[test]
+    fn health_resource_pressure_blocks_degraded_recovery_while_present() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(true);
+        h.update_resource_pressure(pressure(false, true));
+        assert_eq!(
+            h.derive_node_state(NodeState::Degraded),
+            NodeState::Degraded
+        );
+    }
+
+    #[test]
+    fn health_resource_pressure_unfed_is_no_op() {
+        // The pre-#562 posture: a caller that never feeds the pressure
+        // input (none exists in-tree today, but the aggregator is a
+        // library surface) keeps today's behavior — no phantom pressure.
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::TenantReady
+        );
+        assert!(!h.has_resource_pressure());
+        assert!(h.resource_pressure().is_none());
+    }
 }

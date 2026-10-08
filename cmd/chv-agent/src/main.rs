@@ -7,7 +7,7 @@ use chv_agent_core::{
     control_plane::ControlPlaneClient,
     daemon_clients::{NwdClient, StordClient},
     enrollment::EnrollmentClient,
-    health::HealthAggregator,
+    health::{check_host_resources, HealthAggregator},
     inventory::InventoryReporter,
     metrics_server::{metrics_router, MetricsState},
     projection::ProjectingCoreRuntime,
@@ -1201,9 +1201,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(_) => false,
         };
 
+        // #562 (Option 1, maintainer ruling 2026-10-08): the host-resource
+        // pressure check runs once per tick — the same sysinfo getters the
+        // #558 migration verified (memory refresh + root-mount disk probe)
+        // — and feeds both consumers the aggregator was designed for: the
+        // node-state derivation below (a TenantReady node under the 90%
+        // memory / 5 GB disk thresholds degrades) and the /metrics
+        // pressure gauges, updated with the rest of MetricsState at the
+        // end of the tick so `chv_agent_memory_pressure` /
+        // `chv_agent_disk_pressure` stop emitting constant 0. The
+        // scrape-time collector in `metrics_server.rs` keeps its own
+        // sample for the byte counters — one read per tick, one per
+        // scrape, the per-scrape precedent.
+        let host_pressure = check_host_resources();
+
         let mut health = HealthAggregator::new();
         health.update_stord(stord_ok);
         health.update_nwd(nwd_ok);
+        health.update_resource_pressure(host_pressure.clone());
         if let Some(owner) = &core_owner {
             // A wedged Core journal must not silently pass for a healthy node:
             // accepted operations would stop executing while the API keeps
@@ -1563,6 +1578,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ms.cp_disconnected_duration_ms = cp_snapshot.disconnected_duration_ms;
             ms.cp_consecutive_failures = cp_snapshot.consecutive_failures;
             ms.cp_total_deferred_messages = cp_snapshot.total_deferred_messages;
+            // #562: the same per-tick pressure sample the health
+            // derivation consumed above — the gauges and the derived node
+            // state can never disagree about which sample they saw.
+            ms.disk_pressure = host_pressure.disk_pressure;
+            ms.memory_pressure = host_pressure.memory_pressure;
             // Core journal health: emitted only when the core-managed owner
             // exists (legacy mode has no journal poller — the metrics are
             // absent, not zeroed).
