@@ -238,6 +238,29 @@ message DeleteVolumeRequest {
   string backend_class = 4;
 }
 
+// #355 (design docs/design/issue-355-network-policy-dispatch.md, §3
+// Option A, PR 1 of the decomposition): the network firewall-policy
+// dispatch carrier. `policy_json` is the network's stored ruleset
+// (`network_desired_state.firewall_rules_json`) verbatim; the agent
+// handler applies it through nwd's existing `SetFirewallPolicy` — the
+// same call the attach-time path makes — and nwd remains the
+// fail-closed validator of the rule vocabulary. The generation rides
+// `meta.desired_state_version` (the dispatch fence, DP7 — enforced in
+// PR 3 of the decomposition). Mirrors DeleteVolumeRequest's shape
+// (meta + node_id + the resource id + one payload field). Deliberately
+// ACCEPTED in core-managed mode (the M2.2b carve-out the design rules
+// on): policy application already runs behind the Core authority at
+// VM attach (the core executor's set_firewall_policy call), the Core
+// store models no network state to journal into, and the CP operations
+// row is the journal. Dead-but-live with this PR: no producer journals
+// an `UpdateNetworkPolicy` operation until the BFF route lands (PR 2).
+message ApplyNetworkPolicyRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  bytes policy_json = 4;
+}
+
 message StartVmRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -523,6 +546,9 @@ service LifecycleService {
   // closed in core-managed mode like its sibling legacy volume RPCs.
   rpc CreateVolume(CreateVolumeRequest) returns (AckResponse);
   rpc DeleteVolume(DeleteVolumeRequest) returns (AckResponse);
+  // #355 (PR 1 of the decomposition): network firewall-policy dispatch.
+  // Accepted in core-managed mode (see ApplyNetworkPolicyRequest).
+  rpc ApplyNetworkPolicy(ApplyNetworkPolicyRequest) returns (AckResponse);
   rpc StartVm(StartVmRequest) returns (AckResponse);
   rpc StopVm(StopVmRequest) returns (AckResponse);
   rpc RebootVm(RebootVmRequest) returns (AckResponse);

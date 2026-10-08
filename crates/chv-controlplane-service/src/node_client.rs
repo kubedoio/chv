@@ -804,6 +804,52 @@ impl NodeClient {
         result
     }
 
+    /// #355 (PR 1 of the decomposition): dispatch the network's stored
+    /// firewall ruleset to one node's agent. `policy_json` is the NDS
+    /// `firewall_rules_json` verbatim; `generation` rides
+    /// `meta.desired_state_version` (the DP7 fence, enforced from PR 3).
+    /// Dead-but-live with this PR: no producer journals an
+    /// `UpdateNetworkPolicy` operation until the BFF route lands (PR 2).
+    pub async fn apply_network_policy(
+        &mut self,
+        node_id: &str,
+        network_id: &str,
+        generation: &str,
+        policy_json: &[u8],
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::ApplyNetworkPolicyRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            network_id: network_id.to_string(),
+            policy_json: policy_json.to_vec(),
+        };
+        let method = "apply_network_policy";
+        let span = tracing::info_span!("apply_network_policy", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .apply_network_policy(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
     /// Relays the operator's terminal resolution of a restart-interrupted
     /// (`InspectRequired`) operation to the owning agent's core journal.
     /// Pure relay: the agent validates disposition/note and owns the
