@@ -956,6 +956,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chv-netbox-adapter"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "chv-architecture-validate",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "chv-nwd"
 version = "0.3.0"
 dependencies = [

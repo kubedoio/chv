@@ -36,6 +36,7 @@ members = [
     "crates/chv-webui-bff",
     "crates/chv-architecture-validate",
     "crates/chv-architecture-reconcile",
+    "crates/chv-netbox-adapter",
     "cmd/chvctl",
 ]
 resolver = "2"
