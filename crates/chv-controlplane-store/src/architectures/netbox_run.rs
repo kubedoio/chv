@@ -10,8 +10,9 @@
 //!    │           └────────▶ failed ──▶ (requeue) ──▶ queued
 //! ```
 
-use crate::architectures::{parse_ts, parse_ts_opt};
+use crate::architectures::{format_ts, parse_ts, parse_ts_opt};
 use crate::{StoreError, StorePool};
+use chrono::{DateTime, Utc};
 use chv_controlplane_types::architecture::{
     ArchitectureId, ArchitectureVersionId, NetboxProjectionMode, NetboxProjectionRun,
     NetboxProjectionRunId, NetboxProjectionRunStatus, NetboxProjectionTrigger,
@@ -299,6 +300,63 @@ impl NetboxProjectionRunRepository {
                 reason,
             },
         }
+    }
+
+    /// Reclaim runs stuck in `running` since before `before` (worker
+    /// crash / execution-lease expiry): CAS-guarded
+    /// `status='running' AND started_at < ?` → `failed` with a
+    /// reclamation message and `attempt_count + 1` (a reclaimed run
+    /// consumed an attempt, so retry stays bounded by
+    /// [`MAX_ATTEMPTS`]). Runs with a NULL `started_at` are left alone —
+    /// only `claim_next_queued` produces `running` rows and it always
+    /// stamps `started_at`.
+    ///
+    /// Called by the projection worker (PR 4) at the top of every tick;
+    /// a reclaimed run is retried through the normal `requeue` path and
+    /// re-enters idempotently via the external-id match.
+    pub async fn reclaim_stale_running(
+        &self,
+        before: DateTime<Utc>,
+    ) -> Result<Vec<NetboxProjectionRun>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            UPDATE netbox_projection_runs SET
+                status = 'failed',
+                error_message = 'run reclaimed: execution lease expired (worker crash or stall); retry re-enters idempotently',
+                attempt_count = attempt_count + 1,
+                finished_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE status = 'running' AND started_at IS NOT NULL AND started_at < $1
+            RETURNING *
+            "#,
+        )
+        .bind(format_ts(before))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_run).collect()
+    }
+
+    /// Architecture ids that have at least one queued run — the driver
+    /// of the worker's claim loop (claim one run per architecture per
+    /// tick). Sorted for determinism.
+    pub async fn list_architecture_ids_with_queued(
+        &self,
+    ) -> Result<Vec<ArchitectureId>, StoreError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT architecture_id FROM netbox_projection_runs
+            WHERE status = 'queued'
+            ORDER BY architecture_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(id,)| {
+                ArchitectureId::new(id).map_err(|err| StoreError::InvalidConfiguration {
+                    reason: format!("invalid architecture_id in netbox_projection_run row: {err}"),
+                })
+            })
+            .collect()
     }
 }
 

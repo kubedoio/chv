@@ -800,3 +800,128 @@ async fn netbox_run_terminal_transition_on_missing_run_is_not_found() {
     let err = repo.requeue(&nid("missing")).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }), "got {err:?}");
 }
+
+// ── Reclamation + worker claim-loop driver (PR 4) ──────────────────────────
+
+/// Backdate a run's `started_at` so it looks older than the reclamation
+/// horizon (mirrors a worker that claimed the run and died).
+async fn backdate_started_at(db: &TestDb, run_id: &str, started_at: &str) {
+    sqlx::query(
+        "UPDATE netbox_projection_runs SET status = 'running', started_at = $2 WHERE id = $1",
+    )
+    .bind(run_id)
+    .bind(started_at)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn netbox_run_reclaim_stale_running_fails_only_old_running_runs() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    setup_architecture(&db, "topo-2", "v-2").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    // A stale `running` run on topo-1 (claimed 20 minutes ago).
+    repo.create(make_run_input("netrun-stale", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    backdate_started_at(&db, "netrun-stale", "2026-01-01T00:00:00Z").await;
+
+    // A fresh `running` run on topo-2 (just claimed — inside the lease).
+    repo.create(make_run_input("netrun-fresh", "topo-2", "v-2"))
+        .await
+        .unwrap();
+    repo.claim_next_queued(&aid("topo-2"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A merely queued run (topo-3 — the one-active invariant forbids a
+    // second active run on topo-2) is never reclaimed.
+    setup_architecture(&db, "topo-3", "v-3").await;
+    repo.create(make_run_input("netrun-queued", "topo-3", "v-3"))
+        .await
+        .unwrap();
+
+    let before = chrono::Utc::now() - chrono::Duration::minutes(15);
+    let reclaimed = repo.reclaim_stale_running(before).await.unwrap();
+    assert_eq!(reclaimed.len(), 1, "only the stale running run");
+    assert_eq!(reclaimed[0].id, nid("netrun-stale"));
+    assert_eq!(reclaimed[0].status, NetboxProjectionRunStatus::Failed);
+    assert!(
+        reclaimed[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reclaimed"),
+        "reclamation message set: {:?}",
+        reclaimed[0].error_message
+    );
+    assert_eq!(
+        reclaimed[0].attempt_count, 1,
+        "reclamation consumed an attempt"
+    );
+
+    // The fresh running run and the queued run are untouched.
+    let fresh = repo.get(&nid("netrun-fresh")).await.unwrap().unwrap();
+    assert_eq!(fresh.status, NetboxProjectionRunStatus::Running);
+    let queued = repo.get(&nid("netrun-queued")).await.unwrap().unwrap();
+    assert_eq!(queued.status, NetboxProjectionRunStatus::Queued);
+
+    // Idempotent: a second sweep finds nothing.
+    assert!(repo.reclaim_stale_running(before).await.unwrap().is_empty());
+
+    // The reclaimed run stays retryable under the attempt cap.
+    repo.requeue(&nid("netrun-stale")).await.unwrap();
+}
+
+#[tokio::test]
+async fn netbox_run_list_architecture_ids_with_queued_is_distinct() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    setup_architecture(&db, "topo-2", "v-2").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    // Two queued runs on topo-1 (one per active tick is claimed, so the
+    // worker lists ids, not runs), one queued on topo-2.
+    repo.create(make_run_input("netrun-a", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    // topo-1 cannot hold two active runs — run the first to terminal.
+    let claimed = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_succeeded(&claimed.id, None, None).await.unwrap();
+    repo.create(make_run_input("netrun-b", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    repo.create(make_run_input("netrun-c", "topo-2", "v-2"))
+        .await
+        .unwrap();
+
+    let ids = repo.list_architecture_ids_with_queued().await.unwrap();
+    assert_eq!(ids, vec![aid("topo-1"), aid("topo-2")], "distinct + sorted");
+
+    // Claiming topo-1's run removes it from the driver list.
+    repo.claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    let ids = repo.list_architecture_ids_with_queued().await.unwrap();
+    assert_eq!(ids, vec![aid("topo-2")]);
+
+    // And draining everything empties the list.
+    repo.claim_next_queued(&aid("topo-2"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(repo
+        .list_architecture_ids_with_queued()
+        .await
+        .unwrap()
+        .is_empty());
+}

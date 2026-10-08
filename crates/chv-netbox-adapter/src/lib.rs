@@ -11,9 +11,7 @@
 //! - API contract (PR 4): `docs/specs/architecture-designer/contracts/netbox-api-contract.md`
 //! - Plan: `docs/plans/2026-10-08-netbox-projection-implementation-plan.md`
 //!
-//! # PR-2 boundary — pure core, no I/O
-//!
-//! This crate currently ships only the pure, deterministic core:
+//! # Module map
 //!
 //! - [`ownership`] — the external-id format, the prefix-configurable
 //!   custom-field name set, and the [`ownership::ManagedMarker`] write
@@ -27,25 +25,36 @@
 //! - [`plan`] — [`plan::compute_plan`]: the deterministic
 //!   create/update/no_op/conflict/stale diff against an in-memory
 //!   [`plan::NetBoxRemoteObject`] view of NetBox state.
+//! - [`client`] — [`client::NetBoxClient`]: the bounded, HTTPS-only,
+//!   fail-closed NetBox REST client (PR 4).
+//! - [`runner`] — [`runner::NetboxProjectionRunner`]: fetches remote
+//!   state, computes the plan, and executes it with the
+//!   abort-on-first-hard-failure / resume-by-external-id policy (PR 4).
 //!
-//! No HTTP client, no tokio, no sqlx, no clock: identical inputs always
-//! produce byte-identical plans, which is what makes dry-run output
-//! stable and unit-testable. The REST client, runner, and worker arrive
-//! in PR 4; config and persistence in PR 3.
+//! The pure core (mapping/ownership/plan) remains free of I/O, clocks,
+//! and randomness — identical inputs always produce byte-identical
+//! plans, which is what makes dry-run output stable and unit-testable.
+//! The client and runner are the I/O shell and depend on nothing from
+//! the control plane: the composition root
+//! (`chv-controlplane-service`'s worker) loads state from the store,
+//! hands plain data to the runner, and persists outcomes.
 //!
 //! # Conventions
 //!
-//! `tracing`-only logging (nothing in the pure core needs to log), no
-//! panics in library code (errors are returned, never unwrapped), and
-//! [`serde`] types use `BTreeMap`/sorted collections exclusively so
-//! serialized output is byte-stable.
+//! `tracing`-only logging, no panics in library code (errors are
+//! returned, never unwrapped), and [`serde`] types use
+//! `BTreeMap`/sorted collections exclusively so serialized output is
+//! byte-stable.
 
 #![deny(unsafe_code)]
 
+pub mod client;
 pub mod mapping;
 pub mod ownership;
 pub mod plan;
+pub mod runner;
 
+pub use client::{ClientError, NetBoxClient, NetBoxToken, RemoteNetBoxObject};
 pub use mapping::{
     build_objects, validate_netbox_name, validate_netbox_slug, DeviceStatus, MappingError,
     MappingIssue, MappingOutput, NetBoxDevice, NetBoxInterface, NetBoxIpAddress, NetBoxKind,
@@ -60,4 +69,8 @@ pub use ownership::{
 pub use plan::{
     compute_plan, NetBoxRemoteObject, NetboxPlanAction, NetboxProjectionPlan,
     NetboxProjectionPlanEntry, PlanContext, PlanError, PlanSummary, RetentionPolicy,
+};
+pub use runner::{
+    NetboxEntryOutcome, NetboxEntryStatus, NetboxOutcomeSummary, NetboxProjectionInput,
+    NetboxProjectionOutcome, NetboxProjectionRunner, NetboxRunnerErrorSummary, RunnerError,
 };

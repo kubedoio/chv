@@ -433,6 +433,20 @@ pub async fn build_service(
     );
     let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx.clone()));
 
+    // NetBox projection worker (issue #239): claims queued projection
+    // runs and executes them against each architecture's configured
+    // NetBox instance. A NetBox outage can never propagate here — every
+    // run failure is marked on the run row and the loop continues.
+    let netbox_projection_worker = chv_controlplane_service::NetboxProjectionWorker::new(
+        chv_controlplane_store::NetboxProjectionRunRepository::new(pool.clone()),
+        chv_controlplane_store::NetboxProjectionConfigRepository::new(pool.clone()),
+        event_repo.clone(),
+        chv_controlplane_store::ApplyRunRepository::new(pool.clone()),
+        chv_controlplane_store::VersionRepository::new(pool.clone()),
+    );
+    let netbox_projection_worker_handle =
+        tokio::spawn(netbox_projection_worker.run(shutdown_rx.clone()));
+
     let migration_reaper = chv_controlplane_service::MigrationReaper::new(
         pool.clone(),
         node_client_pool.clone(),
@@ -451,7 +465,12 @@ pub async fn build_service(
             (*lifecycle_service).clone(),
         ),
         shutdown_tx,
-        vec![orchestrator_handle, backup_worker_handle, reaper_handle],
+        vec![
+            orchestrator_handle,
+            backup_worker_handle,
+            netbox_projection_worker_handle,
+            reaper_handle,
+        ],
     ))
 }
 

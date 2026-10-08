@@ -8,8 +8,21 @@ publish = false
 [dependencies]
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+# Same reqwest line as cmd/chvctl (rustls, JSON bodies); no multipart.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+[features]
+# Test-only plain-HTTP escape hatch for the client constructor, used by the
+# wiremock-based runner/worker integration tests (wiremock serves plain
+# HTTP). NEVER enable this feature outside dev-dependencies: production
+# paths must go through `NetBoxClient::new`, which rejects non-HTTPS
+# endpoints fail-closed.
+test-http = []
 
 [dev-dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
