@@ -7,7 +7,7 @@ import { buildCloneNames, isStarter } from './starter';
  *
  * BFF wire-shape note: the `Architecture` type does NOT carry a `labels`
  * field — see `docs/plans/2026-06-16-starter-topologies-and-auto-seed.md` §5
- * and the `$lib/bff/architectures` module docstring. Detection must only
+ * and the `#lib/bff/architectures.ts` module docstring. Detection must only
  * use `name` (`starter-` prefix) and `owner_user_id` (system-owned ⇒ null).
  *
  * Clone deep-copy: the BFF `createArchitecture` endpoint already accepts

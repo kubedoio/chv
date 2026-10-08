@@ -15,7 +15,7 @@ The SvelteKit frontend (`/ui`) that runs in the browser and communicates with th
 
 ### Single Source of Truth
 
-`liveState` (`$lib/stores/live-state.svelte.ts`) is the single source of truth for:
+`liveState` (`#lib/stores/live-state.svelte.ts`) is the single source of truth for:
 - Inventory state (`nodes`, `vms`, `inventoryLoading`)
 - API cache (`cachedFetch`, `invalidateCachePattern`)
 - Mutation-driven refresh (`invalidateAndRefresh`)
@@ -24,7 +24,7 @@ The SvelteKit frontend (`/ui`) that runs in the browser and communicates with th
 
 ```svelte
 <script>
-  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+  import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
 
   async function handleDelete(vmId: string) {
     await mutateWithRefresh(
@@ -36,13 +36,13 @@ The SvelteKit frontend (`/ui`) that runs in the browser and communicates with th
 ```
 
 **Forbidden:**
-- Importing `invalidateAll` from `$app/navigation` in page components
-- Importing `invalidatePattern` from `$lib/stores/api-cache.svelte`
-- Calling `invalidateAll()` or `invalidatePattern()` directly
+- Importing `refreshAll` from `$app/navigation` in page components
+- Importing `invalidatePattern` from `#lib/stores/api-cache.svelte.ts`
+- Calling `refreshAll()` or `invalidatePattern()` directly
 
 ### Real-Time Sync
 
-`taskStream` (`$lib/stores/task-stream.svelte.ts`) connects to `/v1/tasks/stream` via fetch-based SSE and calls `liveState.handleTaskCompleted()` for every terminal task. This updates the sidebar and page state without user interaction.
+`taskStream` (`#lib/stores/task-stream.svelte.ts`) connects to `/v1/tasks/stream` via fetch-based SSE and calls `liveState.handleTaskCompleted()` for every terminal task. This updates the sidebar and page state without user interaction.
 
 ### Fallback
 

@@ -8,11 +8,11 @@ import { loginAsAdmin } from './helpers';
  * plus a populated dashboard on fresh boot once the controlplane has seeded
  * the six starters (see `docs/plans/2026-06-16-starter-topologies-and-auto-seed.md`).
  *
- * Detection rule (mirrored in the UI helper `$lib/architectures/starter`):
+ * Detection rule (mirrored in the UI helper `#lib/architectures/starter.ts`):
  *   isStarter = name.startsWith('starter-') AND owner_user_id === null
  *
  * The wire intentionally has NO `labels` field — see the plan §5 and the
- * `Architecture` type in `$lib/bff/architectures`. These tests only mock
+ * `Architecture` type in `#lib/bff/architectures.ts`. These tests only mock
  * the BFF endpoints actually exercised; the architecture-skeleton spec
  * already covers the broader surface.
  *
