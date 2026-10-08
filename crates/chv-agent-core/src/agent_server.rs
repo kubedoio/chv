@@ -1588,7 +1588,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
             .await
             .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
-        nwd.set_firewall_policy(
+        // The CHECKED variant: nwd reports semantic refusals (unknown
+        // topology, engine failure, vocabulary rejection) as a gRPC Ok
+        // wrapping an err_result — an unchecked call would ack a false
+        // success, the exact #355 lie in task form. The failure fails
+        // the operation (retryable on the shared curve), never a
+        // silent drop.
+        nwd.set_firewall_policy_checked(
             &inner.network_id,
             &policy_version,
             inner.policy_json.clone(),
@@ -5673,6 +5679,12 @@ mod tests {
 
     struct MockNetworkPolicyNwd {
         tracker: NetworkPolicyTracker,
+        /// #355 PR 1 review fold: when set, `set_firewall_policy`
+        /// answers the nwd semantic-failure shape — a gRPC `Ok`
+        /// wrapping an `err_result` — so tests can pin that the
+        /// carrier surfaces the refusal instead of acking a false
+        /// success.
+        firewall_failure: Option<(String, String)>,
     }
 
     #[tonic::async_trait]
@@ -5754,6 +5766,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((inner.network_id, policy_json));
+            if let Some((error_code, human_summary)) = &self.firewall_failure {
+                return Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                    status: "error".to_string(),
+                    error_code: error_code.clone(),
+                    human_summary: human_summary.clone(),
+                }));
+            }
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -5855,7 +5874,10 @@ mod tests {
                 tonic::transport::Server::builder()
                     .add_service(
                         chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
-                            MockNetworkPolicyNwd { tracker },
+                            MockNetworkPolicyNwd {
+                                tracker,
+                                firewall_failure: None,
+                            },
                         ),
                     )
                     .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -5967,6 +5989,7 @@ mod tests {
     async fn apply_network_policy_with_rules(
         firewall_rules: &[u8],
         core_managed: bool,
+        nwd_rejects_with: Option<(String, String)>,
     ) -> (
         NetworkPolicyTracker,
         Result<Response<proto::AckResponse>, Status>,
@@ -5982,7 +6005,10 @@ mod tests {
                 tonic::transport::Server::builder()
                     .add_service(
                         chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
-                            MockNetworkPolicyNwd { tracker },
+                            MockNetworkPolicyNwd {
+                                tracker,
+                                firewall_failure: nwd_rejects_with,
+                            },
                         ),
                     )
                     .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -6028,7 +6054,7 @@ mod tests {
         // nwd's set_firewall_policy byte-identically, on the network
         // the request names.
         let rules = br#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#;
-        let (tracker, result) = apply_network_policy_with_rules(rules, false).await;
+        let (tracker, result) = apply_network_policy_with_rules(rules, false, None).await;
         let resp = result.expect("a valid ruleset must ack");
         let result_meta = resp.into_inner().result.expect("ack carries result meta");
         assert_eq!(result_meta.status, "ok");
@@ -6045,7 +6071,7 @@ mod tests {
         // ruleset never reaches nwd — default-deny with zero allows
         // would cut the network's guests off. The ack's summary pins
         // the skip so an early abort cannot pass vacuously.
-        let (tracker, result) = apply_network_policy_with_rules(b"[]", false).await;
+        let (tracker, result) = apply_network_policy_with_rules(b"[]", false, None).await;
         let resp = result.expect("an empty ruleset must still ack ok (a no-op, not a failure)");
         let result_meta = resp.into_inner().result.expect("ack carries result meta");
         assert_eq!(result_meta.status, "ok");
@@ -6092,7 +6118,8 @@ mod tests {
     async fn apply_network_policy_rejects_malformed_policy_json() {
         // Fail closed BEFORE nwd (the M4.4 N7 class): malformed bytes
         // get an invalid_argument, never a silent drop or a pass-through.
-        let (tracker, result) = apply_network_policy_with_rules(b"not json at all", false).await;
+        let (tracker, result) =
+            apply_network_policy_with_rules(b"not json at all", false, None).await;
         let err = result.expect_err("malformed policy_json must fail closed");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(
@@ -6111,12 +6138,52 @@ mod tests {
         // this test ever fails with `unsupported in core-managed mode`,
         // the deployed-mode dispatch leg is dead.
         let rules = br#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#;
-        let (tracker, result) = apply_network_policy_with_rules(rules, true).await;
+        let (tracker, result) = apply_network_policy_with_rules(rules, true, None).await;
         let resp = result.expect(
             "apply_network_policy must NOT refuse in core-managed mode (the #355 M2.2b carve-out)",
         );
         let result_meta = resp.into_inner().result.expect("ack carries result meta");
         assert_eq!(result_meta.status, "ok");
+        let firewall_calls = tracker.firewall_calls.lock().unwrap();
+        assert_eq!(firewall_calls.len(), 1);
+        assert_eq!(firewall_calls[0].1, rules.to_vec());
+    }
+
+    #[tokio::test]
+    async fn apply_network_policy_surfaces_nwd_rejection() {
+        // #355 PR 1 review fold (the MUST-FIX): nwd reports semantic
+        // refusals as a gRPC Ok wrapping an err_result — the
+        // unreachable-topology `NotFound` shape here, exactly what a
+        // stale target-set resolution (a VM placed but never
+        // materialized, a topology torn down at last-detach) produces.
+        // The carrier must FAIL the operation with the refusal
+        // surfaced, never ack a false success — the #355 lie in task
+        // form. The tracker proves the call reached nwd, so this
+        // cannot pass vacuously.
+        let rules = br#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#;
+        let (tracker, result) = apply_network_policy_with_rules(
+            rules,
+            false,
+            Some((
+                "NotFound".to_string(),
+                "no topology for network net-1".to_string(),
+            )),
+        )
+        .await;
+        let err = result.expect_err("an nwd err_result must fail the carrier, not ack ok");
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(
+            err.message().contains("NotFound"),
+            "the nwd error code must ride the failure: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("no topology for network net-1"),
+            "the nwd human summary must ride the failure: {}",
+            err.message()
+        );
+        // The apply reached nwd (the refusal is nwd's, not a
+        // pre-flight abort)...
         let firewall_calls = tracker.firewall_calls.lock().unwrap();
         assert_eq!(firewall_calls.len(), 1);
         assert_eq!(firewall_calls[0].1, rules.to_vec());

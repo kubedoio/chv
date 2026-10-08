@@ -1544,9 +1544,7 @@ impl Orchestrator {
                 network_id = network_id,
                 "network policy update: no desired-state row; no-op success"
             );
-            return self
-                .mark_network_policy_succeeded(operation_id, "no desired-state row")
-                .await;
+            return self.mark_network_policy_succeeded(operation_id).await;
         };
         if desired_status.as_deref() == Some("Deleting") {
             info!(
@@ -1554,9 +1552,7 @@ impl Orchestrator {
                 network_id = network_id,
                 "network policy update: network is Deleting; no-op success"
             );
-            return self
-                .mark_network_policy_succeeded(operation_id, "network is Deleting")
-                .await;
+            return self.mark_network_policy_succeeded(operation_id).await;
         }
         // #360 discipline (unchanged by this PR): a semantically empty
         // ruleset is never dispatched — nwd's engine would engage
@@ -1571,9 +1567,7 @@ impl Orchestrator {
                 network_id = network_id,
                 "network policy update: empty ruleset; no-op success (until the #355 baseline lands)"
             );
-            return self
-                .mark_network_policy_succeeded(operation_id, "empty ruleset")
-                .await;
+            return self.mark_network_policy_succeeded(operation_id).await;
         };
 
         // DP2 target set: distinct nodes with at least one NIC of a
@@ -1599,9 +1593,7 @@ impl Orchestrator {
                 network_id = network_id,
                 "network policy update: no attached VMs; no-op success (applies at first attach)"
             );
-            return self
-                .mark_network_policy_succeeded(operation_id, "no attached VMs")
-                .await;
+            return self.mark_network_policy_succeeded(operation_id).await;
         }
 
         let mut failures: Vec<String> = Vec::new();
@@ -1715,17 +1707,19 @@ impl Orchestrator {
             nodes = %nodes.join(","),
             "network policy dispatched to all nodes with attached VMs"
         );
-        self.mark_network_policy_succeeded(operation_id, &nodes.join(","))
-            .await
+        self.mark_network_policy_succeeded(operation_id).await
     }
 
     /// The no-op/success terminal write shared by the #355 network
     /// policy dispatch paths (`dispatch_update_network_policy`).
-    async fn mark_network_policy_succeeded(
-        &self,
-        operation_id: &str,
-        summary: &str,
-    ) -> Result<(), ChvError> {
+    /// The success terminal write shared by the #355 network policy
+    /// dispatch paths (`dispatch_update_network_policy`). Carries no
+    /// `error_message` by design — the #502 convention: a successful
+    /// terminal write clears the error fields, so a mid-retry failure
+    /// message never survives a success. The no-op REASON (empty
+    /// ruleset, no attached VMs, missing/Deleting NDS row) is
+    /// info-logged at each call site with the operation id.
+    async fn mark_network_policy_succeeded(&self, operation_id: &str) -> Result<(), ChvError> {
         self.operation_repo
             .update_status(&OperationStatusUpdateInput {
                 operation_id: OperationId::new(operation_id.to_string()).map_err(|e| {
@@ -1742,9 +1736,7 @@ impl Orchestrator {
             })
             .await
             .map_err(|e| ChvError::Internal {
-                reason: format!(
-                    "failed to mark UpdateNetworkPolicy operation terminal ({summary}): {e}"
-                ),
+                reason: format!("failed to mark UpdateNetworkPolicy operation terminal: {e}"),
             })?;
         Ok(())
     }
@@ -3916,6 +3908,100 @@ mod tests {
             completed_at.is_some(),
             "the terminal write stamps completed_at"
         );
+    }
+
+    /// #355 PR 1 review fold: the two remaining no-op branches — a
+    /// missing NDS row (the op's network was deleted before the
+    /// dispatch claimed it) and a `'Deleting'` NDS row (the policy
+    /// update raced the network delete) — complete no-op `Succeeded`,
+    /// never a failure: the delete path tears the topology down at
+    /// last-detach, so there is nothing to apply.
+    #[tokio::test]
+    async fn update_network_policy_missing_or_deleting_nds_is_a_noop_success() {
+        let pool = create_test_pool().await;
+        // Missing NDS: the op names a network with no desired-state
+        // row at all.
+        seed_accepted_op(
+            &pool,
+            "op-np-missing",
+            "Network",
+            "net-np-gone",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+        // Deleting NDS: the row exists but is tombstoned.
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-del",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        sqlx::query("UPDATE network_desired_state SET desired_status = 'Deleting' WHERE network_id = 'net-np-del'")
+            .execute(&pool)
+            .await
+            .expect("tombstone the NDS row");
+        seed_accepted_op(
+            &pool,
+            "op-np-del",
+            "Network",
+            "net-np-del",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // A live target on the Deleting network would dispatch if the
+        // tombstone check were missing — seed one and prove it does
+        // not (the branch is not vacuously safe).
+        seed_vm_with_nic(&pool, "vm-np-del", "node-np-del", "net-np-del", None).await;
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-np-del", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        assert!(
+            agent.network_policy_calls.lock().unwrap().is_empty(),
+            "neither a missing nor a Deleting NDS row may dispatch — the live target on the \
+             tombstoned network proves the branch is not vacuously safe"
+        );
+        for op_id in ["op-np-missing", "op-np-del"] {
+            let (status, error_code, _, retry_count, next_retry_at, completed_at) =
+                op_row(&pool, op_id).await;
+            assert_eq!(status, "Succeeded", "{op_id} completes as a no-op");
+            assert_eq!(error_code, None, "{op_id} carries no failure cause");
+            assert_eq!(retry_count, 0);
+            assert_eq!(next_retry_at, None);
+            assert!(
+                completed_at.is_some(),
+                "{op_id}'s terminal write stamps completed_at"
+            );
+        }
     }
 
     /// #355 PR 1: the #378 §7 fast-fail, network-policy leg — an

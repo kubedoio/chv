@@ -911,6 +911,57 @@ impl NwdClient {
         policy_json: Vec<u8>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
+        // Deliberately UNCHECKED (byte-identical to its pre-#355
+        // behavior): nwd's semantic err_result is dropped here. The
+        // attach path depends on this shape; the #355 carrier uses the
+        // checked variant below.
+        self.set_firewall_policy_response(network_id, policy_version, policy_json, operation_id)
+            .await?;
+        Ok(())
+    }
+
+    /// #355 (PR 1): the checked variant of [`set_firewall_policy`] —
+    /// nwd reports SEMANTIC failures (unknown topology `NotFound`,
+    /// engine/command failure, vocabulary rejection) as a gRPC `Ok`
+    /// wrapping an `err_result`, so a caller that only maps the
+    /// transport error acks a false success when the apply was
+    /// refused. This variant inspects the inner result status, the
+    /// `ensure_network_topology` discipline. The #355 policy carrier
+    /// uses it; the attach path keeps the unchecked variant
+    /// byte-identically (its swallow is a pre-existing, separately
+    /// tracked gap — changing it is not this PR's zero-behavior-change
+    /// contract).
+    pub async fn set_firewall_policy_checked(
+        &mut self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: Vec<u8>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let resp = self
+            .set_firewall_policy_response(network_id, policy_version, policy_json, operation_id)
+            .await?
+            .into_inner();
+        if !resp.status.eq_ignore_ascii_case("ok") {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: format!(
+                    "set_firewall_policy failed: {} ({})",
+                    resp.human_summary, resp.error_code
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// The raw-response core both firewall-policy variants share.
+    async fn set_firewall_policy_response(
+        &mut self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: Vec<u8>,
+        operation_id: Option<&str>,
+    ) -> Result<tonic::Response<chv_nwd_api::chv_nwd_api::Result>, ChvError> {
         let req = SetFirewallPolicyRequest {
             meta: Some(chv_nwd_api::chv_nwd_api::Meta {
                 operation_id: operation_id.unwrap_or("").to_string(),
@@ -936,8 +987,7 @@ impl NwdClient {
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            })?;
-        Ok(())
+            })
     }
 
     pub async fn set_nat_policy(
