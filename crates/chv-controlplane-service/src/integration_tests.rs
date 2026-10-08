@@ -1542,6 +1542,13 @@ mod fabric_dispatch {
             Err(tonic::Status::unimplemented(""))
         }
 
+        async fn apply_network_policy(
+            &self,
+            _request: tonic::Request<proto::ApplyNetworkPolicyRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+
         async fn update_overlay(
             &self,
             request: tonic::Request<proto::UpdateOverlayRequest>,

@@ -387,6 +387,22 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         ))
     }
 
+    /// #355 (PR 1 of the decomposition): the network policy update
+    /// journals BFF-direct in the desired-state transaction (PR 2,
+    /// the CreateVolume journaling precedent), NOT through a CP
+    /// lifecycle RPC. The node RPC of the same name (the #355 dispatch
+    /// carrier the orchestrator fans out to agents) is a different
+    /// surface; this CP-side shim stays closed.
+    async fn apply_network_policy(
+        &self,
+        _request: Request<proto::ApplyNetworkPolicyRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        Err(Status::unimplemented(
+            "apply_network_policy is not served by the control plane lifecycle; the network \
+             policy update journals via the BFF (#355)",
+        ))
+    }
+
     async fn start_vm(
         &self,
         request: Request<proto::StartVmRequest>,

@@ -738,6 +738,20 @@ impl Orchestrator {
                 .await;
         }
 
+        // #355 (PR 1 of the decomposition): the network firewall-policy
+        // dispatch fans out to every node with an attached VM on the
+        // network (DP2 — `networks.node_id` is NULL for the
+        // operator-created networks that carry rules, and materialization
+        // is per-node and lazy), so it bypasses the single-node resolution
+        // below exactly like UpdateOverlay. Dead-but-live with this PR:
+        // no producer journals an `UpdateNetworkPolicy` operation until
+        // the BFF route lands (PR 2).
+        if row.operation_type == "UpdateNetworkPolicy" {
+            return self
+                .dispatch_update_network_policy(&row.operation_id, &row.resource_id)
+                .await;
+        }
+
         let node_id = row
             .node_id
             .as_deref()
@@ -1488,6 +1502,240 @@ impl Orchestrator {
                 reason: format!("failed to mark UpdateOverlay operation terminal: {e}"),
             })?;
 
+        Ok(())
+    }
+
+    /// #355 (PR 1 of the decomposition): dispatch the network's stored
+    /// firewall ruleset to every node with an attached VM on the
+    /// network (DP2), with the UpdateOverlay fan-out discipline: the
+    /// #378 §7 all-refusals fast-fail (terminal `Failed` /
+    /// `UNSUPPORTED_BY_AGENT`, no retry), mixed failures on the shared
+    /// retry curve, and the #502 partial-success roll-up naming both
+    /// sets. Zero targets is a no-op `Succeeded` — a fleet network with
+    /// rules but no attached VMs yet is the normal create-then-populate
+    /// order, and the attach-time snapshot path applies the policy at
+    /// first materialization. Dead-but-live with this PR: no producer
+    /// journals an `UpdateNetworkPolicy` operation until the BFF route
+    /// lands (PR 2).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn dispatch_update_network_policy(
+        &self,
+        operation_id: &str,
+        network_id: &str,
+    ) -> Result<(), ChvError> {
+        // The stored ruleset + generation (the DP7 fence rides the
+        // request's meta.desired_state_version; enforcement lands in
+        // PR 3). A missing or tombstoned NDS row is a no-op success: a
+        // policy update racing a network delete has nothing to apply —
+        // the delete path tears the topology down at last-detach.
+        let nds = sqlx::query_as::<_, (Option<String>, Option<String>, i64)>(
+            "SELECT firewall_rules_json, desired_status, desired_generation \
+             FROM network_desired_state WHERE network_id = ?",
+        )
+        .bind(network_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to query network desired state for {network_id}: {e}"),
+        })?;
+        let Some((firewall_rules_json, desired_status, desired_generation)) = nds else {
+            info!(
+                operation_id = operation_id,
+                network_id = network_id,
+                "network policy update: no desired-state row; no-op success"
+            );
+            return self.mark_network_policy_succeeded(operation_id).await;
+        };
+        if desired_status.as_deref() == Some("Deleting") {
+            info!(
+                operation_id = operation_id,
+                network_id = network_id,
+                "network policy update: network is Deleting; no-op success"
+            );
+            return self.mark_network_policy_succeeded(operation_id).await;
+        }
+        // #360 discipline (unchanged by this PR): a semantically empty
+        // ruleset is never dispatched — nwd's engine would engage
+        // default-deny with zero allows and cut the network's guests
+        // off (including DHCP). PR 3 flips this at the policy boundary
+        // (DP4, ruled 2026-10-08: `[]` = no user rules → baseline
+        // allows + default-deny).
+        let ruleset = firewall_rules_json.filter(|p| !chv_common::firewall_ruleset_is_empty(p));
+        let Some(policy_json) = ruleset else {
+            info!(
+                operation_id = operation_id,
+                network_id = network_id,
+                "network policy update: empty ruleset; no-op success (until the #355 baseline lands)"
+            );
+            return self.mark_network_policy_succeeded(operation_id).await;
+        };
+
+        // DP2 target set: distinct nodes with at least one NIC of a
+        // live (non-Deleting) VM on the network. Tombstone-aware so a
+        // policy update racing a VM delete does not dispatch to a node
+        // about to tear the topology down.
+        let target_nodes: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT vds.target_node_id \
+             FROM vm_nic_desired_state n \
+             JOIN vm_desired_state vds ON vds.vm_id = n.vm_id \
+             WHERE n.network_id = ? AND vds.target_node_id IS NOT NULL \
+               AND COALESCE(vds.desired_status, '') != 'Deleting'",
+        )
+        .bind(network_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to resolve network policy target nodes for {network_id}: {e}"),
+        })?;
+        if target_nodes.is_empty() {
+            info!(
+                operation_id = operation_id,
+                network_id = network_id,
+                "network policy update: no attached VMs; no-op success (applies at first attach)"
+            );
+            return self.mark_network_policy_succeeded(operation_id).await;
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut applied: Vec<String> = Vec::new();
+        // #378 §7 fast-fail, network-policy leg: whether every
+        // per-node failure was an `Unimplemented` refusal.
+        let mut all_refusals = true;
+        for node_id in &target_nodes {
+            let dispatch = async {
+                let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id)?;
+                let mut client = self
+                    .node_client_pool
+                    .get_or_connect(node_id, &socket_path)
+                    .await?;
+                client
+                    .apply_network_policy(
+                        node_id,
+                        network_id,
+                        &desired_generation.to_string(),
+                        policy_json.as_bytes(),
+                        operation_id,
+                        Some("orchestrator"),
+                    )
+                    .await?;
+                Ok::<(), ChvError>(())
+            };
+            match dispatch.await {
+                Ok(()) => {
+                    applied.push(node_id.clone());
+                    info!(
+                        operation_id = operation_id,
+                        network_id = network_id,
+                        node_id = %node_id,
+                        "network policy dispatched to node"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        operation_id = operation_id,
+                        network_id = network_id,
+                        node_id = %node_id,
+                        error = %e,
+                        "failed to dispatch network policy to node"
+                    );
+                    if !matches!(e, ChvError::Unimplemented { .. }) {
+                        all_refusals = false;
+                    }
+                    failures.push(format!("{node_id}: {e}"));
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            // The UpdateOverlay roll-up discipline verbatim: an
+            // all-refusals fan-out preserves the refusal identity so
+            // the tick's Unimplemented bypass fast-fails the operation
+            // terminal with the cause-naming code (the terminal row is
+            // written HERE — the bypass never reaches mark_for_retry);
+            // mixed failures keep the Internal aggregation and stay on
+            // the shared retry curve. The #502 partial-success shape
+            // names both sets.
+            if all_refusals {
+                let applied_summary = if applied.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; applied on {} node(s): {}",
+                        applied.len(),
+                        applied.join(", ")
+                    )
+                };
+                let reason = format!(
+                    "network policy update for {network_id} refused by all {} failing node(s): {}{}",
+                    failures.len(),
+                    failures.join("; "),
+                    applied_summary,
+                );
+                self.operation_repo
+                    .update_status(&OperationStatusUpdateInput {
+                        operation_id: OperationId::new(operation_id.to_string()).map_err(|e| {
+                            ChvError::Internal {
+                                reason: format!("invalid operation_id: {e}"),
+                            }
+                        })?,
+                        status: OperationStatus::Failed,
+                        error_code: Some(UNSUPPORTED_BY_AGENT_ERROR_CODE.into()),
+                        error_message: Some(reason.clone()),
+                        observed_generation: None,
+                        updated_by: Some("orchestrator".into()),
+                        updated_unix_ms: now_unix_ms(),
+                    })
+                    .await
+                    .map_err(|e2| ChvError::Internal {
+                        reason: format!("network policy refused and status update failed: {e2}"),
+                    })?;
+                return Err(ChvError::Unimplemented { reason });
+            }
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "network policy update for {network_id} failed on {} node(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+
+        let nodes: Vec<&str> = target_nodes.iter().map(String::as_str).collect();
+        info!(
+            operation_id = operation_id,
+            network_id = network_id,
+            nodes = %nodes.join(","),
+            "network policy dispatched to all nodes with attached VMs"
+        );
+        self.mark_network_policy_succeeded(operation_id).await
+    }
+
+    /// The success terminal write shared by the #355 network policy
+    /// dispatch paths (`dispatch_update_network_policy`). Carries no
+    /// `error_message` by design — the #502 convention: a successful
+    /// terminal write clears the error fields, so a mid-retry failure
+    /// message never survives a success. The no-op REASON (empty
+    /// ruleset, no attached VMs, missing/Deleting NDS row) is
+    /// info-logged at each call site with the operation id.
+    async fn mark_network_policy_succeeded(&self, operation_id: &str) -> Result<(), ChvError> {
+        self.operation_repo
+            .update_status(&OperationStatusUpdateInput {
+                operation_id: OperationId::new(operation_id.to_string()).map_err(|e| {
+                    ChvError::Internal {
+                        reason: format!("invalid operation_id: {e}"),
+                    }
+                })?,
+                status: OperationStatus::Succeeded,
+                error_code: None,
+                error_message: None,
+                observed_generation: None,
+                updated_by: Some("orchestrator".into()),
+                updated_unix_ms: now_unix_ms(),
+            })
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to mark UpdateNetworkPolicy operation terminal: {e}"),
+            })?;
         Ok(())
     }
 
@@ -2722,6 +2970,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -2846,6 +3096,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -2956,6 +3208,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -3054,6 +3308,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -3131,6 +3387,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -3240,6 +3498,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_status: tonic::Status::ok(""),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3327,6 +3587,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             create_status: tonic::Status::ok(""),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3373,6 +3635,630 @@ mod tests {
             "exactly one agent dispatch across all ticks"
         );
         let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-dl-cm").await;
+        assert_eq!(status, "Failed", "the terminal row stays terminal");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+    }
+
+    // ============================================================
+    // #355 PR 1 — the UpdateNetworkPolicy dispatch carrier (fan-out)
+    // (design docs/design/issue-355-network-policy-dispatch.md, §3
+    // Option A + DP2; the M2.2b carve-out is pinned agent-side)
+    // ============================================================
+
+    /// Seeds a network + desired-state row with the given ruleset and
+    /// generation, and (optionally) a VM with a NIC on it at the given
+    /// node. The networks row is the fleet shape the design targets:
+    /// `node_id` NULL (an operator-created network has no owning node
+    /// — DP2's whole premise).
+    async fn seed_network_policy_fixture(
+        pool: &StorePool,
+        network_id: &str,
+        firewall_rules_json: Option<&str>,
+        desired_generation: i64,
+    ) {
+        sqlx::query("INSERT INTO networks (network_id, node_id, display_name) VALUES (?, NULL, ?)")
+            .bind(network_id)
+            .bind(format!("Net {network_id}"))
+            .execute(pool)
+            .await
+            .expect("insert network");
+        sqlx::query(
+            "INSERT INTO network_desired_state \
+             (network_id, desired_generation, desired_status, cidr, gateway, dhcp_enabled, \
+              ipam_mode, is_default, firewall_rules_json) \
+             VALUES (?, ?, 'Pending', '10.200.0.0/24', '10.200.0.1', 1, 'internal', 0, ?)",
+        )
+        .bind(network_id)
+        .bind(desired_generation)
+        .bind(firewall_rules_json)
+        .execute(pool)
+        .await
+        .expect("seed network desired state");
+    }
+
+    async fn seed_vm_with_nic(
+        pool: &StorePool,
+        vm_id: &str,
+        node_id: &str,
+        network_id: &str,
+        desired_status: Option<&str>,
+    ) {
+        seed_node(pool, node_id).await;
+        seed_vm(pool, vm_id, node_id).await;
+        sqlx::query(
+            "INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address) \
+             VALUES (?, ?, ?, '52:54:00:00:00:01')",
+        )
+        .bind(format!("nic-{vm_id}"))
+        .bind(vm_id)
+        .bind(network_id)
+        .execute(pool)
+        .await
+        .expect("seed vm nic");
+        if let Some(status) = desired_status {
+            sqlx::query("UPDATE vm_desired_state SET desired_status = ? WHERE vm_id = ?")
+                .bind(status)
+                .bind(vm_id)
+                .execute(pool)
+                .await
+                .expect("set vm desired_status");
+        }
+    }
+
+    /// #355 PR 1 (DP2): the dispatch fans out to every node with a
+    /// LIVE attached VM on the network — the fleet-network shape where
+    /// `networks.node_id` is meaningless — threading the stored
+    /// ruleset and the NDS generation (the DP7 fence rides
+    /// meta.desired_state_version), and a Deleting VM's node is
+    /// excluded (tombstone-aware target resolution). Dead-but-live: no
+    /// producer journals an `UpdateNetworkPolicy` operation until the
+    /// BFF route lands (PR 2) — the row here is seeded directly, exactly
+    /// as the volume arms' tests do.
+    #[tokio::test]
+    async fn update_network_policy_fans_out_to_nodes_with_live_attached_vms() {
+        let pool = create_test_pool().await;
+        let policy = r#"[{"direction":"ingress","action":"accept","protocol":"icmp","source":"10.200.0.0/24"}]"#;
+        seed_network_policy_fixture(&pool, "net-np", Some(policy), 4).await;
+        seed_vm_with_nic(&pool, "vm-np-a", "node-np-a", "net-np", None).await;
+        seed_vm_with_nic(&pool, "vm-np-b", "node-np-b", "net-np", None).await;
+        // A Deleting VM's node must NOT join the target set.
+        seed_vm_with_nic(
+            &pool,
+            "vm-np-dying",
+            "node-np-dying",
+            "net-np",
+            Some("Deleting"),
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-np",
+            "Network",
+            "net-np",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-np-a", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-np-b", agent.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-np-dying", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let calls = agent.network_policy_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "exactly the two live nodes dispatch, not the Deleting VM's node: {calls:?}"
+        );
+        let mut target_nodes: Vec<&str> = calls.iter().map(|c| c.node_id.as_str()).collect();
+        target_nodes.sort_unstable();
+        assert_eq!(target_nodes, ["node-np-a", "node-np-b"]);
+        for call in &calls {
+            assert_eq!(call.network_id, "net-np");
+            assert_eq!(call.policy_json, policy.as_bytes().to_vec());
+            assert_eq!(
+                call.meta.as_ref().map(|m| m.desired_state_version.as_str()),
+                Some("4"),
+                "the NDS generation rides meta.desired_state_version (the DP7 fence)"
+            );
+        }
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM operations WHERE operation_id = ?")
+                .bind("op-np")
+                .fetch_one(&pool)
+                .await
+                .expect("op status");
+        assert_eq!(status, "Succeeded", "the fan-out converged on the OK acks");
+    }
+
+    /// #355 PR 1: the #360 discipline (unchanged by this PR) — a
+    /// semantically empty ruleset is never dispatched; the operation
+    /// completes no-op Succeeded rather than failing. PR 3 flips the
+    /// semantics (DP4, ruled 2026-10-08: `[]` = baseline +
+    /// default-deny).
+    #[tokio::test]
+    async fn update_network_policy_empty_ruleset_is_a_noop_success() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(&pool, "net-np-empty", Some("[]"), 2).await;
+        seed_vm_with_nic(&pool, "vm-np-empty", "node-np-empty", "net-np-empty", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-empty",
+            "Network",
+            "net-np-empty",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-np-empty", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        assert!(
+            agent.network_policy_calls.lock().unwrap().is_empty(),
+            "an empty ruleset must never be dispatched (the #360 discipline)"
+        );
+        let (status, _, _, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-empty").await;
+        assert_eq!(status, "Succeeded", "the no-op completes, it does not fail");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+    }
+
+    /// #355 PR 1 (DP2): a fleet network with rules but no attached VMs
+    /// yet is the normal create-then-populate order — zero targets is
+    /// a no-op Succeeded (the attach-time snapshot path applies the
+    /// policy at first materialization), not a failure.
+    #[tokio::test]
+    async fn update_network_policy_without_attached_vms_is_a_noop_success() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-bare",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            3,
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-np-bare",
+            "Network",
+            "net-np-bare",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        let (status, _, _, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-bare").await;
+        assert_eq!(status, "Succeeded", "zero targets is a no-op success");
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+    }
+
+    /// #355 PR 1 review fold: the two remaining no-op branches — a
+    /// missing NDS row (the op's network was deleted before the
+    /// dispatch claimed it) and a `'Deleting'` NDS row (the policy
+    /// update raced the network delete) — complete no-op `Succeeded`,
+    /// never a failure: the delete path tears the topology down at
+    /// last-detach, so there is nothing to apply.
+    #[tokio::test]
+    async fn update_network_policy_missing_or_deleting_nds_is_a_noop_success() {
+        let pool = create_test_pool().await;
+        // Missing NDS: the op names a network with no desired-state
+        // row at all.
+        seed_accepted_op(
+            &pool,
+            "op-np-missing",
+            "Network",
+            "net-np-gone",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+        // Deleting NDS: the row exists but is tombstoned.
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-del",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        sqlx::query("UPDATE network_desired_state SET desired_status = 'Deleting' WHERE network_id = 'net-np-del'")
+            .execute(&pool)
+            .await
+            .expect("tombstone the NDS row");
+        seed_accepted_op(
+            &pool,
+            "op-np-del",
+            "Network",
+            "net-np-del",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // A live target on the Deleting network would dispatch if the
+        // tombstone check were missing — seed one and prove it does
+        // not (the branch is not vacuously safe).
+        seed_vm_with_nic(&pool, "vm-np-del", "node-np-del", "net-np-del", None).await;
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-np-del", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        assert!(
+            agent.network_policy_calls.lock().unwrap().is_empty(),
+            "neither a missing nor a Deleting NDS row may dispatch — the live target on the \
+             tombstoned network proves the branch is not vacuously safe"
+        );
+        for op_id in ["op-np-missing", "op-np-del"] {
+            let (status, error_code, _, retry_count, next_retry_at, completed_at) =
+                op_row(&pool, op_id).await;
+            assert_eq!(status, "Succeeded", "{op_id} completes as a no-op");
+            assert_eq!(error_code, None, "{op_id} carries no failure cause");
+            assert_eq!(retry_count, 0);
+            assert_eq!(next_retry_at, None);
+            assert!(
+                completed_at.is_some(),
+                "{op_id}'s terminal write stamps completed_at"
+            );
+        }
+    }
+
+    /// A `MockLifecycleAgent` preset for the #355 network-policy fan-out
+    /// tests: only the policy status varies; every sibling surface
+    /// stays at its inert default (snapshot/VM refusals, OK acks
+    /// elsewhere).
+    fn network_policy_mock_agent(network_policy_status: tonic::Status) -> MockLifecycleAgent {
+        MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status,
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        }
+    }
+
+    /// #355 PR 1 review round 2: the MIXED-failure branch — one node
+    /// acks, one node's transport is DOWN (a connect failure, not an
+    /// `Unimplemented` refusal) — must stay on the shared retry curve
+    /// (`RetryPending`, a scheduled retry), NOT go terminal: the
+    /// overlay arm's `update_overlay_fan_out_mixed_failure_keeps_retry_semantics`
+    /// discipline, now pinned for the network-policy leg too.
+    #[tokio::test]
+    async fn update_network_policy_mixed_failure_keeps_retry_semantics() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-mix",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        seed_vm_with_nic(&pool, "vm-np-mix-a", "node-np-mix-a", "net-np-mix", None).await;
+        seed_vm_with_nic(&pool, "vm-np-mix-b", "node-np-mix-b", "net-np-mix", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-mix",
+            "Network",
+            "net-np-mix",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Node A: a healthy agent. Node B: NO socket at all — the
+        // connect failure is a transport error, not a refusal, so the
+        // fan-out is MIXED (all_refusals = false).
+        let agent_a = network_policy_mock_agent(tonic::Status::ok(""));
+        spawn_mock_lifecycle_agent(&pattern, "node-np-mix-a", agent_a.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        // The healthy node dispatched exactly once...
+        assert_eq!(
+            agent_a.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the reachable node's dispatch happened"
+        );
+        // ...and the op sits on the retry curve, not terminal.
+        let (status, error_code, _, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-mix").await;
+        assert_eq!(
+            status, "RetryPending",
+            "a mixed failure retries — it does not go terminal"
+        );
+        assert_eq!(error_code, None, "no terminal cause is recorded mid-retry");
+        assert_eq!(retry_count, 1, "exactly one retry is scheduled");
+        assert!(
+            next_retry_at.is_some(),
+            "the retry is scheduled for the future"
+        );
+        assert_eq!(completed_at, None, "the op is not completed");
+    }
+
+    /// #355 PR 1 review round 2: the partial-success ALL-REFUSALS
+    /// shape — one node acks, one node refuses `unimplemented` (the
+    /// mixed-version fleet rollout shape) — goes terminal
+    /// `Failed`/`UNSUPPORTED_BY_AGENT` on the first dispatch AND the
+    /// #502 roll-up names the applied set alongside the refusing set.
+    #[tokio::test]
+    async fn update_network_policy_partial_refusal_names_the_applied_set() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-part",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        seed_vm_with_nic(&pool, "vm-np-part-a", "node-np-part-a", "net-np-part", None).await;
+        seed_vm_with_nic(&pool, "vm-np-part-b", "node-np-part-b", "net-np-part", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-part",
+            "Network",
+            "net-np-part",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent_a = network_policy_mock_agent(tonic::Status::ok(""));
+        let agent_b = network_policy_mock_agent(tonic::Status::unimplemented(
+            "apply_network_policy is not served by this agent version",
+        ));
+        spawn_mock_lifecycle_agent(&pattern, "node-np-part-a", agent_a.clone());
+        spawn_mock_lifecycle_agent(&pattern, "node-np-part-b", agent_b.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+        orchestrator.tick().await.expect("tick");
+
+        // Both nodes were attempted...
+        assert_eq!(
+            agent_a.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the accepting node's dispatch happened"
+        );
+        assert_eq!(
+            agent_b.network_policy_calls.lock().unwrap().len(),
+            1,
+            "the refusing node was attempted too"
+        );
+        // ...the op went terminal with the refusal cause...
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-part").await;
+        assert_eq!(status, "Failed", "an all-refusals fan-out is terminal");
+        assert_eq!(error_code.as_deref(), Some("UNSUPPORTED_BY_AGENT"));
+        assert_eq!(retry_count, 0);
+        assert_eq!(next_retry_at, None);
+        assert!(completed_at.is_some());
+        // ...and the roll-up names BOTH sets (the #502 discipline).
+        let message = error_message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("refused by all"),
+            "the all-refusals shape is named: {message:?}"
+        );
+        assert!(
+            message.contains("applied on 1 node(s): node-np-part-a"),
+            "the applied set is named beside the refusing set: {message:?}"
+        );
+    }
+
+    /// #355 PR 1: the #378 §7 fast-fail, network-policy leg — an
+    /// all-refusals fan-out (every agent answering `unimplemented`,
+    /// e.g. a mixed-version fleet before the agent leg rolls out)
+    /// goes terminal `Failed` / `UNSUPPORTED_BY_AGENT` on the first
+    /// dispatch with no retry, exactly like the volume carriers.
+    #[tokio::test]
+    async fn update_network_policy_refusal_fails_fast_without_retry() {
+        let pool = create_test_pool().await;
+        seed_network_policy_fixture(
+            &pool,
+            "net-np-ref",
+            Some(r#"[{"direction":"ingress","action":"accept","protocol":"icmp"}]"#),
+            2,
+        )
+        .await;
+        seed_vm_with_nic(&pool, "vm-np-ref", "node-np-ref", "net-np-ref", None).await;
+        seed_accepted_op(
+            &pool,
+            "op-np-ref",
+            "Network",
+            "net-np-ref",
+            "UpdateNetworkPolicy",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("agent-{node_id}.sock")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let agent = MockLifecycleAgent {
+            snapshot_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_status: tonic::Status::unimplemented(""),
+            snapshot_vm_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshot_vm_status: tonic::Status::unimplemented(""),
+            overlay_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            overlay_status_by_node: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::unimplemented(
+                "apply_network_policy is not served by this agent version",
+            ),
+            create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            delete_status: tonic::Status::ok(""),
+            create_status: tonic::Status::ok(""),
+        };
+        spawn_mock_lifecycle_agent(&pattern, "node-np-ref", agent.clone());
+
+        let orchestrator = test_orchestrator(&pool, &pattern);
+
+        // First (and only) dispatch: the op must go terminal here.
+        orchestrator.tick().await.expect("tick 1");
+        let (status, error_code, error_message, retry_count, next_retry_at, completed_at) =
+            op_row(&pool, "op-np-ref").await;
+        assert_eq!(
+            status, "Failed",
+            "Unimplemented is terminal on first dispatch"
+        );
+        assert_eq!(
+            error_code.as_deref(),
+            Some("UNSUPPORTED_BY_AGENT"),
+            "the error code must name the cause"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("refused by all"),
+            "the roll-up must name the all-refusals shape: {error_message:?}"
+        );
+        assert_eq!(retry_count, 0, "no retry may be scheduled");
+        assert_eq!(next_retry_at, None, "mark_for_retry must never run");
+        assert!(
+            completed_at.is_some(),
+            "the terminal write stamps completed_at"
+        );
+
+        // Further ticks must not resurrect the terminal row or re-dispatch.
+        orchestrator.tick().await.expect("tick 2");
+        orchestrator.tick().await.expect("tick 3");
+        assert_eq!(
+            agent.network_policy_calls.lock().unwrap().len(),
+            1,
+            "exactly one agent dispatch across all ticks"
+        );
+        let (status, _, _, retry_count, next_retry_at, _) = op_row(&pool, "op-np-ref").await;
         assert_eq!(status, "Failed", "the terminal row stays terminal");
         assert_eq!(retry_count, 0);
         assert_eq!(next_retry_at, None);
@@ -4070,6 +4956,13 @@ mod tests {
         /// fast-fail on a refusal (the core-managed posture).
         delete_calls: std::sync::Arc<std::sync::Mutex<Vec<proto::DeleteVolumeRequest>>>,
         delete_status: tonic::Status,
+        /// #355 PR 1: every ApplyNetworkPolicy request, answered with
+        /// `network_policy_status` (OK by default) so tests can pin the
+        /// network_id/policy bytes the CP threaded — and the fan-out
+        /// roll-ups (all-refusals terminal, mixed retry, no-op shapes).
+        network_policy_calls:
+            std::sync::Arc<std::sync::Mutex<Vec<proto::ApplyNetworkPolicyRequest>>>,
+        network_policy_status: tonic::Status,
     }
 
     #[tonic::async_trait]
@@ -4166,6 +5059,31 @@ mod tests {
                     node_observed_generation: "1".to_string(),
                     error_code: "".to_string(),
                     human_summary: "volume deleted".to_string(),
+                }),
+            }))
+        }
+
+        async fn apply_network_policy(
+            &self,
+            request: tonic::Request<proto::ApplyNetworkPolicyRequest>,
+        ) -> Result<tonic::Response<proto::AckResponse>, tonic::Status> {
+            let inner = request.into_inner();
+            let op_id = inner
+                .meta
+                .as_ref()
+                .map(|m| m.operation_id.clone())
+                .unwrap_or_default();
+            self.network_policy_calls.lock().unwrap().push(inner);
+            if self.network_policy_status.code() != tonic::Code::Ok {
+                return Err(self.network_policy_status.clone());
+            }
+            Ok(tonic::Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: op_id,
+                    status: "ok".to_string(),
+                    node_observed_generation: "1".to_string(),
+                    error_code: "".to_string(),
+                    human_summary: "network policy applied".to_string(),
                 }),
             }))
         }
@@ -4525,6 +5443,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -4620,6 +5540,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -4707,6 +5629,8 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -4960,6 +5884,8 @@ mod tests {
                 overlay_status_by_node,
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -5081,6 +6007,8 @@ mod tests {
                 overlay_status_by_node,
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
@@ -5200,6 +6128,8 @@ mod tests {
                 overlay_status_by_node,
             )),
             attach_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            network_policy_status: tonic::Status::ok(""),
             create_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             delete_status: tonic::Status::ok(""),
