@@ -61,20 +61,17 @@ unused-ignored-advisory = "deny"
 #   RUSTSEC-2026-0204 (crossbeam-epoch) — crossbeam-epoch 0.9.21 is outside
 #     the advisory's affected range.
 ignore = [
-    # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
-    #   (a) Non-applicable as vuln: informational ("unmaintained").
-    #       Since the tonic 0.12 → 0.14 bump (#235 PR 1) the crate is a
-    #       DIRECT dependency of `chv-stord-core` only (PEM parsing in
-    #       `src/server.rs` + the migration mTLS tests) — tonic 0.14
-    #       itself no longer pulls it (upstream archived the repo and
-    #       folded the parser into `rustls-pki-types` >= 1.9).
-    #   (b) Upstream: https://github.com/rustls/pemfile/issues/61
-    #       tonic side: https://github.com/hyperium/tonic/pull/2103
-    #   (c) Remove when #235 PR 2 lands: the three direct sites migrate
-    #       to `rustls-pki-types::pem` and the dependency is dropped
-    #       from `chv-stord-core/Cargo.toml`.
-    "RUSTSEC-2025-0134",
-
+    # Removed 2026-10-08 (#235 PR 2 — rustls-pemfile fully retired from the
+    # graph): RUSTSEC-2025-0134 no longer requires an exception — the last
+    # three rustls-pemfile sites (chv-stord-core's migration receiver TLS
+    # config + the two migration mTLS test files) migrated to
+    # rustls-pki-types' folded-in PEM parser (available via the
+    # `rustls::pki_types` re-export, `alloc`-gated), and the dependency was
+    # dropped from `chv-stord-core/Cargo.toml`. PR 1 of #235 had already
+    # removed the transitive edge (tonic 0.14 uses rustls-pki-types
+    # directly); with the direct edge gone the crate is absent from
+    # Cargo.lock entirely.
+    #
     # Removed 2026-10-01 (issue #177 resolved — rust-s3 replaced by
     # object_store 0.14): RUSTSEC-2026-0194 and RUSTSEC-2026-0195 no longer
     # require exceptions — quick-xml now resolves to 0.41.0, which is outside

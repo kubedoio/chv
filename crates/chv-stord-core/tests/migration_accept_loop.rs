@@ -42,6 +42,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
@@ -173,18 +175,13 @@ fn raw_client_connector(
     client_key: &[u8],
 ) -> tokio_rustls::TlsConnector {
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    let mut cursor = std::io::Cursor::new(root_pem.to_vec());
-    for cert in rustls_pemfile::certs(&mut cursor) {
+    for cert in CertificateDer::pem_slice_iter(root_pem) {
         roots.add(cert.unwrap()).unwrap();
     }
-    let mut cert_cursor = std::io::Cursor::new(client_cert.to_vec());
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_cursor)
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(client_cert)
         .collect::<Result<_, _>>()
         .unwrap();
-    let mut key_cursor = std::io::Cursor::new(client_key.to_vec());
-    let key = rustls_pemfile::private_key(&mut key_cursor)
-        .unwrap()
-        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(client_key).unwrap();
     let config = tokio_rustls::rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_client_auth_cert(certs, key)
