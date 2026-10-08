@@ -106,6 +106,14 @@ jobs:
           export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
           ./scripts/package/smoke-rpm.sh dist/packages
 
+      # #549: the converged WebUI serving shape — the tier-label gate for
+      # the controlplane-served UI ([webui] enabled behind the packaged
+      # proxy-only nginx edge, /ws/ console proxy to the agent).
+      - name: Smoke test converged WebUI container
+        run: |
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/smoke-webui.sh dist/packages
+
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
         with:

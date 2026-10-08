@@ -166,8 +166,8 @@ The label stays [CODE-SUPPORTED, UNQUALIFIED] until this path's own
 qualification leg passes — the fresh-host end-to-end smoke tracked in
 #556 (run the one-liner on a clean Linux host and assert package
 install, config generation, service bring-up, agent enrollment, and
-WebUI serving), in the same gate shape as the #447 container
-package-smoke leg tracked in #549.
+WebUI serving), in the same gate shape as the container package-smoke
+leg that ran in #549 (2026-10-08).
 
 ---
 
@@ -664,11 +664,14 @@ The static `map` approach is production-standard for small-to-medium clusters (t
 
 ## Serving the Web UI in package mode
 
-> **Deployment status:** [CODE-SUPPORTED, UNQUALIFIED]. Serving the
-> packaged UI tree is an operator-provided step — no qualification leg
-> exercises it yet (the container package-smoke leg tracked in #549;
-> #447 closed 2026-10-07). `scripts/install.sh` remains the qualified
-> deployment path.
+> **Deployment status:** [CONTAINER-VERIFIED]. The packaged serving
+> shape — `[webui] enabled` behind the packaged proxy-only example
+> edge, from the `.deb` layout — is exercised end to end by the
+> container package-smoke leg (`scripts/package/smoke-webui.sh`, wired
+> into `package-pr.yml`; #549, passed 2026-10-08). The operator still
+> owns the edge, including TLS (decision D7), and guest-level UI
+> behavior is a separate surface (#355). `scripts/install.sh` remains
+> the qualified deployment path.
 
 The `chv-controlplane` package ships the Web UI static tree at
 `/usr/share/chv/ui`, and the control plane can serve it directly from
@@ -754,10 +757,12 @@ it; the VM serial console stops working without it.
 - The example configuration mirrors the one written by
   `scripts/install.sh` (both are proxy-only edges since #447; the
   binary owns static serving). The two copies can still drift.
-- The tier label for serving-from-packages stays
-  [CODE-SUPPORTED, UNQUALIFIED] until the container package-smoke leg
-  (#549; #447 closed 2026-10-07) runs: enabling `[webui]` and starting
-  the binary in a clean container, asserting the UI is served.
+- The tier label for serving-from-packages moved to
+  [CONTAINER-VERIFIED] on 2026-10-08: the container package-smoke leg
+  (#549) enables `[webui]`, starts the binary behind the packaged
+  proxy-only edge in a clean container built from the `.deb`s, and
+  asserts the UI is served (`scripts/package/smoke-webui.sh`, wired
+  into `package-pr.yml`).
 
 ---
 

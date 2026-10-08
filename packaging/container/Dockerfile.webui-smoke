@@ -1,0 +1,73 @@
+# Converged container image for the #549 container package-smoke leg.
+#
+# Tier purpose: this image exists to qualify the post-#447 converged
+# serving shape from the PACKAGED layout — the proxy-only nginx edge
+# (the packaged example conf, /usr/share/chv/examples/chv-example.conf)
+# in front of chv-controlplane with [webui] enabled, serving the
+# packaged UI tree (/usr/share/chv/ui) from its own HTTP listener, plus
+# the chv-agent console listener behind the edge's /ws/ proxy.
+#
+# It is built FROM the .deb packages (not from build-tree artifacts) so
+# the leg proves the packaging contract, the same tier discipline as
+# scripts/package/smoke-deb.sh ([CONTAINER-VERIFIED] per
+# docs/DEPLOYMENT-ARCHITECTURE.md's tier table). It is NOT the qualified
+# production topology (that is scripts/install.sh) and NOT a published
+# image — no CI job pushes it anywhere.
+#
+# Build context (assembled by scripts/package/smoke-webui.sh):
+#   Dockerfile                      (this file, copied to the context root)
+#   webui-smoke-entrypoint.sh       (copied to the context root)
+#   chv-controlplane_<ver>_<arch>.deb
+#   chv-node_<ver>_<arch>.deb
+#
+# The root Dockerfile and docker-compose*.yml are deliberately NOT
+# reused: they carry the pre-#447 shape (nginx serves statics from
+# /opt/chv/ui, no [webui]) and the prod compose is marked legacy — this
+# file is the converged shape's first container expression.
+
+# BASE_IMAGE: debian:12-slim by default (the release pipeline builds
+# packages on ubuntu-22.04, whose glibc satisfies debian:12). A local
+# build on a newer host (glibc > 2.36) can override to ubuntu:24.04 via
+# WEBUI_SMOKE_BASE_IMAGE — the release.yml ubuntu-22.04 build pin exists
+# for exactly this reason.
+ARG BASE_IMAGE=debian:12-slim
+FROM ${BASE_IMAGE}
+
+# nginx: the proxy-only edge. sqlite3 + apache2-utils (htpasswd -B):
+# admin seeding (bcrypt cost 12, quick-install.sh's exact contract).
+# curl/openssl/ca-certificates: entrypoint health polling + cert/TLS
+# material generation. procps: process tooling; runuser ships in
+# util-linux, a required-priority package present in both bases.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        nginx sqlite3 curl openssl ca-certificates apache2-utils procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# The packages (layout contract: /usr/bin binaries, /usr/share/chv/ui,
+# /usr/share/chv/migrations, /usr/share/chv/examples/chv-example.conf,
+# /etc/chv/*.toml example conffiles, chv/chv-stord users). dpkg -i then
+# apt-get -f satisfies declared deps (chv-node Depends: chv-controlplane,
+# wireguard-tools) from the distro repos — the smoke-deb.sh pattern.
+COPY chv-controlplane_*.deb chv-node_*.deb /tmp/packages/
+RUN set -eux; \
+    dpkg -i /tmp/packages/*.deb \
+      || { apt-get update; apt-get -f install -y; dpkg -i /tmp/packages/*.deb; }; \
+    rm -rf /tmp/packages /var/lib/apt/lists/*
+
+# The edge: the PACKAGED example conf, verbatim — the leg exercises the
+# exact file operators are told to install (docs/DEPLOYMENT.md "Serving
+# the Web UI in package mode"), not a bespoke copy.
+RUN rm -f /etc/nginx/sites-enabled/default \
+    && cp /usr/share/chv/examples/chv-example.conf /etc/nginx/sites-enabled/chv
+
+COPY webui-smoke-entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+# The single operator-facing listener is the edge on :80 (everything —
+# UI + API — proxies to the binary on 127.0.0.1:8080; /ws/ proxies to
+# the agent console on 127.0.0.1:8444). 8080/8443/8444 are loopback-only
+# inside the container by design: the converged shape has ONE front
+# door.
+EXPOSE 80
+
+ENTRYPOINT ["/entrypoint.sh"]
