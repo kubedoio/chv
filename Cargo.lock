@@ -1134,6 +1134,7 @@ dependencies = [
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-hypervisor-api",
+ "chv-netbox-adapter",
  "chv-webui-bff-api",
  "hex",
  "jsonwebtoken",

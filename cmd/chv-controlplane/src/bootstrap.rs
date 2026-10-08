@@ -286,6 +286,12 @@ pub async fn build_service(
         drift_reports: Arc::new(chv_controlplane_store::DriftReportRepository::new(
             pool.clone(),
         )),
+        netbox_config: Arc::new(
+            chv_controlplane_store::NetboxProjectionConfigRepository::new(pool.clone()),
+        ),
+        netbox_runs: Arc::new(chv_controlplane_store::NetboxProjectionRunRepository::new(
+            pool.clone(),
+        )),
         mutations: Arc::new(ControlPlaneMutationService::new(
             pool.clone(),
             lifecycle_service.clone(),

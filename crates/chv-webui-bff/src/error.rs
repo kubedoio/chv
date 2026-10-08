@@ -114,6 +114,72 @@ pub enum BffError {
         architecture_id: String,
         message: String,
     },
+    // NetBox projection (#239, PR 5) — stable wire codes from the
+    // contract's error table
+    // (`docs/specs/architecture-designer/contracts/netbox-api-contract.md`).
+    // Dedicated variants mirror how PLAN_EXPIRED / GRAPH_EMPTY /
+    // PRODUCTION_REQUIRES_ADMIN are produced: one variant per stable code,
+    // rendered with the designer's flat `{ code, message }` shape.
+    //
+    // No variant ever carries token material — messages are built from
+    // ids and counts only, and the decrypt path fails closed in the store.
+    /// 404 — `NETBOX_NOT_CONFIGURED` on the config read paths
+    /// (config/get, config/delete): no projection config row exists for
+    /// the architecture.
+    NetboxNotConfigured {
+        architecture_id: String,
+    },
+    /// 400 — `NETBOX_NOT_CONFIGURED` on the action paths (dry-run,
+    /// export): the contract pins 400 there (vs. 404 on config/get).
+    NetboxNotConfiguredPrecondition {
+        architecture_id: String,
+    },
+    /// 400 — `NETBOX_NOT_APPLIED`: the architecture has no succeeded
+    /// apply run — nothing applied to project.
+    NetboxNotApplied {
+        architecture_id: String,
+    },
+    /// 400 — `NETBOX_HTTPS_REQUIRED`: the NetBox endpoint is not HTTPS.
+    /// The store persists the endpoint verbatim; the BFF is the
+    /// accept-time gate (component spec).
+    NetboxHttpsRequired,
+    /// 400 — `NETBOX_TOKEN_MISSING`: the config has no usable token
+    /// (absent, or the stored ciphertext no longer decrypts — fail
+    /// closed, the message never carries ciphertext).
+    NetboxTokenMissing {
+        architecture_id: String,
+    },
+    /// 409 — `NETBOX_RUN_ACTIVE`: a projection run is already queued or
+    /// running for the architecture.
+    NetboxRunActive {
+        architecture_id: String,
+    },
+    /// 409 — `PROJECTION_RUN_NOT_RETRYABLE`: the run is not `failed`, or
+    /// its retry attempts are exhausted.
+    ProjectionRunNotRetryable {
+        run_id: String,
+        reason: String,
+    },
+    /// 409 — `PLAN_EXPIRED` (reuse, per the contract's error table): the
+    /// topology's version moved on under a stale `expected_version` on a
+    /// netbox config upsert — same semantics as
+    /// `/v1/architectures/update`'s StaleVersion conflict, but surfaced
+    /// with the contract's stable code.
+    NetboxStaleVersion {
+        architecture_id: String,
+        current: i64,
+        expected: i64,
+    },
+    /// 502 — `NETBOX_UNREACHABLE`: a synchronous dry-run could not reach
+    /// NetBox. Transport detail is logged server-side only.
+    NetboxUnreachable {
+        architecture_id: String,
+    },
+    /// 502 — `NETBOX_AUTH_FAILED`: NetBox rejected the configured token
+    /// during a synchronous dry-run (runs record it on the run instead).
+    NetboxAuthFailed {
+        architecture_id: String,
+    },
 }
 
 impl IntoResponse for BffError {
@@ -264,6 +330,107 @@ impl IntoResponse for BffError {
                         "drift check failed for architecture {architecture_id}: {message}"
                     ),
                     "code": "DRIFT_CHECK_FAILED",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_GATEWAY, body).into_response();
+            }
+            BffError::NetboxNotConfigured { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "no netbox projection config for architecture {architecture_id}"
+                    ),
+                    "code": "NETBOX_NOT_CONFIGURED",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::NOT_FOUND, body).into_response();
+            }
+            BffError::NetboxNotConfiguredPrecondition { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "no netbox projection config for architecture {architecture_id}; configure NetBox before dry-run or export"
+                    ),
+                    "code": "NETBOX_NOT_CONFIGURED",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::NetboxNotApplied { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "architecture {architecture_id} has no succeeded apply run; nothing applied to project"
+                    ),
+                    "code": "NETBOX_NOT_APPLIED",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::NetboxHttpsRequired => {
+                let body = Json(json!({
+                    "message": "netbox endpoint must use https",
+                    "code": "NETBOX_HTTPS_REQUIRED",
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::NetboxTokenMissing { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "netbox token for architecture {architecture_id} is missing or unreadable"
+                    ),
+                    "code": "NETBOX_TOKEN_MISSING",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::NetboxRunActive { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "a netbox projection run is already queued or running for architecture {architecture_id}"
+                    ),
+                    "code": "NETBOX_RUN_ACTIVE",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::ProjectionRunNotRetryable { run_id, reason } => {
+                let body = Json(json!({
+                    "message": format!("netbox projection run {run_id} is not retryable: {reason}"),
+                    "code": "PROJECTION_RUN_NOT_RETRYABLE",
+                    "run_id": run_id,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::NetboxStaleVersion {
+                architecture_id,
+                current,
+                expected,
+            } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "stale version: client sent {expected}, current is {current}"
+                    ),
+                    "code": "PLAN_EXPIRED",
+                    "architecture_id": architecture_id,
+                    "current": current,
+                    "expected": expected,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::NetboxUnreachable { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "netbox is unreachable for architecture {architecture_id}"
+                    ),
+                    "code": "NETBOX_UNREACHABLE",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_GATEWAY, body).into_response();
+            }
+            BffError::NetboxAuthFailed { architecture_id } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "netbox rejected the configured token for architecture {architecture_id}"
+                    ),
+                    "code": "NETBOX_AUTH_FAILED",
                     "architecture_id": architecture_id,
                 }));
                 return (StatusCode::BAD_GATEWAY, body).into_response();

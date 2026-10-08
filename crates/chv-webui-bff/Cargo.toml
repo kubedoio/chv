@@ -16,6 +16,11 @@ chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-architecture-reconcile = { path = "../chv-architecture-reconcile" }
+# NetBox projection adapter (#239): the dry-run handler drives
+# NetBoxClient/NetboxProjectionRunner directly (synchronous, bounded by
+# the client's request timeout) and validates the custom-field prefix at
+# config-upsert accept time.
+chv-netbox-adapter = { path = "../chv-netbox-adapter" }
 chv-common = { path = "../chv-common" }
 # #379 DP3: the single frozen backend-class vocabulary
 # (BACKEND_CLASSES / is_known_backend_class) used for accept-time

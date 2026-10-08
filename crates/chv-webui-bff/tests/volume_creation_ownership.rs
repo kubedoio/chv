@@ -199,6 +199,12 @@ async fn build_state(mutations: Arc<RecordingMutations>, agent_runtime_dir: &str
         image_repo: ImageRepository::new(pool.clone()),
         apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
         drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
+        netbox_config: Arc::new(
+            chv_controlplane_store::NetboxProjectionConfigRepository::new(pool.clone()),
+        ),
+        netbox_runs: Arc::new(chv_controlplane_store::NetboxProjectionRunRepository::new(
+            pool.clone(),
+        )),
         mutations,
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from(agent_runtime_dir),

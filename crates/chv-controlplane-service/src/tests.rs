@@ -39,6 +39,11 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let drift_reports = Arc::new(chv_controlplane_store::DriftReportRepository::new(
         pool.clone(),
     ));
+    let netbox_config =
+        Arc::new(chv_controlplane_store::NetboxProjectionConfigRepository::new(pool.clone()));
+    let netbox_runs = Arc::new(chv_controlplane_store::NetboxProjectionRunRepository::new(
+        pool.clone(),
+    ));
     let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
         node_repo.clone(),
         operation_repo.clone(),
@@ -59,6 +64,8 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         image_repo,
         apply_runs,
         drift_reports,
+        netbox_config,
+        netbox_runs,
         mutations: Arc::new(crate::ControlPlaneMutationService::new(
             pool_for_mutations,
             lifecycle_service,

@@ -147,7 +147,10 @@ fn caller_visible_scope(claims: &Claims) -> Result<Option<String>, BffError> {
 ///   non-admins get 403 here, so starters are read-only templates that
 ///   operators clone instead of edit.
 /// - any other owner fails with 403 Forbidden.
-fn require_owner_or_admin(claims: &Claims, owner_user_id: Option<&str>) -> Result<(), BffError> {
+pub(crate) fn require_owner_or_admin(
+    claims: &Claims,
+    owner_user_id: Option<&str>,
+) -> Result<(), BffError> {
     if claims.role == "admin" {
         return Ok(());
     }
@@ -168,7 +171,7 @@ fn require_owner_or_admin(claims: &Claims, owner_user_id: Option<&str>) -> Resul
 /// The scoped store read never returns a foreign row; when it reports
 /// `NotFound` we probe unscoped *for the existence/ownership decision only*
 /// and discard the row contents — the caller's error carries no data.
-async fn get_topology_authorized(
+pub(crate) async fn get_topology_authorized(
     state: &AppState,
     claims: &Claims,
     id: &ArchitectureId,
@@ -1606,7 +1609,10 @@ fn is_production_environment(environment: Option<&str>) -> bool {
 /// `update_architecture` blocks non-admins from *un-tagging* a persisted
 /// production row (including via `environment: null`/absent), so the
 /// apply-time guard here cannot be evaded by first relabelling the row.
-fn enforce_production_guard(environment: Option<&str>, role: Role) -> Result<(), BffError> {
+pub(crate) fn enforce_production_guard(
+    environment: Option<&str>,
+    role: Role,
+) -> Result<(), BffError> {
     if is_production_environment(environment) && !role.meets(Role::Admin) {
         return Err(BffError::ProductionRequiresAdmin {
             environment: environment.unwrap_or("").trim().to_string(),
@@ -2299,7 +2305,7 @@ pub async fn list_architecture_versions(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_id(id: &str) -> Result<ArchitectureId, BffError> {
+pub(crate) fn parse_id(id: &str) -> Result<ArchitectureId, BffError> {
     ArchitectureId::new(id)
         .map_err(|e| BffError::BadRequest(format!("invalid architecture id: {e}")))
 }
