@@ -1520,7 +1520,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
     /// every sibling legacy nwd-side-effect RPC: policy application
     /// already runs behind the Core authority at VM attach (the core
     /// executor's set_firewall_policy call), the Core store models no
-    /// network state there is anything to journal INTO, and the CP
+    /// network state to journal into, and the CP
     /// operations row is the journal. What M2.2b refuses is the legacy
     /// fragment path's NodeCache network-axis writes and unprompted
     /// topology ensure — this handler does neither: it applies policy

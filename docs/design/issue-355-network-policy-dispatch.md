@@ -111,7 +111,14 @@ agent handler applies the ruleset via the existing
 exact call). Zero targets ⇒ the op completes `Succeeded` with a
 recorded "no live materialization; policy applies at next attach"
 outcome rather than failing (a fleet network with rules but no VMs yet
-is the normal create-then-populate order).
+is the normal create-then-populate order). *(As-landed in PR 1: the
+handler applies through a new `NwdClient::set_firewall_policy_checked`
+— the same nwd `SetFirewallPolicy` RPC the controller's seam wraps,
+but inspecting the inner result, because nwd reports semantic
+refusals as a gRPC `Ok` wrapping an `err_result` and the pre-existing
+unchecked call drops them; see the CHANGELOG's review-disclosure. A
+PR-2/3 reader wiring new callers should use the checked variant, not
+the controller's.)*
 
 - *Fixes*: (b) updates propagate to live topologies; (c) full task
   surface (accept/retry/terminal-failure cause via the #502
@@ -184,7 +191,9 @@ scopes stay out of scope (§6).
 - **DP3 — the M2.2b carve-out.** A new `ApplyNetworkPolicy` RPC on the
   node `LifecycleService` (beside `CreateVolume`), accepted in
   core-managed mode, whose handler calls
-  `HostResourceController::set_firewall_policy` — justified by the
+  `HostResourceController::set_firewall_policy` *(as-landed: the
+  checked `NwdClient` variant of the same call — §3's as-landed note)*
+  — justified by the
   existing attach-time precedent (policy application already runs
   behind the Core authority when journaled; the Core store models no
   network state, so there is nothing to journal *into* Core — the CP
