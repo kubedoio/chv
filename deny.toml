@@ -62,14 +62,17 @@ unused-ignored-advisory = "deny"
 #     the advisory's affected range.
 ignore = [
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
-    #   (a) Non-applicable as vuln: informational ("unmaintained"). The crate
-    #       is pulled transitively by `tonic` 0.12 for client-side TLS PEM
-    #       parsing. Upstream archived the repo and folded the parser into
-    #       `rustls-pki-types` >= 1.9; tonic 0.13+ uses the new API.
+    #   (a) Non-applicable as vuln: informational ("unmaintained").
+    #       Since the tonic 0.12 → 0.14 bump (#235 PR 1) the crate is a
+    #       DIRECT dependency of `chv-stord-core` only (PEM parsing in
+    #       `src/server.rs` + the migration mTLS tests) — tonic 0.14
+    #       itself no longer pulls it (upstream archived the repo and
+    #       folded the parser into `rustls-pki-types` >= 1.9).
     #   (b) Upstream: https://github.com/rustls/pemfile/issues/61
     #       tonic side: https://github.com/hyperium/tonic/pull/2103
-    #   (c) Remove when CHV upgrades tonic 0.12 -> 0.14 (tracked separately —
-    #       gRPC stack-wide change deferred from this supply-chain PR).
+    #   (c) Remove when #235 PR 2 lands: the three direct sites migrate
+    #       to `rustls-pki-types::pem` and the dependency is dropped
+    #       from `chv-stord-core/Cargo.toml`.
     "RUSTSEC-2025-0134",
 
     # Removed 2026-10-01 (issue #177 resolved — rust-s3 replaced by
@@ -162,8 +165,25 @@ deny = [
     { name = "serde", deny-multiple-versions = true },
 ]
 
-# Crates explicitly allowed to appear multiple times (none today).
-skip = []
+# Crates explicitly allowed to appear multiple times.
+#
+# axum 0.8.9 — pulled by tonic 0.14's `router` feature (multi-service
+#   composition, `Server::add_service` → `Router`, is axum-backed in
+#   tonic 0.14 and every CHV gRPC server composes health + main
+#   services through it), alongside the workspace's direct axum 0.7.
+#   (a) Scope: exactly the known `=0.8.9` from tonic 0.14.6 — any other
+#       axum version appearing twice still trips the
+#       `deny-multiple-versions` gate above.
+#   (b) Removal condition: the ruled axum 0.8 co-move PR (#235,
+#       separate follow-up — workspace `axum` bumps 0.7 → 0.8, the
+#       BFF/CP/agent HTTP servers migrate, `tower-http`/`hyper-util`
+#       co-move as needed); delete this entry and the version pin
+#       together with that bump. Note the pin is deliberately exact:
+#       if a future tonic patch resolves a newer axum 0.8.x, this skip
+#       stops matching and the deny-multiple-versions gate fails loud
+#       — that is intended (bump the pin in the same PR that takes the
+#       new tonic), not a maintenance accident to paper over.
+skip = [{ name = "axum", version = "=0.8.9" }]
 skip-tree = []
 
 # -----------------------------------------------------------------------------

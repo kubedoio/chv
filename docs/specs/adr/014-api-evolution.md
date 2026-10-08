@@ -10,7 +10,7 @@ Accepted
 
 CHV's gRPC and HTTP/JSON APIs are consumed by:
 
-- Internal Rust crates via tonic-generated stubs (tonic-build regenerates from `proto/` on every `cargo build`)
+- Internal Rust crates via tonic-generated stubs (the `tonic-prost-build` codegen regenerates from `proto/` on every `cargo build` — `tonic-build` before the #235 stack bump)
 - The SvelteKit UI via webui-bff (HTTP/JSON over `webui-bff.proto`)
 - External operators (CLI, scripts, monitoring integrations) — current and future
 - Third-party tooling that may rely on stable field numbers in serialised proto binary form
