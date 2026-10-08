@@ -57,7 +57,7 @@ chain from the operator API to it does not exist.
 
 ## 2. Current-state map (the seams any fix must use)
 
-- **BFF** `update_network` (`crates/chv-webui-bff/src/handlers/networks.rs:573-749`):
+- **BFF** `update_network` (`crates/chv-webui-bff/src/handlers/networks.rs:573-833`, post-PR-2 span):
   one transaction writing `network_desired_state` (COALESCE per field,
   `desired_generation + 1`), no operation row, no dispatch. Save-time
   validation already enforces the single engine vocabulary
@@ -215,13 +215,14 @@ scopes stay out of scope (§6).
   topology teardown stays last-detach (#356 N5). The current
   "cleared: stays in force until teardown" `policy_application` note
   is replaced by the journaled operation's outcome.
-- **DP6 — reporting.** The `policy_application` prose notes
-  (`networks.rs:726-747`, pinned by
-  `tests/network_policy_reporting.rs`) are replaced by the standard
-  task surface: the update response carries `task_id`/operation
+- **DP6 — reporting.** The `policy_application` prose notes (pinned
+  pre-PR-2 by `tests/network_policy_reporting.rs`) are replaced by the
+  standard task surface: the update response carries `task_id`/operation
   outcome like every other mutation, and terminal failures surface
   their cause via #502. `last_task` on the network detail starts
-  resolving to policy operations.
+  resolving to policy operations. *(As-landed in PR 2: see the §5
+  note on the response-shape keying — the prose is gone, the detail's
+  `last_task` resolves, and the task reads carry the outcome.)*
 - **DP7 — dispatch fencing.** Reuse `desired_generation` as the
   fence: the agent applies a policy whose generation ≥ the topology's
   last-applied generation; stale generations are idempotent no-ops
@@ -239,8 +240,18 @@ Mirroring the #513/#522 carrier-first pattern:
    until PR 2 produces operations). Zero behavior change. Pins the
    M2.2b carve-out rationale in code comments and the agent tests.
 2. **PR 2 — the producer**: BFF journaling (DP1), claim-query target
-   resolution (DP2), response shape change (DP6), the
-   `network_policy_reporting.rs` test migration.
+   resolution (DP2 — landed with PR 1's arm), response shape change
+   (DP6), the `network_policy_reporting.rs` test migration.
+   *(As-landed: DP6's "the update response carries `task_id` like
+   every other mutation" is shape-keyed on the request — a
+   firewall-carrying update answers with the standard mutation task
+   surface (`{accepted, task_id, network_id, summary,
+   next_refresh_path}`, the create_volume/mutate_volume shape) and
+   the `policy_application` prose is gone; any other update
+   (name-only, or NDS fields without `firewall_rules`) keeps the
+   read-after-write detail response it always returned, because it
+   journals nothing. Both shapes carry `network_id` — the only key
+   the UI reads — so no consumer changes.)*
 3. **PR 3 — the baseline + convergence**: DP4's baseline ruleset in
    the shared firewall module, applied at attach-time for empty
    snapshots; DP5/DP7 fencing tests; the end-to-end contract row
