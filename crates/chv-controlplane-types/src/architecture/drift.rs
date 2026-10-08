@@ -40,6 +40,10 @@ macro_rules! arch_id_newtype {
     };
 }
 
+// Re-exported for sibling modules (e.g. `netbox.rs`) so the newtype
+// pattern has a single definition.
+pub(crate) use arch_id_newtype;
+
 arch_id_newtype!(ArchitectureApplyRunId, "architecture_apply_run_id");
 arch_id_newtype!(ArchitectureDriftReportId, "architecture_drift_report_id");
 

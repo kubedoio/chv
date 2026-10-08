@@ -19,9 +19,10 @@ pub use alerts::{AlertCreateInput, AlertRepository};
 pub use architectures::{
     ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput, DriftReportCreateInput,
     DriftReportRepository, InventorySnapshotCreateInput, InventorySnapshotRepository,
-    PlanCreateInput, PlanRepository, PlanStatusUpdateInput, TopologyCreateInput,
-    TopologyListFilter, TopologyRepository, TopologyUpdateInput, VersionCreateInput,
-    VersionRepository,
+    NetboxProjectionConfigRepository, NetboxProjectionConfigUpsertInput,
+    NetboxProjectionRunCreateInput, NetboxProjectionRunRepository, PlanCreateInput, PlanRepository,
+    PlanStatusUpdateInput, TopologyCreateInput, TopologyListFilter, TopologyRepository,
+    TopologyUpdateInput, VersionCreateInput, VersionRepository, MAX_ATTEMPTS,
 };
 pub use backups::{
     BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupJobUpdateInput,

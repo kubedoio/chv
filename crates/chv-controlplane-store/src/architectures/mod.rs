@@ -7,16 +7,22 @@
 
 mod apply_run;
 mod drift;
+mod netbox_config;
+mod netbox_run;
 mod plan;
 mod snapshot;
 mod topology;
 mod version;
 
 #[cfg(test)]
+mod netbox_tests;
+#[cfg(test)]
 mod tests;
 
 pub use apply_run::{ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput};
 pub use drift::{DriftReportCreateInput, DriftReportRepository};
+pub use netbox_config::{NetboxProjectionConfigRepository, NetboxProjectionConfigUpsertInput};
+pub use netbox_run::{NetboxProjectionRunCreateInput, NetboxProjectionRunRepository, MAX_ATTEMPTS};
 pub use plan::{PlanCreateInput, PlanRepository, PlanStatusUpdateInput};
 pub use snapshot::{InventorySnapshotCreateInput, InventorySnapshotRepository};
 pub use topology::{

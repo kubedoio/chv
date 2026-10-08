@@ -16,6 +16,7 @@
 mod drift;
 mod finding;
 mod model;
+mod netbox;
 mod plan;
 
 pub use drift::{
@@ -26,6 +27,10 @@ pub use finding::{Finding, Severity};
 pub use model::{
     ArchitectureId, ArchitectureStatus, ArchitectureTopology, ArchitectureVersion,
     ArchitectureVersionId, FleetCheckStatus, ValidationStatus,
+};
+pub use netbox::{
+    NetboxProjectionConfig, NetboxProjectionMode, NetboxProjectionRun, NetboxProjectionRunId,
+    NetboxProjectionRunStatus, NetboxProjectionTrigger, NetboxRetentionPolicy,
 };
 pub use plan::{
     ArchitecturePlan, ArchitecturePlanId, InventorySnapshot, InventorySnapshotId, PlanAction,

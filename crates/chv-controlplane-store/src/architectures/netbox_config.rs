@@ -1,0 +1,204 @@
+//! NetBox projection config repository — CRUD for `netbox_projection_config`.
+//!
+//! The NetBox API token is write-only: [`NetboxProjectionConfigUpsertInput`]
+//! carries plaintext, which is encrypted via [`CredentialEncryption`] before
+//! persisting and never stored or returned in the clear. The returned
+//! [`NetboxProjectionConfig`] has no token field by construction, and
+//! [`NetboxProjectionConfigRepository::read_token`] is the only decrypt
+//! path (for the PR-4 projection worker).
+
+use crate::architectures::parse_ts;
+use crate::credential_crypto::CredentialEncryption;
+use crate::{StoreError, StorePool};
+use chv_controlplane_types::architecture::{
+    ArchitectureId, NetboxProjectionConfig, NetboxRetentionPolicy,
+};
+use sqlx::Row;
+
+#[derive(Clone, Debug)]
+pub struct NetboxProjectionConfigUpsertInput {
+    pub architecture_id: ArchitectureId,
+    /// HTTPS base URL of the NetBox instance. Stored verbatim — HTTPS
+    /// enforcement is the BFF's accept-time job (`NETBOX_HTTPS_REQUIRED`),
+    /// per the component spec; the store does not validate the scheme.
+    pub endpoint: String,
+    /// Plaintext NetBox API token. Encrypted before persisting; never
+    /// stored, returned, or logged in the clear.
+    pub token: String,
+    pub token_secret_ref: String,
+    pub retention_policy: NetboxRetentionPolicy,
+    pub enable_post_apply: bool,
+    pub custom_field_prefix: String,
+    pub site_name: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct NetboxProjectionConfigRepository {
+    pool: StorePool,
+    crypto: CredentialEncryption,
+}
+
+impl NetboxProjectionConfigRepository {
+    pub fn new(pool: StorePool) -> Self {
+        Self {
+            pool,
+            crypto: CredentialEncryption::new(),
+        }
+    }
+
+    pub fn pool(&self) -> &StorePool {
+        &self.pool
+    }
+
+    /// Create or update the config for an architecture (upsert on
+    /// `architecture_id`). The plaintext token from the input is encrypted
+    /// before it touches the database; the returned config contains no
+    /// token material.
+    pub async fn upsert(
+        &self,
+        input: NetboxProjectionConfigUpsertInput,
+    ) -> Result<NetboxProjectionConfig, StoreError> {
+        let token_ciphertext = self.crypto.encrypt(&input.token);
+        let row = sqlx::query(
+            r#"
+            INSERT INTO netbox_projection_config (
+                architecture_id,
+                endpoint,
+                token_secret_ref,
+                token_ciphertext,
+                retention_policy,
+                enable_post_apply,
+                custom_field_prefix,
+                site_name
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (architecture_id) DO UPDATE SET
+                endpoint = excluded.endpoint,
+                token_secret_ref = excluded.token_secret_ref,
+                token_ciphertext = excluded.token_ciphertext,
+                retention_policy = excluded.retention_policy,
+                enable_post_apply = excluded.enable_post_apply,
+                custom_field_prefix = excluded.custom_field_prefix,
+                site_name = excluded.site_name,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            RETURNING *
+            "#,
+        )
+        .bind(input.architecture_id.as_str())
+        .bind(&input.endpoint)
+        .bind(&input.token_secret_ref)
+        .bind(&token_ciphertext)
+        .bind(input.retention_policy.as_str())
+        .bind(input.enable_post_apply)
+        .bind(&input.custom_field_prefix)
+        .bind(&input.site_name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| match &err {
+            sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                StoreError::NotFound {
+                    entity: "architecture_topology_or_version",
+                    id: input.architecture_id.to_string(),
+                }
+            }
+            _ => StoreError::from(err),
+        })?;
+
+        row_to_config(&row)
+    }
+
+    /// Fetch the config for an architecture. The returned struct carries
+    /// no token material — only `token_secret_ref` (the reference).
+    pub async fn get(
+        &self,
+        architecture_id: &ArchitectureId,
+    ) -> Result<Option<NetboxProjectionConfig>, StoreError> {
+        let row =
+            sqlx::query(r#"SELECT * FROM netbox_projection_config WHERE architecture_id = $1"#)
+                .bind(architecture_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        row.as_ref().map(row_to_config).transpose()
+    }
+
+    /// Remove the config for an architecture. Returns `true` when a row
+    /// was removed, `false` when none existed. NetBox is never touched —
+    /// deleting the config performs no cleanup on the projection target.
+    pub async fn delete(&self, architecture_id: &ArchitectureId) -> Result<bool, StoreError> {
+        let result =
+            sqlx::query(r#"DELETE FROM netbox_projection_config WHERE architecture_id = $1"#)
+                .bind(architecture_id.as_str())
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Decrypt and return the stored API token — the only decrypt path,
+    /// for the projection worker.
+    ///
+    /// Fail-closed: any decrypt failure (wrong key, tampered ciphertext,
+    /// malformed payload, missing key) returns
+    /// [`StoreError::InvalidConfiguration`] — never the ciphertext —
+    /// mirroring `backups.rs`.
+    pub async fn read_token(
+        &self,
+        architecture_id: &ArchitectureId,
+    ) -> Result<Option<String>, StoreError> {
+        let row = sqlx::query(
+            r#"SELECT token_ciphertext FROM netbox_projection_config WHERE architecture_id = $1"#,
+        )
+        .bind(architecture_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let ciphertext: String = row.try_get("token_ciphertext")?;
+        match self.crypto.decrypt(&ciphertext) {
+            Ok(plaintext) => Ok(Some(plaintext)),
+            Err(err) => {
+                tracing::error!(
+                    architecture_id = %architecture_id,
+                    error = %err,
+                    "netbox token decrypt failed; refusing to return ciphertext (fail-closed)"
+                );
+                Err(StoreError::InvalidConfiguration {
+                    reason: "netbox token for this architecture cannot be decrypted".to_string(),
+                })
+            }
+        }
+    }
+}
+
+fn parse_retention_policy(s: &str) -> Result<NetboxRetentionPolicy, StoreError> {
+    match s {
+        "mark_stale" => Ok(NetboxRetentionPolicy::MarkStale),
+        "delete" => Ok(NetboxRetentionPolicy::Delete),
+        other => Err(StoreError::InvalidConfiguration {
+            reason: format!("unrecognized netbox retention policy: {other}"),
+        }),
+    }
+}
+
+fn row_to_config(row: &sqlx::sqlite::SqliteRow) -> Result<NetboxProjectionConfig, StoreError> {
+    let arch_id_str: String = row.try_get("architecture_id")?;
+    let architecture_id =
+        ArchitectureId::new(arch_id_str).map_err(|err| StoreError::InvalidConfiguration {
+            reason: format!("invalid architecture_id in netbox_projection_config row: {err}"),
+        })?;
+    let retention_str: String = row.try_get("retention_policy")?;
+    let created_at: String = row.try_get("created_at")?;
+    let updated_at: String = row.try_get("updated_at")?;
+
+    Ok(NetboxProjectionConfig {
+        architecture_id,
+        endpoint: row.try_get("endpoint")?,
+        token_secret_ref: row.try_get("token_secret_ref")?,
+        retention_policy: parse_retention_policy(&retention_str)?,
+        enable_post_apply: row.try_get("enable_post_apply")?,
+        custom_field_prefix: row.try_get("custom_field_prefix")?,
+        site_name: row.try_get("site_name")?,
+        created_at: parse_ts(&created_at, "created_at")?,
+        updated_at: parse_ts(&updated_at, "updated_at")?,
+    })
+}
