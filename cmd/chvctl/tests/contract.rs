@@ -74,11 +74,14 @@
 //! PR 3 (landed, #520 — the #372 dead-group removals) removed the
 //! `storage` and `backup` command groups (design §2.2/DP3 and §2.4/DP5):
 //! every subcommand 404'd on routes that do not exist, and the removals
-//! are CLI-surface only — the BFF's `/v1/storage-pools` and
-//! `/v1/backups/*` routes stay (the UI's storage and backup catalog
-//! pages call them), and the BackupWorker scaffold is untouched CP
-//! machinery. Their 6 rows (storage ×4, backup ×2) left this file with
-//! the groups; `chvctl storage ...` / `chvctl backup ...` now fail at
+//! are CLI-surface only — the BFF's `/v1/backups/*` routes stay (the
+//! UI's backup catalog page calls them), and the BackupWorker
+//! scaffold is untouched CP machinery. The BFF's `/v1/storage-pools`
+//! routes were later removed with the whole phantom catalog (#514:
+//! the table was connected to no provisioning, and the UI's storage
+//! page had been an unreachable redirect to /volumes since long
+//! before #372 (d6836446, 2026-04-17)). Their 6 rows (storage ×4,
+//! backup ×2) left this file with the groups; `chvctl storage ...` / `chvctl backup ...` now fail at
 //! argument parsing with "unrecognized subcommand" — truthful (design
 //! residual risk 2).
 //!

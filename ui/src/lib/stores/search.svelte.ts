@@ -1,10 +1,10 @@
 import { browser } from '$app/env';
 import Fuse from 'fuse.js';
 import type { FuseResultMatch } from 'fuse.js';
-import type { VM, Image, Network, StoragePool } from '#lib/api/types.ts';
+import type { VM, Image, Network } from '#lib/api/types.ts';
 
 // Types
-export type SearchItemType = 'vm' | 'image' | 'network' | 'storage' | 'page';
+export type SearchItemType = 'vm' | 'image' | 'network' | 'page';
 
 export interface SearchItem {
   id: string;
@@ -107,7 +107,6 @@ export function buildSearchIndex(data: {
   vms?: VM[];
   images?: Image[];
   networks?: Network[];
-  storagePools?: StoragePool[];
 }) {
   const items: SearchItem[] = [...pages];
   
@@ -166,23 +165,6 @@ export function buildSearchIndex(data: {
     }
   }
   
-  // Add Storage Pools
-  if (data.storagePools) {
-    for (const pool of data.storagePools) {
-      items.push({
-        id: pool.id,
-        type: 'storage',
-        name: pool.name,
-        description: `${pool.pool_type}${pool.is_default ? ' | Default' : ''}`,
-        route: '/storage',
-        meta: {
-          type: pool.pool_type,
-          isDefault: pool.is_default
-        }
-      });
-    }
-  }
-  
   searchIndex = items;
   initFuse();
 }
@@ -234,7 +216,6 @@ export const typeLabels: Record<SearchItemType, string> = {
   vm: 'VMs',
   image: 'Images',
   network: 'Networks',
-  storage: 'Storage',
   page: 'Pages'
 };
 
@@ -243,7 +224,6 @@ export const typeIcons: Record<SearchItemType, string> = {
   vm: 'server',
   image: 'image',
   network: 'network',
-  storage: 'hard-drive',
   page: 'file'
 };
 
