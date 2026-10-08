@@ -19,7 +19,7 @@ References:
 | Surface | Convention to follow | Concrete touchpoints |
 |---|---|---|
 | New crate | workspace member under `crates/` | `crates/chv-netbox-adapter/` — pure core (mapping/ownership/plan) + client + runner |
-| Migrations | numbered SQL in `cmd/chv-controlplane/migrations/` (next: `0059_`) | `0059_netbox_projection.sql` (config + runs tables) |
+| Migrations | numbered SQL in `cmd/chv-controlplane/migrations/` (next free: `0058_` — note `docs/design/issue-384-physical-table-generation-guard.md` also references `0058` as its candidate; whichever campaign lands second takes the next free number) | `0058_netbox_projection.sql` (config + runs tables) |
 | Store repos | `chv-controlplane-store/src/architectures/<entity>.rs` (model: `drift.rs`) | `netbox_config.rs`, `netbox_run.rs`, re-export in `architectures/mod.rs` + crate root |
 | Token encryption | `credential_crypto.rs` (`CredentialEncryption::encrypt/decrypt`) | reuse as-is; no new crypto |
 | BFF wiring | `AppState` fields as `Arc<Repo>` (`router.rs:22-56`), POST-only routes | `handlers/netbox.rs` + route block after the architecture routes |
@@ -61,8 +61,9 @@ update.
     deterministic ordering (kind rank, then name); `compute_plan` against an
     in-memory NetBox state view.
 - Depends only on `chv-architecture-validate` (model + fleet types),
-  `chv-controlplane-types`, `serde`, `thiserror`. **No reqwest, no tokio, no
-  sqlx.**
+  `serde`, `thiserror`. **No reqwest, no tokio, no
+  sqlx.** (The full crate grows `chv-errors`/`tracing` deps only when the
+  client/runner land in PR 4; PR 2's dependency set is the pure-core subset.)
 
 **Tests (in-crate):**
 
@@ -82,7 +83,8 @@ update.
 
 **Scope:**
 
-- `cmd/chv-controlplane/migrations/0059_netbox_projection.sql`:
+- `cmd/chv-controlplane/migrations/0058_netbox_projection.sql`
+  (next free number at plan time — see the surface-analysis note above):
   `netbox_projection_config` (PK `architecture_id`, FK to topologies) and
   `netbox_projection_runs` (PK `id`, FKs to topology + version, status,
   trigger, mode, plan/result/summary JSON, attempt_count, timestamps; partial
@@ -137,7 +139,7 @@ outage → failed/retryable; worker claim atomicity; token never in logs
 
 **Scope:**
 
-- `crates/chv-webui-bff/src/handlers/netbox.rs` implementing the seven
+- `crates/chv-webui-bff/src/handlers/netbox.rs` implementing the eight
   endpoints of the API contract (config get/upsert/delete, dry-run, export,
   runs list/get/retry) with:
   - `require_owner_or_admin` object scoping (reuse from
@@ -163,7 +165,7 @@ config token redaction, active-run 409, error-code stability.
 **Scope:**
 
 - At the architecture apply-run terminal transition site (where the run
-  reaches `Succeeded`), a best-effort hook: if a `netbox_projection_config`
+  reaches `Succeeded` (status string `succeeded`), a best-effort hook: if a `netbox_projection_config`
   exists with `enable_post_apply = true`, insert a `queued` run
   (`trigger = post_apply`).
 - The hook **cannot fail the apply**: all errors are logged and swallowed
@@ -180,7 +182,7 @@ config token redaction, active-run 409, error-code stability.
 
 **Scope:**
 
-- `ui/src/lib/bff/architectures.ts` — typed client functions for the seven
+- `ui/src/lib/bff/architectures.ts` — typed client functions for the eight
   endpoints (+ vitest).
 - `ui/src/lib/stores/architecture-netbox-store.svelte.ts` — config, dry-run
   plan, runs state.

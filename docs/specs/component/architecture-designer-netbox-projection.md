@@ -117,6 +117,7 @@ queued ──▶ running ──▶ succeeded
 | Foreign-object collision | Entry `conflict`; object untouched; run continues other entries |
 | Token missing/unreadable | Run `failed` with `NETBOX_TOKEN_MISSING` before any request |
 | Config absent | Manual export rejected `NETBOX_NOT_CONFIGURED`; post-apply trigger silently skips |
+| No succeeded apply run | Manual export / dry-run rejected `NETBOX_NOT_APPLIED` — the projection source is the most recent `succeeded` apply run's version, never the editable draft |
 | Partial failure mid-plan | Executed entries persist in `result_json`; retry resumes via external-id match |
 | Worker crash mid-run | Run reclaimed after lease timeout; retry re-enters idempotently |
 

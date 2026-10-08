@@ -51,7 +51,8 @@ reconciliation in the first version; no destructive deletes by default.
 3. **Ownership is expressed only through custom fields.** Every object the
    adapter creates carries `chv_managed_by="chv"`, `chv_external_id`
    (`arch:<arch_id>:<kind>/<name>:<version>`), `chv_architecture_id`,
-   `chv_managed_state`, and `chv_architecture_version`. Reconcile matches by
+   `chv_managed_state`, `chv_architecture_version`, and
+   `chv_mapping_version`. Reconcile matches by
    `chv_external_id`, then by natural key. The adapter **never modifies or
    deletes** a NetBox object that does not carry `chv_managed_by="chv"` —
    collisions with foreign objects are reported as conflicts, never taken

@@ -43,7 +43,7 @@ topology and live fleet state** (ADR-005). The pipeline today:
 
 ```text
 CHVArchitecture YAML (desired)
-   │  chv.kubedo.io/v1alpha1; 14 resource kinds
+   │  chv.kubedo.io/v1alpha1; 13 resource kinds
    ▼
 validate        chv-architecture-validate: parse + static checks
    ▼             + fleet checks against live InventorySnapshot
@@ -61,6 +61,9 @@ drift           chv-architecture-reconcile::drift: compare baseline vs live
 ### 1.2 The authoritative source data model
 
 The desired-state contract is the `CHVArchitecture` YAML document modelled
+strongly-typed in `crates/chv-architecture-validate/src/model.rs`, with
+**13 resource kinds**:
+The desired-state contract is the `CHVArchitecture` YAML document modelled
 strongly-typed in `crates/chv-architecture-validate/src/model.rs`:
 
 | Kind | Model struct | Notes |
@@ -73,7 +76,7 @@ strongly-typed in `crates/chv-architecture-validate/src/model.rs`:
 | `ssh_keys` / `instance_users` / `backup_targets` / `backup_policies` / `roles` / `users` / `projects` | … | config/identity kinds |
 
 Container: `CHVArchitecture{ apiVersion, kind, metadata{name,display_name,
-description,environment,owner,labels}, <14 kind vectors> }`.
+description,environment,owner,labels}, <13 kind vectors> }`.
 
 ### 1.3 Inventory / live-state surface
 
@@ -253,10 +256,15 @@ authorization boundary as the other architecture handlers. *→ DP1.*
 
 ### 4.2 Projection source of truth (resolves G2)
 
-Project from the **applied architecture version** (`architecture_versions`
-row: `normalized_model_json` / `latest_yaml`) as the authoritative CHV shape,
-**enriched** for hosts by the live `InventorySnapshot` (node CPU/mem, datastore
-capacity/kind, network vlan/cidr facts when present). Rationale:
+Project from the **applied architecture version** (the `architecture_versions`
+row — `normalized_model_json` / `yaml_content` — identified by the
+`architecture_version_id` of the most recent `succeeded` apply run) as the
+authoritative CHV shape, **enriched** for hosts by the live
+`InventorySnapshot` (node CPU/mem, datastore capacity/kind, network vlan/cidr
+facts when present). The mutable `architecture_topologies.latest_yaml` (the
+editable draft) is **never** the projection source — after a failed or
+in-flight apply on a newer version it diverges from what was actually applied.
+Rationale:
 
 - The applied version already carries everything the issue's mapping needs:
   hosts, VMs, VM interfaces + IPs, networks + cidr/vlan, topology metadata
@@ -283,6 +291,7 @@ Every projected NetBox object carries CHV ownership **custom fields**:
 | `chv_managed_by` | `chv` | Ownership marker |
 | `chv_managed_state` | `active` \| `stale` | Retention marker (see DP12) |
 | `chv_architecture_version` | `<version>` | Applied version provenance |
+| `chv_mapping_version` | `v1` | Mapping contract version (see the mapping contract) |
 
 Reconcile algorithm per object kind (pure `mapping`/`ownership`, then `plan`):
 
@@ -307,7 +316,8 @@ Two triggers, both funnel into the same `NetboxProjectionRunner`:
 
 - **Manual**: `POST /v1/architectures/netbox/export` (dry-run flag + force).
 - **Post-successful-apply**: enqueued at the point the architecture apply run
-  transitions to `Succeeded`. This is a **best-effort enqueue** — it never
+  transitions to `Succeeded` (status string `succeeded` — the durable
+  apply-run status is lowercase snake_case). This is a **best-effort enqueue** — it never
   changes the apply result (DP8). Implemented as a hook in the apply-resolution
   path that inserts a `Queued` projection run if the architecture has a NetBox
   projection config enabled.
@@ -328,13 +338,13 @@ advance through `Queued/Running/Succeeded/Failed`, retry with backoff). Runs are
 | DP1 | Where does the projection code live? | New `crates/chv-netbox-adapter` in the management/control-plane integration layer; outside any Core runtime. | G1 |
 | DP2 | NetBox client | Thin `reqwest` (rustls, HTTPS-required) client, token auth from config; never logs the token. Bounded to a documented NetBox REST contract for v4 DCIM/IPAM endpoints. | G1,G5 |
 | DP3 | Source of truth for the projection | Applied architecture version (`normalized_model_json`) enriched by live `InventorySnapshot` host facts. Defer runtime-observed VM IPs to a snapshot-extension follow-up. | G2 |
-| DP4 | Ownership/external-ID mechanism | Custom fields `chv_external_id` / `chv_architecture_id` / `chv_managed_by=chv` / `chv_managed_state` / `chv_architecture_version`; exact-match lookup by `chv_external_id`. | G3 |
+| DP4 | Ownership/external-ID mechanism | Custom fields `chv_external_id` / `chv_architecture_id` / `chv_managed_by=chv` / `chv_managed_state` / `chv_architecture_version` / `chv_mapping_version`; exact-match lookup by `chv_external_id`. | G3 |
 | DP5 | Idempotency + conflict policy | Reconcile by external-id; never mutate non-`chv_managed_by=chv` objects; name-collision on create → conflict; partial-failure re-entry → update. | G3 |
 | DP6 | Triggers | Manual export endpoint + best-effort post-successful-apply enqueue; both run the same runner. | G4 |
 | DP7 | Dry-run/report | Runner first computes a `NetboxProjectionPlan` (create/update/no-op/conflict/stale) — deterministic, secret-free. Dry-run returns it; export executes it. | G4 |
 | DP8 | Failure isolation from apply | Post-apply projection is best-effort and asynchronous; projection run failure never alters the apply run/plan/topology result. Retry independent. | G4 |
 | DP9 | NetBox config + token | Per-architecture `NetboxProjectionConfig` (endpoint, token `secret_ref`, custom-field schema refs, retention policy). Token stored via `credential_crypto`; enforce HTTPS; redact everywhere. | G5 |
-| DP10 | Projection persistence + audit | New `netbox_projection_runs` table (queued/running/succeeded/failed, result_json, error, retry); emit `architecture_exported` audit events (attempt/result/retry). | G7 |
+| DP10 | Projection persistence + audit | New `netbox_projection_runs` table (queued/running/succeeded/failed, result_json, error, retry); emit the five `architecture_netbox_*` audit events (config_updated, dry_run, export_succeeded, export_failed, export_retried — attempt/result/retry). | G7 |
 | DP11 | RBAC | Operator-level permission; production environments escalate to Admin (parity with apply/destroy). Requires `architecture:export` semantics; reuse `require_owner_or_admin` scoping. | G8 |
 | DP12 | Retention / no-delete | Configurable per-architecture retention policy; default = mark removed CHV objects `chv_managed_state=stale` and leave in place. `delete` is opt-in only. | G10 |
 
@@ -347,9 +357,8 @@ Versioned (`MAPPING_VERSION = "v1"`). Built by pure builders in `mapping.rs`.
 | CHV source | NetBox object | Key fields | Custom fields |
 |---|---|---|---|
 | `servers[]` + live `NodeInfo` | **DCIM Device** (device_role `chv-node`, device_type `chv-host`) | `name`, `site` (from env/labels), `serial`/asset none; `custom_fields` | external_id, arch_id, managed_by, state, version; CPU/mem stored in `device.custom_fields` when not otherwise placed |
-| `instances[]` | **DCIM VirtualMachine** (role `chv-vm`) | `name`, `status` (from run drift/state: active/staged/offline when known) | external_id, arch_id, managed_by, state, version; placement via `cluster` or `device` = mapped server when resolvable |
-| `instances[].networks[]{name,ip}` | **DCIM Interface** (`
-`type virtual`, attached to the VM) | `name`, `mac` (none in v1 — not modelled), `description` = network name | external_id, arch_id, … |
+| `instances[]` | **Virtualization VirtualMachine** (role `chv-vm`) | `name`, `status` (from run drift/state: active/staged/offline when known) | external_id, arch_id, managed_by, state, version; placement via `cluster` or `device` = mapped server when resolvable |
+| `instances[].networks[]{name,ip}` | **Virtualization Interface** (`type virtual`, attached to the VM) | `name`, `mac` (none in v1 — not modelled), `description` = network name | external_id, arch_id, … |
 | `networks[]` | **IPAM Prefix** (+ **IPAM VLAN** when `type=vlan` / `vlan_id` present) | `prefix`=`cidr`, `vlan`=`vlan_id`, `description` | external_id, arch_id, … |
 | `instances[].networks[].ip` | **IPAM IPAddress** | `address`, `vrf` (from network), `dns_name` optionally | external_id, arch_id, … |
 | `metadata.{environment,owner,labels}` | on every object as NetBox tags / custom fields | `tags` = derived from `labels` + `environment` | `chv_architecture_id`, `chv_external_id`, … |
@@ -396,9 +405,19 @@ trigger (manual | post-apply)
    ─ dry-run: return plan to caller (secret-free, deterministic)
    ─ export:  runner executes plan entries in order
        success item → record
-       failure item → abort remaining? (configurable) → run Failed, retry
+       failure item → abort remaining (fixed v1 policy: abort-on-first-
+                     hard-failure) → run Failed, retry
    → persist run (result_json, error), emit audit event
 ```
+
+`stale` entries are executed by the runner as **marks** under the default
+`mark_stale` retention policy. Under the opt-in `delete` retention policy the
+runner executes `stale` entries as NetBox **deletions** — still guarded by the
+unconditional ownership check (only objects with `chv_managed_by == "chv"` and
+this architecture's `chv_architecture_id` are ever deleted). The plan's action
+set is unchanged (`delete` is a runner interpretation of `stale` under the
+configured retention, recorded in the plan's `retention` field), so dry-run
+output remains policy-independent.
 
 ### 8.2 Idempotency & retry
 - Same version re-export → all `no_op` (nothing changes).
@@ -430,26 +449,36 @@ trigger (manual | post-apply)
   can apply/destroy).
 - **Secrets in NetBox objects**: the adapter copies no CHV secrets into NetBox.
   `secret_ref` fields are never exported; only names/ids/metadata are projected.
-- **Audit**: `architecture_exported` events carry attempt/result/retry state and
-  never the token.
+- **Audit**: the five `architecture_netbox_*` events (`config_updated`,
+  `dry_run`, `export_succeeded`, `export_failed`, `export_retried`) carry
+  attempt/result/retry state and never the token. These supersede the security
+  spec's recommended-but-unimplemented `architecture_exported` name.
 
 ---
 
 ## 10. API surface (BFF, POST-only convention — parity with §1.5)
 
+The authoritative endpoint and error-code tables live in the API contract
+(`docs/specs/architecture-designer/contracts/netbox-api-contract.md`); the
+summary below mirrors it.
+
 | Endpoint | Role | Request → Response |
 |---|---|---|
 | `POST /v1/architectures/netbox/config/get` | Operator | `{id}` → config summary (never the token) or 404 |
-| `POST /v1/architectures/netbox/config/upsert` | Operator | `{id, endpoint, token_secret_ref, retention, dry_run_fields…}` → config |
-| `POST /v1/architectures/netbox/export/dry-run` | Operator | `{id, version?}` → `{plan_status, plan_id?, entries[], summary{create,update,no_op,conflict,stale}}` |
-| `POST /v1/architectures/netbox/export` | Operator | `{id, plan_id?}` → `{run_id, status}` |
-| `POST /v1/architectures/netbox/runs/list` | Operator | `{id}` → projection runs for the topology |
+| `POST /v1/architectures/netbox/config/upsert` | Operator | `{id, expected_version, endpoint, token?, token_secret_ref, retention, enable_post_apply, site_name?}` → config |
+| `POST /v1/architectures/netbox/config/delete` | Operator | `{id}` → deleted (NetBox untouched) |
+| `POST /v1/architectures/netbox/export/dry-run` | Operator | `{id}` → `{mapping_version, architecture_id, architecture_version, entries[], summary{create,update,no_op,conflict,stale}}` (projects the most recent `succeeded` apply run's version) |
+| `POST /v1/architectures/netbox/export` | Operator (Admin if production) | `{id}` → `{run_id, status}` |
+| `POST /v1/architectures/netbox/runs/list` | Operator | `{id, limit?}` → projection runs for the topology |
 | `POST /v1/architectures/netbox/runs/get` | Operator | `{id, run_id}` → run detail + result |
+| `POST /v1/architectures/netbox/runs/retry` | Operator | `{id, run_id}` → `{run_id, status}` (failed runs below the attempt cap) |
 
-New stable error codes: `NETBOX_NOT_CONFIGURED`, `NETBOX_HTTPS_REQUIRED`,
-`NETBOX_TOKEN_MISSING`, `NETBOX_UNREACHABLE`, `NETBOX_CONFLICT`,
-`NETBOX_PLAN_CONFLICTS`, `PROJECTION_RUN_NOT_RETRYABLE`. Production gating uses
-the environment → Admin rule; non-admin owners get the same 403 policy.
+Stable error codes (mirroring the contract table): `NETBOX_NOT_CONFIGURED`,
+`NETBOX_NOT_APPLIED`, `NETBOX_HTTPS_REQUIRED`, `NETBOX_TOKEN_MISSING`,
+`NETBOX_RUN_ACTIVE`, `PROJECTION_RUN_NOT_RETRYABLE`,
+`PRODUCTION_REQUIRES_ADMIN`, `NETBOX_UNREACHABLE`, `NETBOX_AUTH_FAILED`,
+`PLAN_EXPIRED`. Production gating
+uses the environment → Admin rule; non-admin owners get the same 403 policy.
 
 ---
 
@@ -473,15 +502,19 @@ architecture stores under `ui/src/lib/stores/architecture-*.svelte.ts`).
 
 ```text
 netbox_projection_config
-  architecture_id PK, endpoint, token_secret_ref, retention_policy,
-  enable_post_apply, custom_field_prefix, created_at, updated_at
+  architecture_id PK, endpoint, token_secret_ref, token_ciphertext,
+  retention_policy, enable_post_apply, custom_field_prefix, site_name,
+  created_at, updated_at
 
 netbox_projection_runs
   id PK, architecture_id, architecture_version_id, trigger (manual|post_apply),
-  status (queued|running|succeeded|failed), plan_id/plan_json,
-  result_json, summary_json, error_message, started_at, finished_at,
-  requested_by, created_at
+  mode (dry_run|export), status (queued|running|succeeded|failed),
+  plan_json, result_json, summary_json, error_message, attempt_count,
+  started_at, finished_at, requested_by, created_at
 ```
+
+(Field detail and status machines live in the component spec; the tables
+above mirror it.)
 
 Persistence follows the designer rule (keep full inputs + results for audit and
 future migration).

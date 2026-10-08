@@ -35,8 +35,8 @@ the field names themselves are stable contract surface.
 | CHV source | NetBox object | Natural key | Notes |
 |---|---|---|---|
 | `servers[]` | DCIM **Device** (role `chv-node`, type `chv-host`) | `name` | `site` from config or `metadata.environment` label; CPU/memory as custom fields when live facts exist |
-| `instances[]` | DCIM **VirtualMachine** | `name` | `status`: `active` when the applied run succeeded; `staged` otherwise; `cluster`/`device` from `placement.server` when resolvable |
-| `instances[].networks[]` | DCIM **Interface** (`type: virtual`) on the VM | `name` + parent VM | `description` = CHV network name |
+| `instances[]` | Virtualization **VirtualMachine** | `name` | `status`: `active` when the applied run succeeded; `staged` otherwise; `cluster`/`device` from `placement.server` when resolvable |
+| `instances[].networks[]` | Virtualization **Interface** (`type: virtual`) on the VM | `name` + parent VM | `description` = CHV network name |
 | `networks[]` | IPAM **Prefix** | `prefix` (=`cidr`) | `description` from network name/type |
 | `networks[]` with `vlan_id` | IPAM **VLAN** | `vid` (+ group) | linked to the Prefix |
 | `instances[].networks[].ip` | IPAM **IPAddress** | `address` (+ vrf when used) | assigned to the VM's Interface |

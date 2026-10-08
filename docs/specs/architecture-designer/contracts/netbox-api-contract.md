@@ -77,7 +77,8 @@ POST /v1/architectures/netbox/config/upsert
 
 - `token` is optional on update (omitted/null keeps the existing secret).
 - `expected_version` follows the topology's optimistic-concurrency rule
-  (409 `StaleVersion` on mismatch, same as `/v1/architectures/update`).
+  (rejected 409 on `expected_version` mismatch, same behavior as
+  `/v1/architectures/update`).
 - `retention_policy ∈ {"mark_stale", "delete"}`; `"delete"` requires Admin.
 - Non-HTTPS endpoints are rejected: 400 `NETBOX_HTTPS_REQUIRED`.
 
@@ -92,6 +93,11 @@ POST /v1/architectures/netbox/export/dry-run
 ```json
 { "id": "arch_01HX..." }
 ```
+
+**Projected version:** the `architecture_version_id` of the most recent
+`succeeded` apply run for the architecture — never the editable
+`latest_yaml` draft. If the architecture has never been applied, the request
+fails with 400 `NETBOX_NOT_APPLIED` (there is nothing applied to project).
 
 Response — the deterministic, secret-free plan (computed live against NetBox
 read endpoints; no writes):
@@ -171,6 +177,7 @@ and below the attempt cap; otherwise 409 `PROJECTION_RUN_NOT_RETRYABLE`.
 | Code | HTTP | Meaning |
 |---|---|---|
 | `NETBOX_NOT_CONFIGURED` | 400/404 | No projection config for the architecture |
+| `NETBOX_NOT_APPLIED` | 400 | Architecture has no succeeded apply run — nothing applied to project |
 | `NETBOX_HTTPS_REQUIRED` | 400 | Endpoint is not HTTPS |
 | `NETBOX_TOKEN_MISSING` | 400 | Config has no usable token |
 | `NETBOX_RUN_ACTIVE` | 409 | A run is already queued/running |
