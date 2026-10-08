@@ -158,6 +158,18 @@ pub fn external_id(architecture_id: &str, kind: &str, name: &str, version: u64) 
 /// Shared by the fail-closed scrubber in [`crate::mapping`] and by
 /// [`validate_custom_field_prefix`] so a configured prefix can never
 /// generate scrubber-tripping field names of our own.
+///
+/// The bare `secret` / `key` / `credential` stems are deliberately
+/// wider than rule 5's field list: a prefix like `secret_`, `key_` or
+/// `credential_` must be rejected even though it names no contract
+/// field. Because the list is shared with the scrubber, the wider
+/// stems over-reject there too — a hypothetical model field whose
+/// *name* merely contains `key` or `credential` would fail closed
+/// instead of projecting. That is the intended trade-off: sharing one
+/// list can only err in the direction of over-rejection (never
+/// projecting a secret-shaped name), and under-rejection (a
+/// secret-carrier name slipping through to NetBox) is the unsafe
+/// direction.
 pub const SECRET_FIELD_NAME_PATTERNS: &[&str] = &[
     "secret_ref",
     "password",
@@ -166,6 +178,9 @@ pub const SECRET_FIELD_NAME_PATTERNS: &[&str] = &[
     "private_key",
     "ssh_key",
     "auth",
+    "secret",
+    "key",
+    "credential",
 ];
 
 /// `true` when a custom-field *name* marks it as a secret carrier.
@@ -440,8 +455,19 @@ mod tests {
             "custom-field prefix must not be empty (every remote custom field would be treated as projected)"
         );
         // Secret-shaped prefixes would trip the fail-closed scrubber on
-        // our own derived field names.
-        for prefix in ["token_", "auth_", "SECRET_REF_", "my_password_", "ssh_key_"] {
+        // our own derived field names. The bare stems (`secret_`,
+        // `key_`, `credential_`) are covered alongside the contract's
+        // rule-5 field names (`token_`, `auth_`, `password_`, …).
+        for prefix in [
+            "token_",
+            "auth_",
+            "my_password_",
+            "secret_",
+            "key_",
+            "credential_",
+            "SECRET_REF_",
+            "ssh_key_",
+        ] {
             assert!(
                 validate_custom_field_prefix(prefix).is_err(),
                 "prefix {prefix:?} must be rejected"

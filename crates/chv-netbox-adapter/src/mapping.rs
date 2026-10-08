@@ -1723,7 +1723,16 @@ mod tests {
     #[test]
     fn invalid_custom_field_prefixes_are_rejected() {
         let arch = test_architecture();
-        for prefix in ["", "token_", "auth_", "MY_PASSWORD_", "ssh_key_"] {
+        for prefix in [
+            "",
+            "token_",
+            "auth_",
+            "MY_PASSWORD_",
+            "ssh_key_",
+            "secret_",
+            "key_",
+            "credential_",
+        ] {
             let input = ProjectionInput {
                 architecture: &arch,
                 architecture_id: ARCH_ID,

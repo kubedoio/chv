@@ -14,11 +14,17 @@
 //! lookup by chv_external_id (remote objects of the same kind)
 //!   ├─ exactly one, chv_owned (managed_by "chv", mapping version v1)
 //!   │     ├─ content equal          → no_op
+//!   │     ├─ content differs, remote natural key differs from the
+//!   │     │  desired one and the desired natural key is occupied
+//!   │     │  by another object       → conflict (rename blocked,
+//!   │     │                             never write)
 //!   │     └─ content differs        → update
 //!   ├─ exactly one, foreign/absent owner
 //!   │     or foreign mapping version → conflict (never write)
 //!   └─ more than one (duplicate external id /
-//!        ambiguous remote state)     → conflict (never write)
+//!        ambiguous remote state)     → conflict (never write; the
+//!                                        duplicates are also exempt
+//!                                        from stale)
 //! not found by external id
 //!   ├─ natural key free                 → create
 //!   ├─ natural key occupied, foreign    → conflict (never write)
@@ -42,12 +48,13 @@
 //! `conflict` entries carry empty `changes`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::mapping::{MappingIssue, MappingOutput, NetBoxKind, NetBoxObject};
 use crate::ownership::{
     validate_custom_field_prefix, CustomFieldNames, ManagedMarker, MANAGED_BY_CHV, MAPPING_VERSION,
+    RESOURCE_SLUG_INSTANCE, RESOURCE_SLUG_NETWORK, RESOURCE_SLUG_SERVER,
 };
 
 /// Placeholder shown for a field that is unset on one side of a diff.
@@ -241,6 +248,14 @@ pub fn compute_plan(
 
     let names = &context.names;
     let mut entries = Vec::new();
+    // External ids whose desired-object lookup was ambiguous (more
+    // than one same-kind remote match). The conflict emitted for the
+    // desired object already covers the duplicates, so the stale loop
+    // must exempt them too — under `delete` retention a stale entry
+    // would delete an object whose ownership is ambiguous (mapping
+    // contract collision tree: "duplicates are also exempt from
+    // stale").
+    let mut ambiguous_ext_ids: BTreeSet<String> = BTreeSet::new();
 
     for object in &desired.objects {
         let Some(ext_id) = object.custom_fields().get(&names.external_id).cloned() else {
@@ -271,7 +286,10 @@ pub fn compute_plan(
             .collect();
         if ext_matches.len() > 1 {
             // Ambiguous remote state: more than one remote object of
-            // this kind claims our external id. Never propose a write.
+            // this kind claims our external id. Never propose a write,
+            // and remember the id so the stale loop leaves the
+            // duplicates alone.
+            ambiguous_ext_ids.insert(ext_id.clone());
             entries.push(entry(
                 NetboxPlanAction::Conflict,
                 object,
@@ -290,6 +308,32 @@ pub fn compute_plan(
         if let Some((remote_object, marker)) = ext_matches.into_iter().next() {
             if marker.is_owned_by_chv() && marker.architecture_id == context.architecture_id {
                 let changes = content_changes(object, remote_object, names);
+                // Rename detection (mapping contract collision tree):
+                // the match is ours but sits at a different natural
+                // key — the object was renamed in NetBox. The rename
+                // can only proceed while the desired natural key is
+                // free; another same-kind remote occupying it would
+                // make the PATCH unexecutable, so fail closed with a
+                // conflict instead of proposing a dead update. (The
+                // renamed match itself never counts as the occupier:
+                // its natural key differs from the desired one.)
+                let rename_blocked = remote_object.natural_key != natural_key
+                    && remote
+                        .iter()
+                        .any(|r| r.kind == object.kind() && r.natural_key == natural_key);
+                if rename_blocked {
+                    entries.push(entry(
+                        NetboxPlanAction::Conflict,
+                        object,
+                        natural_key,
+                        ext_id,
+                        "chv-owned remote object was renamed in NetBox, but the desired \
+                         natural key is occupied by another object; the rename is blocked"
+                            .to_string(),
+                        Vec::new(),
+                    ));
+                    continue;
+                }
                 let (action, reason) = if changes.is_empty() {
                     (
                         NetboxPlanAction::NoOp,
@@ -426,8 +470,30 @@ pub fn compute_plan(
         if !marker.is_owned_by_chv() || marker.architecture_id != context.architecture_id {
             continue;
         }
+        // Duplicates of an ambiguous external id: the desired-object
+        // pass already emitted a conflict covering them, and their
+        // ownership is by definition unresolved — never stale (and so
+        // never deleted under `delete` retention).
+        if ambiguous_ext_ids.contains(&marker.external_id) {
+            continue;
+        }
+        // A remote is still desired when a same-kind desired object
+        // occupies its natural key, OR claims its external id — the
+        // NetBox-side rename case: the desired-object pass already
+        // emitted an `update` for the renamed object, so marking it
+        // stale as well would be contradictory (its CHV source still
+        // exists) and, under `delete` retention, would delete an
+        // object that was just updated.
         let still_desired = desired.objects.iter().any(|o| {
-            o.kind() == remote_object.kind && o.natural_key() == remote_object.natural_key
+            if o.kind() != remote_object.kind {
+                return false;
+            }
+            if o.natural_key() == remote_object.natural_key {
+                return true;
+            }
+            o.custom_fields()
+                .get(&names.external_id)
+                .is_some_and(|ext| *ext == marker.external_id)
         });
         if still_desired {
             continue;
@@ -435,7 +501,7 @@ pub fn compute_plan(
         entries.push(NetboxProjectionPlanEntry {
             action: NetboxPlanAction::Stale,
             kind: remote_object.kind,
-            chv_resource_ref: resource_ref_from_external_id(&marker.external_id),
+            chv_resource_ref: resource_ref_from_external_id(&marker.external_id, remote_object.kind),
             netbox_natural_key: remote_object.natural_key.clone(),
             external_id: marker.external_id.clone(),
             reason: format!(
@@ -506,16 +572,66 @@ fn resource_ref(object: &NetBoxObject) -> String {
     }
 }
 
-/// Best-effort `chv_resource_ref` for a remote object whose CHV source
-/// disappeared: recover the `<kind>/<name>` segment of the external id,
-/// pluralizing the kind slug so the ref matches the live-entry form
-/// (`servers/x`, not `server/x`).
-fn resource_ref_from_external_id(ext_id: &str) -> String {
-    // arch:<architecture_id>:<kind>/<name>:<version>
+/// `chv_resource_ref` for a remote object whose CHV source
+/// disappeared: reconstruct the **live** ref form from the external
+/// id, so a stale entry carries the byte-identical ref the object had
+/// while it was still planned.
+///
+/// The external-id bodies (as composed by `build_objects` in
+/// [`crate::mapping`]) map onto the live refs of
+/// [`resource_ref`] as follows:
+///
+/// | external-id body | NetBox kind | live ref |
+/// |---|---|---|
+/// | `server/{name}` | device | `servers/{name}` |
+/// | `network/{name}` | prefix | `networks/{name}` |
+/// | `network/{name}#vlan` | vlan | `networks/{name}` |
+/// | `instance/{vm}` | virtual machine | `instances/{vm}` |
+/// | `instance/{vm}/{net}` | interface | `instances/{vm}/networks/{net}` |
+/// | `instance/{vm}/{net}#{ip}` | ip address | `instances/{vm}/{net}` |
+///
+/// The remote object's NetBox kind selects the reconstruction — the
+/// `instance/…` body alone cannot distinguish an interface from an IP
+/// address once the `#` segment is gone. Unknown slugs, slug/kind
+/// combinations, or malformed bodies keep the pluralized passthrough
+/// of the raw segment — never fabricated, never a panic.
+fn resource_ref_from_external_id(ext_id: &str, kind: NetBoxKind) -> String {
+    // arch:<architecture_id>:<kind>/<body>:<version>
     let segment = ext_id.split(':').nth(2).unwrap_or_default();
-    match segment.split_once('/') {
-        Some((kind, rest)) => format!("{}/{}", plural_kind_slug(kind), rest),
-        None => segment.to_string(),
+    let Some((slug, body)) = segment.split_once('/') else {
+        // No kind/body split: malformed, pass the segment through.
+        return segment.to_string();
+    };
+    match (slug, kind) {
+        (RESOURCE_SLUG_SERVER, NetBoxKind::Device) => format!("servers/{body}"),
+        (RESOURCE_SLUG_NETWORK, NetBoxKind::Prefix | NetBoxKind::Vlan) => {
+            // VLAN bodies carry a `#vlan` tail; both live refs name the
+            // CHV network itself (`networks/<name>`).
+            match body.split_once('#') {
+                Some((name, _tail)) => format!("networks/{name}"),
+                None => format!("networks/{body}"),
+            }
+        }
+        (RESOURCE_SLUG_INSTANCE, NetBoxKind::VirtualMachine) => format!("instances/{body}"),
+        (RESOURCE_SLUG_INSTANCE, NetBoxKind::Interface) => {
+            // `instance/{vm}/{net}` → the interface's live ref nests
+            // the network under `networks/`.
+            match body.split_once('/') {
+                Some((vm, net)) => format!("instances/{vm}/networks/{net}"),
+                None => format!("instances/{body}"),
+            }
+        }
+        (RESOURCE_SLUG_INSTANCE, NetBoxKind::IpAddress) => {
+            // `instance/{vm}/{net}#{ip}` → the IP's live ref names its
+            // owning interface, dropping the address segment.
+            match body.split_once('#') {
+                Some((vm_net, _address)) => format!("instances/{vm_net}"),
+                None => format!("instances/{body}"),
+            }
+        }
+        // Unknown slug or slug/kind combination: pluralized
+        // passthrough of the raw segment (previous behavior).
+        _ => format!("{}/{}", plural_kind_slug(slug), body),
     }
 }
 
@@ -524,9 +640,9 @@ fn resource_ref_from_external_id(ext_id: &str) -> String {
 /// unchanged (never fabricated, never a panic).
 fn plural_kind_slug(kind: &str) -> &str {
     match kind {
-        crate::ownership::RESOURCE_SLUG_SERVER => "servers",
-        crate::ownership::RESOURCE_SLUG_NETWORK => "networks",
-        crate::ownership::RESOURCE_SLUG_INSTANCE => "instances",
+        RESOURCE_SLUG_SERVER => "servers",
+        RESOURCE_SLUG_NETWORK => "networks",
+        RESOURCE_SLUG_INSTANCE => "instances",
         other => other,
     }
 }
@@ -889,6 +1005,108 @@ mod tests {
     }
 
     #[test]
+    fn stale_refs_for_derived_kinds_match_live_refs() {
+        // Remote state built from an architecture with one extra VM
+        // interface (plus its IP) and one extra VLAN; the desired state
+        // lacks them, so all three go stale. Their `chv_resource_ref`
+        // must be byte-identical to the refs the same objects carry
+        // while live — recovered kind-aware from the external id, not
+        // the raw external-id body.
+        let mut remote_arch = test_architecture();
+        remote_arch.instances[0]
+            .networks
+            .push(chv_architecture_validate::model::InstanceNetwork {
+                name: "storage".to_string(),
+                ip: Some("10.42.1.9".to_string()),
+            });
+        remote_arch
+            .networks
+            .push(chv_architecture_validate::model::Network {
+                name: "mgmt".to_string(),
+                network_type: chv_architecture_validate::model::NetworkType::Vlan,
+                bridge: None,
+                vlan_id: Some(7),
+                cidr: None,
+                gateway: None,
+                dns: Vec::new(),
+                dhcp: None,
+            });
+        let remote_desired =
+            build_objects(&projection_input(&remote_arch, 3, None)).expect("builds");
+        let remote = mirror(&remote_desired.objects);
+
+        // Live refs: the richer state planned against its own mirror is
+        // all no_op, so its entries carry the live ref forms.
+        let live_plan =
+            compute_plan(&remote_desired, &remote, &PlanContext::new(ARCH_ID, 3)).expect("plan");
+        let live_ref = |kind: NetBoxKind, key: &[(&str, &str)]| {
+            live_plan
+                .entries
+                .iter()
+                .find(|e| {
+                    e.kind == kind
+                        && key.iter().all(|(k, v)| {
+                            e.netbox_natural_key.get(*k).map(String::as_str) == Some(*v)
+                        })
+                })
+                .map(|e| e.chv_resource_ref.clone())
+                .unwrap_or_default()
+        };
+
+        // Desired state without the extras → the three derived objects
+        // go stale, everything still desired is a no_op.
+        let desired = desired(3);
+        let plan = compute_plan(&desired, &remote, &PlanContext::new(ARCH_ID, 3)).expect("plan");
+        assert_eq!(plan.summary.stale, 3);
+        assert_eq!(plan.summary.no_op as usize, desired.objects.len());
+
+        let stale_ref = |kind: NetBoxKind, key: &[(&str, &str)]| {
+            plan.entries
+                .iter()
+                .find(|e| {
+                    e.action == NetboxPlanAction::Stale
+                        && e.kind == kind
+                        && key.iter().all(|(k, v)| {
+                            e.netbox_natural_key.get(*k).map(String::as_str) == Some(*v)
+                        })
+                })
+                .map(|e| e.chv_resource_ref.clone())
+                .unwrap_or_default()
+        };
+
+        // Interface: `instances/{vm}/networks/{net}`, not the raw
+        // external-id body `instances/vm-01/storage`.
+        let interface_key = &[("name", "storage"), ("virtual_machine", "vm-01")];
+        assert_eq!(
+            stale_ref(NetBoxKind::Interface, interface_key),
+            live_ref(NetBoxKind::Interface, interface_key)
+        );
+        assert_eq!(
+            stale_ref(NetBoxKind::Interface, interface_key),
+            "instances/vm-01/networks/storage"
+        );
+
+        // VLAN: `networks/{name}`, without the `#vlan` body tail.
+        let vlan_key = &[("vid", "7")];
+        assert_eq!(
+            stale_ref(NetBoxKind::Vlan, vlan_key),
+            live_ref(NetBoxKind::Vlan, vlan_key)
+        );
+        assert_eq!(stale_ref(NetBoxKind::Vlan, vlan_key), "networks/mgmt");
+
+        // IP: `instances/{vm}/{net}`, dropping the address segment.
+        let ip_key = &[("address", "10.42.1.9")];
+        assert_eq!(
+            stale_ref(NetBoxKind::IpAddress, ip_key),
+            live_ref(NetBoxKind::IpAddress, ip_key)
+        );
+        assert_eq!(
+            stale_ref(NetBoxKind::IpAddress, ip_key),
+            "instances/vm-01/storage"
+        );
+    }
+
+    #[test]
     fn plan_serialization_is_byte_stable() {
         let desired = desired(3);
         let remote = mirror(&desired.objects);
@@ -1106,6 +1324,223 @@ mod tests {
                 e.action,
                 NetboxPlanAction::Create | NetboxPlanAction::Update
             )));
+    }
+
+    #[test]
+    fn ambiguous_external_id_duplicates_are_exempt_from_stale() {
+        // Two same-kind remotes sharing the desired device's external
+        // id, at *different* natural keys (so neither is covered by the
+        // still-desired check): one conflict entry for the desired
+        // object and — even under `delete` retention — ZERO stale
+        // entries, because deleting an object whose ownership is
+        // ambiguous must never be proposed (mapping contract: "the
+        // duplicates are also exempt from stale").
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let duplicate = |name: &str| NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), name.to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id.clone(),
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+
+        let mut context = PlanContext::new(ARCH_ID, 3);
+        context.retention = RetentionPolicy::Delete;
+        let plan = compute_plan(
+            &desired,
+            &[duplicate("dup-a"), duplicate("dup-b")],
+            &context,
+        )
+        .expect("plan");
+
+        // Exactly one conflict entry, for the desired object.
+        let device_conflicts: Vec<&NetboxProjectionPlanEntry> = plan
+            .entries
+            .iter()
+            .filter(|e| e.kind == NetBoxKind::Device && e.action == NetboxPlanAction::Conflict)
+            .collect();
+        assert_eq!(device_conflicts.len(), 1);
+        assert_eq!(
+            device_conflicts[0]
+                .netbox_natural_key
+                .get("name")
+                .map(String::as_str),
+            Some("chv-node-01")
+        );
+        assert!(device_conflicts[0]
+            .reason
+            .contains("ambiguous remote state"));
+        // Zero stale entries — the duplicates are exempt.
+        assert_eq!(plan.summary.stale, 0);
+        assert!(plan
+            .entries
+            .iter()
+            .all(|e| e.action != NetboxPlanAction::Stale));
+    }
+
+    #[test]
+    fn rename_onto_occupied_natural_key_is_conflict_never_update() {
+        // The single external-id match is chv-owned but sits at another
+        // natural key (the object was renamed in NetBox), and the
+        // desired natural key is occupied by a foreign object: the
+        // rename cannot proceed → conflict, never an update the HTTP
+        // layer would reject.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let renamed = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-old".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id,
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+        let occupier = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-01".to_string())].into(),
+            custom_fields: BTreeMap::new(),
+            content: BTreeMap::new(),
+        };
+
+        let plan = compute_plan(
+            &desired,
+            &[renamed, occupier],
+            &PlanContext::new(ARCH_ID, 3),
+        )
+        .expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Conflict);
+        assert!(device_entry.reason.contains("desired natural key"));
+        assert!(device_entry.reason.contains("occupied"));
+        assert!(device_entry.reason.contains("rename"));
+        assert!(device_entry.changes.is_empty());
+        // Never an update (or create) for the device.
+        assert!(!plan.entries.iter().any(|e| e.kind == NetBoxKind::Device
+            && matches!(
+                e.action,
+                NetboxPlanAction::Create | NetboxPlanAction::Update
+            )));
+    }
+
+    #[test]
+    fn rename_onto_free_natural_key_proceeds_as_update() {
+        // Same rename, but the desired natural key is free: the rename
+        // proceeds as an update (the guard must not over-fire).
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let renamed = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-old".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id,
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+
+        let plan = compute_plan(&desired, &[renamed], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+
+        let device_entry = plan
+            .entries
+            .iter()
+            .find(|e| e.kind == NetBoxKind::Device)
+            .expect("device entry");
+        assert_eq!(device_entry.action, NetboxPlanAction::Update);
+        assert!(!device_entry.changes.is_empty());
+        // The renamed remote is claimed by the desired object's external
+        // id — it must NOT also be marked stale (its CHV source still
+        // exists; the update covers it).
+        assert_eq!(plan.summary.stale, 0);
+        assert!(!plan
+            .entries
+            .iter()
+            .any(|e| e.action == NetboxPlanAction::Stale));
+    }
+
+    #[test]
+    fn renamed_remote_claimed_by_external_id_is_not_stale() {
+        // A chv-owned remote whose natural key matches nothing desired
+        // but whose external id IS claimed by a desired object of the
+        // same kind: the desired pass emits `update` (the rename), and
+        // the stale loop must exempt it — a `stale` alongside the
+        // `update` would be contradictory, and under `delete` retention
+        // it would delete the object that was just updated.
+        let desired = desired(3);
+        let ext_id = device_ext_id(&desired, "chv-node-01");
+        let renamed = NetBoxRemoteObject {
+            kind: NetBoxKind::Device,
+            natural_key: [("name".to_string(), "chv-node-old".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: ext_id,
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 3,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            content: BTreeMap::new(),
+        };
+
+        let plan = compute_plan(
+            &desired,
+            std::slice::from_ref(&renamed),
+            &PlanContext::new(ARCH_ID, 3),
+        )
+        .expect("plan");
+
+        assert_eq!(plan.summary.stale, 0);
+        assert!(plan
+            .entries
+            .iter()
+            .all(|e| e.action != NetboxPlanAction::Stale));
+
+        // Contrast: a chv-owned remote whose external id is claimed by
+        // NO desired object (a genuinely removed source) is still stale.
+        let removed = NetBoxRemoteObject {
+            natural_key: [("name".to_string(), "chv-node-gone".to_string())].into(),
+            custom_fields: ManagedMarker {
+                external_id: crate::ownership::external_id(
+                    ARCH_ID,
+                    crate::ownership::RESOURCE_SLUG_SERVER,
+                    "chv-node-gone",
+                    2,
+                ),
+                architecture_id: ARCH_ID.to_string(),
+                managed_by: MANAGED_BY_CHV.to_string(),
+                managed_state: crate::ownership::ManagedState::Active,
+                architecture_version: 2,
+                mapping_version: crate::ownership::MAPPING_VERSION.to_string(),
+            }
+            .to_custom_fields(&CustomFieldNames::default()),
+            ..renamed
+        };
+        let plan = compute_plan(&desired, &[removed], &PlanContext::new(ARCH_ID, 3)).expect("plan");
+        assert_eq!(plan.summary.stale, 1);
     }
 
     #[test]
