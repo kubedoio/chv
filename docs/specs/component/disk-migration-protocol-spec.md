@@ -52,6 +52,28 @@ optimization layered in front of the digest, not a correctness gate of
 its own — the residual window between the pre-pause gate and the pause
 completing remains covered by the post-pause whole-volume digest.
 
+**Pause-first mode (issue #394, Option C — opt-in stop-the-world).**
+`TriggerDiskMigrationRequest.pause_first` (threaded end-to-end: the
+agent's `MigrateVmRequest`→`MigrationConfig.pause_first`, the BFF
+vm-mutate migrate action's `pause_first` JSON field, and
+`chvctl migrate start --pause-first` / `chvctl vm migrate
+--pause-first`) moves the VM-pause handshake to **before any source
+byte is read**: the task enters the `PAUSED_PRE_COPY` status phase
+with `needs_vm_pause = true` — observable with zero bytes transferred
+— and the sender blocks there until `ResumeDiskMigration{vm_paused:
+true}`. The canary baseline is sampled *after* the pause, so the
+covered window is exactly the quiesced transfer; the dirty rounds then
+converge trivially on the quiesced source; the finalize digest
+verifies instead of catching loss. A migration in this mode is
+correct by construction for any write pattern, at the cost of
+downtime equal to the full disk+memory transfer — the operator-facing
+alternative to #394's "retry with the source quiesced" answer. The
+sender fails closed (`failed_precondition`, before connecting) if the
+mode is requested without a task attached: an operator who asked for
+the pause must never get a silent degradation to quiescent-assumed
+semantics. The WebUI does not expose the toggle yet (API/chvctl
+only); the UI surface is recorded follow-up work.
+
 ## Transport
 - gRPC bidirectional streaming: `StorageMigrationService.StreamBlocks` over a single `MigrationMessage` stream (`proto/node/chv-stord-migration.proto`)
 - The migration stream is served on **two** listeners (`crates/chv-stord-core/src/server.rs`):
@@ -156,6 +178,7 @@ Source stord                Agent                   Destination
 ```
 
 - When the dirty rounds are done, the sender runs the **pre-pause gate** — the last write-canary re-check (#394, Option A); failing there means the VM was never paused, so no resume is needed — then the task moves to `PausedFinalSync` and sets `needs_vm_pause = true`, and the sender blocks on the task's pause channel (`crates/chv-stord-core/src/migration/sender.rs`, `migration/task.rs`)
+- In pause-first mode (#394, Option C) this same handshake runs **before bulk copy** (`PausedPreCopy`): the pre-pause gate and the wait below it are then already satisfied — the VM has been paused since before the first source read — so the task transitions to `PausedFinalSync` for observability and the sender proceeds to `FinalSync` without waiting
 - The agent (polling `GetDiskMigrationStatus`) pauses the VM via the Cloud Hypervisor API and signals back with `ResumeDiskMigration{vm_paused: true}` (`crates/chv-stord-core/src/handlers.rs`, `crates/chv-agent-core/src/migration.rs`)
 - Only then does the sender emit `FinalSync{vm_paused: true}`
 - There is **no post-pause dirty sweep** (issue #394): the last dirty round ran before the pause; for a quiescent volume there is nothing left to flush
@@ -442,6 +465,7 @@ not under `[migration]`): the destination endpoint host of every
 | Phase 3/4: Write canary | sender.rs `verify_source_canary()`, backends `write_canary_probe()` | DONE — file-stat fingerprint sampled before bulk copy, re-checked at every round boundary and the pre-pause gate; `source_modified_during_migration` fail-fast (issue #394, Option A) |
 | Phase 3: Round acks / boundary flushes | receiver.rs, sender.rs | DONE — ack every 64 chunks, round ack on `RoundComplete`, window flush at `FinalSync`/pre-`FinalizeAck` (issue #391) |
 | Phase 4: Pause handshake (`needs_vm_pause` → `ResumeDiskMigration{vm_paused:true}` → `FinalSync{vm_paused:true}`) | sender.rs, task.rs, handlers.rs | DONE — no post-pause dirty sweep (issue #394, see Claimed mode) |
+| Phase 0/4: Pause-first mode (`pause_first` → `PAUSED_PRE_COPY` before bulk copy; fail-closed without a task) | sender.rs, handlers.rs, task.rs; agent migration.rs, daemon_clients.rs, agent_server.rs; CP bff_mutations.rs; BFF handlers/vms.rs; chvctl | DONE — issue #394, Option C (see Claimed mode) |
 | Phase 5: Finalize digest | volume_digest.rs, sender.rs | DONE — versioned SHA-256 over the full source, sent in `FinalizeComplete.volume_checksum` (issue #392) |
 | Phase 5: Destination verification | receiver.rs `verify_destination()` | DONE — re-computes the digest over the destination; `verified=false` ⇒ sender fails with `Status::data_loss`, task Failed |
 | Flow control (SendWindow, Ack) | flow_control.rs | DONE — window 128, ack interval 64, 30 s timeout |

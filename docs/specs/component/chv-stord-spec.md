@@ -56,3 +56,4 @@
 | Disk migration bulk copy, flow control, CRC, resumability | Implemented |
 | Disk migration dirty sync rounds and convergence reporting | Implemented; `MigrationTaskTable` tracks rounds, dirty blocks, bytes transferred |
 | Paused final dirty flush | Implemented; `MigrationSender` pauses at `PausedFinalSync`, signals via watch channel, waits for agent `resume_disk_migration` |
+| Pause-first mode (issue #394 Option C) | Implemented; opt-in `TriggerDiskMigrationRequest.pause_first` moves the same handshake before bulk copy (`PausedPreCopy`, zero bytes transferred); sender fails closed `failed_precondition` without a task; pause channel latches for senders not yet at their gate — see `disk-migration-protocol-spec.md` |

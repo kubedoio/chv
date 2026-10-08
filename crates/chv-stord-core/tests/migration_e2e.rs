@@ -70,6 +70,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tonic::Request;
 
 /// Install the rustls ring crypto provider (same as `cmd/chv-stord`
 /// startup). Idempotent.
@@ -724,6 +725,286 @@ async fn pause_handshake_releases_final_sync() {
     let dest = std::fs::read(dest_dir.path().join("vol-e2e-pause.img"))
         .expect("receiving volume file must exist");
     assert_eq!(dest, expected, "destination must match the source bytes");
+}
+
+/// **Pause-first mode** (issue #394, Option C): with the opt-in
+/// stop-the-world mode, the pause request must arrive BEFORE any source
+/// byte is read — observed as `PausedPreCopy` with zero bytes transferred
+/// — and the sender must stay blocked there until the pause is signaled.
+/// After the pause, the whole transfer runs against the quiesced source
+/// and completes with the finalize digest verified: correct by
+/// construction, the digest as proof rather than as a late loss detector.
+///
+/// A source write landing while the sender is still blocked in the
+/// pre-copy pause is pre-baseline (the canary baseline is sampled after
+/// the pause handshake), so it is legitimately part of the transferred
+/// image — the test pins that too: the destination must contain it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_first_pauses_before_bulk_copy() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    let mut expected = write_source_image(src_dir.path(), "vol.img", 2);
+
+    let src_backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+    let volume_id = "vol-e2e-pause-first".to_string();
+    let handle = open_source_volume(&src_backend, &volume_id, "vol.img", 2 * BLOCK).await;
+
+    let (addr, ca) = spawn_receiver(dest_dir.path()).await;
+
+    let table = MigrationTaskTable::new();
+    let (task, _pause_rx) =
+        MigrationTask::new(volume_id.clone(), handle.clone(), format!("https://{addr}"));
+    table.insert("mig-e2e-pause-first".to_string(), task.clone());
+    let task = table.get("mig-e2e-pause-first").unwrap();
+
+    let sender = MigrationSender::new(src_backend, volume_id, handle)
+        .with_tls(sender_tls(&ca))
+        .with_task(task.clone())
+        .with_pause_first();
+    let endpoint = format!("https://{addr}");
+    let migration = tokio::spawn(async move {
+        tokio::time::timeout(MIGRATION_TIMEOUT, sender.start_migration(endpoint))
+            .await
+            .expect("migration must not hang")
+            .expect("migration must succeed");
+    });
+
+    // Wait for the pause request. The discriminator this test exists
+    // for: it must arrive in PausedPreCopy with NOTHING transferred.
+    let deadline = tokio::time::Instant::now() + MIGRATION_TIMEOUT;
+    loop {
+        let state = task.state.read().await;
+        if state.needs_vm_pause {
+            assert_eq!(
+                state.phase,
+                MigrationPhase::PausedPreCopy,
+                "pause-first must request the pause in PausedPreCopy"
+            );
+            assert_eq!(
+                state.bytes_transferred, 0,
+                "pause-first must pause BEFORE any source byte is read"
+            );
+            assert_eq!(
+                state.convergence_round, 0,
+                "pause-first must pause before any dirty round"
+            );
+            break;
+        }
+        assert_ne!(
+            state.phase,
+            MigrationPhase::Completed,
+            "sender must not complete before the VM pause is signaled"
+        );
+        assert_ne!(
+            state.phase,
+            MigrationPhase::Failed,
+            "migration failed while waiting for pause: {}",
+            state.error_message
+        );
+        drop(state);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sender never requested the pre-copy VM pause"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // The sender must genuinely be blocked on the pre-copy pause: give
+    // it a wide window to (incorrectly) proceed on its own, then assert
+    // on the state itself, not just the future's liveness — a slow
+    // misbehaving sender could otherwise slip past the window.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !migration.is_finished(),
+        "sender must stay blocked in PausedPreCopy until the pause is signaled"
+    );
+    {
+        let state = task.state.read().await;
+        assert_eq!(state.phase, MigrationPhase::PausedPreCopy);
+        assert_eq!(
+            state.bytes_transferred, 0,
+            "no byte may move while blocked in PausedPreCopy"
+        );
+    }
+
+    // While the "VM" is paused, a host-level write lands before the
+    // canary baseline (sampled after the handshake) — pre-baseline, so
+    // legitimately part of the transferred image. Mirror it into the
+    // expected bytes.
+    let mid_pause = vec![0x5Au8; 64 * 1024];
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(src_dir.path().join("vol.img"))
+            .unwrap();
+        f.seek(SeekFrom::Start(BLOCK)).unwrap();
+        f.write_all(&mid_pause).unwrap();
+    }
+    let offset = BLOCK as usize;
+    expected[offset..offset + mid_pause.len()].copy_from_slice(&mid_pause);
+
+    // Simulate `ResumeDiskMigration{vm_paused: true}`.
+    task.pause_tx.send(true).unwrap();
+
+    tokio::time::timeout(MIGRATION_TIMEOUT, migration)
+        .await
+        .expect("migration future must not hang")
+        .expect("migration task must not panic");
+    let state = task.state.read().await;
+    assert_eq!(state.phase, MigrationPhase::Completed);
+    assert_finalize_digest_observed(&state);
+    drop(state);
+
+    let dest = std::fs::read(dest_dir.path().join("vol-e2e-pause-first.img"))
+        .expect("receiving volume file must exist");
+    assert_eq!(
+        dest, expected,
+        "destination must match the quiesced source bytes exactly"
+    );
+}
+
+/// **Pause-signal latching for staggered senders** (issue #394 Option C
+/// review finding): the agent pauses and resumes ALL of a VM's volumes
+/// when the FIRST one requests the pause — a sibling whose sender has
+/// not yet reached its pause gate (still completing the mTLS handshake)
+/// must not turn that resume into an error, and must observe the pause
+/// when it later reaches its gate. Before the fix, the trigger handler
+/// dropped the task's pause receiver when the spawned sender started, so
+/// a `ResumeDiskMigration` arriving while the sender was still
+/// connecting (not yet subscribed at its gate) hit a closed watch
+/// channel: the send failed, the resume RPC errored, and the agent
+/// aborted the whole migration — near-deterministic for multi-volume
+/// pause-first, where the resume fires while siblings are still
+/// connecting.
+///
+/// Driven through the REAL `TriggerDiskMigration` handler (the
+/// production construction site of the task and its pause channel),
+/// with a destination that accepts the TCP connection but never
+/// completes the TLS handshake: the spawned sender is deterministically
+/// stuck pre-handshake — it cannot have subscribed at its pause gate —
+/// so the resume that follows must latch on the open channel rather
+/// than fail on a closed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_signal_latches_for_senders_not_yet_at_their_gate() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+
+    write_source_image(src_dir.path(), "vol-latch.img", 2);
+
+    let backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+
+    // A silent destination: accepts and holds connections, never
+    // answers the TLS handshake. The sender hangs in connect — alive,
+    // pre-handshake, and provably not subscribed at its pause gate.
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = silent.local_addr().unwrap();
+    let hold = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = silent.accept().await {
+            held.push(sock); // never read, never written, never closed
+        }
+    });
+
+    let svc = chv_stord_core::handlers::StorageServiceImpl::new(
+        backend.clone(),
+        Arc::new(chv_stord_core::session::SessionTable::new()),
+        Arc::new(chv_observability::Metrics::new()),
+        src_dir.path().to_path_buf(),
+        vec!["local".to_string()],
+        vec![],
+        vec![],
+        vec![], // migration_dest_allowlist: empty = allow all
+        // The TLS identity is required by the sender but never validated
+        // against the silent peer (the handshake never completes).
+        Some(sender_tls(&test_ca("silent-dest"))),
+    );
+
+    let handle = open_source_volume(&backend, "vol-latch", "vol-latch.img", 2 * BLOCK).await;
+    svc.sessions().upsert(chv_stord_core::session::Session {
+        volume_id: "vol-latch".to_string(),
+        vm_id: None,
+        attachment_handle: handle.clone(),
+        export_kind: "raw".to_string(),
+        export_path: src_dir
+            .path()
+            .join("vol-latch.img")
+            .to_string_lossy()
+            .to_string(),
+        runtime_status: "open".to_string(),
+    });
+
+    // Trigger through the REAL handler, pause-first.
+    let resp = chv_stord_api::chv_stord_api::storage_service_server::StorageService::trigger_disk_migration(
+        &svc,
+        Request::new(chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest {
+            meta: None,
+            volume_id: "vol-latch".to_string(),
+            attachment_handle: handle,
+            dest_endpoint: format!("https://{silent_addr}"),
+            pause_first: true,
+        }),
+    )
+    .await
+    .expect("trigger must be served");
+    let inner = resp.into_inner();
+    assert_eq!(
+        inner.result.as_ref().map(|r| r.status.as_str()),
+        Some("OK"),
+        "trigger must succeed"
+    );
+    let migration_id = inner.migration_id;
+
+    // Let the spawned sender start and settle into the (never-completing)
+    // TLS handshake — past the point where the pre-fix code had already
+    // dropped the task's pause receiver.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The resume the agent's poll would produce for a sibling volume:
+    // the sender is stuck pre-handshake, nowhere near its pause gate.
+    // It must latch, never error.
+    let resume = chv_stord_api::chv_stord_api::storage_service_server::StorageService::resume_disk_migration(
+        &svc,
+        Request::new(chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest {
+            migration_id: migration_id.clone(),
+            vm_paused: true,
+        }),
+    )
+    .await
+    .expect("resume must be served");
+    let result = resume.into_inner().result.expect("result present");
+    assert_eq!(
+        result.status, "OK",
+        "resume while the sender is not yet at its pause gate must latch, not fail: {}",
+        result.human_summary
+    );
+
+    // And the latch must be observable: a sender reaching its gate now
+    // would see the pause already signaled. The task is still alive and
+    // pre-handshake (the silent destination never lets it progress) —
+    // pinned by the status staying non-terminal and the pause flag set.
+    let resp =
+        chv_stord_api::chv_stord_api::storage_service_server::StorageService::get_disk_migration_status(
+            &svc,
+            Request::new(chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest {
+                migration_id,
+            }),
+        )
+        .await
+        .expect("status must be served")
+        .into_inner();
+    assert_ne!(
+        resp.phase,
+        chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase::Failed as i32,
+        "the latched resume must not fail the migration: {}",
+        resp.error_message
+    );
+
+    hold.abort();
 }
 
 /// **Corruption detection at finalize** (issue #392, the reason the digest

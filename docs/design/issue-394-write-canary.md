@@ -1,12 +1,12 @@
-# Issue #394 — Concurrent-write storage migration: write canary (Option A, adopted)
+# Issue #394 — Concurrent-write storage migration: write canary (Option A) and pause-first mode (Option C)
 
 Adoption record. Ruling 2026-10-08 (session, recorded on the issue):
 **DP1 adopted** (state correction — the loss is loud-but-late post-#392,
 not silent); **DP2 adopted** — Option A (write canary, fail fast) lands
-now; **DP3 deferred** — Option C (pause-first opt-in mode) is a tight
-follow-up, its own PR; **DP4 adopted** — Options B/D parked with
-recorded triggers; **DP5** — the M4.6 recorded boundary stays as-is
-under A.
+now; **DP3** — Option C (pause-first opt-in mode) was ruled a tight
+follow-up, its own PR, and has since landed (§5); **DP4 adopted** —
+Options B/D parked with recorded triggers; **DP5** — the M4.6 recorded
+boundary stays as-is under A.
 
 The options write-up with the full analysis lives on the issue
 (2026-10-08, `#394` comment "options write-up — request for a design
@@ -86,7 +86,8 @@ gate:
   transfer window.
 - It does not make live migration supported. The quiescent-only
   contract is unchanged; a canary failure tells the operator to retry
-  with the source quiesced (or wait for Option C).
+  with the source quiesced — or to opt into pause-first mode (§5), now
+  landed.
 
 ## 3. Test surface
 
@@ -115,9 +116,105 @@ gate:
 - **Option B — post-pause diff sweep** (true concurrent-write
   correctness up to the pause point, O(volume) pause window): reopen
   when a tenant-facing live-migration requirement lands.
-- **Option C — pause-first opt-in mode** (stop-the-world, correct by
-  construction): ruled a tight follow-up PR to this issue — it closes
-  #394.
 - **Option D — dm-snapshot COW** (true live migration, bounded
   pause): reopen when bounded-downtime live migration is required;
   device-backed volumes only.
+
+## 5. Option C — pause-first opt-in mode (landed)
+
+The follow-up the DP3 ruling deferred to. What landed:
+
+- **Stord** (`crates/chv-stord-core/src/migration/sender.rs`): the
+  opt-in `pause_first` mode on the sender. When set, the VM-pause
+  handshake runs **before any source byte is read**: the task enters
+  the new `PausedPreCopy` phase with `needs_vm_pause = true`
+  (observable with zero bytes transferred), the sender blocks until
+  the pause is signaled, and only then samples the canary baseline
+  and starts bulk copy. The transfer is correct by construction for
+  any write pattern — the canary becomes a tripwire for non-VM
+  writers, the dirty rounds converge trivially, the finalize digest
+  verifies instead of catching loss. At the pre-pause gate the
+  handshake is already satisfied (the VM has been paused since
+  before bulk copy): the task transitions to `PausedFinalSync` for
+  observability and the sender proceeds to `FinalSync` without
+  waiting. Without a task attached the mode fails closed with
+  `failed_precondition` **before connecting** — an operator who
+  asked for the pause must never get a silent degradation to
+  quiescent-assumed semantics.
+- **Pause-signal latching** (`crates/chv-stord-core/src/handlers.rs`):
+  the trigger handler now holds the task's pause-channel receiver
+  open for the spawned sender's lifetime. Before, the receiver was
+  dropped when the handler returned, so a `ResumeDiskMigration`
+  arriving while the sender was still connecting (not yet
+  subscribed at a pause gate) hit a closed watch channel: the send
+  failed, the resume RPC errored, and the agent's resume-all loop
+  aborted the whole migration. Pause-first makes that window
+  near-deterministic for multi-volume VMs (the resume fires when
+  the FIRST volume requests the pause, while siblings are still
+  connecting); the same staggered shape existed latently in the
+  default mode's final-sync pause. With the receiver held, the
+  signal latches: a sender reaching its gate later observes the
+  pause already signaled and proceeds.
+- **Contract** (`proto/node/chv-stord-api.proto`):
+  `TriggerDiskMigrationRequest.pause_first` and the
+  `PAUSED_PRE_COPY` status phase; `proto/controlplane/
+  control-plane-node.proto`: `MigrationConfig.pause_first` (the
+  first config field the agent actually reads — the tuning fields
+  remain defaults-only).
+- **Agent** (`crates/chv-agent-core/src/migration.rs`): the poll
+  handles `PausedPreCopy` with the same pause-and-resume handshake
+  as `PausedFinalSync`; progress during a pause-first pause stays in
+  the disk phase (`MIGRATION_PHASE_PRECOPY_DISK`) instead of
+  falsely claiming the memory phase. The VM stays paused through
+  disk and memory migration and is resumed on the destination —
+  the same resume contract the default mode already had at its
+  final-sync pause; only the pause's position moved.
+- **Operator surface**: the BFF vm-mutate migrate action accepts an
+  optional `pause_first` JSON field — a *present* non-bool value is
+  rejected 400 rather than coerced (a quoted `"true"` silently
+  downgrading to quiescent-assumed would be the same "asked for the
+  pause, didn't get it" failure the mode exists to prevent);
+  `chvctl migrate start --pause-first` and `chvctl vm migrate
+  --pause-first` set it.
+- **Boundary**: the WebUI does not expose the toggle (API/chvctl
+  only) — recorded follow-up work, not part of this change.
+- **Boundary (version skew, disclosed)**: the fail-closed posture is
+  within-version. An older stord that predates the field silently
+  ignores `pause_first` (proto3 unknown field) and runs the default
+  quiescent-assumed path — the operator's stop-the-world request
+  degrades silently across a version-skewed deploy. The realistic
+  exposure is low (agent and stord are co-deployed node daemons from
+  the same package), but the honest statement is that the mode's
+  "never silently degrade" invariant is enforced at the sender (no
+  task ⇒ fail before connecting), not across peer versions. A
+  considered-and-deferred hardening: echo `pause_first` in
+  `TriggerDiskMigrationResponse` and fail the migration at T=0 when
+  the echo comes back false.
+- **Boundary (pre-existing CP convergence looseness, disclosed)**:
+  the CP state machine's `wait_for_convergence` declares convergence
+  on `dirty_remaining <= threshold` without a bytes-or-phase guard,
+  so it fires on the first 5 s status poll of *any* migration —
+  default mode included — while the disk transfer is still running.
+  Pause-first does not change this but makes the symptom more
+  visible: the DB phase reads `memory_migration` during the
+  pre-copy pause, and the remaining disk transfer runs under the
+  memory phase's timeout budget. Pre-existing behavior, unchanged
+  by this PR; recorded as follow-up (the phase-label and
+  timeout-budget interaction deserve their own fix with
+  default-mode regression coverage).
+- **Tests**: `migration_e2e.rs::pause_first_pauses_before_bulk_copy`
+  (pause arrives in `PausedPreCopy` with zero bytes, stays blocked,
+  completes verified; a write during the blocked window is
+  pre-baseline and legitimately transferred);
+  `migration_e2e.rs::pause_signal_latches_for_senders_not_yet_at_
+  their_gate` (the resume-latch fix, driven through the real
+  `TriggerDiskMigration` handler against a silent destination — the
+  sender is provably stuck pre-handshake when the resume arrives);
+  `sender::tests::pause_first_without_task_fails_closed_before_
+  connecting`; agent poll test `paused_pre_copy_drives_pause_
+  handshake_and_reports_disk_phase`;
+  `daemon_clients::stord_trigger_disk_migration_carries_pause_first`
+  (the agent→stord wire hop); chvctl contract test
+  `vm_migrate_pause_first_row` pinning the CLI→BFF→mutation thread;
+  BFF route rows `vm_migrate_pause_first.rs` (the non-bool rejection,
+  the bool forward, the absent-field default).

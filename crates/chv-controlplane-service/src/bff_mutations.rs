@@ -214,6 +214,7 @@ impl MutationService for ControlPlaneMutationService {
         &self,
         vm_id: String,
         target_node_id: String,
+        pause_first: bool,
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError> {
         let source_node_id =
@@ -239,7 +240,17 @@ impl MutationService for ControlPlaneMutationService {
                 vm_id: vm_id.clone(),
                 source_node_id: source_node_id.clone(),
                 destination_node_id: target_node_id,
-                config: None,
+                // Issue #394 Option C: the operator's opt-in
+                // stop-the-world mode. The tuning fields stay 0
+                // ("use stord's defaults") — pause_first is the only
+                // field the agent currently reads.
+                config: Some(proto::MigrationConfig {
+                    dirty_threshold_blocks: 0,
+                    max_convergence_rounds: 0,
+                    block_size_bytes: 0,
+                    total_timeout_seconds: 0,
+                    pause_first,
+                }),
             })
             .await;
 
