@@ -133,6 +133,11 @@ impl ClientError {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Unreachable { .. } | Self::AuthFailed => true,
+            // 429 (rate limit) is transient: a NetBox behind a proxy/LB
+            // throttles under load; the bounded exponential backoff caps
+            // any retry storm. `Retry-After` is not honored — the backoff
+            // schedule is the single retry clock.
+            Self::Api { status: 429, .. } => true,
             Self::Api { status, .. } => *status >= 500,
             _ => false,
         }
@@ -1308,5 +1313,41 @@ mod tests {
             parse_list_page(&missing),
             Err(ClientError::MalformedResponse { .. })
         ));
+    }
+
+    #[test]
+    fn transient_classification_covers_rate_limit_and_server_errors() {
+        // 429 (rate limit behind a proxy/LB), 5xx, unreachable, and
+        // auth failures are transient — retried with backoff.
+        assert!(ClientError::Api {
+            status: 429,
+            message: String::new()
+        }
+        .is_transient());
+        assert!(ClientError::Api {
+            status: 503,
+            message: String::new()
+        }
+        .is_transient());
+        assert!(ClientError::Unreachable {
+            reason: String::from("conn refused")
+        }
+        .is_transient());
+        assert!(ClientError::AuthFailed.is_transient());
+        // 4xx semantics are permanent: retrying fails identically.
+        assert!(!ClientError::Api {
+            status: 400,
+            message: String::new()
+        }
+        .is_transient());
+        assert!(!ClientError::Api {
+            status: 404,
+            message: String::new()
+        }
+        .is_transient());
+        assert!(!ClientError::HttpsRequired {
+            endpoint: String::from("http://x")
+        }
+        .is_transient());
     }
 }

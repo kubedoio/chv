@@ -1281,7 +1281,6 @@ async fn reclamation_fails_stale_running_run_and_leaves_fresh_alone() {
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let stale = get_run(&db, "netrun-stale").await;
-    assert_eq!(stale.status, NetboxProjectionRunStatus::Failed);
     assert_eq!(stale.attempt_count, 1, "reclamation consumed an attempt");
     assert!(
         stale
@@ -1300,14 +1299,29 @@ async fn reclamation_fails_stale_running_run_and_leaves_fresh_alone() {
         ),
         "expected reclaimed failure event, got {events:?}"
     );
+    // A lease expiry is a transient failure class: the reclaimed run is
+    // retried through the normal requeue path (bounded by MAX_ATTEMPTS
+    // and the backoff schedule), so it lands back in `queued` with a
+    // future next_attempt_at rather than requiring manual operator
+    // action.
+    assert_eq!(stale.status, NetboxProjectionRunStatus::Queued);
+    assert!(
+        stale
+            .next_attempt_at
+            .is_some_and(|at| at > chrono::Utc::now()),
+        "requeued run must be backoff-gated: {:?}",
+        stale.next_attempt_at
+    );
 
     let fresh = get_run(&db, "netrun-fresh").await;
     assert_eq!(fresh.status, NetboxProjectionRunStatus::Running);
 
-    // Idempotent: a second sweep finds nothing new to reclaim.
+    // Idempotent: a second sweep finds nothing new to reclaim, and the
+    // requeued run is still backoff-gated (not re-executed).
     worker_for(&db).tick().await.expect("second tick succeeds");
     let stale = get_run(&db, "netrun-stale").await;
     assert_eq!(stale.attempt_count, 1);
+    assert_eq!(stale.status, NetboxProjectionRunStatus::Queued);
     let fresh = get_run(&db, "netrun-fresh").await;
     assert_eq!(fresh.status, NetboxProjectionRunStatus::Running);
 }

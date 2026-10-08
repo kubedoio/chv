@@ -168,6 +168,31 @@ impl NetboxProjectionWorker {
                 }),
             )
             .await;
+            // A lease expiry means the worker died mid-run — a transient
+            // failure class. Retry through the normal requeue path
+            // (bounded by MAX_ATTEMPTS and the backoff schedule) so an
+            // abandoned export does not require manual operator action.
+            match self.run_repo.requeue(&run.id).await {
+                Ok(requeued) => {
+                    info!(
+                        run_id = %run.id,
+                        architecture_id = %run.architecture_id,
+                        attempt_count = requeued.attempt_count,
+                        next_attempt_at = ?requeued.next_attempt_at,
+                        "reclaimed run requeued with backoff"
+                    );
+                }
+                Err(e) => {
+                    // Attempt cap exhausted or another run became active —
+                    // the run stays failed; a normal bounded-retry outcome.
+                    warn!(
+                        run_id = %run.id,
+                        architecture_id = %run.architecture_id,
+                        error = %e,
+                        "reclaimed run was not requeued (attempt cap or active run)"
+                    );
+                }
+            }
         }
         Ok(())
     }
