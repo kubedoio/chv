@@ -254,7 +254,14 @@ async fn create_network(state: &AppState, token: &str, name: &str, cidr: &str) -
 }
 
 #[tokio::test]
-async fn update_network_reports_attach_time_policy_application() {
+async fn update_network_journals_and_returns_the_policy_task() {
+    // #355 PR 2 (DP1 + DP6): a firewall-carrying update answers with
+    // the standard mutation task surface — NOT the read-after-write
+    // detail plus prose note it used to return — and journals an
+    // `UpdateNetworkPolicy` operation in the same transaction as the
+    // desired-state write, keyed per-generation (the CreateVolume
+    // journaling precedent). The PR 1 orchestrator arm claims the
+    // journaled row; the attach-time snapshot mechanism is unchanged.
     let state = build_state().await;
     let token = seed_jwt(&state).await;
     seed_node(&state).await;
@@ -270,15 +277,55 @@ async fn update_network_reports_attach_time_policy_application() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "update body: {body}");
-    let note = body["policy_application"].as_str().unwrap_or_else(|| {
-        panic!(
-            "policy_application note must be present when firewall_rules ride the update: {body}"
-        )
-    });
-    assert!(
-        note.contains("pending"),
-        "the note must state the policy is not yet live: {note}"
+    // The task surface (the mutate_volume/create_volume shape).
+    assert_eq!(body["accepted"].as_bool(), Some(true), "task body: {body}");
+    let task_id = body["task_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("task_id must be present: {body}"))
+        .to_string();
+    assert_eq!(
+        body["network_id"].as_str(),
+        Some(net_id.as_str()),
+        "the task body carries the network id (the UI's only read key): {body}"
     );
+    assert!(
+        body["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("applies on every node"),
+        "the summary names the dispatch semantics: {body}"
+    );
+    assert_eq!(
+        body["next_refresh_path"].as_str(),
+        Some(format!("/api/v1/tasks/{}", task_id).as_str()),
+        "the refresh path names the task: {body}"
+    );
+    // The prose note is REPLACED by the task surface (DP6).
+    assert!(
+        body.get("policy_application").is_none(),
+        "the policy_application prose note is gone: {body}"
+    );
+
+    // The journaled operation: Accepted, per-generation key, owner
+    // stamped, the bumped generation riding the row.
+    let (op_type, op_status, key, requested_by, generation): (String, String, String, String, i64) =
+        sqlx::query_as(
+            "SELECT operation_type, status, idempotency_key, requested_by, desired_generation \
+             FROM operations WHERE operation_id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("query journaled operation");
+    assert_eq!(op_type, "UpdateNetworkPolicy");
+    assert_eq!(op_status, "Accepted");
+    assert_eq!(
+        key,
+        format!("update-network-policy-{}-2", net_id),
+        "the idempotency key is per-generation (create seeded 1, this update bumped to 2)"
+    );
+    assert_eq!(requested_by, "u-operator", "the owner is stamped (#386)");
+    assert_eq!(generation, 2);
 
     // The snapshot is persisted (the attach-time mechanism reads it).
     let stored: Option<String> = sqlx::query_scalar(
@@ -292,15 +339,32 @@ async fn update_network_reports_attach_time_policy_application() {
         stored.unwrap_or_default().contains("icmp"),
         "the rules must be persisted for the attach-time path to pick up"
     );
+
+    // DP6's detail half: the network's `last_task` resolves to the
+    // policy operation (the detail query keys on resource_kind
+    // 'network').
+    let (status, detail) = post_with_token(
+        state.clone(),
+        "/v1/networks/get",
+        &token,
+        &format!(r#"{{"network_id":"{net_id}"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "detail body: {detail}");
+    assert_eq!(
+        detail["detail"]["last_task"].as_str(),
+        Some("UpdateNetworkPolicy"),
+        "the detail's last_task names the policy operation: {detail}"
+    );
 }
 
 #[tokio::test]
-async fn update_network_clearing_rules_reports_the_stale_policy_residual() {
-    // The honest half of the clear story (#355): `[]` never dispatches
-    // (an empty ruleset would engage default-deny with no allows), and
-    // nwd re-asserts the last recorded non-empty policy on every new
-    // attach — so a previously-applied policy STAYS in force. The
-    // response must say that instead of implying the clear took effect.
+async fn update_network_clearing_rules_journals_the_noop_task() {
+    // The clear story (#355 PR 2): `[]` is a real mutation — it
+    // journals an `UpdateNetworkPolicy` task (the PR 1 dispatch leg
+    // completes it as a no-op Succeeded until PR 3 lands the ruled
+    // DP4 baseline), and the response's summary says so honestly: a
+    // policy previously applied on a live node stays in force.
     let state = build_state().await;
     let token = seed_jwt(&state).await;
     seed_node(&state).await;
@@ -318,11 +382,8 @@ async fn update_network_clearing_rules_reports_the_stale_policy_residual() {
     .await;
     assert_eq!(status, StatusCode::OK, "apply body: {body}");
     assert!(
-        body["policy_application"]
-            .as_str()
-            .unwrap()
-            .contains("pending"),
-        "non-empty rules report pending application: {body}"
+        body["task_id"].as_str().is_some(),
+        "the apply carries a task: {body}"
     );
 
     // ...then clear it.
@@ -334,16 +395,92 @@ async fn update_network_clearing_rules_reports_the_stale_policy_residual() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "clear body: {body}");
-    let note = body["policy_application"]
+    let summary = body["summary"]
         .as_str()
-        .unwrap_or_else(|| panic!("clear must carry its own note: {body}"));
+        .unwrap_or_else(|| panic!("the clear carries its own task summary: {body}"));
     assert!(
-        note.contains("cleared"),
-        "the note must identify the update as a clear: {note}"
+        summary.contains("cleared"),
+        "the summary must identify the update as a clear: {summary}"
     );
     assert!(
-        note.contains("stays in force"),
-        "the note must state the stale-policy residual: {note}"
+        summary.contains("stays in force"),
+        "the summary must state the stale-policy residual (honest until the DP4 baseline lands): {summary}"
+    );
+    // The clear journaled its own per-generation task.
+    let ops: Vec<(String, String)> = sqlx::query_as(
+        "SELECT operation_type, idempotency_key FROM operations \
+         WHERE resource_id = ? ORDER BY desired_generation",
+    )
+    .bind(&net_id)
+    .fetch_all(&state.pool)
+    .await
+    .expect("query network ops");
+    assert_eq!(ops.len(), 2, "apply + clear each mint a task: {ops:?}");
+    assert!(
+        ops.iter().all(|(t, _)| t == "UpdateNetworkPolicy"),
+        "both tasks are policy operations: {ops:?}"
+    );
+    assert_eq!(ops[0].1, format!("update-network-policy-{}-2", net_id));
+    assert_eq!(ops[1].1, format!("update-network-policy-{}-3", net_id));
+}
+
+#[tokio::test]
+async fn update_network_without_firewall_fields_journals_nothing() {
+    // DP1's other half: only firewall-field updates mint operations —
+    // a name-only or NDS-fields-only update keeps the detail response
+    // it always returned and journals zero rows (it dispatches
+    // nothing; bumping the generation alone must not mint a task).
+    let state = build_state().await;
+    let token = seed_jwt(&state).await;
+    seed_node(&state).await;
+    let net_id = create_network(&state, &token, "tenant-a", "10.99.0.0/24").await;
+
+    // Name-only: the read-after-write detail response, no task keys.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/update",
+        &token,
+        &format!(r#"{{"network_id":"{net_id}","name":"renamed"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "name-only body: {body}");
+    assert!(
+        body.get("task_id").is_none() && body.get("accepted").is_none(),
+        "a name-only update returns the detail shape, not the task shape: {body}"
+    );
+    assert_eq!(
+        body["detail"]["network_id"].as_str(),
+        Some(net_id.as_str()),
+        "the detail shape still carries network_id: {body}"
+    );
+
+    // NDS-fields-only (cidr): the detail shape too, generation bumped,
+    // still zero operations.
+    let (status, body) = post_with_token(
+        state.clone(),
+        "/v1/networks/update",
+        &token,
+        &format!(r#"{{"network_id":"{net_id}","cidr":"10.99.1.0/24"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "cidr-only body: {body}");
+    assert!(
+        body.get("task_id").is_none(),
+        "a cidr-only update mints no task: {body}"
+    );
+    let (ops, generation): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM operations WHERE resource_id = ?), \
+                desired_generation FROM network_desired_state WHERE network_id = ?",
+    )
+    .bind(&net_id)
+    .bind(&net_id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("query ops and generation");
+    assert_eq!(ops, 0, "no operations journaled by non-firewall updates");
+    assert_eq!(
+        generation, 2,
+        "the cidr update bumped the generation without minting a task"
     );
 }
 

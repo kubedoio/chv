@@ -653,6 +653,10 @@ pub async fn update_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
+    // The #355 policy operation minted by this update, if any (None
+    // until the desired-state write below bumps the generation).
+    let mut policy_operation_id: Option<String> = None;
+
     if let Some(name) = name {
         sqlx::query("UPDATE networks SET display_name = ? WHERE network_id = ?")
             .bind(name)
@@ -663,7 +667,10 @@ pub async fn update_network(
     }
 
     if has_network_update {
-        sqlx::query(
+        // RETURNING the bumped generation: the #355 policy operation's
+        // idempotency key is per-generation (DP1), and the DP7 fence
+        // rides it when PR 3 lands.
+        let new_generation: i64 = sqlx::query_scalar(
             r#"
             UPDATE network_desired_state
             SET
@@ -680,6 +687,7 @@ pub async fn update_network(
                 desired_generation = desired_generation + 1,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE network_id = ?
+            RETURNING desired_generation
             "#,
         )
         .bind(cidr)
@@ -693,11 +701,46 @@ pub async fn update_network(
         .bind(dns_enabled)
         .bind(&dns_scope_json)
         .bind(&network_id)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
             BffError::Internal(format!("failed to update network desired state: {}", e))
         })?;
+
+        // #355 PR 2 (DP1, the CreateVolume journaling precedent): a
+        // firewall-field update journals an `UpdateNetworkPolicy`
+        // operation IN the same transaction as the desired-state write,
+        // keyed per-generation so every mutation mints its own task.
+        // The PR 1 orchestrator arm claims it and fans the stored
+        // ruleset out to every node with a live attached VM on the
+        // network. Deliberately journaled ONLY when the firewall field
+        // rode the request — name/cidr/DHCP-only updates bump the
+        // generation but mint no operations (they dispatch nothing).
+        // An empty ruleset (`[]`) journals too: it is a real mutation,
+        // and the dispatch leg no-ops it (Succeeded) until PR 3 lands
+        // the ruled DP4 baseline.
+        policy_operation_id = if firewall_rules_json.is_some() {
+            let operation_id = chv_common::gen_short_id();
+            let idempotency_key =
+                format!("update-network-policy-{}-{}", network_id, new_generation);
+            sqlx::query(
+                r#"
+                INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+                VALUES (?, ?, 'network', ?, 'UpdateNetworkPolicy', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                "#,
+            )
+            .bind(&operation_id)
+            .bind(&idempotency_key)
+            .bind(&network_id)
+            .bind(&claims.sub)
+            .bind(new_generation)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+            Some(operation_id)
+        } else {
+            None
+        };
     }
 
     tx.commit()
@@ -706,45 +749,46 @@ pub async fn update_network(
 
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
-    let Json(mut detail) = get_network(
+
+    // #355 PR 2 (DP6): a firewall-carrying update answers with the
+    // standard mutation task surface (the CreateVolume/mutate_volume
+    // shape) — the prose `policy_application` notes are REPLACED by
+    // the journaled operation, whose terminal state (and, on failure,
+    // its #502 cause) surfaces through the task reads and the detail's
+    // `last_task`. Any other update (name-only, or NDS fields without
+    // firewall_rules) keeps the read-after-write detail response it
+    // always returned — the response shape is keyed on whether the
+    // request mutated the policy boundary, and both shapes carry
+    // `network_id` (the only key the UI reads).
+    if let Some(operation_id) = policy_operation_id {
+        let cleared = firewall_rules_json
+            .as_deref()
+            .map(chv_common::firewall_ruleset_is_empty)
+            .unwrap_or(false);
+        let summary = if cleared {
+            // Honest until PR 3 lands the ruled DP4 baseline: the
+            // journaled task completes as a no-op, and a policy
+            // previously applied on a live node stays in force.
+            "Firewall policy cleared; empty rulesets apply no policy until the \
+             #355 baseline lands (a previously applied policy stays in force)"
+        } else {
+            "Firewall policy update accepted; applies on every node with an \
+             attached VM on this network"
+        };
+        return Ok(Json(json!({
+            "accepted": true,
+            "task_id": operation_id,
+            "network_id": network_id,
+            "summary": summary,
+            "next_refresh_path": format!("/api/v1/tasks/{}", operation_id),
+        })));
+    }
+    let Json(detail) = get_network(
         BearerToken(claims),
         State(state),
         axum::Json(json!({ "network_id": network_id })),
     )
     .await?;
-    // Honest reporting (#355): firewall policy travels with the VM spec
-    // and the Core executor applies it at ATTACH time (default-deny plus
-    // these rules). The DB update alone does not reach an
-    // already-materialized network — say so instead of implying the
-    // rules are live on the node. Clearing the rules (`[]`) is reported
-    // differently and truthfully: empty rulesets are never dispatched
-    // (nwd would engage default-deny with no allow rules and cut the
-    // network's guests off entirely), so a policy previously applied on
-    // a live network STAYS in force until that network's host topology
-    // is torn down — nwd re-asserts the last recorded non-empty policy
-    // on every new attach.
-    if let Some(rules) = firewall_rules_json.as_deref() {
-        let note = if chv_common::firewall_ruleset_is_empty(rules) {
-            "cleared: empty rulesets are never dispatched; a policy previously \
-             applied on a live network (if any) stays in force until that \
-             network's host topology is torn down (tracked in #355)"
-        } else {
-            "pending: applied when a VM spec is next dispatched to a node \
-             (VM create or spec update); already-attached VMs are not \
-             re-policyed until then"
-        };
-        match detail.as_object_mut() {
-            Some(obj) => {
-                obj.insert("policy_application".to_string(), json!(note));
-            }
-            None => {
-                tracing::warn!(
-                    network_id = %network_id,
-                    "network detail response was not a JSON object; policy_application note dropped"
-                );
-            }
-        }
-    }
     Ok(Json(detail))
 }
 
