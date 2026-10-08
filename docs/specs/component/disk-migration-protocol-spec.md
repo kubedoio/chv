@@ -33,6 +33,25 @@ is not claimed. What was actually proven on a real host (positive path plus
 fail-closed identity/interruption negatives) is recorded in
 `docs/evidence/production-readiness/v0.3.0-rc1/04-real-host-qualification/m4.6-migration.md`.
 
+**Write canary (issue #394, Option A — fail fast).** Since #394's Option A
+ruling, concurrent source writes are not merely caught late at the finalize
+digest: the sender samples a write-canary fingerprint of the source's
+backing store immediately before bulk copy
+(`StorageBackend::write_canary_probe`) and re-checks it at every
+dirty-round boundary and at the pre-pause gate. On a file-backed backend
+(`WriteCanaryCapability::FileStat`) any stat change — mtime, ctime, or
+size; every `write(2)` through any descriptor updates mtime/ctime, the
+hypervisor's included — fails the migration immediately with a distinct
+`source_modified_during_migration` `failed_precondition` error, *before*
+the VM pause and *before* the finalize digest is computed (an empty
+`finalize_volume_digest` distinguishes the early failure). Backends whose
+backing store cannot be stat-observed (block devices, RADOS objects)
+report `WriteCanaryCapability::Unavailable` and keep the pre-canary
+behavior: fail-late at the digest. The canary is a latency-of-failure
+optimization layered in front of the digest, not a correctness gate of
+its own — the residual window between the pre-pause gate and the pause
+completing remains covered by the post-pause whole-volume digest.
+
 ## Transport
 - gRPC bidirectional streaming: `StorageMigrationService.StreamBlocks` over a single `MigrationMessage` stream (`proto/node/chv-stord-migration.proto`)
 - The migration stream is served on **two** listeners (`crates/chv-stord-core/src/server.rs`):
@@ -80,6 +99,7 @@ Source                          Destination
 ```
 
 - Source reads the volume sequentially in 4 MiB chunks (`DEFAULT_BLOCK_SIZE` = `DIRTY_TRACKING_BLOCK_SIZE`, so bitmap bits map 1:1 to migration chunks) and sends each as a `BlockChunk` with CRC32 of the data (`crates/chv-stord-core/src/migration/sender.rs`)
+- Immediately before this phase, the sender samples the **write-canary baseline** — a stat fingerprint of the source's backing store (`write_canary_probe`) — which every later phase boundary re-checks (#394, Option A; see Claimed mode)
 - Sparse handling: an all-zero block is sent with empty `data`, `is_sparse = true`, and `crc32 = 0`; the receiver writes zeros if payload bytes are present and skips the write when the payload is empty (the receiving volume is created zero-initialized) (`crates/chv-stord-core/src/migration/sender.rs`, `migration/receiver.rs`)
 - The receiver rejects a chunk whose `offset + len` would write past the end of the receiving volume (`crates/chv-stord-core/src/migration/receiver.rs`)
 - Flow control: send window of at most 128 unacknowledged chunks, interval acks every 64 chunks, 30 s ack-wait timeout (see Flow Control)
@@ -106,7 +126,7 @@ Source                          Destination
   │◄────────────────────────────────│
 ```
 
-- Each round starts with an **atomic snapshot-and-clear** of the dirty bitmap (`snapshot_and_clear_dirty_bitmap`), so no write is lost between reading the bitmap and clearing it (`crates/chv-stord-core/src/migration/sender.rs`, `crates/chv-stord-backends/src/trait.rs`)
+- Each round starts with a **write-canary re-check** against the migration-start fingerprint (`write_canary_probe`; a stat change fails the migration with `source_modified_during_migration` before any further data moves — issue #394, Option A), then an **atomic snapshot-and-clear** of the dirty bitmap (`snapshot_and_clear_dirty_bitmap`), so no stord-visible write is lost between reading the bitmap and clearing it (`crates/chv-stord-core/src/migration/sender.rs`, `crates/chv-stord-backends/src/trait.rs`)
 - The round's dirty blocks are bracketed by `RoundStart` / `RoundComplete`
 - The receiver answers every `RoundComplete` with an `Ack` carrying its cumulative sequence number — by stream ordering that includes every chunk of the round, so the round ack doubles as the ack-window flush; the sender drains after it until its last acknowledged sequence equals the last sequence it sent (`crates/chv-stord-core/src/migration/receiver.rs`, `migration/sender.rs`, issue #391)
 - Round termination (`crates/chv-stord-core/src/migration/sender.rs`):
@@ -135,7 +155,7 @@ Source stord                Agent                   Destination
   │─────────────────────────────────────────────────────►│
 ```
 
-- When the dirty rounds are done, the task moves to `PausedFinalSync` and sets `needs_vm_pause = true`; the sender blocks on the task's pause channel (`crates/chv-stord-core/src/migration/sender.rs`, `migration/task.rs`)
+- When the dirty rounds are done, the sender runs the **pre-pause gate** — the last write-canary re-check (#394, Option A); failing there means the VM was never paused, so no resume is needed — then the task moves to `PausedFinalSync` and sets `needs_vm_pause = true`, and the sender blocks on the task's pause channel (`crates/chv-stord-core/src/migration/sender.rs`, `migration/task.rs`)
 - The agent (polling `GetDiskMigrationStatus`) pauses the VM via the Cloud Hypervisor API and signals back with `ResumeDiskMigration{vm_paused: true}` (`crates/chv-stord-core/src/handlers.rs`, `crates/chv-agent-core/src/migration.rs`)
 - Only then does the sender emit `FinalSync{vm_paused: true}`
 - There is **no post-pause dirty sweep** (issue #394): the last dirty round ran before the pause; for a quiescent volume there is nothing left to flush
@@ -419,6 +439,7 @@ not under `[migration]`): the destination endpoint host of every
 | Phase 2: CRC32 per chunk | sender.rs, receiver.rs | DONE |
 | Phase 2: Sparse block detection | sender.rs `is_all_zeros()` | DONE — all-zero blocks sent as empty payload with crc32=0 |
 | Phase 3: Dirty sync rounds | sender.rs `dirty_sync_rounds()` | DONE — atomic snapshot-and-clear per round, `RoundStart`/chunks/`RoundComplete`, `DIRTY_THRESHOLD`/`MAX_DIRTY_ROUNDS` constants, early exit at 0 dirty |
+| Phase 3/4: Write canary | sender.rs `verify_source_canary()`, backends `write_canary_probe()` | DONE — file-stat fingerprint sampled before bulk copy, re-checked at every round boundary and the pre-pause gate; `source_modified_during_migration` fail-fast (issue #394, Option A) |
 | Phase 3: Round acks / boundary flushes | receiver.rs, sender.rs | DONE — ack every 64 chunks, round ack on `RoundComplete`, window flush at `FinalSync`/pre-`FinalizeAck` (issue #391) |
 | Phase 4: Pause handshake (`needs_vm_pause` → `ResumeDiskMigration{vm_paused:true}` → `FinalSync{vm_paused:true}`) | sender.rs, task.rs, handlers.rs | DONE — no post-pause dirty sweep (issue #394, see Claimed mode) |
 | Phase 5: Finalize digest | volume_digest.rs, sender.rs | DONE — versioned SHA-256 over the full source, sent in `FinalizeComplete.volume_checksum` (issue #392) |

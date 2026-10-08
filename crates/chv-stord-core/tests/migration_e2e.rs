@@ -14,15 +14,30 @@
 //!   ack that never came and timed out after 30 s. The receiver now flushes
 //!   its ack window at phase boundaries, so the migration completes and the
 //!   destination file matches the source bytes exactly.
-//! - **Dirty rounds**: a concurrent `write_block` on the source (the only
+//! - **Dirty rounds**: a pre-migration `write_block` on the source (the only
 //!   protocol-level dirty generator per issue #394 — the source bitmap is
-//!   populated by `LocalFileBackend::write_block`) must be picked up by a
-//!   dirty sync round, transferred, and present in the destination. Before
-//!   the round-ack fix the sender blocked forever after `RoundComplete`.
+//!   populated by `LocalFileBackend::write_block`, and in production nothing
+//!   calls it on a source during migration) must be picked up by a dirty
+//!   sync round, transferred, and present in the destination. Before the
+//!   round-ack fix the sender blocked forever after `RoundComplete`.
 //! - **Pause handshake**: with a task in a `MigrationTaskTable` (the stord
 //!   handler path), the sender must reach `PausedFinalSync` and *stay*
 //!   blocked until `ResumeDiskMigration{vm_paused:true}` semantics (a
 //!   `true` on the task's `pause_tx` watch) release it into FinalSync.
+//!
+//! The write canary (issue #394, Option A) is pinned by two tests below:
+//!
+//! - **Fail fast**: a source write that lands during bulk copy (the write
+//!   path the dirty bitmap cannot see) must fail the migration at the
+//!   first dirty-round boundary with the distinct
+//!   `source_modified_during_migration` code — *before* the VM pause and
+//!   *before* the finalize digest is computed (the empty
+//!   `finalize_volume_digest` proves the failure was early, not the
+//!   post-transfer #392 failure).
+//! - **Residual window stays fail-closed**: a source write landing *after*
+//!   the pre-pause gate (while the sender waits for the pause) is beyond
+//!   the canary's reach by design; the post-pause whole-volume digest must
+//!   still catch it and fail the migration with `data_loss` at finalize.
 //!
 //! Fail-closed semantics at the chunk level — the receiver's
 //! CRC-mismatch rejection and out-of-bounds chunk rejection, and the
@@ -312,15 +327,16 @@ async fn small_volume_completes_and_matches() {
     );
 }
 
-/// **Dirty rounds transfer real data** (issue #391, round acknowledgment):
-/// while bulk copy is running, a concurrent task writes to the source via
-/// `write_block` — the only legitimate protocol-level dirty generator
-/// (issue #394: the source bitmap is populated exclusively by
-/// `LocalFileBackend::write_block`). The migration must converge through a
-/// DIRTY_SYNC round, complete, and the destination must contain both the
-/// pre-seeded dirty bytes and the concurrently written bytes.
+/// **Dirty rounds converge pre-seeded writes** (issue #391, round
+/// acknowledgment): dirty blocks written via `write_block` *before* the
+/// migration starts (the only protocol-level dirty generator per issue
+/// #394 — and the only timing the quiescent-source contract permits,
+/// since the write canary fails the migration on any source write after
+/// the baseline) must be picked up by a dirty sync round, transferred,
+/// and present in the destination. Before the round-ack fix the sender
+/// blocked forever after `RoundComplete`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dirty_rounds_transfer_concurrent_writes() {
+async fn dirty_rounds_converge_preseeded_writes() {
     install_crypto_provider();
 
     let src_dir = tempfile::tempdir().unwrap();
@@ -335,8 +351,11 @@ async fn dirty_rounds_transfer_concurrent_writes() {
     let volume_id = "vol-e2e-dirty".to_string();
     let handle = open_source_volume(&src_backend, &volume_id, "vol.img", blocks * BLOCK).await;
 
-    // Pre-seed one deterministic dirty block (block 1): guarantees the
-    // first dirty sync round has real payload regardless of scheduling.
+    // Pre-seed two deterministic dirty blocks — block 1 and the last
+    // block — BEFORE the sender starts, so the first dirty sync round
+    // has real payload at two distant offsets and the migration stays
+    // inside the quiescent-source contract (the canary baseline is
+    // sampled after these writes).
     let d0 = vec![0xD0u8; 64 * 1024];
     src_backend
         .write_block(&volume_id, &handle, BLOCK, &d0)
@@ -344,44 +363,19 @@ async fn dirty_rounds_transfer_concurrent_writes() {
         .expect("pre-seed dirty write must succeed");
     expected[BLOCK as usize..BLOCK as usize + d0.len()].copy_from_slice(&d0);
 
+    let d1 = vec![0xD1u8; 64 * 1024];
+    let d1_offset = (blocks - 1) * BLOCK;
+    src_backend
+        .write_block(&volume_id, &handle, d1_offset, &d1)
+        .await
+        .expect("pre-seed dirty write must succeed");
+    expected[d1_offset as usize..d1_offset as usize + d1.len()].copy_from_slice(&d1);
+
     let (addr, ca) = spawn_receiver(dest_dir.path()).await;
 
     let (task, _pause_rx) =
         MigrationTask::new(volume_id.clone(), handle.clone(), format!("https://{addr}"));
     spawn_auto_pause(task.clone());
-
-    // Concurrent dirty writer (simulates the guest writing during bulk
-    // copy): once the bulk phase is observed, keep writing the same payload
-    // to the LAST block (offset 28 MiB) for as long as the bulk phase is
-    // running. Targeting the last block maximizes the window: the sender
-    // reads blocks in order, so the write lands before the sender's read of
-    // that block and is transferred both by bulk copy and by the dirty
-    // round that re-sends the marked block.
-    let writer_backend = src_backend.clone();
-    let writer_volume = volume_id.clone();
-    let writer_handle = handle.clone();
-    let writer_task = task.clone();
-    let d1 = vec![0xD1u8; 64 * 1024];
-    let d1_payload = d1.clone();
-    let d1_offset = (blocks - 1) * BLOCK;
-    let writer = tokio::spawn(async move {
-        loop {
-            let phase = writer_task.state.read().await.phase;
-            match phase {
-                MigrationPhase::Pending => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                MigrationPhase::BulkCopy => {
-                    writer_backend
-                        .write_block(&writer_volume, &writer_handle, d1_offset, &d1_payload)
-                        .await
-                        .expect("concurrent dirty write must succeed");
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                _ => break, // DirtySync or later: stop writing
-            }
-        }
-    });
 
     let sender = MigrationSender::new(src_backend, volume_id, handle)
         .with_tls(sender_tls(&ca))
@@ -391,9 +385,6 @@ async fn dirty_rounds_transfer_concurrent_writes() {
         .await
         .expect("migration must not hang (round-ack deadlock regression?)")
         .expect("migration must succeed");
-    writer
-        .await
-        .expect("concurrent writer must finish without panicking");
 
     let state = task.state.read().await;
     assert_eq!(state.phase, MigrationPhase::Completed);
@@ -408,15 +399,233 @@ async fn dirty_rounds_transfer_concurrent_writes() {
     assert_finalize_digest_observed(&state);
     drop(state);
 
-    // The concurrently written bytes must be present in the destination.
-    expected[d1_offset as usize..d1_offset as usize + d1.len()].copy_from_slice(&d1);
-
     let dest = std::fs::read(dest_dir.path().join("vol-e2e-dirty.img"))
         .expect("receiving volume file must exist");
     assert_eq!(
         dest, expected,
-        "destination must contain the bulk image plus both dirty writes"
+        "destination must contain the bulk image plus both pre-seeded dirty writes"
     );
+}
+
+/// **Concurrent source write fails fast** (issue #394, Option A): a
+/// write to the source backing file during bulk copy — the write path
+/// the dirty bitmap cannot see, i.e. what a running guest produces —
+/// must fail the migration at the first dirty-round boundary with the
+/// distinct `source_modified_during_migration` code. The failure must
+/// be *early*: the VM is never paused (`needs_vm_pause` stays false)
+/// and the finalize digest is never computed (empty
+/// `finalize_volume_digest`) — pre-#394 this scenario burned a full
+/// transfer plus two O(volume) digest passes before failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_source_write_fails_fast() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    // 64 MiB = 16 chunks: bulk copy is long enough that the concurrent
+    // writer (polling at 1 ms, writing every iteration) lands its
+    // out-of-band writes inside the phase, before the round-1 canary
+    // check. A missed window cannot pass silently — the migration would
+    // then complete or fail at the finalize digest, and the
+    // failed_precondition/token assertions below fail loudly.
+    let blocks: u64 = 16;
+    write_source_image(src_dir.path(), "vol.img", blocks);
+
+    let src_backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+    let volume_id = "vol-e2e-canary".to_string();
+    let handle = open_source_volume(&src_backend, &volume_id, "vol.img", blocks * BLOCK).await;
+
+    let (addr, ca) = spawn_receiver(dest_dir.path()).await;
+
+    let (task, _pause_rx) =
+        MigrationTask::new(volume_id.clone(), handle.clone(), format!("https://{addr}"));
+    spawn_auto_pause(task.clone());
+
+    // Concurrent out-of-band writer: once the bulk phase is observed,
+    // write the source backing file directly — a plain in-place write
+    // through a descriptor stord never handed out, exactly the shape of
+    // a hypervisor (guest) write and invisible to the dirty bitmap.
+    let src_path = src_dir.path().join("vol.img");
+    let writer_task = task.clone();
+    let writer = tokio::spawn(async move {
+        loop {
+            let phase = writer_task.state.read().await.phase;
+            match phase {
+                MigrationPhase::Pending => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                MigrationPhase::BulkCopy => {
+                    tokio::task::spawn_blocking({
+                        let path = src_path.clone();
+                        move || {
+                            use std::io::{Seek, SeekFrom, Write};
+                            let mut f =
+                                std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                            f.seek(SeekFrom::Start(1024)).unwrap();
+                            f.write_all(&[0x77u8; 512]).unwrap();
+                            f.sync_all().unwrap();
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                _ => break, // DirtySync or later: stop writing
+            }
+        }
+    });
+
+    let sender = MigrationSender::new(src_backend, volume_id, handle)
+        .with_tls(sender_tls(&ca))
+        .with_task(task.clone());
+    let endpoint = format!("https://{addr}");
+    let result = tokio::time::timeout(MIGRATION_TIMEOUT, sender.start_migration(endpoint))
+        .await
+        .expect("migration must not hang (canary check regression?)");
+    writer.await.expect("concurrent writer must finish");
+
+    let status = result
+        .expect_err("a concurrent source write must fail the migration, not converge or complete");
+    assert_eq!(
+        status.code(),
+        tonic::Code::FailedPrecondition,
+        "canary failure must be failed_precondition: {}",
+        status.message()
+    );
+    assert!(
+        status
+            .message()
+            .contains("source_modified_during_migration"),
+        "error must carry the source_modified_during_migration token: {}",
+        status.message()
+    );
+
+    let state = task.state.read().await;
+    assert_eq!(state.phase, MigrationPhase::Failed);
+    assert!(
+        state
+            .error_message
+            .contains("source_modified_during_migration"),
+        "task error_message must carry the token: {}",
+        state.error_message
+    );
+    assert!(
+        !state.needs_vm_pause,
+        "the VM must never be paused for a canary failure (no resume needed)"
+    );
+    assert!(
+        state.finalize_volume_digest.is_empty(),
+        "canary failure must precede the finalize digest (fail fast, not fail late)"
+    );
+}
+
+/// **Residual window stays fail-closed** (issue #394, Option A +
+/// #392 layering): the canary's last check is the pre-pause gate, so a
+/// source write landing while the sender waits for the VM pause is
+/// beyond the canary's reach by design. The post-pause whole-volume
+/// digest must still catch it: the destination (which holds the
+/// pre-write bytes) diverges from the source, the FinalizeAck reports
+/// `verified: false`, and the migration fails with `data_loss` —
+/// loudly, never `Completed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_write_during_pause_window_fails_at_finalize_digest() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    // 8 MiB = 2 chunks, quiescent through bulk copy and the (empty)
+    // dirty rounds so the sender reaches the pause wait cleanly.
+    let expected = write_source_image(src_dir.path(), "vol.img", 2);
+
+    let src_backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+    let volume_id = "vol-e2e-pause-write".to_string();
+    let handle = open_source_volume(&src_backend, &volume_id, "vol.img", 2 * BLOCK).await;
+
+    let (addr, ca) = spawn_receiver(dest_dir.path()).await;
+
+    let (task, mut pause_rx) =
+        MigrationTask::new(volume_id.clone(), handle.clone(), format!("https://{addr}"));
+
+    let sender = MigrationSender::new(src_backend, volume_id, handle)
+        .with_tls(sender_tls(&ca))
+        .with_task(task.clone());
+    let endpoint = format!("https://{addr}");
+    let migration = tokio::spawn(async move {
+        tokio::time::timeout(MIGRATION_TIMEOUT, sender.start_migration(endpoint))
+            .await
+            .expect("migration must not hang")
+    });
+
+    // Wait until the sender is provably blocked in the pause wait (the
+    // pre-pause gate has passed — this is the window the canary cannot
+    // cover), then write the source out-of-band, then release the pause.
+    let deadline = tokio::time::Instant::now() + MIGRATION_TIMEOUT;
+    loop {
+        {
+            let state = task.state.read().await;
+            assert!(
+                state.phase != MigrationPhase::Completed && state.phase != MigrationPhase::Failed,
+                "sender must still be waiting for the pause when we write: {:?}",
+                state.error_message
+            );
+            if state.needs_vm_pause {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sender never reached the pause wait"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // The out-of-band write: in-place, no truncate — a guest-shaped
+    // write the transferred chunks do not carry.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(src_dir.path().join("vol.img"))
+            .unwrap();
+        f.seek(SeekFrom::Start(1024)).unwrap();
+        f.write_all(&[0x99u8; 512]).unwrap();
+        f.sync_all().unwrap();
+    }
+    drop(expected); // (the destination is asserted to *diverge*, not match)
+
+    task.pause_tx.send(true).unwrap();
+    assert!(*pause_rx.borrow_and_update());
+
+    let result = migration
+        .await
+        .expect("migration task must not panic (canary regression?)");
+    let status = result.expect_err(
+        "a source write inside the pause window must fail the finalize digest verification",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::DataLoss,
+        "finalize digest divergence is a data-integrity failure: {}",
+        status.message()
+    );
+    assert!(
+        status.message().contains("finalization failed"),
+        "error must name the finalization failure: {}",
+        status.message()
+    );
+
+    let state = task.state.read().await;
+    assert_eq!(state.phase, MigrationPhase::Failed);
+    assert!(
+        state.error_message.contains("finalization failed"),
+        "task error_message must name the failure: {}",
+        state.error_message
+    );
+    // Unlike the canary's fail-fast path, this failure is *late* by
+    // design: the digest was computed (the #392 gate did the catching).
+    assert_finalize_digest_observed(&state);
 }
 
 /// **Pause handshake**: with the task registered in a `MigrationTaskTable`
