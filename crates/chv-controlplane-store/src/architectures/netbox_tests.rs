@@ -87,6 +87,20 @@ fn make_run_input(run_id: &str, topo_id: &str, version_id: &str) -> NetboxProjec
     }
 }
 
+/// The sweep-enqueued shape: `post_apply` trigger, system-requested
+/// (no `requested_by`).
+fn make_post_apply_run_input(
+    run_id: &str,
+    topo_id: &str,
+    version_id: &str,
+) -> NetboxProjectionRunCreateInput {
+    NetboxProjectionRunCreateInput {
+        trigger_kind: NetboxProjectionTrigger::PostApply,
+        requested_by: None,
+        ..make_run_input(run_id, topo_id, version_id)
+    }
+}
+
 // ── NetboxProjectionConfigRepository ───────────────────────────────────────
 
 #[tokio::test]
@@ -944,6 +958,124 @@ async fn netbox_run_terminal_transition_on_missing_run_is_not_found() {
     );
     let err = repo.requeue(&nid("missing")).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }), "got {err:?}");
+}
+
+// ── Post-apply sweep support (PR 6) ─────────────────────────────────────────
+
+/// `list_post_apply_enabled` returns only the enabled configs, ordered
+/// by `architecture_id` for deterministic sweeps, and reflects
+/// enablement toggles.
+#[tokio::test]
+async fn netbox_config_list_post_apply_enabled_filters_and_orders() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    setup_architecture(&db, "topo-2", "v-2").await;
+    setup_architecture(&db, "topo-3", "v-3").await;
+    let repo = NetboxProjectionConfigRepository::new(db.pool.clone());
+
+    // Insertion order differs from architecture_id order on purpose:
+    // the sweep must not depend on physical row order.
+    let mut enabled_mid = make_config_input("topo-2");
+    enabled_mid.enable_post_apply = true;
+    repo.upsert(enabled_mid).await.unwrap();
+    repo.upsert(make_config_input("topo-1")).await.unwrap(); // disabled
+    let mut enabled_last = make_config_input("topo-3");
+    enabled_last.enable_post_apply = true;
+    repo.upsert(enabled_last).await.unwrap();
+
+    let listed = repo.list_post_apply_enabled().await.unwrap();
+    let ids: Vec<ArchitectureId> = listed.iter().map(|c| c.architecture_id.clone()).collect();
+    assert_eq!(ids, vec![aid("topo-2"), aid("topo-3")], "enabled only, ASC");
+
+    // Toggling a config off removes it from the sweep set.
+    repo.upsert(make_config_input("topo-2")).await.unwrap();
+    let listed = repo.list_post_apply_enabled().await.unwrap();
+    let ids: Vec<ArchitectureId> = listed.iter().map(|c| c.architecture_id.clone()).collect();
+    assert_eq!(ids, vec![aid("topo-3")]);
+
+    // Deleting an enabled config removes it too.
+    repo.delete(&aid("topo-3")).await.unwrap();
+    assert!(repo.list_post_apply_enabled().await.unwrap().is_empty());
+}
+
+/// `has_post_apply_for_version` matches any-status `post_apply` runs
+/// for exactly the (architecture, version) pair — the sweep's
+/// idempotency guard. A manual run never matches; a failed or
+/// succeeded post_apply run still does ("already attempted").
+#[tokio::test]
+async fn netbox_run_has_post_apply_for_version_is_pair_scoped_and_any_status() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    setup_architecture(&db, "topo-2", "v-2").await;
+    setup_architecture(&db, "topo-3", "v-3").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    // Nothing yet.
+    assert!(!repo
+        .has_post_apply_for_version(&aid("topo-1"), &vid("v-1"))
+        .await
+        .unwrap());
+
+    // A FAILED post_apply run still counts: a permanently-failed sweep
+    // enqueue must not be re-enqueued every tick (transient retries
+    // are owned by the bounded auto-requeue instead).
+    repo.create(make_post_apply_run_input("netrun-failed", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    let claimed = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
+        .await
+        .unwrap();
+    assert!(repo
+        .has_post_apply_for_version(&aid("topo-1"), &vid("v-1"))
+        .await
+        .unwrap());
+
+    // A SUCCEEDED post_apply run counts too (the common case).
+    repo.create(make_post_apply_run_input("netrun-done", "topo-2", "v-2"))
+        .await
+        .unwrap();
+    let claimed = repo
+        .claim_next_queued(&aid("topo-2"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_succeeded(&claimed.id, None, None).await.unwrap();
+    assert!(repo
+        .has_post_apply_for_version(&aid("topo-2"), &vid("v-2"))
+        .await
+        .unwrap());
+
+    // A manual run never matches — even terminal.
+    repo.create(make_run_input("netrun-manual", "topo-3", "v-3"))
+        .await
+        .unwrap();
+    let claimed = repo
+        .claim_next_queued(&aid("topo-3"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_succeeded(&claimed.id, None, None).await.unwrap();
+    assert!(!repo
+        .has_post_apply_for_version(&aid("topo-3"), &vid("v-3"))
+        .await
+        .unwrap());
+
+    // Pair-scoped: another architecture's post_apply run does not
+    // match, and neither does another version of the same
+    // architecture.
+    assert!(!repo
+        .has_post_apply_for_version(&aid("topo-2"), &vid("v-1"))
+        .await
+        .unwrap());
+    assert!(!repo
+        .has_post_apply_for_version(&aid("topo-3"), &vid("v-1"))
+        .await
+        .unwrap());
 }
 
 // ── Reclamation + worker claim-loop driver (PR 4) ──────────────────────────

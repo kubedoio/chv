@@ -10,16 +10,22 @@
 //!    store's CAS-guarded `reclaim_stale_running`; a reclaimed run is
 //!    retried through the normal requeue path and re-enters
 //!    idempotently via the external-id match.
-//! 2. **Claim** — one queued run per architecture per tick
+//! 2. **Post-apply sweep** (PR 6) — for every architecture whose
+//!    config has `enable_post_apply = true`, enqueue a `post_apply`
+//!    export run for the most recent `succeeded` apply run's version,
+//!    unless one already exists for that version (idempotent across
+//!    ticks) or an active run holds the architecture's one-active slot
+//!    (coalescing). See [`Self::enqueue_post_apply_triggers`].
+//! 3. **Claim** — one queued run per architecture per tick
 //!    (`list_architecture_ids_with_queued` + `claim_next_queued`; the
 //!    claim is a single atomic UPDATE, so concurrent workers cannot
 //!    double-claim).
-//! 3. **Execute** — load the config and decrypt the token in-memory
+//! 4. **Execute** — load the config and decrypt the token in-memory
 //!    (fail-closed), resolve the applied version, parse the
 //!    `CHVArchitecture` model, and hand plain data to
 //!    [`chv_netbox_adapter::NetboxProjectionRunner`]. The adapter stays
 //!    store-free; this worker is the only place the two worlds meet.
-//! 4. **Persist** — `mark_succeeded` with the serialized outcome and
+//! 5. **Persist** — `mark_succeeded` with the serialized outcome and
 //!    plan summary, or `mark_failed` with a redacted, secret-free
 //!    error message (plus the per-entry outcome ledger when the run
 //!    partially executed), plus an `EventType::Audit` event carrying
@@ -38,11 +44,11 @@ use std::time::Duration;
 use chv_architecture_validate::model::CHVArchitecture;
 use chv_controlplane_store::{
     ApplyRunRepository, EventAppendInput, EventRepository, NetboxProjectionConfigRepository,
-    NetboxProjectionRunRepository, VersionRepository,
+    NetboxProjectionRunCreateInput, NetboxProjectionRunRepository, StoreError, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureVersionId, NetboxProjectionMode, NetboxProjectionRun, NetboxRetentionPolicy,
-    RunStatus,
+    ArchitectureVersionId, NetboxProjectionMode, NetboxProjectionRun, NetboxProjectionRunId,
+    NetboxProjectionTrigger, NetboxRetentionPolicy, RunStatus,
 };
 use chv_controlplane_types::domain::{EventSeverity, EventType};
 use chv_errors::ChvError;
@@ -135,8 +141,13 @@ impl NetboxProjectionWorker {
     /// One worker iteration. Store-level failures bubble to `run`
     /// (warn + continue); per-run failures are handled inside
     /// `process_run` (mark failed + event) and never bubble.
+    ///
+    /// The post-apply sweep runs after reclamation but **before** the
+    /// claim loop, so a just-succeeded apply enqueues its projection on
+    /// the very same tick.
     pub async fn tick(&self) -> Result<(), ChvError> {
         self.reclaim_stale_runs().await?;
+        self.enqueue_post_apply_triggers().await?;
         self.claim_and_process().await?;
         Ok(())
     }
@@ -190,6 +201,178 @@ impl NetboxProjectionWorker {
                         architecture_id = %run.architecture_id,
                         error = %e,
                         "reclaimed run was not requeued (attempt cap or active run)"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Post-apply trigger sweep (PR 6 of the #239 plan).
+    ///
+    /// The plan's original wording placed this hook at the apply-run
+    /// terminal transition site, but that site does not exist: the
+    /// apply path defers the terminal transitions to the orchestrator
+    /// (its own module doc — "The orchestrator (out of scope for
+    /// Phase 5) is responsible for the terminal `Succeeded` /
+    /// `PartiallyFailed` / `Failed` transitions; this module only puts
+    /// the run on the rails" — and nothing in the codebase writes
+    /// `RunStatus::Succeeded` to `architecture_apply_runs`). The
+    /// trigger is therefore realized as a sweep over the durable
+    /// outcome: for every architecture whose config has
+    /// `enable_post_apply = true`, take the most recent `succeeded`
+    /// apply run and enqueue a `queued` `post_apply` export run for
+    /// its version.
+    ///
+    /// This is strictly more isolated than an in-line hook (the apply
+    /// path calls nothing — a NetBox outage or a projection-store
+    /// failure is structurally incapable of changing an apply result,
+    /// the issue's headline AC) and behaviorally equivalent once the
+    /// orchestrator's terminal transitions land: a fresh `succeeded`
+    /// apply run fires here on the very next tick with zero changes.
+    ///
+    /// Semantics:
+    ///
+    /// - **Idempotent across ticks**: the enqueue is skipped when a
+    ///   `post_apply` run of ANY status already exists for the
+    ///   (architecture, version) pair (`has_post_apply_for_version`).
+    ///   A permanently-failed post_apply run is therefore not
+    ///   re-enqueued automatically — transient failures are owned by
+    ///   the bounded auto-requeue, and after the attempt cap the
+    ///   operator retries manually.
+    /// - **Coalescing**: an active (queued/running) run — manual or
+    ///   post_apply — holds the architecture's one-active slot, so the
+    ///   create fails with the store's active-run conflict; that
+    ///   outcome is a skip (the next export reconciles), not an error.
+    /// - **Isolation**: a failure while handling one architecture
+    ///   (store hiccup, corrupt row) is `warn!`-ed and the sweep moves
+    ///   on to the next architecture; only a total failure of the
+    ///   config listing bubbles to the tick loop's existing
+    ///   warn-and-continue discipline.
+    ///
+    /// No audit event is emitted at enqueue: the API contract's event
+    /// set (`architecture_netbox_export_succeeded` / `_failed`,
+    /// `_dry_run`, `_retried`) is defined at execution time, and the
+    /// manual export endpoint likewise emits nothing at enqueue — the
+    /// run row itself is the enqueue record. A `debug!` covers
+    /// observability.
+    async fn enqueue_post_apply_triggers(&self) -> Result<(), ChvError> {
+        let configs = self
+            .config_repo
+            .list_post_apply_enabled()
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to list post-apply-enabled netbox configs: {e}"),
+            })?;
+
+        for config in configs {
+            // Apply-run listing: `list_for_architecture` orders
+            // `created_at DESC` (newest first) and does not filter by
+            // status, so the first `Succeeded` row here is provably
+            // the most recent successful apply.
+            let apply_runs = match self
+                .apply_run_repo
+                .list_for_architecture(&config.architecture_id, None)
+                .await
+            {
+                Ok(runs) => runs,
+                Err(e) => {
+                    warn!(
+                        architecture_id = %config.architecture_id,
+                        error = %e,
+                        "post-apply sweep: apply-run listing failed; skipping architecture"
+                    );
+                    continue;
+                }
+            };
+            let Some(latest_succeeded) = apply_runs
+                .iter()
+                .find(|apply| apply.status == RunStatus::Succeeded)
+            else {
+                debug!(
+                    architecture_id = %config.architecture_id,
+                    "post-apply sweep: no succeeded apply run; skipping architecture"
+                );
+                continue;
+            };
+            let version_id = latest_succeeded.architecture_version_id.clone();
+
+            match self
+                .run_repo
+                .has_post_apply_for_version(&config.architecture_id, &version_id)
+                .await
+            {
+                Ok(true) => {
+                    debug!(
+                        architecture_id = %config.architecture_id,
+                        architecture_version_id = %version_id,
+                        "post-apply sweep: run already exists for this version; skipping"
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        architecture_id = %config.architecture_id,
+                        architecture_version_id = %version_id,
+                        error = %e,
+                        "post-apply sweep: post-apply lookup failed; skipping architecture"
+                    );
+                    continue;
+                }
+            }
+
+            let run_id = match NetboxProjectionRunId::new(chv_common::gen_short_id()) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(
+                        architecture_id = %config.architecture_id,
+                        error = %e,
+                        "post-apply sweep: run id generation failed; skipping architecture"
+                    );
+                    continue;
+                }
+            };
+            match self
+                .run_repo
+                .create(NetboxProjectionRunCreateInput {
+                    id: run_id,
+                    architecture_id: config.architecture_id.clone(),
+                    architecture_version_id: version_id.clone(),
+                    trigger_kind: NetboxProjectionTrigger::PostApply,
+                    mode: NetboxProjectionMode::Export,
+                    plan_json: None,
+                    // System trigger: no human requested this run.
+                    requested_by: None,
+                })
+                .await
+            {
+                Ok(run) => {
+                    info!(
+                        run_id = %run.id,
+                        architecture_id = %run.architecture_id,
+                        architecture_version_id = %run.architecture_version_id,
+                        "post-apply trigger enqueued netbox projection run"
+                    );
+                }
+                // The one-active partial index rejected the insert: an
+                // active run (manual or post_apply) already holds the
+                // architecture's slot — coalesce per the plan.
+                Err(StoreError::Conflict { reason, .. })
+                    if reason.contains("active run already exists") =>
+                {
+                    debug!(
+                        architecture_id = %config.architecture_id,
+                        architecture_version_id = %version_id,
+                        "post-apply sweep: active run exists; coalescing"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        architecture_id = %config.architecture_id,
+                        architecture_version_id = %version_id,
+                        error = %e,
+                        "post-apply sweep: enqueue failed; skipping architecture"
                     );
                 }
             }

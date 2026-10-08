@@ -191,6 +191,23 @@ impl NetboxProjectionConfigRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// All configs with the post-apply trigger enabled — the driver of
+    /// the projection worker's post-apply sweep (PR 6). Ordered by
+    /// `architecture_id` for deterministic sweeps. The returned structs
+    /// carry no token material (same construction as [`Self::get`]).
+    pub async fn list_post_apply_enabled(&self) -> Result<Vec<NetboxProjectionConfig>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM netbox_projection_config
+            WHERE enable_post_apply = 1
+            ORDER BY architecture_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_config).collect()
+    }
+
     /// Decrypt and return the stored API token — the only decrypt path,
     /// for the projection worker.
     ///

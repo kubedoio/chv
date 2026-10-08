@@ -410,6 +410,38 @@ impl NetboxProjectionRunRepository {
             })
             .collect()
     }
+
+    /// Whether a `post_apply`-triggered run of **any status** already
+    /// exists for the (architecture, version) pair — the post-apply
+    /// sweep's idempotency guard (PR 6).
+    ///
+    /// Any status, deliberately: a **failed** post_apply run still
+    /// counts as "already attempted". Without that rule every worker
+    /// tick would re-enqueue a permanently-failed post_apply run
+    /// forever (an unbounded re-enqueue sweep); transient failures are
+    /// instead owned by the bounded auto-requeue ([`Self::requeue`] /
+    /// [`MAX_ATTEMPTS`]), and once the attempt cap is exhausted the
+    /// operator retries manually.
+    pub async fn has_post_apply_for_version(
+        &self,
+        architecture_id: &ArchitectureId,
+        version_id: &ArchitectureVersionId,
+    ) -> Result<bool, StoreError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT 1 FROM netbox_projection_runs
+            WHERE trigger_kind = 'post_apply'
+              AND architecture_id = $1
+              AND architecture_version_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(architecture_id.as_str())
+        .bind(version_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
 }
 
 /// Conflict used when the `netbox_projection_runs_one_active` partial

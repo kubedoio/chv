@@ -321,6 +321,28 @@ Two triggers, both funnel into the same `NetboxProjectionRunner`:
   path that inserts a `queued` projection run if the architecture has a NetBox
   projection config enabled.
 
+> **Implementation note (realized shape of the post-apply trigger).** The
+> apply-run terminal transition site named above does not exist yet: the
+> orchestrator owns the terminal `Succeeded` / `PartiallyFailed` / `Failed`
+> transitions, and the apply module's own doc says *"The orchestrator (out of
+> scope for Phase 5) is responsible for the terminal `Succeeded` /
+> `PartiallyFailed` / `Failed` transitions; this module only puts the run on
+> the rails."* Nothing in the codebase writes `succeeded` to
+> `architecture_apply_runs`. The trigger is therefore implemented as a
+> **worker-side sweep** in `NetboxProjectionWorker::tick`: each tick lists
+> architectures with `enable_post_apply = true`, takes each one's most recent
+> `succeeded` apply run, and enqueues a `post_apply` export run for its
+> version — unless a `post_apply` run of any status already exists for that
+> (architecture, version) pair (idempotent across ticks; a permanently-failed
+> post-apply run is retried by the operator, transient ones by the bounded
+> auto-requeue) or an active run holds the architecture's one-active slot
+> (coalescing, enforced by the partial unique index). This shape is
+> **strictly more isolated** than an in-line hook — the apply path calls
+> nothing, so a NetBox outage or a projection-store failure is structurally
+> incapable of changing an apply result — and **behaviorally equivalent**
+> once the orchestrator's terminal transitions land: the sweep fires on the
+> very next tick with zero changes.
+
 Projection runs are executed by a small control-plane worker (analogous to the
 `BackupWorker` pattern: `NetboxProjectionWorker`, claim pending runs atomically,
 advance through `queued/running/succeeded/failed`, retry with backoff). Runs are
