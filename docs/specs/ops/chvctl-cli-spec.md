@@ -98,8 +98,9 @@ existed:
 - `chvctl storage list|show|create|delete` — every subcommand 404'd;
   the backing `storage_pools` catalog is a phantom surface nothing in
   provisioning reads or writes (#379 C4; the catalog question is tracked
-  in #514). The BFF's `/v1/storage-pools` routes and the UI's storage
-  pages are unchanged.
+  in #514 — which later removed the catalog wholesale: the BFF routes,
+  the CP stub routes, the UI page, and the table are gone; the storage
+  inventory lives at `/volumes` and `chvctl volume list`).
 - `chvctl backup list|run` — every subcommand 404'd; even repointed, the
   live `BackupWorker`'s execute is a guaranteed-fail no-op ("Backup is
   not DR" per the production-readiness declaration). The BFF's

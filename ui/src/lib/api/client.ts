@@ -3,12 +3,10 @@ import { goto } from '$app/navigation';
 import { toast } from '#lib/stores/toast.svelte.ts';
 import type {
   APIErrorEnvelope,
-  CreateStoragePoolInput,
   Event,
   InstallActionResponse,
   InstallStatusResponse,
   NodeWithResources,
-  StoragePool,
   VM,
   VMTemplate,
   CreateVMTemplateInput,
@@ -305,12 +303,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       return request<InstallActionResponse>('/api/v1/install/repair', {
         method: 'POST',
         body: JSON.stringify(body)
-      });
-    },
-    createStoragePool(data: CreateStoragePoolInput) {
-      return request<StoragePool>('/api/v1/storage-pools', {
-        method: 'POST',
-        body: JSON.stringify(data)
       });
     },
     listVMs() {

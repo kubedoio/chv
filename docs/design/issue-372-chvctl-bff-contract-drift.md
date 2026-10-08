@@ -525,7 +525,9 @@ then `cargo test --workspace` + clippy/fmt before landing each PR.
 - **Backup execution** — *reopen when a backup executor design exists;
   until then no CLI verb may imply one (DP5).*
 - **Making `storage_pools` truthful / Option B** — belongs to #379's
-  deferred Option B; *reopen per its triggers.*
+  deferred Option B; *reopen per its triggers.* **Resolved 2026-10-08
+  (#514):** neither truth-making nor repointing — the whole catalog
+  (BFF routes, CP stub, UI page, `storage_pools` table) was removed.
 - **Volume-create implementation** — #513's PR per DP8; this pass freezes
   names only.
 - **Typed shared contract crate (Option C)** — *reopen when the harness
