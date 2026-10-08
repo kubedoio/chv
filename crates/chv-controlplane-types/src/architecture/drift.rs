@@ -37,11 +37,29 @@ macro_rules! arch_id_newtype {
                 self.0.fmt(f)
             }
         }
+
+        impl TryFrom<String> for $name {
+            type Error = IdentifierError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = IdentifierError;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
     };
 }
 
 // Re-exported for sibling modules (e.g. `netbox.rs`) so the newtype
-// pattern has a single definition.
+// pattern has a single definition. The impl set mirrors `model.rs`'s
+// `arch_id_newtype!` (including the `TryFrom` conversions) so all
+// architecture id newtypes behave uniformly.
 pub(crate) use arch_id_newtype;
 
 arch_id_newtype!(ArchitectureApplyRunId, "architecture_apply_run_id");

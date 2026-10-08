@@ -65,7 +65,7 @@ fn make_config_input(topo_id: &str) -> NetboxProjectionConfigUpsertInput {
     NetboxProjectionConfigUpsertInput {
         architecture_id: aid(topo_id),
         endpoint: "https://netbox.example.internal".to_string(),
-        token: "netbox-api-token-plaintext".to_string(),
+        token: Some("netbox-api-token-plaintext".to_string()),
         token_secret_ref: format!("netbox-{topo_id}"),
         retention_policy: NetboxRetentionPolicy::MarkStale,
         enable_post_apply: false,
@@ -81,6 +81,7 @@ fn make_run_input(run_id: &str, topo_id: &str, version_id: &str) -> NetboxProjec
         architecture_version_id: vid(version_id),
         trigger_kind: NetboxProjectionTrigger::Manual,
         mode: NetboxProjectionMode::Export,
+        plan_json: None,
         requested_by: Some("senol".to_string()),
     }
 }
@@ -190,7 +191,7 @@ async fn netbox_config_token_roundtrip() {
     let repo = NetboxProjectionConfigRepository::new(db.pool.clone());
 
     let mut input = make_config_input("topo-1");
-    input.token = "PAbCd-super-secret-token".to_string();
+    input.token = Some("PAbCd-super-secret-token".to_string());
     repo.upsert(input).await.unwrap();
 
     // The only decrypt path returns exactly the plaintext that was
@@ -199,6 +200,72 @@ async fn netbox_config_token_roundtrip() {
     // both directions, so the roundtrip holds either way.)
     let token = repo.read_token(&aid("topo-1")).await.unwrap();
     assert_eq!(token.as_deref(), Some("PAbCd-super-secret-token"));
+}
+
+#[tokio::test]
+async fn netbox_config_update_without_token_keeps_existing_secret() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionConfigRepository::new(db.pool.clone());
+
+    let mut input = make_config_input("topo-1");
+    input.token = Some("original-secret".to_string());
+    repo.upsert(input).await.unwrap();
+
+    // Token-less edit: `None` must preserve the stored credential, not
+    // clobber it (the API contract: omitted/null keeps the secret).
+    let mut edit = make_config_input("topo-1");
+    edit.endpoint = "https://netbox2.example.internal".to_string();
+    edit.token = None;
+    let updated = repo.upsert(edit).await.unwrap();
+    assert_eq!(updated.endpoint, "https://netbox2.example.internal");
+
+    let token = repo.read_token(&aid("topo-1")).await.unwrap();
+    assert_eq!(token.as_deref(), Some("original-secret"));
+
+    // A careless BFF sending an empty string is treated the same as an
+    // omitted token: the secret survives.
+    let mut edit = make_config_input("topo-1");
+    edit.token = Some("   ".to_string());
+    repo.upsert(edit).await.unwrap();
+    let token = repo.read_token(&aid("topo-1")).await.unwrap();
+    assert_eq!(token.as_deref(), Some("original-secret"));
+}
+
+#[tokio::test]
+async fn netbox_config_update_with_new_token_replaces_secret() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionConfigRepository::new(db.pool.clone());
+
+    let mut input = make_config_input("topo-1");
+    input.token = Some("original-secret".to_string());
+    repo.upsert(input).await.unwrap();
+
+    let mut edit = make_config_input("topo-1");
+    edit.token = Some("rotated-secret".to_string());
+    repo.upsert(edit).await.unwrap();
+
+    let token = repo.read_token(&aid("topo-1")).await.unwrap();
+    assert_eq!(token.as_deref(), Some("rotated-secret"));
+}
+
+#[tokio::test]
+async fn netbox_config_fresh_upsert_without_token_is_invalid_configuration() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionConfigRepository::new(db.pool.clone());
+
+    let mut input = make_config_input("topo-1");
+    input.token = None;
+    let err = repo.upsert(input).await.unwrap_err();
+    assert!(
+        matches!(&err, StoreError::InvalidConfiguration { reason }
+            if reason.contains("token is required when creating")),
+        "expected InvalidConfiguration, got {err:?}"
+    );
+    // Nothing was persisted.
+    assert!(repo.get(&aid("topo-1")).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -258,6 +325,71 @@ async fn netbox_run_create_get_roundtrip() {
 
     let fetched = repo.get(&nid("netrun-1")).await.unwrap().expect("run row");
     assert_eq!(fetched, run);
+}
+
+#[tokio::test]
+async fn netbox_run_create_persists_plan_json() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    // Dry-run style: the plan is known at enqueue time.
+    let mut input = make_run_input("netrun-1", "topo-1", "v-1");
+    input.plan_json = Some("{\"entries\":[{\"op\":\"create\"}]}".to_string());
+    let run = repo.create(input).await.unwrap();
+    assert_eq!(
+        run.plan_json.as_deref(),
+        Some("{\"entries\":[{\"op\":\"create\"}]}")
+    );
+
+    let fetched = repo.get(&nid("netrun-1")).await.unwrap().unwrap();
+    assert_eq!(fetched.plan_json, run.plan_json);
+
+    // Without a plan the column stays NULL (the worker may instead
+    // persist results via mark_succeeded). Uses a second architecture:
+    // netrun-1 is still queued, so a sibling run for topo-1 would trip
+    // the one-active index instead.
+    setup_architecture(&db, "topo-2", "v-2").await;
+    let run = repo
+        .create(make_run_input("netrun-2", "topo-2", "v-2"))
+        .await
+        .unwrap();
+    assert_eq!(run.plan_json, None);
+}
+
+#[tokio::test]
+async fn netbox_run_create_duplicate_run_id_conflicts() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    repo.create(make_run_input("netrun-1", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    // Drain to terminal so the retry hits the PK, not the one-active
+    // partial index (which would report architecture_id).
+    let claimed = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_succeeded(&claimed.id, None, None).await.unwrap();
+
+    let err = repo
+        .create(make_run_input("netrun-1", "topo-1", "v-1"))
+        .await
+        .unwrap_err();
+    match err {
+        StoreError::Conflict { entity, id, reason } => {
+            assert_eq!(entity, "netbox_projection_run");
+            assert_eq!(id, "netrun-1");
+            assert!(
+                reason.contains("run id already exists"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -338,6 +470,12 @@ async fn netbox_run_one_active_invariant() {
 }
 
 #[tokio::test]
+// Concurrency note: this is a sequential simulation of single-statement
+// atomicity, not a true multi-worker race. `claim_next_queued` performs
+// the `queued → running` flip in one UPDATE, so SQLite serializes
+// concurrent claims; the second `claim_next_queued` below observing
+// "nothing queued" stands in for a second worker losing the race. True
+// concurrency is not exercised here (single connection, no threads).
 async fn netbox_run_claim_next_queued() {
     let db = TestDb::new().await;
     setup_architecture(&db, "topo-1", "v-1").await;
@@ -504,6 +642,52 @@ async fn netbox_run_requeue_from_failed() {
         matches!(err, StoreError::Conflict { .. }),
         "expected Conflict requeueing a succeeded run, got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn netbox_run_requeue_while_another_run_is_active_conflicts() {
+    let db = TestDb::new().await;
+    setup_architecture(&db, "topo-1", "v-1").await;
+    let repo = NetboxProjectionRunRepository::new(db.pool.clone());
+
+    // The exact reachable sequence: run A fails (freeing the one-active
+    // slot), run B is created (allowed), then requeueing A would flip it
+    // back to queued and collide with B in the partial unique index.
+    repo.create(make_run_input("netrun-a", "topo-1", "v-1"))
+        .await
+        .unwrap();
+    let claimed_a = repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.mark_failed(&claimed_a.id, Some("netbox unreachable".to_string()))
+        .await
+        .unwrap();
+
+    repo.create(make_run_input("netrun-b", "topo-1", "v-1"))
+        .await
+        .unwrap();
+
+    // Must surface as Conflict (409 NETBOX_RUN_ACTIVE), not a raw
+    // database error.
+    let err = repo.requeue(&nid("netrun-a")).await.unwrap_err();
+    match err {
+        StoreError::Conflict { entity, reason, .. } => {
+            assert_eq!(entity, "netbox_projection_run");
+            assert!(
+                reason.contains("active run already exists"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+
+    // Run A stays failed; run B is untouched.
+    let a = repo.get(&nid("netrun-a")).await.unwrap().unwrap();
+    assert_eq!(a.status, NetboxProjectionRunStatus::Failed);
+    let b = repo.get(&nid("netrun-b")).await.unwrap().unwrap();
+    assert_eq!(b.status, NetboxProjectionRunStatus::Queued);
 }
 
 #[tokio::test]

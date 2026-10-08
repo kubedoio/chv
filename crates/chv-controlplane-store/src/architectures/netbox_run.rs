@@ -33,6 +33,11 @@ pub struct NetboxProjectionRunCreateInput {
     pub architecture_version_id: ArchitectureVersionId,
     pub trigger_kind: NetboxProjectionTrigger,
     pub mode: NetboxProjectionMode,
+    /// Deterministic plan from `chv-netbox-adapter`, persisted at run
+    /// creation: dry-run runs carry the plan they will report; export
+    /// runs carry it once computed (the PR-4 worker may also leave it
+    /// `None` and persist results via `mark_succeeded` instead).
+    pub plan_json: Option<String>,
     pub requested_by: Option<String>,
 }
 
@@ -71,9 +76,10 @@ impl NetboxProjectionRunRepository {
                 trigger_kind,
                 mode,
                 status,
+                plan_json,
                 requested_by
             )
-            VALUES ($1, $2, $3, $4, $5, 'queued', $6)
+            VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)
             RETURNING *
             "#,
         )
@@ -82,6 +88,7 @@ impl NetboxProjectionRunRepository {
         .bind(input.architecture_version_id.as_str())
         .bind(input.trigger_kind.as_str())
         .bind(input.mode.as_str())
+        .bind(&input.plan_json)
         .bind(&input.requested_by)
         .fetch_one(&self.pool)
         .await
@@ -224,6 +231,12 @@ impl NetboxProjectionRunRepository {
     /// clearing `finished_at`. Only allowed while the run is `failed` and
     /// `attempt_count < MAX_ATTEMPTS`; guard violations map to
     /// [`StoreError::Conflict`].
+    ///
+    /// The flip back to `queued` re-enters the `one_active` partial
+    /// unique index, so requeueing while another run is queued/running
+    /// fails the UPDATE with a UNIQUE violation — mapped to
+    /// [`StoreError::Conflict`] (409 at the BFF), not a raw database
+    /// error.
     pub async fn requeue(
         &self,
         run_id: &NetboxProjectionRunId,
@@ -240,7 +253,8 @@ impl NetboxProjectionRunRepository {
         .bind(run_id.as_str())
         .bind(MAX_ATTEMPTS)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|err| map_requeue_error(err, run_id))?;
 
         match row {
             Some(row) => row_to_run(&row),
@@ -288,6 +302,17 @@ impl NetboxProjectionRunRepository {
     }
 }
 
+/// Conflict used when the `netbox_projection_runs_one_active` partial
+/// unique index rejects a write: another queued/running run exists for
+/// the architecture.
+fn active_run_conflict(id: String) -> StoreError {
+    StoreError::Conflict {
+        entity: ENTITY,
+        id,
+        reason: "an active run already exists for this architecture",
+    }
+}
+
 /// Map a sqlx error from the create path into [`StoreError`].
 ///
 /// SQLite reports the partial-index violation as
@@ -300,11 +325,7 @@ fn map_create_error(err: sqlx::Error, input: &NetboxProjectionRunCreateInput) ->
         if db_err.is_unique_violation() {
             let message = db_err.message();
             if message.contains("architecture_id") {
-                return StoreError::Conflict {
-                    entity: ENTITY,
-                    id: input.architecture_id.to_string(),
-                    reason: "an active run already exists for this architecture",
-                };
+                return active_run_conflict(input.architecture_id.to_string());
             }
             return StoreError::Conflict {
                 entity: ENTITY,
@@ -317,6 +338,21 @@ fn map_create_error(err: sqlx::Error, input: &NetboxProjectionRunCreateInput) ->
                 entity: "architecture_topology_or_version",
                 id: input.architecture_id.to_string(),
             };
+        }
+    }
+    StoreError::Database(err)
+}
+
+/// Map a sqlx error from the requeue path into [`StoreError`].
+///
+/// The only expected failure is the `one_active` partial unique index:
+/// the `failed → queued` flip collides with another active run for the
+/// same architecture. Without this mapping the caller would see a raw
+/// [`StoreError::Database`] (HTTP 500) instead of the contract's 409.
+fn map_requeue_error(err: sqlx::Error, run_id: &NetboxProjectionRunId) -> StoreError {
+    if let sqlx::Error::Database(ref db_err) = err {
+        if db_err.is_unique_violation() {
+            return active_run_conflict(run_id.to_string());
         }
     }
     StoreError::Database(err)

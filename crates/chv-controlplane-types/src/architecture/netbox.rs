@@ -283,4 +283,15 @@ mod tests {
     fn run_id_rejects_empty() {
         assert!(NetboxProjectionRunId::new("  ").is_err());
     }
+
+    #[test]
+    fn run_id_try_from_string_and_str() {
+        // The drift.rs macro provides the same TryFrom impls as
+        // model.rs's ArchitectureId.
+        let from_string: NetboxProjectionRunId = "netrun-9".to_string().try_into().unwrap();
+        assert_eq!(from_string.as_str(), "netrun-9");
+        let from_str: NetboxProjectionRunId = "netrun-9".try_into().unwrap();
+        assert_eq!(from_str, from_string);
+        assert!(NetboxProjectionRunId::try_from("").is_err());
+    }
 }

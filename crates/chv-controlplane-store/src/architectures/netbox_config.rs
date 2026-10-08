@@ -15,16 +15,25 @@ use chv_controlplane_types::architecture::{
 };
 use sqlx::Row;
 
-#[derive(Clone, Debug)]
+/// Input for creating or updating a NetBox projection config.
+///
+/// Deliberately does **not** derive `Debug`: the struct carries the
+/// plaintext API token, and any `{:?}` formatting (log lines, panic
+/// messages, test failures) would dump the secret — mirroring the
+/// secret-bearing inputs in `backups.rs` (`BackupScheduleCreateInput`).
+#[derive(Clone)]
 pub struct NetboxProjectionConfigUpsertInput {
     pub architecture_id: ArchitectureId,
     /// HTTPS base URL of the NetBox instance. Stored verbatim — HTTPS
     /// enforcement is the BFF's accept-time job (`NETBOX_HTTPS_REQUIRED`),
     /// per the component spec; the store does not validate the scheme.
     pub endpoint: String,
-    /// Plaintext NetBox API token. Encrypted before persisting; never
-    /// stored, returned, or logged in the clear.
-    pub token: String,
+    /// Plaintext NetBox API token. `None` (or an empty/whitespace string,
+    /// normalized to absent) on update keeps the existing secret;
+    /// required when creating the config, since the `token_ciphertext`
+    /// column is NOT NULL. Encrypted before persisting; never stored,
+    /// returned, or logged in the clear.
+    pub token: Option<String>,
     pub token_secret_ref: String,
     pub retention_policy: NetboxRetentionPolicy,
     pub enable_post_apply: bool,
@@ -54,57 +63,106 @@ impl NetboxProjectionConfigRepository {
     /// `architecture_id`). The plaintext token from the input is encrypted
     /// before it touches the database; the returned config contains no
     /// token material.
+    ///
+    /// `token` is optional on update: `None` keeps the existing secret —
+    /// the update-only path omits `token_ciphertext` from the SET clause
+    /// entirely, so a token-less edit cannot destroy the stored
+    /// credential. On create it is an error: the `token_ciphertext`
+    /// column is NOT NULL and a first-time config needs a secret
+    /// ([`StoreError::InvalidConfiguration`]).
     pub async fn upsert(
         &self,
         input: NetboxProjectionConfigUpsertInput,
     ) -> Result<NetboxProjectionConfig, StoreError> {
-        let token_ciphertext = self.crypto.encrypt(&input.token);
-        let row = sqlx::query(
-            r#"
-            INSERT INTO netbox_projection_config (
-                architecture_id,
-                endpoint,
-                token_secret_ref,
-                token_ciphertext,
-                retention_policy,
-                enable_post_apply,
-                custom_field_prefix,
-                site_name
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (architecture_id) DO UPDATE SET
-                endpoint = excluded.endpoint,
-                token_secret_ref = excluded.token_secret_ref,
-                token_ciphertext = excluded.token_ciphertext,
-                retention_policy = excluded.retention_policy,
-                enable_post_apply = excluded.enable_post_apply,
-                custom_field_prefix = excluded.custom_field_prefix,
-                site_name = excluded.site_name,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-            RETURNING *
-            "#,
-        )
-        .bind(input.architecture_id.as_str())
-        .bind(&input.endpoint)
-        .bind(&input.token_secret_ref)
-        .bind(&token_ciphertext)
-        .bind(input.retention_policy.as_str())
-        .bind(input.enable_post_apply)
-        .bind(&input.custom_field_prefix)
-        .bind(&input.site_name)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|err| match &err {
-            sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                StoreError::NotFound {
-                    entity: "architecture_topology_or_version",
-                    id: input.architecture_id.to_string(),
+        // An empty/whitespace token is treated as absent (a careless BFF
+        // sending "" must not clobber the stored secret); the raw value is
+        // encrypted verbatim otherwise.
+        match input.token.as_deref() {
+            Some(token) if !token.trim().is_empty() => {
+                let token_ciphertext = self.crypto.encrypt(token);
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO netbox_projection_config (
+                        architecture_id,
+                        endpoint,
+                        token_secret_ref,
+                        token_ciphertext,
+                        retention_policy,
+                        enable_post_apply,
+                        custom_field_prefix,
+                        site_name
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (architecture_id) DO UPDATE SET
+                        endpoint = excluded.endpoint,
+                        token_secret_ref = excluded.token_secret_ref,
+                        token_ciphertext = excluded.token_ciphertext,
+                        retention_policy = excluded.retention_policy,
+                        enable_post_apply = excluded.enable_post_apply,
+                        custom_field_prefix = excluded.custom_field_prefix,
+                        site_name = excluded.site_name,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    RETURNING *
+                    "#,
+                )
+                .bind(input.architecture_id.as_str())
+                .bind(&input.endpoint)
+                .bind(&input.token_secret_ref)
+                .bind(&token_ciphertext)
+                .bind(input.retention_policy.as_str())
+                .bind(input.enable_post_apply)
+                .bind(&input.custom_field_prefix)
+                .bind(&input.site_name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|err| match &err {
+                    sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                        StoreError::NotFound {
+                            entity: "architecture_topology_or_version",
+                            id: input.architecture_id.to_string(),
+                        }
+                    }
+                    _ => StoreError::from(err),
+                })?;
+                row_to_config(&row)
+            }
+            // Token omitted (or empty): update-only. `token_ciphertext`
+            // is not part of the SET clause, so the stored secret is
+            // preserved. A missing row means this would be a create, and
+            // creating requires a token.
+            _ => {
+                let row = sqlx::query(
+                    r#"
+                    UPDATE netbox_projection_config SET
+                        endpoint = $2,
+                        token_secret_ref = $3,
+                        retention_policy = $4,
+                        enable_post_apply = $5,
+                        custom_field_prefix = $6,
+                        site_name = $7,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE architecture_id = $1
+                    RETURNING *
+                    "#,
+                )
+                .bind(input.architecture_id.as_str())
+                .bind(&input.endpoint)
+                .bind(&input.token_secret_ref)
+                .bind(input.retention_policy.as_str())
+                .bind(input.enable_post_apply)
+                .bind(&input.custom_field_prefix)
+                .bind(&input.site_name)
+                .fetch_optional(&self.pool)
+                .await?;
+                match row {
+                    Some(row) => row_to_config(&row),
+                    None => Err(StoreError::InvalidConfiguration {
+                        reason: "token is required when creating a netbox projection config"
+                            .to_string(),
+                    }),
                 }
             }
-            _ => StoreError::from(err),
-        })?;
-
-        row_to_config(&row)
+        }
     }
 
     /// Fetch the config for an architecture. The returned struct carries
