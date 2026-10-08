@@ -63,8 +63,6 @@ drift           chv-architecture-reconcile::drift: compare baseline vs live
 The desired-state contract is the `CHVArchitecture` YAML document modelled
 strongly-typed in `crates/chv-architecture-validate/src/model.rs`, with
 **13 resource kinds**:
-The desired-state contract is the `CHVArchitecture` YAML document modelled
-strongly-typed in `crates/chv-architecture-validate/src/model.rs`:
 
 | Kind | Model struct | Notes |
 |---|---|---|
@@ -319,12 +317,12 @@ Two triggers, both funnel into the same `NetboxProjectionRunner`:
   transitions to `Succeeded` (status string `succeeded` — the durable
   apply-run status is lowercase snake_case). This is a **best-effort enqueue** — it never
   changes the apply result (DP8). Implemented as a hook in the apply-resolution
-  path that inserts a `Queued` projection run if the architecture has a NetBox
+  path that inserts a `queued` projection run if the architecture has a NetBox
   projection config enabled.
 
 Projection runs are executed by a small control-plane worker (analogous to the
 `BackupWorker` pattern: `NetboxProjectionWorker`, claim pending runs atomically,
-advance through `Queued/Running/Succeeded/Failed`, retry with backoff). Runs are
+advance through `queued/running/succeeded/failed`, retry with backoff). Runs are
 **serialized per architecture** (a simple per-architecture mutex key / a
 "one active run per architecture" claim) to keep idempotent ordering.
 *→ DP6, DP7, DP8, DP10.*
@@ -465,7 +463,7 @@ summary below mirrors it.
 | Endpoint | Role | Request → Response |
 |---|---|---|
 | `POST /v1/architectures/netbox/config/get` | Operator | `{id}` → config summary (never the token) or 404 |
-| `POST /v1/architectures/netbox/config/upsert` | Operator | `{id, expected_version, endpoint, token?, token_secret_ref, retention, enable_post_apply, site_name?}` → config |
+| `POST /v1/architectures/netbox/config/upsert` | Operator | `{id, expected_version, endpoint, token?, token_secret_ref, retention_policy, enable_post_apply, site_name?}` → config |
 | `POST /v1/architectures/netbox/config/delete` | Operator | `{id}` → deleted (NetBox untouched) |
 | `POST /v1/architectures/netbox/export/dry-run` | Operator | `{id}` → `{mapping_version, architecture_id, architecture_version, entries[], summary{create,update,no_op,conflict,stale}}` (projects the most recent `succeeded` apply run's version) |
 | `POST /v1/architectures/netbox/export` | Operator (Admin if production) | `{id}` → `{run_id, status}` |

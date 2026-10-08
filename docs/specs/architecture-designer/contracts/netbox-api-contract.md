@@ -107,6 +107,7 @@ read endpoints; no writes):
   "mapping_version": "v1",
   "architecture_id": "arch_01HX...",
   "architecture_version": 3,
+  "retention": "mark_stale",
   "summary": { "create": 4, "update": 1, "no_op": 7, "conflict": 1, "stale": 0 },
   "entries": [
     {

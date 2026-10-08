@@ -144,6 +144,10 @@ run; enqueue failure is logged and swallowed.
 
 ## Idempotency and ownership
 
+- The six ownership custom fields (see the mapping contract's table for the
+  authoritative set): `chv_external_id`, `chv_architecture_id`,
+  `chv_managed_by`, `chv_managed_state`, `chv_architecture_version`,
+  `chv_mapping_version`.
 - External ID: `arch:<architecture_id>:<kind>/<name>:<version>` where `kind`
   is the stable `ResourceType` slug (`server`, `network`, `instance`, …).
 - Reconcile: match by `chv_external_id` custom field → then by natural key.

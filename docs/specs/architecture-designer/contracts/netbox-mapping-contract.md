@@ -66,6 +66,12 @@ the field names themselves are stable contract surface.
 
 ## Plan entries (dry-run and export)
 
+The plan object carries `mapping_version`, `architecture_id`,
+`architecture_version`, `retention` (the configured policy — `mark_stale` |
+`delete` — recorded as plan metadata so the runner and audit trail know how
+`stale` entries will be executed; entries themselves are policy-independent),
+`summary`, and `entries`:
+
 ```json
 {
   "action": "create | update | no_op | conflict | stale",
@@ -85,16 +91,31 @@ the field names themselves are stable contract surface.
 
 ## Ownership and collision semantics
 
+The authoritative tree (mirrors `chv-netbox-adapter`'s `compute_plan`):
+
 ```text
-lookup by chv_external_id
-  ├─ found, chv_managed_by == "chv"
-  │     ├─ content equal          → no_op
-  │     └─ content differs        → update
-  └─ found, foreign/absent owner  → conflict (never write)
-not found by external id
+lookup by chv_external_id, SAME NetBox kind as the desired object
+  ├─ no same-kind match
+  │     → fall through to the natural-key branch below
+  ├─ more than one same-kind match (ambiguous remote state)
+  │     → conflict (never write; duplicates are also exempt from stale)
+  └─ exactly one same-kind match
+        ├─ not chv-owned (managed_by != "chv" or mapping_version != v1)
+        │     → conflict (never write)
+        └─ chv-owned (managed_by == "chv" AND mapping_version == v1)
+              ├─ content equal   → no_op
+              └─ content differs → update
+                (if the match's natural key differs from the desired one and
+                 the desired natural key is occupied by another object, the
+                 rename cannot proceed → conflict, never write)
+
+not matched by external id
   ├─ natural key free             → create
   ├─ natural key occupied, foreign → conflict (never write)
-  └─ natural key occupied, same external id → update (partial-failure resume)
+  ├─ natural key occupied, chv-owned but mapping_version != v1
+  │                                → conflict (never write)
+  └─ natural key occupied, chv-owned, same external id
+                                   → update (partial-failure resume)
 ```
 
 The write guard is unconditional: **no request is sent that would modify an
