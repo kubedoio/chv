@@ -48,3 +48,19 @@ chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+# Self dev-dependency: turns this crate's `test-http` feature on for the
+# integration-test build only (the standard Cargo pattern for exercising
+# a feature-gated seam without enabling it in production builds).
+chv-webui-bff = { path = ".", features = ["test-http"] }
+# Mock NetBox for the dry-run wire tests (same version as
+# chv-controlplane-service's wiremock suites).
+wiremock = "0.6"
+
+[features]
+# Test-only passthrough of the adapter's plain-HTTP client constructor
+# (see the `build_netbox_client` seam in handlers/netbox.rs), mirroring
+# chv-controlplane-service's dev-only enablement of the adapter's
+# `test-http` feature. NEVER enable this feature in production
+# dependencies: the dry-run handler must stay on the HTTPS-only
+# `NetBoxClient::new`.
+test-http = ["chv-netbox-adapter/test-http"]

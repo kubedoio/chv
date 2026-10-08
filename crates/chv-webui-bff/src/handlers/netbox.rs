@@ -499,9 +499,13 @@ pub async fn netbox_config_upsert(
         .await
         .map_err(|e| match e {
             // Create-without-token: the store refuses because the
-            // ciphertext column is NOT NULL. A clear flat 400, not a
-            // 500.
-            StoreError::InvalidConfiguration { reason } => BffError::BadRequest(reason),
+            // ciphertext column is NOT NULL. The contract's "config
+            // has no usable token" code covers it; the store's reason
+            // is static and safe, but the dedicated variant renders
+            // the BFF's own clean message instead.
+            StoreError::InvalidConfiguration { .. } => BffError::NetboxTokenMissing {
+                architecture_id: id.to_string(),
+            },
             other => other.into(),
         })?;
 
@@ -661,7 +665,11 @@ pub async fn netbox_dry_run(
     // HTTPS is enforced by the constructor (fail-closed); the endpoint
     // was already scheme-checked at accept time, so this is
     // belt-and-braces for configs written before that gate existed.
-    let client = NetBoxClient::new(&config.endpoint, NetBoxToken::new(token))
+    // The construction goes through [`build_netbox_client`] — the
+    // HTTPS-only `NetBoxClient::new` in production, the adapter's
+    // plain-HTTP test constructor under this crate's dev-only
+    // `test-http` feature (see the seam's doc).
+    let client = build_netbox_client(&config.endpoint, NetBoxToken::new(token))
         .map_err(map_client_build_error)?;
     let runner = NetboxProjectionRunner::new(client);
 
@@ -692,8 +700,11 @@ pub async fn netbox_dry_run(
     );
     // The contract's event list includes architecture_netbox_dry_run;
     // the worker emits it for run-row dry-runs, the BFF for the
-    // synchronous path. Details carry the summary counts only — no run
-    // id exists on this path (nothing is persisted).
+    // synchronous path. Per the contract's events section, events carry
+    // the architecture id, run id, trigger, and summary — this path
+    // persists no run row (the sync dry-run writes nothing), so
+    // run_id is null, and the only way in is the API, hence trigger
+    // "manual".
     emit_netbox_event(
         &state,
         &claims,
@@ -701,6 +712,8 @@ pub async fn netbox_dry_run(
         EventSeverity::Info,
         serde_json::json!({
             "architecture_id": id.as_str(),
+            "run_id": serde_json::Value::Null,
+            "trigger": "manual",
             "summary": serde_json::to_value(plan.summary)?,
         }),
     )
@@ -751,7 +764,9 @@ pub async fn netbox_export(
         });
     }
 
-    let (version_id, _model, _version_number) = resolve_applied_version(&state, &id).await?;
+    // Id-only resolution: the worker re-resolves (and parses) the model
+    // itself; here only the version reference is persisted.
+    let version_id = resolve_applied_version_id(&state, &id).await?;
 
     let run_id = NetboxProjectionRunId::new(chv_common::gen_short_id())
         .map_err(|e| BffError::Internal(format!("failed to mint netbox run id: {e}")))?;
@@ -769,10 +784,31 @@ pub async fn netbox_export(
         .await
         .map_err(|e| match e {
             // The one-active partial unique index: another queued or
-            // running run exists for this architecture.
-            StoreError::Conflict { .. } => BffError::NetboxRunActive {
-                architecture_id: id.to_string(),
-            },
+            // running run exists for this architecture. The store also
+            // reports a duplicate run id as `Conflict`, so the reason
+            // is matched — only the active-run conflict is the
+            // caller's 409 `NETBOX_RUN_ACTIVE`; any other conflict
+            // (e.g. a collision on our freshly minted run id) is an
+            // internal error, never a mislabeled NETBOX_RUN_ACTIVE.
+            StoreError::Conflict { reason, .. } if reason.contains("active run") => {
+                BffError::NetboxRunActive {
+                    architecture_id: id.to_string(),
+                }
+            }
+            StoreError::Conflict {
+                entity,
+                id: conflict_id,
+                reason,
+            } => {
+                tracing::error!(
+                    architecture_id = %id,
+                    entity = %entity,
+                    conflict_id = %conflict_id,
+                    reason = %reason,
+                    "netbox run enqueue hit an unexpected conflict"
+                );
+                BffError::Internal("failed to enqueue netbox projection run".into())
+            }
             other => other.into(),
         })?;
 
@@ -829,11 +865,15 @@ pub async fn netbox_runs_get(
 ) -> Result<Json<NetboxRunDetailDto>, BffError> {
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
+    // Ownership first, run-id format second: the topology is loaded and
+    // authorized before the run id is parsed, so a malformed run id can
+    // never serve as a format-only oracle against a foreign topology
+    // (the 403/404 must win over the 400).
+    get_topology_authorized(&state, &claims, &id).await?;
+
     let run_id = NetboxProjectionRunId::new(req.run_id.clone())
         .map_err(|e| BffError::BadRequest(format!("invalid run id: {e}")))?;
     tracing::info!(architecture_id = %id, run_id = %run_id, "netbox_runs_get");
-
-    get_topology_authorized(&state, &claims, &id).await?;
 
     let run = load_run_for_architecture(&state, &id, &run_id).await?;
     Ok(Json(run_detail_dto(run)))
@@ -852,16 +892,21 @@ pub async fn netbox_runs_retry(
 ) -> Result<Json<NetboxRunRetryResponse>, BffError> {
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
-    let run_id = NetboxProjectionRunId::new(req.run_id.clone())
-        .map_err(|e| BffError::BadRequest(format!("invalid run id: {e}")))?;
     let role = Role::parse(&claims.role).ok_or_else(|| {
         BffError::Internal("operator middleware passed but role string is unparseable".into())
     })?;
-    tracing::info!(architecture_id = %id, run_id = %run_id, actor = %claims.sub, "netbox_runs_retry");
 
+    // Ownership first, run-id format second (same reasoning as
+    // runs_get): all topology-level guards fire before the run id is
+    // parsed, so a malformed run id is never observable against a
+    // foreign topology.
     let topo = get_topology_authorized(&state, &claims, &id).await?;
     require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
     enforce_production_guard(topo.environment.as_deref(), role)?;
+
+    let run_id = NetboxProjectionRunId::new(req.run_id.clone())
+        .map_err(|e| BffError::BadRequest(format!("invalid run id: {e}")))?;
+    tracing::info!(architecture_id = %id, run_id = %run_id, actor = %claims.sub, "netbox_runs_retry");
 
     let run = load_run_for_architecture(&state, &id, &run_id).await?;
     let requeued = state
@@ -926,7 +971,8 @@ fn retention_from_config(policy: NetboxRetentionPolicy) -> RetentionPolicy {
 /// `(version_id, parsed model, version_number)`; every failure mode
 /// (no succeeded apply run, missing version row, absent or unparseable
 /// normalized model) answers 400 `NETBOX_NOT_APPLIED`, mirroring the
-/// PR-4 worker's resolution.
+/// PR-4 worker's resolution. Used by the dry-run path, which needs the
+/// full model to compute the plan.
 async fn resolve_applied_version(
     state: &AppState,
     architecture_id: &ArchitectureId,
@@ -934,19 +980,7 @@ async fn resolve_applied_version(
     let not_applied = || BffError::NetboxNotApplied {
         architecture_id: architecture_id.to_string(),
     };
-    // Unscoped: ownership was authorized by the caller; the apply-run
-    // rows belong to the same architecture we already loaded.
-    let apply_runs = state
-        .apply_runs
-        .list_for_architecture(architecture_id, None)
-        .await?;
-    // `list_for_architecture` orders created_at DESC (newest first);
-    // the first Succeeded row is provably the most recent one.
-    let latest_succeeded = apply_runs
-        .iter()
-        .find(|apply| apply.status == RunStatus::Succeeded)
-        .ok_or_else(not_applied)?;
-    let version_id = latest_succeeded.architecture_version_id.clone();
+    let version_id = latest_succeeded_apply_version_id(state, architecture_id).await?;
 
     let version_repo = VersionRepository::new(state.pool.clone());
     let version = version_repo.get(&version_id, None).await.map_err(|e| {
@@ -972,6 +1006,83 @@ async fn resolve_applied_version(
         not_applied()
     })?;
     Ok((version_id, model, version.version_number))
+}
+
+/// Resolve the projection source's version id only — the same
+/// "most recent `succeeded` apply run → its version id, version row
+/// must exist" algorithm as [`resolve_applied_version`], minus the
+/// model deserialization. The export-enqueue path only persists the id
+/// (the PR-4 worker re-resolves and parses the model itself), so
+/// deserializing + validating the full `CHVArchitecture` there would
+/// be wasted work. Failure modes answer 400 `NETBOX_NOT_APPLIED`,
+/// identically to the full resolution.
+async fn resolve_applied_version_id(
+    state: &AppState,
+    architecture_id: &ArchitectureId,
+) -> Result<ArchitectureVersionId, BffError> {
+    let not_applied = || BffError::NetboxNotApplied {
+        architecture_id: architecture_id.to_string(),
+    };
+    let version_id = latest_succeeded_apply_version_id(state, architecture_id).await?;
+
+    // Row-exists check only; whether the model parses is the worker's
+    // concern (it fails the run there, never silently).
+    let version_repo = VersionRepository::new(state.pool.clone());
+    version_repo.get(&version_id, None).await.map_err(|e| {
+        tracing::warn!(
+            architecture_id = %architecture_id,
+            version_id = %version_id,
+            error = %e,
+            "applied architecture version row could not be loaded"
+        );
+        not_applied()
+    })?;
+    Ok(version_id)
+}
+
+/// The shared "most recent succeeded apply run" lookup — the
+/// `architecture_version_id` of the newest `succeeded` apply run for
+/// the architecture. Unscoped: ownership was authorized by the caller;
+/// the apply-run rows belong to the same architecture we already
+/// loaded. No succeeded run answers 400 `NETBOX_NOT_APPLIED`.
+async fn latest_succeeded_apply_version_id(
+    state: &AppState,
+    architecture_id: &ArchitectureId,
+) -> Result<ArchitectureVersionId, BffError> {
+    let apply_runs = state
+        .apply_runs
+        .list_for_architecture(architecture_id, None)
+        .await?;
+    // `list_for_architecture` orders created_at DESC (newest first);
+    // the first Succeeded row is provably the most recent one.
+    let latest_succeeded = apply_runs
+        .iter()
+        .find(|apply| apply.status == RunStatus::Succeeded)
+        .ok_or_else(|| BffError::NetboxNotApplied {
+            architecture_id: architecture_id.to_string(),
+        })?;
+    Ok(latest_succeeded.architecture_version_id.clone())
+}
+
+/// Client construction seam for the synchronous dry-run.
+///
+/// Production always takes the HTTPS-only, fail-closed
+/// [`NetBoxClient::new`]. Under this crate's `test-http` feature — a
+/// dev-dependencies-only passthrough of the adapter's test feature,
+/// mirroring how `chv-controlplane-service` enables it for its
+/// wiremock suites — the adapter's plain-HTTP test constructor is used
+/// instead, so the BFF's own wiremock tests can drive the real request
+/// path through this handler. The feature is never enabled by
+/// production dependents (only the self dev-dependency in Cargo.toml
+/// turns it on for the integration-test build).
+#[cfg(feature = "test-http")]
+fn build_netbox_client(endpoint: &str, token: NetBoxToken) -> Result<NetBoxClient, ClientError> {
+    NetBoxClient::new_unchecked_for_tests(endpoint, token)
+}
+
+#[cfg(not(feature = "test-http"))]
+fn build_netbox_client(endpoint: &str, token: NetBoxToken) -> Result<NetBoxClient, ClientError> {
+    NetBoxClient::new(endpoint, token)
 }
 
 /// Map a NetBox client construction failure. The endpoint scheme was

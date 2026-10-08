@@ -21,27 +21,41 @@
 //!   https-required, run-active, not-retryable, plan-expired;
 //! - **happy paths** — config upsert → get roundtrip, runs list/get
 //!   after an enqueued run, retry of a failed below-cap run;
-//! - **dry-run gates** — the not-configured / not-applied preconditions
-//!   plus the 502 `NETBOX_UNREACHABLE` transport leg against a dead
-//!   HTTPS port.
+//! - **dry-run gates** — the not-configured / not-applied preconditions,
+//!   the 502 `NETBOX_UNREACHABLE` transport leg against a dead HTTPS
+//!   port, and the fail-closed 400 `NETBOX_TOKEN_MISSING` when the
+//!   stored ciphertext no longer decrypts;
+//! - **dry-run over a mock NetBox** — via this crate's dev-only
+//!   `test-http` client seam (see `build_netbox_client` in
+//!   handlers/netbox.rs), a wiremock NetBox driven through the real
+//!   route: a 401 → 502 `NETBOX_AUTH_FAILED`, and an all-empty remote
+//!   → 200 with the contract's plan shape asserted field-by-field;
+//! - **run payload degradation** — an unparseable `plan_json` column
+//!   comes back as the raw string, not null and not an error.
 //!
-//! ## Dry-run success path — deliberate gap
+//! ## Plain-HTTP test seam
 //!
-//! The full success leg (mock NetBox over wiremock, asserting the plan
-//! shape) lives in the adapter/worker suites (PR 4), which can use the
-//! test-only plain-HTTP client constructor. The BFF handler builds
-//! `NetBoxClient::new` (HTTPS-only, no injection seam by design — the
-//! production path must not be mockable through `AppState`), so this
-//! suite exercises the transport leg against a dead `https://127.0.0.1:1`
-//! endpoint (connection refused → 502 `NETBOX_UNREACHABLE`) and leaves
-//! the plan-shape assertions to the PR-4 wiremock suites.
+//! wiremock serves plain HTTP, while the production dry-run path is
+//! HTTPS-only end to end (accept-time gate + fail-closed client
+//! constructor). The crate's `test-http` feature — enabled for this
+//! suite by the self dev-dependency in Cargo.toml, mirroring how
+//! `chv-controlplane-service` enables the adapter's `test-http` for
+//! its wiremock suites — switches the handler's client seam to the
+//! adapter's test-only plain-HTTP constructor. Configs pointing at the
+//! mock are seeded through the repository (bypassing the BFF's
+//! accept-time HTTPS gate, which has its own test above).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use chv_architecture_validate::model::{
+    CHVArchitecture, Instance, InstanceNetwork, InstancePlacement, InstanceResources, Metadata,
+    Network, NetworkType, Server, ServerResources,
+};
 use chv_common::SystemClock;
 use chv_controlplane_store::{
     AlertRepository, ApplyRunCreateInput, ApplyRunRepository, BackupRepository,
@@ -61,6 +75,8 @@ use chv_webui_bff::{AppState, BffError};
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
+use wiremock::matchers::{method, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ---------------------------------------------------------------------------
 // Scaffolding (mirrors tests/architecture_permission_matrix.rs)
@@ -301,6 +317,17 @@ const MINIMAL_MODEL_JSON: &str = r#"{"apiVersion":"chv.kubedo.io/v1alpha1","kind
 /// plus a `succeeded` apply run referencing it — the projection source
 /// the dry-run/export gates resolve. Returns the version id.
 async fn seed_applied_version(state: &AppState, arch_id: &str) -> String {
+    seed_applied_version_with_model(state, arch_id, MINIMAL_MODEL_JSON).await
+}
+
+/// Like [`seed_applied_version`], but with an explicit
+/// `normalized_model_json` (used by the wiremock dry-run suites, whose
+/// plan assertions need a non-empty architecture).
+async fn seed_applied_version_with_model(
+    state: &AppState,
+    arch_id: &str,
+    model_json: &str,
+) -> String {
     let architecture_id = ArchitectureId::new(arch_id).expect("valid architecture id");
     let version_id = ArchitectureVersionId::new(format!("aver-{arch_id}")).expect("valid id");
     VersionRepository::new(state.pool.clone())
@@ -310,7 +337,7 @@ async fn seed_applied_version(state: &AppState, arch_id: &str) -> String {
             version_number: 1,
             yaml_content: String::new(),
             design_graph_json: None,
-            normalized_model_json: Some(MINIMAL_MODEL_JSON.to_string()),
+            normalized_model_json: Some(model_json.to_string()),
             change_summary: Some("seeded by netbox route tests".to_string()),
             created_by: None,
         })
@@ -331,6 +358,83 @@ async fn seed_applied_version(state: &AppState, arch_id: &str) -> String {
         .await
         .expect("seed succeeded apply run");
     version_id.into_inner()
+}
+
+/// The projected architecture for the wiremock dry-run suites — one
+/// server, one VLAN network with a CIDR, one instance with a fixed IP
+/// on that network: exactly one object of each of the six mapped
+/// kinds. Mirrors `fixture_architecture` in
+/// `chv-controlplane-service/src/netbox_projection_worker_tests.rs` so
+/// the two suites pin the same mapping inputs.
+fn fixture_architecture() -> CHVArchitecture {
+    CHVArchitecture {
+        api_version: "chv.kubedo.io/v1alpha1".to_string(),
+        kind: "CHVArchitecture".to_string(),
+        metadata: Metadata {
+            name: "t1".to_string(),
+            display_name: None,
+            description: None,
+            environment: Some("production".to_string()),
+            owner: Some("alice".to_string()),
+            labels: [("team".to_string(), "platform".to_string())].into(),
+        },
+        servers: vec![Server {
+            name: "chv-node-01".to_string(),
+            management_ip: None,
+            role: None,
+            labels: BTreeMap::new(),
+            resources: Some(ServerResources {
+                cpu_cores: Some(4),
+                memory_gb: Some(8),
+            }),
+            networks: None,
+        }],
+        networks: vec![Network {
+            name: "backend".to_string(),
+            network_type: NetworkType::Vlan,
+            bridge: None,
+            vlan_id: Some(42),
+            cidr: Some("10.42.0.0/24".to_string()),
+            gateway: None,
+            dns: Vec::new(),
+            dhcp: None,
+        }],
+        datastores: Vec::new(),
+        backup_targets: Vec::new(),
+        backup_policies: Vec::new(),
+        images: Vec::new(),
+        templates: Vec::new(),
+        instances: vec![Instance {
+            name: "vm-01".to_string(),
+            template: None,
+            placement: Some(InstancePlacement {
+                server: Some("chv-node-01".to_string()),
+            }),
+            resources: Some(InstanceResources {
+                cpu: Some(2),
+                memory_mb: Some(2048),
+            }),
+            disks: Vec::new(),
+            networks: vec![InstanceNetwork {
+                name: "backend".to_string(),
+                ip: Some("10.42.0.5".to_string()),
+            }],
+            cloud_init: None,
+            backup: None,
+            tags: Vec::new(),
+        }],
+        ssh_keys: Vec::new(),
+        instance_users: Vec::new(),
+        roles: Vec::new(),
+        users: Vec::new(),
+        projects: Vec::new(),
+    }
+}
+
+/// The model JSON persisted as the applied version's
+/// `normalized_model_json` for the wiremock dry-run suites.
+fn fixture_model_json() -> String {
+    serde_json::to_string(&fixture_architecture()).expect("model serializes")
 }
 
 /// Upsert a projection config directly through the repository (bypasses
@@ -926,6 +1030,265 @@ async fn dry_run_unreachable_netbox_is_502_netbox_unreachable() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "dry-run dead port: {body}");
     assert_eq!(body["code"], serde_json::json!("NETBOX_UNREACHABLE"));
+}
+
+/// A stored ciphertext that no longer decrypts (here: corrupted via
+/// direct SQL) fails closed on dry-run: 400 with the literal
+/// `NETBOX_TOKEN_MISSING` code — never the ciphertext, never a 500.
+/// The config row exists, so the not-configured gate passes and the
+/// decrypt failure is what must surface.
+#[tokio::test]
+async fn dry_run_corrupted_ciphertext_is_400_netbox_token_missing() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "tokmissing", "u-alice", None).await;
+    seed_applied_version(&state, &arch).await;
+    seed_config(&state, &arch, "https://netbox.example.internal").await;
+
+    // Corrupt the stored ciphertext directly: the row still exists
+    // (row-present == token-set on config responses), but the secret
+    // can no longer be decrypted. The `enc:` prefix is required —
+    // unprefixed values are backward-compatibility plaintext and would
+    // pass through; a well-formed prefix with a bogus payload fails
+    // closed (hex/GCM authentication).
+    sqlx::query(
+        "UPDATE netbox_projection_config SET token_ciphertext = 'enc:deadbeef' WHERE architecture_id = ?",
+    )
+    .bind(&arch)
+    .execute(&state.pool)
+    .await
+    .expect("corrupt ciphertext");
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, raw) = post_raw(
+        &state,
+        "/v1/architectures/netbox/export/dry-run",
+        &operator,
+        &format!(r#"{{"id":"{arch}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "corrupted ciphertext: {raw}"
+    );
+    assert!(
+        raw.contains("\"NETBOX_TOKEN_MISSING\""),
+        "literal NETBOX_TOKEN_MISSING code must be in the body: {raw}"
+    );
+    // Fail-closed: the ciphertext blob never reaches the wire.
+    assert!(!raw.contains("deadbeef"), "ciphertext echoed: {raw}");
+}
+
+/// A NetBox that rejects the configured token (401 on the first list
+/// endpoint) answers 502 with the literal `NETBOX_AUTH_FAILED` code.
+/// The mock is reached through the crate's dev-only `test-http` client
+/// seam (see the module doc); the config is seeded repository-side
+/// because the BFF's accept-time gate (rightly) refuses plain HTTP.
+#[tokio::test]
+async fn dry_run_netbox_rejecting_token_is_502_netbox_auth_failed() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "authfail", "u-alice", None).await;
+    seed_applied_version(&state, &arch).await;
+
+    let server = MockServer::start().await;
+    // 401 on every GET — the first per-kind list endpoint the runner
+    // fetches fails auth.
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    seed_config(&state, &arch, &server.uri()).await;
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, raw) = post_raw(
+        &state,
+        "/v1/architectures/netbox/export/dry-run",
+        &operator,
+        &format!(r#"{{"id":"{arch}"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "401 mock: {raw}");
+    assert!(
+        raw.contains("\"NETBOX_AUTH_FAILED\""),
+        "literal NETBOX_AUTH_FAILED code must be in the body: {raw}"
+    );
+}
+
+/// Dry-run against an all-empty NetBox (every per-kind list and every
+/// natural-key probe returns an empty page) succeeds with the
+/// contract's plan shape, asserted field-by-field: the fixture
+/// architecture projects exactly one object of each of the six mapped
+/// kinds, all `create` (nothing of ours exists remotely). Mirrors the
+/// worker-suite fixture (`netbox_projection_worker_tests.rs`).
+#[tokio::test]
+async fn dry_run_against_empty_netbox_returns_contract_plan_shape() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "planshape", "u-alice", None).await;
+    seed_applied_version_with_model(&state, &arch, &fixture_model_json()).await;
+
+    let server = MockServer::start().await;
+    // Every GET under /api/ — the six per-kind custom-field lists and
+    // the natural-key probes alike — answers an empty page.
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "next": null,
+            "results": [],
+        })))
+        .mount(&server)
+        .await;
+    seed_config(&state, &arch, &server.uri()).await;
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, body) = post_json(
+        &state,
+        "/v1/architectures/netbox/export/dry-run",
+        &operator,
+        &format!(r#"{{"id":"{arch}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dry-run against empty netbox: {body}"
+    );
+
+    // The contract's plan shape, field by field.
+    assert_eq!(body["mapping_version"], serde_json::json!("v1"));
+    assert_eq!(body["architecture_id"], serde_json::json!(arch));
+    assert_eq!(body["architecture_version"], serde_json::json!(1));
+    assert_eq!(body["retention"], serde_json::json!("mark_stale"));
+    assert_eq!(
+        body["summary"],
+        serde_json::json!({"create": 6, "update": 0, "no_op": 0, "conflict": 0, "stale": 0}),
+        "one create per mapped kind: {body}"
+    );
+
+    // Entries: six creates, one per kind, each with the action/kind/ref
+    // fields the contract's entry shape defines.
+    let entries = body["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 6, "one entry per mapped kind: {body}");
+    let mut kinds: Vec<&str> = entries
+        .iter()
+        .map(|entry| {
+            assert_eq!(
+                entry["action"],
+                serde_json::json!("create"),
+                "entry: {entry}"
+            );
+            // A create carries no diff lines.
+            assert_eq!(entry["changes"], serde_json::json!([]), "entry: {entry}");
+            let kind = entry["kind"].as_str().expect("kind string");
+            let reference = entry["chv_resource_ref"].as_str().expect("ref string");
+            assert!(
+                reference.contains('/'),
+                "chv_resource_ref is servers/<name>-style: {entry}"
+            );
+            assert!(
+                !entry["netbox_natural_key"]
+                    .as_object()
+                    .expect("natural key object")
+                    .is_empty(),
+                "entry carries its natural key: {entry}"
+            );
+            assert!(
+                entry["external_id"].as_str().is_some_and(|s| !s.is_empty()),
+                "entry carries an external id: {entry}"
+            );
+            kind
+        })
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        [
+            "device",
+            "interface",
+            "ip_address",
+            "prefix",
+            "virtual_machine",
+            "vlan"
+        ],
+        "exactly one entry of each mapped kind: {body}"
+    );
+
+    // The dry-run event carries the contract's event fields:
+    // architecture id, run id (null — nothing persisted), trigger
+    // (manual — the only way in is the API), and the summary counts.
+    let events: Vec<(String,)> = sqlx::query_as(
+        "SELECT COALESCE(details, '') FROM events WHERE message = 'architecture_netbox_dry_run'",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .expect("fetch events");
+    assert_eq!(events.len(), 1, "exactly one dry-run event: {events:?}");
+    let details = &events[0].0;
+    assert!(
+        details.contains(&arch),
+        "event carries architecture id: {details}"
+    );
+    assert!(
+        details.contains("\"run_id\":null"),
+        "event carries run_id: null (no run persisted): {details}"
+    );
+    assert!(
+        details.contains("\"trigger\":\"manual\""),
+        "event carries trigger manual: {details}"
+    );
+    assert!(
+        details.contains("\"create\":6"),
+        "event carries the summary counts: {details}"
+    );
+}
+
+/// An unparseable `plan_json` column degrades to the raw string on
+/// runs/get (the contract: parsed JSON when parseable, raw otherwise) —
+/// never null, never a 500.
+#[tokio::test]
+async fn runs_get_unparseable_plan_json_returns_raw_string() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "rawplan", "u-alice", None).await;
+    let version_id = seed_applied_version(&state, &arch).await;
+
+    let run_repo = NetboxProjectionRunRepository::new(state.pool.clone());
+    let run_id = chv_controlplane_types::architecture::NetboxProjectionRunId::new("netrun-raw-1")
+        .expect("valid id");
+    run_repo
+        .create(chv_controlplane_store::NetboxProjectionRunCreateInput {
+            id: run_id.clone(),
+            architecture_id: ArchitectureId::new(&arch).expect("valid id"),
+            architecture_version_id: ArchitectureVersionId::new(&version_id).expect("valid id"),
+            trigger_kind: chv_controlplane_types::architecture::NetboxProjectionTrigger::Manual,
+            mode: chv_controlplane_types::architecture::NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: None,
+        })
+        .await
+        .expect("create run");
+
+    // A plan payload that is not JSON (a truncated write, say).
+    sqlx::query("UPDATE netbox_projection_runs SET plan_json = 'not-json{' WHERE id = ?")
+        .bind(run_id.as_str())
+        .execute(&state.pool)
+        .await
+        .expect("corrupt plan_json");
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, body) = post_json(
+        &state,
+        "/v1/architectures/netbox/runs/get",
+        &operator,
+        &format!(r#"{{"id":"{arch}","run_id":"{run_id}"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "runs/get with garbage plan: {body}");
+    assert_eq!(
+        body["plan_json"],
+        serde_json::json!("not-json{"),
+        "the raw string comes back verbatim — not null, not an error: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
