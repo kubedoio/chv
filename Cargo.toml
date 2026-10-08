@@ -42,9 +42,37 @@ resolver = "2"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = { version = "0.12", features = ["tls"] }
-tonic-health = "0.12"
-prost = "0.13"
+# tonic 0.14 split the old `tls` feature by crypto provider
+# (`tls-ring` / `tls-aws-lc`) plus optional root stores
+# (`tls-native-roots` / `tls-webpki-roots`, neither needed — every CHV
+# TLS consumer loads its CA/cert material explicitly from PEM files).
+# `tls-ring` keeps the ring provider the rest of the rustls stack uses
+# (sqlx runtime-tokio-rustls, the stord migration mTLS listener).
+#
+# Feature set: transport + server + channel (hyper-based serving and
+# clients), codegen (generated service traits; also what tonic-health
+# requires), the ring TLS stack (which enables `tls-connect-info` — the
+# CP's peer-identity extractor reads `TlsConnectInfo` from request
+# extensions), and `router`. The last one is not optional for CHV:
+# tonic 0.14 moved multi-service composition (`Server::add_service` →
+# `Router`) onto axum, and every CHV gRPC server composes at least
+# health + its main service through it. `router` therefore pulls axum
+# 0.8 into the graph alongside the workspace's direct axum 0.7 — a
+# duplicate that deny.toml's `deny-multiple-versions` gate would
+# forbid; the known axum 0.8.9 is explicitly `skip`-listed there with
+# a removal condition (the ruled separate axum 0.8 co-move PR, #235).
+tonic = { version = "0.14", default-features = false, features = [
+    "transport",
+    "server",
+    "channel",
+    "codegen",
+    "router",
+    "tls-ring",
+] }
+tonic-health = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"

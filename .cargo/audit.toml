@@ -36,14 +36,16 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
-    #   Pulled transitively by tonic 0.12 for client TLS PEM parsing.
-    #   Upstream archived the repo and folded the parser into
-    #   rustls-pki-types >= 1.9; tonic 0.13+ uses the new API.
+    #   Since the tonic 0.12 -> 0.14 bump (#235 PR 1) the crate is a
+    #   DIRECT dependency of chv-stord-core only (PEM parsing in
+    #   src/server.rs + the migration mTLS tests) — tonic 0.14 no
+    #   longer pulls it (upstream archived the repo and folded the
+    #   parser into rustls-pki-types >= 1.9).
     #   Upstream:
     #     - https://github.com/rustls/pemfile/issues/61
     #     - https://github.com/hyperium/tonic/pull/2103
-    #   Removal condition: CHV upgrades tonic 0.12 -> 0.14+ (deferred —
-    #   gRPC-stack-wide change, not in scope for this supply-chain PR).
+    #   Removal condition: #235 PR 2 migrates the three direct sites to
+    #   rustls-pki-types::pem and drops the dependency.
     "RUSTSEC-2025-0134",
 
     # Removed 2026-10-01 (issue #177 resolved — rust-s3 replaced by
