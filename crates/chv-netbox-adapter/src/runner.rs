@@ -196,20 +196,23 @@ impl NetboxProjectionRunner {
 
         // Resolution indexes: (kind rank, natural key) and (kind rank,
         // raw external id) → NetBox id, mirroring the lookups
-        // `compute_plan` performed, plus the id-keyed remote objects for
-        // the delete-side ownership re-verification.
+        // `compute_plan` performed, plus the (kind, id)-keyed remote
+        // objects for the delete-side ownership re-verification.
         let mut remote_by_key: BTreeMap<(u8, String), i64> = BTreeMap::new();
         let mut remote_by_ext: BTreeMap<(u8, String), i64> = BTreeMap::new();
-        for (netbox_id, remote) in &remote_by_id {
+        for (&(kind, netbox_id), remote) in &remote_by_id {
+            debug_assert_eq!(kind, remote.kind);
             let key = (remote.kind.rank(), natural_key_string(&remote.natural_key));
-            // `remote_by_id` iterates in ascending NetBox-id order, the
-            // same order `compute_plan` saw — on a natural key occupied
-            // by several objects, keep the first (lowest-id) match so
-            // the runner resolves exactly the object the pure core
-            // planned against.
-            remote_by_key.entry(key).or_insert(*netbox_id);
+            // `remote_by_id` iterates in (kind, ascending NetBox-id)
+            // order — the same order `compute_plan` saw — on a natural
+            // key occupied by several objects, keep the first
+            // (lowest-id) match so the runner resolves exactly the
+            // object the pure core planned against. Multiplicity is a
+            // within-kind property, so kind-major iteration preserves
+            // the within-kind lowest-id semantics.
+            remote_by_key.entry(key).or_insert(netbox_id);
             if let Some(ext) = remote.custom_fields.get(&input.names.external_id) {
-                remote_by_ext.insert((remote.kind.rank(), ext.clone()), *netbox_id);
+                remote_by_ext.insert((remote.kind.rank(), ext.clone()), netbox_id);
             }
         }
 
@@ -386,9 +389,20 @@ impl NetboxProjectionRunner {
                                 // plan: only delete an object whose
                                 // remote marker still proves our
                                 // ownership of this architecture.
-                                let owned = remote_by_id.get(&netbox_id).and_then(|remote| {
-                                    ManagedMarker::parse(&remote.custom_fields, &input.names)
-                                });
+                                // The lookup is (kind, id)-keyed —
+                                // NetBox ids are per-kind, so the id
+                                // alone would not identify the
+                                // object (see
+                                // `fetch_remote_state`).
+                                let owned =
+                                    remote_by_id
+                                        .get(&(entry.kind, netbox_id))
+                                        .and_then(|remote| {
+                                            ManagedMarker::parse(
+                                                &remote.custom_fields,
+                                                &input.names,
+                                            )
+                                        });
                                 let verified = owned
                                     .filter(|marker| {
                                         marker.is_owned_by_chv()
@@ -488,7 +502,7 @@ impl NetboxProjectionRunner {
         (
             MappingOutput,
             NetboxProjectionPlan,
-            BTreeMap<i64, NetBoxRemoteObject>,
+            BTreeMap<(NetBoxKind, i64), NetBoxRemoteObject>,
         ),
         RunnerError,
     > {
@@ -537,21 +551,36 @@ impl NetboxProjectionRunner {
     /// The six per-kind lists are fetched **concurrently** (each is a
     /// full paginated query that can take up to the request timeout);
     /// the natural-key probes stay sequential — they are per-object and
-    /// bounded by the plan size. Results are deduplicated by NetBox id
-    /// into a `BTreeMap`, so the order handed to `compute_plan` stays
+    /// bounded by the plan size. Results are deduplicated into a
+    /// `BTreeMap`, so the order handed to `compute_plan` stays
     /// deterministic regardless of completion order.
     ///
     /// Natural-key ambiguity (a probe matching several remote objects,
     /// e.g. `10.42.0.5/24` and `10.42.0.5/32`) is **not** an error:
     /// every match enters the remote state, and the pure core degrades
     /// the collision to a per-entry `conflict` — the run continues.
+    ///
+    /// The map is keyed by `(kind, NetBox id)` — NetBox ids are only
+    /// unique **per kind** (each content type has its own primary-key
+    /// sequence), so a vlan and a device routinely share the same id.
+    /// Keying by id alone collapses same-id objects into one entry,
+    /// each insert silently overwriting the last: on real NetBox a
+    /// converged six-object state reduces to the single object whose
+    /// probe runs last, every plan after the first degrades to
+    /// duplicate creates, and the duplicates trip NetBox's
+    /// nested-reference ambiguity guards (observed in qualification
+    /// run 37983487636: only the IP — the last probe in kind rank
+    /// order — survived, and the duplicate vlan made the prefix
+    /// create fail with "Multiple objects match {'vid': 42}"). The
+    /// simulator assigns globally-unique ids from one counter, so
+    /// only the real-NetBox lane can see this.
     async fn fetch_remote_state(
         &self,
         desired: &[NetBoxObject],
         names: &CustomFieldNames,
         architecture_id: &str,
-    ) -> Result<BTreeMap<i64, NetBoxRemoteObject>, ClientError> {
-        let mut by_id: BTreeMap<i64, NetBoxRemoteObject> = BTreeMap::new();
+    ) -> Result<BTreeMap<(NetBoxKind, i64), NetBoxRemoteObject>, ClientError> {
+        let mut by_id: BTreeMap<(NetBoxKind, i64), NetBoxRemoteObject> = BTreeMap::new();
 
         // The six list methods have distinct opaque future types, so
         // they are boxed to share one `try_join_all` input.
@@ -585,7 +614,7 @@ impl NetboxProjectionRunner {
         ];
         for list in futures_util::future::try_join_all(kind_lists).await? {
             for entry in list {
-                by_id.insert(entry.netbox_id, entry.object);
+                by_id.insert((entry.object.kind, entry.netbox_id), entry.object);
             }
         }
 
@@ -607,7 +636,7 @@ impl NetboxProjectionRunner {
                 }
             };
             for entry in found {
-                by_id.insert(entry.netbox_id, entry.object);
+                by_id.insert((entry.object.kind, entry.netbox_id), entry.object);
             }
         }
 

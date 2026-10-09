@@ -252,6 +252,133 @@ impl NetboxBackend {
         }
     }
 
+    /// Print the raw instance answers for the standard fixture's
+    /// remote-state queries — per kind, the unfiltered list, the
+    /// by-architecture list, and the natural-key probe — to stderr
+    /// (captured in the qualification lane's run.log). Fixture-keyed
+    /// (vid 42, 10.42.0.0/24, chv-node-01, vm-01, backend,
+    /// 10.42.0.5; limit 50 = the client's PAGE_LIMIT) because the
+    /// scenarios share the standard fixture shape; the query forms
+    /// mirror the client's wire shapes.
+    async fn drift_dump(&self, architecture_id: &str) {
+        let cf = format!("cf_chv_architecture_id={architecture_id}");
+        let queries: Vec<(String, &str)> = vec![
+            ("/api/ipam/vlans/?limit=50".into(), "vlans unfiltered"),
+            (
+                format!("/api/ipam/vlans/?{cf}&limit=50"),
+                "vlans by architecture",
+            ),
+            (
+                "/api/ipam/vlans/?vid=42&limit=50".into(),
+                "vlan probe (vid 42)",
+            ),
+            ("/api/ipam/prefixes/?limit=50".into(), "prefixes unfiltered"),
+            (
+                format!("/api/ipam/prefixes/?{cf}&limit=50"),
+                "prefixes by architecture",
+            ),
+            (
+                "/api/ipam/prefixes/?prefix=10.42.0.0/24&limit=50".into(),
+                "prefix probe",
+            ),
+            ("/api/dcim/devices/?limit=50".into(), "devices unfiltered"),
+            (
+                format!("/api/dcim/devices/?{cf}&limit=50"),
+                "devices by architecture",
+            ),
+            (
+                "/api/dcim/devices/?name=chv-node-01&limit=50".into(),
+                "device probe",
+            ),
+            (
+                "/api/virtualization/virtual-machines/?limit=50".into(),
+                "virtual machines unfiltered",
+            ),
+            (
+                format!("/api/virtualization/virtual-machines/?{cf}&limit=50"),
+                "virtual machines by architecture",
+            ),
+            (
+                "/api/virtualization/virtual-machines/?name=vm-01&limit=50".into(),
+                "vm probe",
+            ),
+            (
+                "/api/virtualization/interfaces/?limit=50".into(),
+                "interfaces unfiltered",
+            ),
+            (
+                format!("/api/virtualization/interfaces/?{cf}&limit=50"),
+                "interfaces by architecture",
+            ),
+            (
+                "/api/virtualization/interfaces/?name=backend&limit=50".into(),
+                "interface probe (name only, VM half client-side)",
+            ),
+            (
+                "/api/ipam/ip-addresses/?limit=50".into(),
+                "ip addresses unfiltered",
+            ),
+            (
+                format!("/api/ipam/ip-addresses/?{cf}&limit=50"),
+                "ip addresses by architecture",
+            ),
+            (
+                "/api/ipam/ip-addresses/?address=10.42.0.5&limit=50".into(),
+                "ip probe",
+            ),
+        ];
+        for (path, label) in queries {
+            match self.raw_get(&path).await {
+                Some(body) => eprintln!("DRIFT EVIDENCE — {label} ({path}): {body}"),
+                None => eprintln!("DRIFT EVIDENCE — {label}: (simulator arm — in-process)"),
+            }
+        }
+        // The client half: what the runner's own client (same
+        // construction the worker's test factory uses) parses for the
+        // same queries at this instant. Raw rows + zero parsed = a
+        // parsing problem; zero rows + zero parsed = the instance;
+        // rows both places = the fetch at run time saw something
+        // else (timing).
+        if let Self::Real(live) = self {
+            let client = NetBoxClient::new_unchecked_for_tests(
+                live.base_url(),
+                NetBoxToken::new(live.token().to_string()),
+            )
+            .expect("drift-dump client");
+            let evidence = |label: &str, found: &[chv_netbox_adapter::RemoteNetBoxObject]| {
+                let ids: Vec<i64> = found.iter().map(|entry| entry.netbox_id).collect();
+                eprintln!(
+                    "DRIFT EVIDENCE (client) — {label}: {} rows, ids {ids:?}",
+                    found.len()
+                );
+            };
+            if let Ok(found) = client.get_vlans_by_vid(42).await {
+                evidence("vlan probe (vid 42)", &found);
+            }
+            if let Ok(found) = client.get_prefixes_by_cidr("10.42.0.0/24").await {
+                evidence("prefix probe", &found);
+            }
+            if let Ok(found) = client.get_devices_by_name("chv-node-01").await {
+                evidence("device probe", &found);
+            }
+            if let Ok(found) = client.get_virtual_machines_by_name("vm-01").await {
+                evidence("vm probe", &found);
+            }
+            if let Ok(found) = client.get_interfaces_by_name("backend", "vm-01").await {
+                evidence("interface probe", &found);
+            }
+            if let Ok(found) = client.get_ip_addresses_by_address("10.42.0.5").await {
+                evidence("ip probe", &found);
+            }
+            if let Ok(found) = client
+                .list_vlans_by_architecture("chv_architecture_id", architecture_id)
+                .await
+            {
+                evidence("vlans by architecture", &found);
+            }
+        }
+    }
+
     /// Bulk-load objects at caller-chosen natural keys and ids (sim:
     /// the `/__seed` control plane; real backend: API-driven
     /// creation — the caller-chosen id is NetBox's to assign, and
@@ -655,6 +782,17 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-reexport").await;
+    if run.status != NetboxProjectionRunStatus::Succeeded {
+        // Drift evidence: what the instance answers RIGHT NOW for the
+        // runner's exact queries (the persisted outcome says what the
+        // plan decided; only this says what the instance told the
+        // fetch that decided it). Qualification run 37980195431
+        // needed exactly this: five probes and five by-architecture
+        // lists allegedly returned empty pages over converged state
+        // that the unfiltered state dump showed — while the identical
+        // queries in `probes_find_converged_state` found everything.
+        backend.drift_dump("topo-sim").await;
+    }
     assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "re-export");
     // Secret-freedom: the recorded outcome (provenance envelope +
     // executed plan, the document the BFF later serves) carries no

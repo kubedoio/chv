@@ -892,6 +892,70 @@ async fn export_creates_all_objects_then_re_run_is_all_no_op() {
     assert_eq!(request_count(&server, "DELETE", "/api/").await, 0);
 }
 
+/// Real NetBox assigns ids per content type (per-table primary-key
+/// sequences), so a converged multi-kind state routinely has a vlan,
+/// a prefix, a device, a VM, an interface, and an IP all carrying the
+/// SAME id. The remote-state fetch must key its map by (kind, id):
+/// keyed by id alone, the six objects collapse into one entry and
+/// every plan after the first degrades to duplicate creates (the
+/// simulator masks this — its ids come from one global counter — so
+/// only the real-NetBox qualification lane could catch it; run
+/// 37983487636, where the duplicate vlan tripped NetBox's ambiguity
+/// guard on the prefix create). The wiremock mirror above assigns
+/// globally-distinct ids (`400 + i`), which is exactly why this
+/// needs its own fixture: every mirrored row here shares id 7.
+#[tokio::test]
+async fn re_run_is_all_no_op_when_kinds_share_netbox_ids() {
+    let db = TestDb::new().await;
+    let server = MockServer::start().await;
+    setup_projection(
+        &db,
+        &server.uri(),
+        "topo-1",
+        "v-1",
+        "apply-1",
+        "netrun-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+
+    // Converged remote state in the real NetBox shape: same natural
+    // keys and custom fields as the desired projection, one row per
+    // kind, every row id 7.
+    let mut by_path: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
+    for object in desired_objects("topo-1") {
+        let fixture = remote_fixture(7, &object);
+        by_path.entry(kind_path(&object)).or_default().push(fixture);
+    }
+    for (kind_path, results) in by_path {
+        Mock::given(method("GET"))
+            .and(path(kind_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(results)))
+            .mount(&server)
+            .await;
+    }
+
+    // `setup_projection` has already enqueued the post-apply export
+    // run — the first tick executes it directly against the mirrored
+    // state.
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, "netrun-1").await;
+    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    let outcome = outcome_of(&run);
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.summary.skipped, 6, "all no_op despite shared ids");
+    assert_eq!(outcome.summary.succeeded, 0);
+    assert_eq!(outcome.summary.failed, 0);
+    assert_eq!(outcome.plan.summary.create, 0);
+
+    // Nothing was written — a duplicate create over converged state
+    // is exactly the drift this pins.
+    assert_eq!(request_count(&server, "POST", "/api/").await, 0);
+    assert_eq!(request_count(&server, "PATCH", "/api/").await, 0);
+    assert_eq!(request_count(&server, "DELETE", "/api/").await, 0);
+}
+
 #[tokio::test]
 async fn partial_failure_aborts_and_retry_resumes_without_duplicate_create() {
     let db = TestDb::new().await;
