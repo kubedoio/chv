@@ -1,6 +1,7 @@
 use crate::cache::{NodeCache, PendingControlPlaneMessage, PendingControlPlaneMessageKind};
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::sync::Arc;
 use tonic::transport::Channel;
 
 pub struct ControlPlaneClient {
@@ -276,32 +277,158 @@ impl ControlPlaneClient {
         }
         Ok(())
     }
+}
 
-    pub async fn flush_pending_messages(&mut self, cache: &mut NodeCache) -> Result<(), ChvError> {
-        let pending = cache.pending_control_plane_messages().to_vec();
-        if pending.is_empty() {
-            return Ok(());
+/// Drain the pending control-plane queue on an agent tick (#582).
+/// The queue exists to survive control-plane unavailability, but several
+/// producers enqueue unconditionally — migration progress reports (the
+/// agent_server reporter) among them — and without a periodic drain those
+/// messages would sit queued until the next reconnect, which never comes
+/// during a stable connection: the CP's migration row would never update
+/// at all (masked before #582 by a vacuous convergence check that fired
+/// on the first poll), and the CP's memory-phase wait could never observe
+/// the agent's MemoryMigration/Completed phase reports either.
+///
+/// Called on every agent tick (~5 s) with the current telemetry client:
+/// - queue empty → no-op (no dispatch, no cache write);
+/// - drained → the cache is persisted;
+/// - dispatch failure → the unsent remainder is re-queued ahead of
+///   anything enqueued meanwhile, a connectivity failure is recorded,
+///   and `None` is returned so a later tick reconnects (the reconnect
+///   path flushes the re-queued remainder).
+///
+/// The queue is snapshotted and cleared under the lock, but the gRPC
+/// dispatches happen OUTSIDE it: the inner dispatch calls have no
+/// timeout of their own, so holding the lock across them would let a
+/// slow or half-open control plane wedge every other cache consumer
+/// (the migration reporter's try_lock-or-skip enqueue, and the
+/// agent-server RPC handlers) for the duration of the RPCs. Messages
+/// enqueued while a batch is in flight simply wait for the next tick.
+/// Each dispatch is also bounded by a 10 s deadline — a hung (but
+/// established) connection is converted into a connectivity failure
+/// and a client drop rather than stalling the agent tick forever.
+pub async fn drain_pending_control_plane_queue(
+    cache: &Arc<tokio::sync::Mutex<NodeCache>>,
+    cache_path: &std::path::Path,
+    telemetry: Option<ControlPlaneClient>,
+    connectivity: &mut crate::connectivity::ConnectivityTracker,
+) -> Option<ControlPlaneClient> {
+    drain_pending_control_plane_queue_with_timeout(
+        cache,
+        cache_path,
+        telemetry,
+        connectivity,
+        PENDING_DISPATCH_TIMEOUT,
+    )
+    .await
+}
+
+/// Deadline for a single queued-message dispatch inside the drain.
+/// The inner dispatch calls carry no timeout of their own, so without
+/// this a hung (but established) control-plane connection would stall
+/// the drain forever — and, because the failure path would never run,
+/// the agent would never record the connectivity failure or drop the
+/// client to reconnect. Acking a queued message is a fast unary for a
+/// healthy control plane; 10 s is far beyond anything legitimate.
+/// (Tests shrink it through `drain_pending_control_plane_queue_with_timeout`
+/// to pin the deadline behavior without waiting real seconds.)
+const PENDING_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn drain_pending_control_plane_queue_with_timeout(
+    cache: &Arc<tokio::sync::Mutex<NodeCache>>,
+    cache_path: &std::path::Path,
+    mut telemetry: Option<ControlPlaneClient>,
+    connectivity: &mut crate::connectivity::ConnectivityTracker,
+    dispatch_timeout: std::time::Duration,
+) -> Option<ControlPlaneClient> {
+    if telemetry.is_none() {
+        return telemetry;
+    }
+    // Snapshot and clear the queue under the lock, then dispatch
+    // outside it. The batch is only taken from memory here — the
+    // on-disk cache still holds it until the post-dispatch save, so a
+    // crash mid-dispatch loses nothing (the queue is at-least-once).
+    let batch = {
+        let mut locked = cache.lock().await;
+        let batch = locked.pending_control_plane_messages().to_vec();
+        if batch.is_empty() {
+            None
+        } else {
+            locked.replace_pending_control_plane_messages(Vec::new());
+            Some(batch)
         }
+    };
+    let Some(batch) = batch else {
+        return telemetry;
+    };
 
-        let total = pending.len();
-        for (i, message) in pending.iter().enumerate() {
-            let kind = format!("{:?}", message.kind);
-            tracing::info!(message_kind = %kind, "dispatching pending control-plane message");
-            if let Err(e) = self.dispatch_pending_message(message).await {
+    // Dispatch outside the lock; stop at the first failure and keep
+    // the unsent remainder (this batch plus anything enqueued while
+    // we were dispatching — the remainder goes back first, ahead of
+    // the newer messages, to preserve queue order). Each dispatch is
+    // bounded by the caller's deadline (see PENDING_DISPATCH_TIMEOUT).
+    let client = telemetry
+        .as_mut()
+        .expect("telemetry presence checked above");
+    let total = batch.len();
+    let mut failed_from = None;
+    for (i, message) in batch.iter().enumerate() {
+        let kind = format!("{:?}", message.kind);
+        match tokio::time::timeout(dispatch_timeout, client.dispatch_pending_message(message)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 tracing::warn!(
                     message_kind = %kind,
                     sent = i,
                     remaining = total - i,
                     error = %e,
-                    "dispatch pending message failed, re-queuing remaining"
+                    "failed to flush pending control-plane messages on tick"
                 );
-                cache.replace_pending_control_plane_messages(pending[i..].to_vec());
-                return Err(e);
+                failed_from = Some(i);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    message_kind = %kind,
+                    sent = i,
+                    remaining = total - i,
+                    timeout_secs = dispatch_timeout.as_secs(),
+                    "timed out flushing pending control-plane messages on tick"
+                );
+                failed_from = Some(i);
+                break;
             }
         }
+    }
 
-        cache.replace_pending_control_plane_messages(Vec::new());
-        Ok(())
+    // The commit (remainder re-queue and cache save) happens under the
+    // lock, unlike the dispatches: the save must be atomic with the
+    // queue mutation against concurrent enqueues, and it is a fast
+    // local JSON write — nothing like the unbounded RPCs above. A
+    // reporter whose try_lock lands in this window skips one report,
+    // which the ~5 s report cadence and the 90 s freshness budget
+    // absorb.
+    {
+        let mut locked = cache.lock().await;
+        if let Some(i) = failed_from {
+            let mut remainder = batch[i..].to_vec();
+            remainder.extend_from_slice(locked.pending_control_plane_messages());
+            locked.replace_pending_control_plane_messages(remainder);
+        }
+        if let Err(e) = locked.save(cache_path).await {
+            tracing::warn!(
+                error = %e,
+                "failed to save cache after draining pending control-plane messages"
+            );
+        }
+    }
+
+    if failed_from.is_some() {
+        connectivity.record_failure(chv_common::now_unix_ms());
+        None
+    } else {
+        telemetry
     }
 }
 
@@ -376,6 +503,15 @@ mod tests {
     struct MockTelemetryService {
         node_reports: Arc<Mutex<Vec<proto::NodeStateReport>>>,
         events: Arc<Mutex<Vec<proto::PublishEventRequest>>>,
+        migration_reports: Arc<Mutex<Vec<proto::MigrationProgress>>>,
+        /// When set, `report_migration_progress` stalls this long before
+        /// responding — used to pin that the per-tick drain dispatches
+        /// OUTSIDE the cache lock.
+        progress_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        /// Set at entry to `report_migration_progress`, before any
+        /// stall — lets tests synchronize on "a dispatch is in
+        /// flight" instead of guessing with a fixed sleep.
+        progress_started: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[tonic::async_trait]
@@ -474,8 +610,20 @@ mod tests {
 
         async fn report_migration_progress(
             &self,
-            _request: Request<proto::MigrationProgress>,
+            request: Request<proto::MigrationProgress>,
         ) -> Result<Response<proto::AckResponse>, Status> {
+            let delay_ms = self
+                .progress_delay_ms
+                .load(std::sync::atomic::Ordering::SeqCst);
+            self.progress_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            self.migration_reports
+                .lock()
+                .unwrap()
+                .push(request.into_inner());
             Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: "migration-progress".to_string(),
@@ -524,11 +672,16 @@ mod tests {
         }
     }
 
+    /// #582: the per-tick drain is what actually delivers the agent's
+    /// queued migration progress during a stable connection (the
+    /// queue was previously flushed only on reconnect). This pins the
+    /// wiring's contract: a queued MigrationProgress is dispatched,
+    /// the queue is emptied, the cache is persisted, and the client
+    /// is kept for the next tick.
     #[tokio::test]
-    async fn flush_pending_messages_drains_cache_outbox() {
+    async fn drain_pending_control_plane_queue_delivers_queued_migration_progress() {
         let telemetry = MockTelemetryService::default();
-        let node_reports = telemetry.node_reports.clone();
-        let events = telemetry.events.clone();
+        let migration_reports = telemetry.migration_reports.clone();
         let inventory = MockInventoryService;
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -550,44 +703,379 @@ mod tests {
             server.await.unwrap();
         });
 
-        let mut client =
-            ControlPlaneClient::new(format!("http://{}", bound_addr), None, None, None)
-                .await
-                .unwrap();
+        let client = ControlPlaneClient::new(format!("http://{}", bound_addr), None, None, None)
+            .await
+            .unwrap();
 
-        let mut cache = NodeCache::new("node-1");
-        cache.enqueue_pending_message(PendingControlPlaneMessage::node_state(
-            proto::NodeStateReport {
-                node_id: "node-1".to_string(),
-                state: "TenantReady".to_string(),
-                observed_generation: "7".to_string(),
-                health_status: "Healthy".to_string(),
-                last_error: String::new(),
-                reported_unix_ms: 0,
+        // The shape the agent_server migration reporter produces:
+        // progress enqueued into the cache's pending queue.
+        let mut cache_inner = NodeCache::new("node-1");
+        cache_inner.enqueue_pending_message(PendingControlPlaneMessage::migration_progress(
+            proto::MigrationProgress {
+                vm_id: "vm-1".to_string(),
+                operation_id: "op-1".to_string(),
+                phase: proto::MigrationPhase::ConvergingDisk as i32,
+                bytes_transferred: 2_097_152,
+                total_bytes: 10_737_418_240,
+                convergence_round: 1,
+                dirty_blocks_remaining: 500,
+                progress_percent: 45.0,
             },
         ));
-        cache.enqueue_pending_message(PendingControlPlaneMessage::event(
-            proto::PublishEventRequest {
-                meta: Some(proto::RequestMeta {
-                    operation_id: "op-1".to_string(),
-                    requested_by: "agent".to_string(),
-                    target_node_id: "node-1".to_string(),
-                    desired_state_version: "7".to_string(),
-                    request_unix_ms: 0,
-                }),
-                node_id: "node-1".to_string(),
-                severity: "warning".to_string(),
-                event_type: "NodeStateTransition".to_string(),
-                summary: "deferred".to_string(),
-                details_json: vec![],
+        let cache = Arc::new(tokio::sync::Mutex::new(cache_inner));
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache.json");
+        let mut connectivity = crate::connectivity::ConnectivityTracker::new();
+
+        let telemetry_client =
+            drain_pending_control_plane_queue(&cache, &cache_path, Some(client), &mut connectivity)
+                .await;
+
+        assert!(
+            telemetry_client.is_some(),
+            "a successful drain must keep the client for the next tick"
+        );
+        assert!(cache
+            .lock()
+            .await
+            .pending_control_plane_messages()
+            .is_empty());
+        assert_eq!(migration_reports.lock().unwrap().len(), 1);
+        assert_eq!(connectivity.consecutive_failures(), 0);
+
+        // The delivered message must be the migration progress itself,
+        // not just any message.
+        let delivered = migration_reports.lock().unwrap()[0].clone();
+        assert_eq!(delivered.vm_id, "vm-1");
+        assert_eq!(delivered.operation_id, "op-1");
+        assert_eq!(delivered.convergence_round, 1);
+        assert_eq!(delivered.dirty_blocks_remaining, 500);
+
+        // The next tick drains an empty queue: no-op — the client is
+        // kept, nothing further is dispatched, no connectivity change,
+        // no cache write. (This is the hot path for every idle tick
+        // in production.) Remove the file the first drain persisted so
+        // a no-op write would be visible.
+        std::fs::remove_file(&cache_path).unwrap();
+        let telemetry_client = drain_pending_control_plane_queue(
+            &cache,
+            &cache_path,
+            telemetry_client,
+            &mut connectivity,
+        )
+        .await;
+        assert!(
+            telemetry_client.is_some(),
+            "an empty queue must keep the client"
+        );
+        assert!(cache
+            .lock()
+            .await
+            .pending_control_plane_messages()
+            .is_empty());
+        assert_eq!(migration_reports.lock().unwrap().len(), 1);
+        assert_eq!(connectivity.consecutive_failures(), 0);
+        assert!(
+            !cache_path.exists(),
+            "an empty queue must not write the cache file"
+        );
+
+        let _ = tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// #582 failure path: when dispatch fails, the drain must drop the
+    /// client (so a later tick reconnects), record a connectivity
+    /// failure, and leave the message queued for the reconnect flush.
+    #[tokio::test]
+    async fn drain_pending_control_plane_queue_drops_client_and_requeues_on_failure() {
+        let telemetry = MockTelemetryService::default();
+        let inventory = MockInventoryService;
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let server = tonic::transport::Server::builder()
+                .layer(chv_observability::GrpcMetricsLayer::new())
+                .add_service(TelemetryServiceServer::new(telemetry))
+                .add_service(InventoryServiceServer::new(inventory))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        rx.await.ok();
+                    },
+                );
+            server.await.unwrap();
+        });
+
+        let client = ControlPlaneClient::new(format!("http://{}", bound_addr), None, None, None)
+            .await
+            .unwrap();
+
+        // Kill the control plane before draining: the next dispatch
+        // must fail (connection refused on the closed listener).
+        let _ = tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+
+        let mut cache_inner = NodeCache::new("node-1");
+        cache_inner.enqueue_pending_message(PendingControlPlaneMessage::migration_progress(
+            proto::MigrationProgress {
+                vm_id: "vm-1".to_string(),
+                operation_id: "op-1".to_string(),
+                phase: proto::MigrationPhase::ConvergingDisk as i32,
+                bytes_transferred: 2_097_152,
+                total_bytes: 10_737_418_240,
+                convergence_round: 1,
+                dirty_blocks_remaining: 500,
+                progress_percent: 45.0,
             },
         ));
+        let cache = Arc::new(tokio::sync::Mutex::new(cache_inner));
 
-        client.flush_pending_messages(&mut cache).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache.json");
+        let mut connectivity = crate::connectivity::ConnectivityTracker::new();
 
-        assert!(cache.pending_control_plane_messages().is_empty());
-        assert_eq!(node_reports.lock().unwrap().len(), 1);
-        assert_eq!(events.lock().unwrap().len(), 1);
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            drain_pending_control_plane_queue(&cache, &cache_path, Some(client), &mut connectivity),
+        )
+        .await
+        .expect("the failed drain must terminate (bounded reconnect backoff)");
+
+        assert!(
+            drained.is_none(),
+            "a failed drain must drop the client so a later tick reconnects"
+        );
+        assert_eq!(
+            cache.lock().await.pending_control_plane_messages().len(),
+            1,
+            "the message must stay queued for the reconnect flush"
+        );
+        assert_eq!(connectivity.consecutive_failures(), 1);
+    }
+
+    /// #582 deadline pin: a stalled (but established) control-plane
+    /// connection must not hang the per-tick drain forever — without
+    /// the per-dispatch deadline the failure path would never run,
+    /// so the agent would never record the connectivity failure or
+    /// drop the client to reconnect, wedging the tick loop. The
+    /// dispatch deadline is shrunk through the private helper (the
+    /// production value is 10 s) so the stall outlives it without
+    /// waiting real seconds.
+    #[tokio::test]
+    async fn drain_pending_control_plane_queue_times_out_a_stalled_dispatch() {
+        let telemetry = MockTelemetryService::default();
+        telemetry
+            .progress_delay_ms
+            .store(400, std::sync::atomic::Ordering::SeqCst);
+        let inventory = MockInventoryService;
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let server = tonic::transport::Server::builder()
+                .layer(chv_observability::GrpcMetricsLayer::new())
+                .add_service(TelemetryServiceServer::new(telemetry))
+                .add_service(InventoryServiceServer::new(inventory))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        rx.await.ok();
+                    },
+                );
+            server.await.unwrap();
+        });
+
+        let client = ControlPlaneClient::new(format!("http://{}", bound_addr), None, None, None)
+            .await
+            .unwrap();
+
+        let mut cache_inner = NodeCache::new("node-1");
+        cache_inner.enqueue_pending_message(PendingControlPlaneMessage::migration_progress(
+            proto::MigrationProgress {
+                vm_id: "vm-1".to_string(),
+                operation_id: "op-1".to_string(),
+                phase: proto::MigrationPhase::ConvergingDisk as i32,
+                bytes_transferred: 2_097_152,
+                total_bytes: 10_737_418_240,
+                convergence_round: 1,
+                dirty_blocks_remaining: 500,
+                progress_percent: 45.0,
+            },
+        ));
+        let cache = Arc::new(tokio::sync::Mutex::new(cache_inner));
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache.json");
+        let mut connectivity = crate::connectivity::ConnectivityTracker::new();
+
+        // A 50 ms deadline against a 400 ms stall: the drain must
+        // terminate on its own (the outer bound only catches a hang),
+        // take the failure path, and re-queue the message.
+        let started = std::time::Instant::now();
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drain_pending_control_plane_queue_with_timeout(
+                &cache,
+                &cache_path,
+                Some(client),
+                &mut connectivity,
+                std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("the stalled drain must terminate via its dispatch deadline");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the drain must fail fast on a stalled dispatch, not wait out the stall"
+        );
+
+        assert!(
+            drained.is_none(),
+            "a timed-out drain must drop the client so a later tick reconnects"
+        );
+        assert_eq!(
+            cache.lock().await.pending_control_plane_messages().len(),
+            1,
+            "the message must stay queued for the reconnect flush"
+        );
+        assert_eq!(connectivity.consecutive_failures(), 1);
+
+        let _ = tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// #582 lock-scope pin: the per-tick drain must dispatch OUTSIDE
+    /// the cache lock. The inner dispatch calls have no timeout of
+    /// their own, so a slow or half-open control plane would wedge
+    /// every other cache consumer (the migration reporter's
+    /// try_lock-or-skip enqueue, and the agent-server RPC handlers)
+    /// for the duration of the RPCs if the lock were held across
+    /// them. With the control plane stalling the report, a reporter
+    /// must still be able to enqueue, and the in-flight message must
+    /// be delivered while the newer one stays queued for the next
+    /// tick (the post-dispatch commit must not clobber it).
+    #[tokio::test]
+    async fn drain_pending_control_plane_queue_dispatches_outside_the_cache_lock() {
+        let telemetry = MockTelemetryService::default();
+        telemetry
+            .progress_delay_ms
+            .store(400, std::sync::atomic::Ordering::SeqCst);
+        let migration_reports = telemetry.migration_reports.clone();
+        let progress_started = telemetry.progress_started.clone();
+        let inventory = MockInventoryService;
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let server = tonic::transport::Server::builder()
+                .layer(chv_observability::GrpcMetricsLayer::new())
+                .add_service(TelemetryServiceServer::new(telemetry))
+                .add_service(InventoryServiceServer::new(inventory))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        rx.await.ok();
+                    },
+                );
+            server.await.unwrap();
+        });
+
+        let client = ControlPlaneClient::new(format!("http://{}", bound_addr), None, None, None)
+            .await
+            .unwrap();
+
+        let make_progress = |vm: &'static str| {
+            PendingControlPlaneMessage::migration_progress(proto::MigrationProgress {
+                vm_id: vm.to_string(),
+                operation_id: "op-1".to_string(),
+                phase: proto::MigrationPhase::ConvergingDisk as i32,
+                bytes_transferred: 2_097_152,
+                total_bytes: 10_737_418_240,
+                convergence_round: 1,
+                dirty_blocks_remaining: 500,
+                progress_percent: 45.0,
+            })
+        };
+
+        let mut cache_inner = NodeCache::new("node-1");
+        cache_inner.enqueue_pending_message(make_progress("vm-in-flight"));
+        let cache = Arc::new(tokio::sync::Mutex::new(cache_inner));
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache.json");
+
+        // Start the drain; the dispatch stalls 400ms in the mock.
+        let cache_for_drain = cache.clone();
+        let drain = tokio::spawn(async move {
+            let mut connectivity = crate::connectivity::ConnectivityTracker::new();
+            drain_pending_control_plane_queue(
+                &cache_for_drain,
+                &cache_path,
+                Some(client),
+                &mut connectivity,
+            )
+            .await
+        });
+
+        // Wait until the drain is provably mid-dispatch (the mock has
+        // entered report_migration_progress and is stalling) — NOT a
+        // fixed sleep, which an overloaded CI runner could schedule
+        // around. Once the dispatch has begun, the queue snapshot has
+        // necessarily already happened, so this try_lock plus enqueue
+        // exactly models the migration reporter racing a live drain.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !progress_started.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the drain never started dispatching"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let enqueued_during_dispatch = match cache.try_lock() {
+            Ok(mut locked) => {
+                locked.enqueue_pending_message(make_progress("vm-enqueued-mid-drain"));
+                true
+            }
+            Err(_) => false,
+        };
+
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+            .await
+            .expect("the drain must finish despite the stalled dispatch")
+            .expect("drain task must not panic");
+
+        assert!(
+            enqueued_during_dispatch,
+            "the cache lock must be free while the drain dispatches — \
+             holding it across the RPCs would starve the migration \
+             reporter and the agent-server handlers"
+        );
+        assert!(
+            drained.is_some(),
+            "a successful drain must keep the client for the next tick"
+        );
+        // The in-flight message was delivered; the one enqueued mid-drain
+        // stays queued for the next tick (the commit must not clobber it).
+        assert_eq!(migration_reports.lock().unwrap().len(), 1);
+        assert_eq!(migration_reports.lock().unwrap()[0].vm_id, "vm-in-flight");
+        let queued = cache.lock().await.pending_control_plane_messages().to_vec();
+        assert_eq!(
+            queued.len(),
+            1,
+            "the mid-drain enqueue must survive the commit"
+        );
 
         let _ = tx.send(());
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;

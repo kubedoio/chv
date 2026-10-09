@@ -55,7 +55,8 @@ completing remains covered by the post-pause whole-volume digest.
 **Pause-first mode (issue #394, Option C — opt-in stop-the-world).**
 `TriggerDiskMigrationRequest.pause_first` (threaded end-to-end: the
 agent's `MigrateVmRequest`→`MigrationConfig.pause_first`, the BFF
-vm-mutate migrate action's `pause_first` JSON field, and
+vm-mutate migrate action's `pause_first` JSON field, the WebUI
+migrate modal's pause-first checkbox, and
 `chvctl migrate start --pause-first` / `chvctl vm migrate
 --pause-first`) moves the VM-pause handshake to **before any source
 byte is read**: the task enters the `PAUSED_PRE_COPY` status phase
@@ -77,9 +78,10 @@ the migration at trigger time when a pause-first request comes back
 without the echo — a stord that predates the field drops the unknown
 request field (proto3) and would silently run the default path. The
 guard is one-directional: default-mode requests never require an
-echo, so a skewed stord still serves them. The WebUI does not expose
-the toggle yet (API/chvctl only); the UI surface is recorded
-follow-up work.
+echo, so a skewed stord still serves them. The WebUI's migrate modal
+exposes the opt-in as a pause-first checkbox with an honest downtime
+warning (landed via #582); the mode is now reachable from every
+surface: UI, API, and chvctl.
 
 ## Transport
 - gRPC bidirectional streaming: `StorageMigrationService.StreamBlocks` over a single `MigrationMessage` stream (`proto/node/chv-stord-migration.proto`)
