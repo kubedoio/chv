@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
+chv-monitoring-core = { path = "../chv-monitoring-core" }
+chv-monitoring-store = { path = "../chv-monitoring-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-architecture-reconcile = { path = "../chv-architecture-reconcile" }

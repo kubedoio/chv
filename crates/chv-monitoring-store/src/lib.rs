@@ -28,7 +28,7 @@ pub mod status;
 
 pub use config::MonitoringStoreConfig;
 pub use db::MonitoringStore;
-pub use error::{IngestOutcome, MonitoringStoreError};
+pub use error::{IngestOutcome, MonitoringStoreError, QueryRejection};
 pub use ingest::NodeBatch;
 pub use maintenance::MaintenanceReport;
 pub use query::{

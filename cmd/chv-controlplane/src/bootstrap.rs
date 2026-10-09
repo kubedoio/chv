@@ -370,6 +370,8 @@ pub async fn build_service(
             pool.clone(),
             lifecycle_service.clone(),
         )),
+        monitoring: monitoring_store.clone(),
+        monitoring_health: monitoring_health.clone(),
         jwt_secret: config.jwt_secret.clone(),
         agent_runtime_dir: config.agent_runtime_dir.clone(),
         cache: chv_webui_bff::BffCache::new(5),

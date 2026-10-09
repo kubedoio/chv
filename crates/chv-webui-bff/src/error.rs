@@ -13,6 +13,18 @@ pub enum BffError {
     Forbidden(String),
     Conflict(String),
     TooManyRequests(String),
+    /// 503 — the native monitoring subsystem is degraded or disabled
+    /// (query/alerts contract v1 `monitoring_unavailable`). NEVER means
+    /// nodes or VMs are unhealthy.
+    MonitoringUnavailable(String),
+    /// 400 — monitoring query contract violations with a typed code
+    /// from the contract vocabulary (`invalid_range`,
+    /// `query_too_large`, `unknown_metric`, `unsupported_source`,
+    /// `invalid_target_kind`).
+    MonitoringQuery {
+        code: String,
+        message: String,
+    },
     /// Endpoint exists in the routing surface but is not yet wired to a real
     /// implementation. Mapped to HTTP 501 with `code: "NOT_IMPLEMENTED"` so
     /// callers get a deterministic signal during phased rollouts. The string
@@ -200,6 +212,20 @@ impl IntoResponse for BffError {
             BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
             BffError::TooManyRequests(msg) => {
                 (StatusCode::TOO_MANY_REQUESTS, msg.clone(), "RATE_LIMITED")
+            }
+            BffError::MonitoringUnavailable(msg) => {
+                let body = Json(json!({
+                    "message": msg,
+                    "code": "MONITORING_UNAVAILABLE",
+                }));
+                return (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+            }
+            BffError::MonitoringQuery { code, message } => {
+                let body = Json(json!({
+                    "message": message,
+                    "code": code.to_uppercase(),
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
             }
             BffError::NotImplemented(msg) => {
                 (StatusCode::NOT_IMPLEMENTED, msg.clone(), "NOT_IMPLEMENTED")

@@ -1,5 +1,5 @@
 use crate::db::MonitoringStore;
-use crate::error::MonitoringStoreError;
+use crate::error::{MonitoringStoreError, QueryRejection};
 use chv_monitoring_core::model::{MetricKind, SampleQuality, Source, TargetKind, Unit};
 use sqlx::Row;
 use std::collections::BTreeMap;
@@ -165,6 +165,7 @@ impl MonitoringStore {
     ) -> Result<Vec<HistorySeries>, MonitoringStoreError> {
         if metric_ids.is_empty() || metric_ids.len() > MAX_METRIC_IDS_PER_QUERY {
             return Err(MonitoringStoreError::QueryRejected {
+                code: QueryRejection::QueryTooLarge,
                 reason: format!(
                     "between 1 and {} metric ids required",
                     MAX_METRIC_IDS_PER_QUERY
@@ -173,12 +174,14 @@ impl MonitoringStore {
         }
         if from_ms >= to_ms {
             return Err(MonitoringStoreError::QueryRejected {
+                code: QueryRejection::InvalidRange,
                 reason: "from_ms must be before to_ms".to_string(),
             });
         }
         let range = to_ms - from_ms;
         if range > MAX_AGGREGATED_MS_PUBLIC {
             return Err(MonitoringStoreError::QueryRejected {
+                code: QueryRejection::QueryTooLarge,
                 reason: format!("range exceeds the {MAX_AGGREGATED_MS_PUBLIC} ms ceiling"),
             });
         }
@@ -200,6 +203,7 @@ impl MonitoringStore {
             Resolution::Raw => {
                 if range > self.config.raw_retention_ms {
                     return Err(MonitoringStoreError::QueryRejected {
+                        code: QueryRejection::InvalidRange,
                         reason: format!(
                             "raw resolution is limited to the {} ms raw retention",
                             self.config.raw_retention_ms
@@ -211,6 +215,7 @@ impl MonitoringStore {
             Resolution::FiveMinute => {
                 if range > MAX_DETAILED_RANGE_MS {
                     return Err(MonitoringStoreError::QueryRejected {
+                        code: QueryRejection::InvalidRange,
                         reason: "5m resolution is limited to the 30-day detailed ceiling"
                             .to_string(),
                     });
@@ -356,6 +361,26 @@ impl MonitoringStore {
     /// by retention still reports — with `stale` quality and no value —
     /// so "current" never fabricates a reading and never silently
     /// forgets a target.
+    /// The distinct target ids of one kind that have any stored series
+    /// (bounded by `limit`). The `/overview` surface uses this to
+    /// enumerate targets when the request does not narrow them; the
+    /// bound is the contract's 100-target overview cap.
+    pub async fn list_targets(
+        &self,
+        target_kind: &TargetKind,
+        limit: usize,
+    ) -> Result<Vec<String>, MonitoringStoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT target_id FROM monitoring_series \
+             WHERE target_kind = ? ORDER BY target_id LIMIT ?",
+        )
+        .bind(target_kind.as_str())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn query_current(
         &self,
         target_kind: &TargetKind,
@@ -366,6 +391,7 @@ impl MonitoringStore {
     ) -> Result<Vec<CurrentSample>, MonitoringStoreError> {
         if metric_ids.len() > MAX_METRIC_IDS_PER_QUERY {
             return Err(MonitoringStoreError::QueryRejected {
+                code: QueryRejection::QueryTooLarge,
                 reason: format!("at most {} metric ids per query", MAX_METRIC_IDS_PER_QUERY),
             });
         }

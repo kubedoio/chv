@@ -165,6 +165,8 @@ async fn build_state() -> AppState {
         )),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
+        monitoring: None,
+        monitoring_health: chv_webui_bff::MonitoringHealth::new(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
         cache: chv_webui_bff::BffCache::new(5),
         // SystemClock is fine — these tests never depend on the BFF's clock

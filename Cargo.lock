@@ -1211,6 +1211,8 @@ dependencies = [
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
+ "chv-monitoring-store",
  "chv-netbox-adapter",
  "chv-webui-bff",
  "chv-webui-bff-api",

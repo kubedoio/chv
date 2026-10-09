@@ -13,8 +13,31 @@ pub enum MonitoringStoreError {
     InvalidConfiguration { reason: String },
     #[error("monitoring store is degraded: {reason}")]
     Degraded { reason: String },
-    #[error("query rejected: {reason}")]
-    QueryRejected { reason: String },
+    #[error("query rejected ({}): {}", code.as_str(), reason)]
+    QueryRejected {
+        code: QueryRejection,
+        reason: String,
+    },
+}
+
+/// Why a read query was rejected — the query/alerts contract v1 error
+/// vocabulary (`invalid_range`, `query_too_large`); the BFF maps these
+/// straight onto its wire error codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryRejection {
+    /// Malformed or out-of-bounds time range / resolution request.
+    InvalidRange,
+    /// A limit (metric count, range ceiling, point cap) was exceeded.
+    QueryTooLarge,
+}
+
+impl QueryRejection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QueryRejection::InvalidRange => "invalid_range",
+            QueryRejection::QueryTooLarge => "query_too_large",
+        }
+    }
 }
 
 /// The durable outcome of an ingestion attempt, mirroring the ingestion
