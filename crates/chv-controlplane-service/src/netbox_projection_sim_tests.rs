@@ -94,6 +94,7 @@ use chv_controlplane_types::architecture::{
 };
 use chv_netbox_adapter::ownership::CustomFieldNames;
 use chv_netbox_adapter::plan::RetentionPolicy;
+use chv_netbox_adapter::runner::NetboxProjectionOutcome;
 use chv_netbox_adapter::{
     NetBoxClient, NetBoxKind, NetBoxObject, NetBoxToken, NetboxEntryStatus, NetboxPlanAction,
     NetboxProjectionInput, NetboxProjectionRunner,
@@ -111,6 +112,65 @@ use crate::netbox_projection_worker_tests::{
     setup_post_apply_config_with_token, setup_projection_with_token, setup_topology_and_version,
     vid, worker_for, SITE, TOKEN,
 };
+
+// ---------------------------------------------------------------------------
+// Run-status assertions with drift diagnostics
+// ---------------------------------------------------------------------------
+
+/// Assert a projection run reached the expected terminal status,
+/// surfacing the persisted runner outcome on mismatch.
+///
+/// When the real-NetBox qualification lane's drift tripwire fires,
+/// the bare `assert_eq!` on the DB record is otherwise all the lane
+/// reports — yet the failing request (URL, status, response body)
+/// lives in the runner's persisted error summary, and the runner's
+/// sqlite vanishes with the compose stack. Print it here or lose it
+/// (this exact gap cost a whole dispatch round-trip in
+/// qualification run 37971829693).
+fn assert_run_status(
+    run: &chv_controlplane_types::architecture::NetboxProjectionRun,
+    expected: NetboxProjectionRunStatus,
+    context: &str,
+) {
+    if run.status != expected {
+        let mut diagnostics = format!(
+            "{context}: run status is {:?}, expected {:?}",
+            run.status, expected
+        );
+        if let Some(raw) = run.result_json.as_deref() {
+            let parsed = serde_json::from_str::<Value>(raw)
+                .ok()
+                .and_then(|envelope| {
+                    serde_json::from_value::<NetboxProjectionOutcome>(
+                        envelope.get("result").cloned()?,
+                    )
+                    .ok()
+                });
+            if let Some(outcome) = parsed {
+                diagnostics.push_str(&format!(
+                    "\nrunner error: {}",
+                    outcome
+                        .error
+                        .as_ref()
+                        .map(|error| error.message.as_str())
+                        .unwrap_or("(no abort error recorded)")
+                ));
+                diagnostics.push_str(&format!("\nsummary: {:?}", outcome.summary));
+                let non_succeeded: Vec<_> = outcome
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.status != NetboxEntryStatus::Succeeded)
+                    .collect();
+                diagnostics.push_str(&format!("\nnon-succeeded entries: {non_succeeded:#?}"));
+            } else {
+                diagnostics.push_str(&format!("\nraw result json: {raw}"));
+            }
+        } else {
+            diagnostics.push_str("\n(no persisted runner outcome)");
+        }
+        panic!("{diagnostics}");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Backend abstraction (simulator + real-NetBox qualification variant)
@@ -471,7 +531,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
     assert_eq!(runs.len(), 1, "exactly one post_apply run: {runs:?}");
     let first = &runs[0];
     assert_eq!(first.trigger_kind, NetboxProjectionTrigger::PostApply);
-    assert_eq!(first.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(first, NetboxProjectionRunStatus::Succeeded, "apply");
     assert!(
         first.finished_at.is_some(),
         "the run executed to terminal state"
@@ -580,7 +640,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-reexport").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "re-export");
     // Secret-freedom: the recorded outcome (provenance envelope +
     // executed plan, the document the BFF later serves) carries no
     // token material.
@@ -635,7 +695,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
         .iter()
         .find(|run| run.architecture_version_id == vid("v-2"))
         .expect("the v-2 post_apply run");
-    assert_eq!(second.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(second, NetboxProjectionRunStatus::Succeeded, "apply v-2");
 
     // The run projected the v2 model (provenance envelope).
     let envelope: Value = serde_json::from_str(second.result_json.as_deref().expect("result json"))
@@ -818,7 +878,7 @@ async fn foreign_object_at_natural_key_is_never_written_inner(backend: &NetboxBa
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-foreign").await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "foreign object");
 
     // The VLAN entry degraded to a conflict and was skipped.
     let outcome = outcome_of(&run);
@@ -1026,7 +1086,7 @@ async fn netbox_outage_never_changes_the_apply_result_inner(backend: &NetboxBack
         .expect("recovery tick succeeds");
 
     let run = get_run(&db, &runs[0].id.to_string()).await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "recovery");
     assert_eq!(
         run.attempt_count, 1,
         "the successful retry did not consume an attempt"
@@ -1193,7 +1253,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create_inn
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, &run_id).await;
-    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "retry");
     assert_eq!(
         run.attempt_count, 1,
         "the successful resume did not consume an attempt"
@@ -1346,7 +1406,11 @@ async fn manual_double_enqueue_coalesces_to_one_active_run_inner(backend: &Netbo
     );
     assert_eq!(runs[0].id, first_id);
     assert_eq!(runs[0].trigger_kind, NetboxProjectionTrigger::Manual);
-    assert_eq!(runs[0].status, NetboxProjectionRunStatus::Succeeded);
+    assert_run_status(
+        &runs[0],
+        NetboxProjectionRunStatus::Succeeded,
+        "coalesced manual",
+    );
     assert!(
         post_apply_runs(&db, "topo-coalesce").await.is_empty(),
         "the sweep must coalesce behind the active manual run"

@@ -503,18 +503,44 @@ impl NetBoxClient {
             .await
     }
 
-    /// Interfaces matching `name` + parent virtual machine name (the
-    /// Interface natural key). All matches are returned.
+    /// Interfaces matching the natural key (`name` on
+    /// `virtual_machine`). All matches are returned.
+    ///
+    /// The `virtual_machine` half of the key is applied client-side,
+    /// on the parsed rows — it MUST NOT become a query param. NetBox
+    /// 4.7.2 types the `virtual_machine` list filter as a
+    /// `ModelMultipleChoiceFilter` (netbox/virtualization/filtersets.py,
+    /// `VMInterfaceFilterSet`), whose form field is a Django
+    /// `ModelMultipleChoiceField`: it validates that the referenced
+    /// value EXISTS and answers 400 ("… is not one of the available
+    /// choices") instead of an empty page. The plain `name` filter is
+    /// a `MultiValueCharFilter` and answers an empty 200 for unknown
+    /// values. That asymmetry bites because the runner probes natural
+    /// keys BEFORE the plan creates anything: on a fresh instance the
+    /// VM does not exist yet, so a `virtual_machine` param would fail
+    /// the whole run (observed in qualification run 37971829693: the
+    /// interface probes were the only 400s — every other probe uses a
+    /// plain filter). The simulator does not model choice-field
+    /// existence validation, so this drift is only visible against
+    /// real NetBox.
     pub async fn get_interfaces_by_name(
         &self,
         name: &str,
         virtual_machine: &str,
     ) -> Result<Vec<RemoteNetBoxObject>, ClientError> {
-        self.lookup_all(
-            NetBoxKind::Interface,
-            &[("name", name), ("virtual_machine", virtual_machine)],
-        )
-        .await
+        self.lookup_all(NetBoxKind::Interface, &[("name", name)])
+            .await
+            .map(|found| {
+                found
+                    .into_iter()
+                    .filter(|object| {
+                        matches!(
+                            object.object.natural_key.get("virtual_machine"),
+                            Some(vm) if vm == virtual_machine
+                        )
+                    })
+                    .collect()
+            })
     }
 
     /// Prefixes matching the CIDR (the Prefix natural key). All matches
