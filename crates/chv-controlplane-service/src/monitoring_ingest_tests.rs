@@ -451,3 +451,31 @@ async fn disk_full_degrades_monitoring_but_not_lifecycle() {
         "history preserved, not reset"
     );
 }
+
+/// Counters are integer-valued end to end (exact decimal-string
+/// deltas on the wire and in the store): a float counter would be
+/// accepted and durably stored, then never surfaced by the
+/// integer-only query/rollup paths — rejected at the boundary instead
+/// of committing data that can never be read back.
+#[tokio::test]
+async fn float_counter_values_reject_whole_batch() {
+    let f = Fixture::new().await;
+    let mut sample = node_cpu_sample(now_ms(), 0.5);
+    sample.target_kind = "vm".to_string();
+    sample.target_id = f.vm_id.clone();
+    sample.metric_id = "vm.block.read_bytes_total".to_string();
+    sample.source = "vmm".to_string();
+    sample.kind = "counter".to_string();
+    sample.unit = "bytes".to_string();
+    sample.boot_id = "boot-1".to_string();
+    sample.identity_epoch = "epoch-1".to_string();
+    sample.value = Some(proto::metric_sample_v1::Value::FloatValue(1234.5));
+    let resp = f.ingest(0, vec![sample]).await;
+    assert_eq!(resp.outcome, "invalid_batch");
+    assert!(resp
+        .meta
+        .as_ref()
+        .unwrap()
+        .human_summary
+        .contains("integer"));
+}

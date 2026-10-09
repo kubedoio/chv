@@ -598,3 +598,195 @@ async fn corrupt_database_reports_degraded_not_panics() {
         "corruption is an error signal, got: {err}"
     );
 }
+
+/// Integer-valued gauges (byte counts, counts) must aggregate through
+/// both raw bucketing and rollups: they are stored in the exact
+/// integer column, and an aggregation that only reads the float column
+/// would turn every one of their history points into an absence.
+#[tokio::test]
+async fn integer_gauges_aggregate_in_history_and_rollups() {
+    let (_dir, s) = store().await;
+    let mut samples = Vec::new();
+    for i in 0..10u64 {
+        samples.push(
+            SampleBuilder::new(
+                TargetKind::Node,
+                "node-1",
+                "node.memory.available_bytes",
+                Source::NodeOs,
+                T0 + i * 1_000,
+            )
+            .unwrap()
+            .value(SampleValue::Integer(2_000_000_000 + i * 1_000_000))
+            .build()
+            .unwrap(),
+        );
+    }
+    s.ingest_node_batch("node-1", &batch("b", 0, samples), T0 + 10_000)
+        .await
+        .unwrap();
+
+    // Raw bucketing (5 points over the 10s range forces 2s buckets):
+    // every bucket must carry the mean of its integer observations.
+    let series = s
+        .query_history(
+            &TargetKind::Node,
+            "node-1",
+            &["node.memory.available_bytes".to_string()],
+            None,
+            T0,
+            T0 + 10_000,
+            5,
+            Resolution::Raw,
+        )
+        .await
+        .unwrap();
+    let gauge = &series[0];
+    assert!(!gauge.points.is_empty());
+    for p in &gauge.points {
+        assert_eq!(p.quality, SampleQuality::Valid);
+        assert!(p.value.is_some(), "integer gauge bucket has a value");
+    }
+
+    // Rollups: min/max/sum must aggregate the integer values, and the
+    // rollup history point must be Valid with a value.
+    s.run_maintenance(T0 + 60_000).await.unwrap();
+    let row = sqlx::query(
+        "SELECT value_min, value_max, value_count FROM monitoring_rollups
+         WHERE tier = '5m' AND metric_id = 'node.memory.available_bytes'",
+    )
+    .fetch_one(s.pool())
+    .await
+    .unwrap();
+    let (min, max, count): (Option<f64>, Option<f64>, Option<i64>) = (
+        row.get("value_min"),
+        row.get("value_max"),
+        row.get("value_count"),
+    );
+    assert_eq!(min, Some(2_000_000_000.0));
+    assert_eq!(max, Some(2_009_000_000.0));
+    assert_eq!(count, Some(10));
+
+    let series = s
+        .query_history(
+            &TargetKind::Node,
+            "node-1",
+            &["node.memory.available_bytes".to_string()],
+            None,
+            // The 5m window containing T0 starts before T0 — query
+            // from the window boundary or the rollup row falls outside
+            // the range.
+            T0 - (T0 % 300_000),
+            T0 - (T0 % 300_000) + 300_000,
+            5,
+            Resolution::FiveMinute,
+        )
+        .await
+        .unwrap();
+    let rolled = &series[0];
+    assert!(rolled
+        .points
+        .iter()
+        .any(|p| p.quality == SampleQuality::Valid && p.value.is_some()));
+}
+
+/// A counter delta that crosses an ingestion gap must be rated against
+/// the real time between its two samples: attributing it to a single
+/// bucket would inflate the rate by the gap's length.
+#[tokio::test]
+async fn counter_bucket_window_spans_the_real_gap() {
+    let (_dir, s) = store().await;
+    // Two observations 60s apart (a 50s silence between them), 100s
+    // range with 10 buckets ⇒ 10s nominal buckets.
+    let samples = vec![
+        iface_counter(T0, 1_000, "boot-a", "e"),
+        iface_counter(T0 + 60_000, 4_000, "boot-a", "e"),
+    ];
+    s.ingest_node_batch("node-1", &batch("b", 0, samples), T0 + 60_000)
+        .await
+        .unwrap();
+
+    let series = s
+        .query_history(
+            &TargetKind::Node,
+            "node-1",
+            &["node.net.rx_bytes_total".to_string()],
+            None,
+            T0,
+            T0 + 100_000,
+            10,
+            Resolution::Raw,
+        )
+        .await
+        .unwrap();
+    let counter = &series[0];
+    let delta_point = counter
+        .points
+        .iter()
+        .find(|p| p.value.is_some())
+        .expect("the gap-crossing delta is present");
+    assert_eq!(delta_point.integer_value, Some(3_000));
+    assert_eq!(
+        delta_point.window_ms, 60_000,
+        "window_ms is the observed span between the two samples, not the nominal bucket"
+    );
+    // The rate a consumer computes from the wire: 3000 bytes over the
+    // 60s observed span = 50 B/s (not 3000 over one 10s bucket).
+    let rate_per_second =
+        delta_point.integer_value.unwrap() as f64 * 1000.0 / delta_point.window_ms as f64;
+    assert!(
+        (rate_per_second - 50.0).abs() < 1e-9,
+        "rate is the true average, got {rate_per_second}"
+    );
+}
+
+/// A rollup window with a single valid counter observation carries no
+/// interval: the delta stays honestly absent (Valid always means the
+/// point has a number — a lone sample must not fabricate a 0 rate).
+#[tokio::test]
+async fn rollup_lone_counter_sample_has_no_delta() {
+    let (_dir, s) = store().await;
+    let samples = vec![iface_counter(T0, 1_234, "boot-a", "e")];
+    s.ingest_node_batch("node-1", &batch("b", 0, samples), T0 + 1_000)
+        .await
+        .unwrap();
+    s.run_maintenance(T0 + 60_000).await.unwrap();
+
+    let row = sqlx::query(
+        "SELECT counter_delta FROM monitoring_rollups
+         WHERE tier = '5m' AND metric_id = 'node.net.rx_bytes_total'",
+    )
+    .fetch_one(s.pool())
+    .await
+    .unwrap();
+    let delta: Option<i64> = row.get("counter_delta");
+    assert_eq!(delta, None, "a lone sample carries no interval");
+
+    let series = s
+        .query_history(
+            &TargetKind::Node,
+            "node-1",
+            &["node.net.rx_bytes_total".to_string()],
+            None,
+            // The 5m window containing T0 starts before T0 — query
+            // from the window boundary or the rollup row falls outside
+            // the range.
+            T0 - (T0 % 300_000),
+            T0 - (T0 % 300_000) + 300_000,
+            5,
+            Resolution::FiveMinute,
+        )
+        .await
+        .unwrap();
+    let rolled = &series[0];
+    let point = rolled
+        .points
+        .iter()
+        .find(|p| p.value.is_none())
+        .expect("the lone-sample window is visible");
+    assert_ne!(
+        point.quality,
+        SampleQuality::Valid,
+        "Valid always means has-a-number"
+    );
+}

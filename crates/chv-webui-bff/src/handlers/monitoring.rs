@@ -420,10 +420,14 @@ pub async fn overview(
             .await
             .map_err(map_store_error)?;
         let sample_values: Vec<Value> = samples.iter().map(current_value_json).collect();
+        // The FRESHEST sample's age answers "is anything reporting for
+        // this target?": one long-dead series among fresh ones must not
+        // paint the whole target stale (worst-case age is visible
+        // per-sample via each sample's own observed_at_ms).
         let age_seconds = samples
             .iter()
             .map(|s| now.saturating_sub(s.observed_at_ms) / 1000)
-            .max();
+            .min();
         targets.push(json!({
             "target_id": target_id,
             "samples": sample_values,
@@ -458,6 +462,10 @@ pub async fn health(
         "rejected_batches": snapshot.rejected_batches,
         "unavailable_batches": snapshot.unavailable_batches,
         "headroom_bytes": snapshot.headroom_bytes,
+        // True when the last headroom probe could not read the
+        // filesystem: ingestion fails open in that window, but the
+        // headroom floor is unverified until the next successful probe.
+        "headroom_probe_failed": snapshot.headroom_probe_failed,
         "raw_samples": snapshot.raw_samples,
         "generated_at_ms": now_ms(),
     })))

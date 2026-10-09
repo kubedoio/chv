@@ -247,7 +247,8 @@ impl MonitoringStore {
              FROM monitoring_samples
              WHERE target_kind = ? AND target_id = ? AND metric_id = ?
                AND source = ? AND dimensions_hash = ?
-               AND observed_at_ms >= ? AND observed_at_ms < ?",
+               AND observed_at_ms >= ? AND observed_at_ms < ?
+             ORDER BY observed_at_ms ASC",
         )
         .bind(&series.target_kind)
         .bind(&series.target_id)
@@ -266,6 +267,10 @@ impl MonitoringStore {
         let mut value_sum = 0.0f64;
         let mut counter_first: Option<i64> = None;
         let mut counter_last: Option<i64> = None;
+        // Number of valid integer observations in the window: a delta
+        // needs a real interval (two observations). A lone sample
+        // carries no rate — emitting 0 would fabricate an idle window.
+        let mut counter_obs = 0i64;
         let mut counter_delta: Option<i64> = None;
         let mut counter_epoch: Option<(String, String)> = None;
         // A reset is an epoch change between consecutive valid counter
@@ -281,7 +286,9 @@ impl MonitoringStore {
                 continue;
             }
             valid_count += 1;
-            if let Some(v) = value_real {
+            // Gauges may be stored as exact integers (byte counts) or
+            // floats — both are observations for min/max/sum.
+            if let Some(v) = value_real.or_else(|| value_integer.map(|i| i as f64)) {
                 value_min = value_min.min(v);
                 value_max = value_max.max(v);
                 value_sum += v;
@@ -304,10 +311,11 @@ impl MonitoringStore {
                     counter_first = Some(v);
                 }
                 counter_last = Some(v);
+                counter_obs += 1;
             }
         }
         if let (Some(f), Some(l)) = (counter_first, counter_last) {
-            if !counter_reset {
+            if !counter_reset && counter_obs >= 2 {
                 counter_delta = Some(l - f);
             }
         }

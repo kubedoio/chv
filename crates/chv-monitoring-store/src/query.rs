@@ -645,44 +645,63 @@ enum QueryTier {
 }
 
 fn rollup_point(r: StoredRollup, window_ms: u64, kind: &MetricKind) -> HistoryPoint {
-    let valid = r.valid_points > 0;
-    let quality = if valid {
-        SampleQuality::Valid
-    } else {
-        // A window with only non-valid points stays visible with its
-        // honest absence rather than a gap that reads as "never
-        // collected".
-        SampleQuality::Unavailable
-    };
     match kind {
-        MetricKind::Counter => HistoryPoint {
-            timestamp_ms: r.window_start_ms.unsigned_abs(),
-            window_ms,
-            value: r.counter_delta.map(|d| d as f64),
-            integer_value: r.counter_delta,
-            quality,
-        },
-        _ => HistoryPoint {
-            timestamp_ms: r.window_start_ms.unsigned_abs(),
-            window_ms,
-            value: if valid {
-                r.value_sum
-                    .zip(r.value_count)
-                    .map(|(s, c)| s / c.max(1) as f64)
+        MetricKind::Counter => {
+            // A counter window is Valid only when it carries a real
+            // observed interval (a delta): a reset, an epoch crossing,
+            // or a lone sample in the window leaves the rate honestly
+            // absent — a "Valid" point without a value would teach
+            // consumers that Valid means has-a-number.
+            let quality = if r.counter_delta.is_some() {
+                SampleQuality::Valid
             } else {
-                None
-            },
-            integer_value: None,
-            quality,
-        },
+                SampleQuality::Unavailable
+            };
+            HistoryPoint {
+                timestamp_ms: r.window_start_ms.unsigned_abs(),
+                window_ms,
+                value: r.counter_delta.map(|d| d as f64),
+                integer_value: r.counter_delta,
+                quality,
+            }
+        }
+        _ => {
+            let mean = r
+                .value_sum
+                .zip(r.value_count)
+                .filter(|(_, c)| *c > 0)
+                .map(|(s, c)| s / c as f64);
+            // Same rule as counters: Valid means the point carries a
+            // number. A window whose valid samples left no aggregate
+            // (e.g. every point non-valid) is an honest absence, not a
+            // "valid" hole. Windows with zero samples never get a
+            // rollup row (the maintenance pass deletes those), so
+            // reaching here means the window was observed.
+            let quality = if mean.is_some() {
+                SampleQuality::Valid
+            } else {
+                SampleQuality::Unavailable
+            };
+            HistoryPoint {
+                timestamp_ms: r.window_start_ms.unsigned_abs(),
+                window_ms,
+                value: mean,
+                integer_value: None,
+                quality,
+            }
+        }
     }
 }
 
 /// Bucket raw points to at most `max_points` buckets. Gauges: mean of
-/// valid points per bucket (non-valid points excluded from numerator
-/// and denominator). Counters: the same-epoch delta between
-/// consecutive buckets' last valid values — a reset or epoch crossing
-/// emits no value for the crossing bucket, never a negative.
+/// valid points per bucket (integer- and float-stored values both
+/// aggregate; non-valid points are excluded from numerator and
+/// denominator). Counters: the same-epoch delta between consecutive
+/// buckets' last valid values — a reset or epoch crossing emits no
+/// value for the crossing bucket, never a negative — and each point's
+/// `window_ms` is the real time between the two samples it subtracts,
+/// so a delta that crosses an ingestion gap is rated against the gap,
+/// not against a single bucket.
 fn bucket_raw(
     raw: Vec<RawPoint>,
     from_ms: u64,
@@ -705,47 +724,64 @@ fn bucket_raw(
     let mut out = Vec::new();
     match kind {
         MetricKind::Counter => {
-            // Per bucket: last valid value and its epoch.
+            // Per bucket: last valid value, its epoch, and its timestamp.
             let mut last_val = vec![None::<i64>; n_buckets];
             let mut last_epoch = vec![None::<(String, String)>; n_buckets];
+            let mut last_ts = vec![None::<i64>; n_buckets];
             let mut has_nonvalid = vec![false; n_buckets];
             for p in &raw {
                 let idx = bucket_of(p.observed_at_ms);
                 if let Some(v) = p.value_integer {
                     last_val[idx] = Some(v);
                     last_epoch[idx] = Some((p.boot_id.clone(), p.identity_epoch.clone()));
+                    last_ts[idx] = Some(p.observed_at_ms);
                 } else {
                     has_nonvalid[idx] = true;
                 }
             }
-            let mut prev: Option<(i64, (String, String))> = None;
+            // `prev` carries the previous bucket's last value AND its
+            // timestamp: the delta between two bucket-last values spans
+            // the real time between those samples (which crosses any
+            // ingestion gap), so the point's `window_ms` must be that
+            // span — attributing a gap-crossing delta to a single
+            // bucket would inflate the rate by the gap's length.
+            let mut prev: Option<(i64, (String, String), i64)> = None;
             for idx in 0..n_buckets {
-                if let (Some(v), Some(ep)) = (last_val[idx], last_epoch[idx].clone()) {
+                if let (Some(v), Some(ep), Some(ts)) =
+                    (last_val[idx], last_epoch[idx].clone(), last_ts[idx])
+                {
                     let point = match &prev {
-                        Some((pv, pep)) if pep == &ep => {
+                        Some((pv, pep, pts)) if pep == &ep => {
                             let delta = v - pv;
                             if delta >= 0 {
-                                Some((Some(delta), SampleQuality::Valid))
-                            } else if has_nonvalid[idx] {
-                                // Reset inside the bucket: no value.
-                                Some((None, SampleQuality::Unavailable))
+                                // The rate's time base is the observed
+                                // span between the two samples (which
+                                // crosses any ingestion gap), never the
+                                // nominal bucket width — attributing a
+                                // gap-crossing delta to one bucket
+                                // would inflate the rate.
+                                let span = (ts - pts).max(1) as u64;
+                                Some((Some(delta), SampleQuality::Valid, span))
                             } else {
-                                Some((None, SampleQuality::Unavailable))
+                                // Reset inside the bucket: no value.
+                                Some((None, SampleQuality::Unavailable, bucket_ms))
                             }
                         }
-                        _ if has_nonvalid[idx] => Some((None, SampleQuality::Unavailable)),
+                        _ if has_nonvalid[idx] => {
+                            Some((None, SampleQuality::Unavailable, bucket_ms))
+                        }
                         _ => None,
                     };
-                    if let Some((delta, quality)) = point {
+                    if let Some((delta, quality, span)) = point {
                         out.push(HistoryPoint {
                             timestamp_ms: from_ms + (idx as u64) * bucket_ms,
-                            window_ms: bucket_ms,
+                            window_ms: span,
                             value: delta.map(|d| d as f64),
                             integer_value: delta,
                             quality,
                         });
                     }
-                    prev = Some((v, ep));
+                    prev = Some((v, ep, ts));
                 } else if has_nonvalid[idx] {
                     out.push(HistoryPoint {
                         timestamp_ms: from_ms + (idx as u64) * bucket_ms,
@@ -762,7 +798,10 @@ fn bucket_raw(
             let mut nonvalid: Vec<usize> = vec![0; n_buckets];
             for p in &raw {
                 let idx = bucket_of(p.observed_at_ms);
-                match p.value_real {
+                // Gauges may be stored as exact integers (byte counts)
+                // or floats — either is a valid observation for the
+                // mean; only a non-valid quality is excluded.
+                match p.value_real.or_else(|| p.value_integer.map(|v| v as f64)) {
                     Some(v) => {
                         sums[idx].0 += v;
                         sums[idx].1 += 1;

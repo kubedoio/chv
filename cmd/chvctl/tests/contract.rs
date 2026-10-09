@@ -821,6 +821,8 @@ fn build_state(
         mutations,
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir,
+        monitoring: None,
+        monitoring_health: chv_webui_bff::MonitoringHealth::new(),
         cache: chv_webui_bff::BffCache::new(5),
         clock: Arc::new(SystemClock),
         pool,

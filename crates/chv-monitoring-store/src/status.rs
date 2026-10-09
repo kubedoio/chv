@@ -11,7 +11,9 @@ use std::sync::RwLock;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MonitoringHealthSnapshot {
     /// Why monitoring is degraded (store unavailable, disk headroom
-    /// exhausted, corruption). `None` when healthy.
+    /// exhausted, corruption). `None` when healthy. Materialized from
+    /// the flavor trackers below (store flavor takes precedence) —
+    /// readers only need this field.
     pub degraded_reason: Option<String>,
     /// Newest durably-accepted ingest (unix ms).
     pub last_ingest_at_ms: Option<u64>,
@@ -25,8 +27,21 @@ pub struct MonitoringHealthSnapshot {
     /// Last observed filesystem headroom on the monitoring filesystem
     /// (bytes), when known.
     pub headroom_bytes: Option<u64>,
+    /// True when the last headroom probe could not read the
+    /// filesystem. Ingestion fails open in that window (the durable
+    /// size budget still bounds the file), but the headroom floor is
+    /// unverified until the next successful probe — surfaced instead
+    /// of silently dropping the protection.
+    pub headroom_probe_failed: bool,
     /// Raw sample count at the last maintenance pass.
     pub raw_samples: Option<u64>,
+    /// Store-flavor degradation (store error, config-disabled,
+    /// corruption): cleared by a durable ingest success or operator
+    /// intervention, never by headroom recovery.
+    pub store_degraded: Option<String>,
+    /// Headroom-flavor degradation (disk-full floor breach): cleared
+    /// by headroom recovery only.
+    pub headroom_degraded: Option<String>,
 }
 
 /// Shared, lock-protected health state written by the ingestion path
@@ -62,20 +77,62 @@ impl MonitoringHealth {
         f(&mut guard);
     }
 
-    /// Mark monitoring degraded (idempotent; keeps the first reason
-    /// unless `replace` is set).
+    /// Mark monitoring degraded with a store-flavor reason
+    /// (idempotent; keeps the first reason).
     pub fn degrade(&self, reason: String) {
         self.update(|s| {
-            if s.degraded_reason.is_none() {
-                s.degraded_reason = Some(reason);
+            if s.store_degraded.is_none() {
+                s.store_degraded = Some(reason);
+                s.recompute_degraded_reason();
             }
         });
     }
 
-    /// Clear degradation (e.g. headroom recovered).
+    /// Mark monitoring degraded because the headroom floor is breached
+    /// (disk full). Replaceable by a newer headroom reading; cleared
+    /// only by [`Self::clear_headroom`] — headroom recovery must never
+    /// clear a store-flavor degradation, and vice versa.
+    pub fn degrade_headroom(&self, reason: String) {
+        self.update(|s| {
+            s.headroom_degraded = Some(reason);
+            s.recompute_degraded_reason();
+        });
+    }
+
+    /// Clear headroom-flavor degradation (headroom recovered).
+    pub fn clear_headroom(&self) {
+        self.update(|s| {
+            s.headroom_degraded = None;
+            s.recompute_degraded_reason();
+        });
+    }
+
+    /// Clear store-flavor degradation — called when a durable ingest
+    /// succeeds (the store provably works again).
+    pub fn clear_store_degraded(&self) {
+        self.update(|s| {
+            s.store_degraded = None;
+            s.recompute_degraded_reason();
+        });
+    }
+
+    /// Clear all degradation.
     pub fn clear_degraded(&self) {
         self.update(|s| {
+            s.store_degraded = None;
+            s.headroom_degraded = None;
             s.degraded_reason = None;
         });
+    }
+}
+
+impl MonitoringHealthSnapshot {
+    /// `degraded_reason` is the presentation of the two flavor
+    /// trackers: a store problem is the more severe one and wins.
+    fn recompute_degraded_reason(&mut self) {
+        self.degraded_reason = self
+            .store_degraded
+            .clone()
+            .or_else(|| self.headroom_degraded.clone());
     }
 }

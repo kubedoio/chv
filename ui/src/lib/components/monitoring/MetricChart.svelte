@@ -104,7 +104,7 @@
 									if (series.kind === 'counter') {
 										const rate = formatCounterRate(point.integer_value, point.window_ms);
 										return rate !== null
-											? `${rate.toFixed(1)} ${unitSuffix} over ${point.window_ms / 1000}s`
+											? `${rate.toFixed(1)} ${unitSuffix} (average rate)`
 											: 'no data';
 									}
 									return `${point.value ?? '—'} ${unitSuffix}`;

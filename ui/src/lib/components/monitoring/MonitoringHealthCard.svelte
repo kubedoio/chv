@@ -82,6 +82,12 @@
 						<strong>{formatBytes(health.headroom_bytes)}</strong>
 					</div>
 				{/if}
+				{#if health.headroom_probe_failed}
+					<div class="health-row warn">
+						<span>Headroom probe</span>
+						<strong>failed — floor unverified</strong>
+					</div>
+				{/if}
 			{:else}
 				<div class="degraded-note">
 					The monitoring history subsystem is unavailable{health.degraded_reason ? `: ${health.degraded_reason}` : '.'}

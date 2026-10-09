@@ -37,7 +37,14 @@ export function formatCores(cores: number): string {
 	return `${cores.toFixed(2)} cores`;
 }
 
-/** A counter rate from a decimal-string integer delta and its window. */
+/**
+ * A counter rate from a decimal-string integer delta and its window.
+ *
+ * The integer delta travels the wire exactly; converting to a float
+ * for the chart loses precision beyond 2^53 — bounded to display
+ * precision (a chart axis cannot represent more), documented by the
+ * beyond-2^53 test below.
+ */
 export function formatCounterRate(
 	integerValue: string | undefined,
 	windowMs: number

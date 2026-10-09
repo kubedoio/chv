@@ -18,7 +18,7 @@ runbook covers verification, tuning, and manual damage recovery.
 | Piece | Location (package defaults) |
 |---|---|
 | Store database | one SQLite file per the `[monitoring] database_url` (default `sqlite:///var/lib/chv/monitoring/monitoring.db`; **separate** from the operational `chv.db`) |
-| Schema migrations | `CHV_MONITORING_MIGRATIONS_DIR` (packaged at `/usr/local/share/chv/monitoring-migrations`) |
+| Schema migrations | embedded in the control-plane binary; overridden by the `[monitoring] migrations_dir` setting when it points at a directory that holds migrations (`install.sh` writes `/usr/local/share/chv/monitoring-migrations` there) |
 | Configuration | `/etc/chv/controlplane.toml`, `[monitoring]` section (see `docs/examples/controlplane.toml`) |
 | Health surface | `GET /v1/monitoring/health` (BFF, authenticated); the UI's overview rail shows a Monitoring Health card; `/v1/health` carries a `monitoring: ok/degraded` line that never flips the overall status |
 
@@ -48,7 +48,12 @@ isolate disk-full risk — this is deliberate (ADR-027): monitoring stops
 itself before it can fill a disk VM lifecycle depends on.
 
 1. Check `degraded_reason` on `/v1/monitoring/health` — headroom
-   failures name the floor and the observed free bytes.
+   failures name the floor and the observed free bytes. A
+   `headroom_probe_failed: true` field (without degradation) means the
+   probe itself could not read the filesystem: ingestion continues
+   (fail-open, the size budget still bounds the file), but the floor
+   is unverified until the next successful probe — treat a persistent
+   probe failure as a filesystem-level symptom worth investigating.
 2. Free space or raise/lower the floor in `controlplane.toml`:
 
    ```toml

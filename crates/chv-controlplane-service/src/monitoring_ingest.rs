@@ -180,6 +180,12 @@ impl MonitoringIngestImplementation {
     /// Per-sender rate window check. Returns the count of batches
     /// accepted in the current window including this one, or 0 when
     /// the window was reset for this batch.
+    ///
+    /// Fixed window: bursts straddling a window boundary can each
+    /// consume a full budget, transiently allowing ~2× the nominal
+    /// cap. Acceptable for advisory telemetry (the agent's cadence is
+    /// one batch per 15 s against a 20/min cap) — documented here so
+    /// the boundary allowance is a decision, not an accident.
     fn count_rate(&self, sender: &str, now_ms: u64) -> u32 {
         let mut entry = self.rate_windows.entry(sender.to_string()).or_default();
         let window = entry.value_mut();
@@ -204,22 +210,20 @@ impl MonitoringIngestImplementation {
         let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(path);
         match headroom::available_bytes(&dir) {
             Ok(available) => {
-                self.health.update(|s| s.headroom_bytes = Some(available));
+                self.health.update(|s| {
+                    s.headroom_bytes = Some(available);
+                    s.headroom_probe_failed = false;
+                });
                 if available < self.limits.min_headroom_bytes {
-                    self.health.degrade(format!(
+                    self.health.degrade_headroom(format!(
                         "filesystem headroom {} bytes below floor {} bytes",
                         available, self.limits.min_headroom_bytes
                     ));
                     false
                 } else {
-                    // Headroom recovered: clear only the headroom
-                    // flavor of degradation (a store error stays).
-                    let reason = self.health.snapshot().degraded_reason;
-                    if let Some(r) = reason {
-                        if r.contains("headroom") {
-                            self.health.clear_degraded();
-                        }
-                    }
+                    // Headroom recovered: clear exactly the headroom
+                    // flavor — a store-flavor degradation survives.
+                    self.health.clear_headroom();
                     true
                 }
             }
@@ -227,8 +231,17 @@ impl MonitoringIngestImplementation {
                 // statvfs failure on the monitoring filesystem is
                 // treated as unknown-but-suspicious: fail open for
                 // ingestion (the durable size budget still bounds the
-                // file) but record it.
+                // file) but surface it in health — the floor is
+                // unverified until the next successful probe, and a
+                // silently dropped protection is worse than a visible
+                // one.
                 tracing::warn!(error = %e, "monitoring headroom probe failed");
+                self.health.update(|s| {
+                    s.headroom_probe_failed = true;
+                    // The last reading is stale; report unknown rather
+                    // than a number we can no longer stand behind.
+                    s.headroom_bytes = None;
+                });
                 true
             }
         }
@@ -342,6 +355,22 @@ impl MonitoringIngestImplementation {
             }
             (None, _) => None,
         };
+        // Counters are integer-valued on the wire and in the store
+        // (exact decimal-string deltas): a float counter would be
+        // accepted and durably stored, then never surfaced by the
+        // integer-only query/rollup paths — reject it at the boundary
+        // instead of committing data that can never be read back.
+        if metric.kind == MetricKind::Counter {
+            if let Some(SampleValue::Float(_)) = value {
+                return Err(reject(
+                    OUTCOME_INVALID_BATCH,
+                    format!(
+                        "counter metric {} must carry an integer value, not a float",
+                        s.metric_id
+                    ),
+                ));
+            }
+        }
 
         // Timestamp bounds: live raw ingestion only.
         let age = now_ms - s.observed_at_ms;
@@ -564,6 +593,10 @@ impl MonitoringIngestService for MonitoringIngestImplementation {
                     h.accepted_batches += 1;
                     h.last_ingest_at_ms = Some(now_ms as u64);
                 });
+                // A durable commit proves the store works: clear a
+                // stale store-flavor degradation (headroom flavor is
+                // not ours to clear here).
+                self.health.clear_store_degraded();
                 self.respond(
                     &request,
                     OUTCOME_ACCEPTED,
@@ -577,6 +610,7 @@ impl MonitoringIngestService for MonitoringIngestImplementation {
                     h.duplicate_batches += 1;
                     h.last_ingest_at_ms = Some(now_ms as u64);
                 });
+                self.health.clear_store_degraded();
                 self.respond(
                     &request,
                     OUTCOME_DUPLICATE,

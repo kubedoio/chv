@@ -2,8 +2,54 @@ use crate::config::MonitoringStoreConfig;
 use crate::error::MonitoringStoreError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::time::Duration;
+
+/// The migration set embedded at compile time — the fallback when the
+/// configured `migrations_dir` does not exist or holds no migrations.
+/// A default-configuration control plane started from any working
+/// directory must not silently degrade monitoring because a relative
+/// migrations path resolved nowhere; the embedded copy is byte-ident
+/// ical to the packaged files (same checksums, so a database migrated
+/// from one source is compatible with the other).
+///
+/// When a migration file is added under
+/// `cmd/chv-controlplane/monitoring-migrations/`, add its embedded
+/// entry here — the test at the bottom of this file fails otherwise.
+const EMBEDDED_MIGRATIONS: &[(&str, &str)] = &[(
+    "0001_initial.sql",
+    include_str!("../../../cmd/chv-controlplane/monitoring-migrations/0001_initial.sql"),
+)];
+
+fn embedded_migrator() -> Result<sqlx::migrate::Migrator, MonitoringStoreError> {
+    let mut migrations = Vec::new();
+    for (name, sql) in EMBEDDED_MIGRATIONS {
+        let (version, description) = name
+            .strip_suffix(".sql")
+            .and_then(|stem| {
+                let (v, d) = stem.split_once('_')?;
+                Some((v.parse::<i64>().ok()?, d.to_string()))
+            })
+            .ok_or_else(|| MonitoringStoreError::Degraded {
+                reason: format!("embedded migration name {name:?} is malformed"),
+            })?;
+        migrations.push(sqlx::migrate::Migration::new(
+            version,
+            Cow::Owned(description),
+            sqlx::migrate::MigrationType::Simple,
+            Cow::Borrowed(sql),
+            false,
+        ));
+    }
+    migrations.sort_by_key(|m| m.version);
+    Ok(sqlx::migrate::Migrator {
+        migrations: Cow::Owned(migrations),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    })
+}
 
 /// The monitoring store's own pool. Deliberately separate from the
 /// control-plane store pool (ADR-027): monitoring work can never hold
@@ -51,7 +97,16 @@ impl MonitoringStore {
             });
         }
 
-        let migrator = sqlx::migrate::Migrator::new(config.migrations_dir.as_path()).await?;
+        // Prefer the configured migrations directory when it exists
+        // and holds migrations (packaged installs point at
+        // /usr/local/share/chv/monitoring-migrations); otherwise fall
+        // back to the embedded copy so a default or relative-path
+        // configuration still gets a migrated store instead of a
+        // silent degradation.
+        let migrator = match sqlx::migrate::Migrator::new(config.migrations_dir.as_path()).await {
+            Ok(m) if !m.migrations.is_empty() => m,
+            _ => embedded_migrator()?,
+        };
         migrator.run(&store.pool).await?;
         // Truncate the WAL after migrations so a fresh file starts small.
         let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -92,5 +147,59 @@ impl MonitoringStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(page_count.unsigned_abs() * page_size.unsigned_abs())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The embedded set must list exactly the repo's migration files:
+    /// adding a migration without its embedded entry would make
+    /// dir-configured and default-configured control planes diverge.
+    #[test]
+    fn embedded_migrations_match_the_repo_migration_dir() {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../cmd/chv-controlplane/monitoring-migrations"
+        ));
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("repo migrations dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".sql"))
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<&str> = EMBEDDED_MIGRATIONS.iter().map(|(n, _)| *n).collect();
+        embedded.sort_unstable();
+        assert_eq!(
+            on_disk, embedded,
+            "a migration file under cmd/chv-controlplane/monitoring-migrations has no \
+             embedded copy — add it to EMBEDDED_MIGRATIONS in db.rs"
+        );
+    }
+
+    /// A default or relative `migrations_dir` that resolves nowhere
+    /// must still yield a migrated store (embedded fallback), not a
+    /// silent monitoring degradation.
+    #[tokio::test]
+    async fn missing_migrations_dir_falls_back_to_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MonitoringStore::connect(MonitoringStoreConfig {
+            database_url: format!("sqlite://{}/monitoring.db", dir.path().display()),
+            migrations_dir: std::path::PathBuf::from("/nonexistent-monitoring-migrations"),
+            ..MonitoringStoreConfig::default()
+        })
+        .await
+        .expect("connect with embedded migrations");
+        // The embedded initial migration created the schema.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitoring_samples'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        store.close().await;
     }
 }

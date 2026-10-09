@@ -108,6 +108,8 @@ export interface MonitoringHealthResponse {
 	rejected_batches?: number;
 	unavailable_batches?: number;
 	headroom_bytes?: number | null;
+	/** True when the last headroom probe failed (floor unverified). */
+	headroom_probe_failed?: boolean;
 	raw_samples?: number;
 	generated_at_ms: number;
 }
