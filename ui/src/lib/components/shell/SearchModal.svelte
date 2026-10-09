@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { goto } from '$app/navigation';
-  import { Search, X, Clock, Server, Image, Network, HardDrive, FileText } from 'lucide-svelte';
+  import { Search, X, Clock, Server, Image, Network, FileText } from 'lucide-svelte';
   import { 
     openSearch, 
     closeSearch, 
@@ -175,7 +175,6 @@
       case 'vm': return Server;
       case 'image': return Image;
       case 'network': return Network;
-      case 'storage': return HardDrive;
       case 'page': return FileText;
       default: return FileText;
     }
@@ -186,7 +185,6 @@
       case 'vm': return 'text-blue-500';
       case 'image': return 'text-purple-500';
       case 'network': return 'text-green-500';
-      case 'storage': return 'text-orange-500';
       case 'page': return 'text-[var(--shell-text-secondary)]';
       default: return 'text-[var(--shell-text-secondary)]';
     }

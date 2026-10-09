@@ -4,7 +4,7 @@
   import Input from '#lib/components/primitives/TextInput.svelte';
   import { createAPIClient, getStoredToken } from '#lib/api/client.ts';
   import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
-  import type { VMTemplate, Image, Network, StoragePool, VM, CloudInitTemplate } from '#lib/api/types.ts';
+  import type { VMTemplate, Image, Network, VM, CloudInitTemplate } from '#lib/api/types.ts';
   import { onMount } from 'svelte';
 
   interface Props {
@@ -12,7 +12,6 @@
     template?: VMTemplate | null;
     images?: Image[];
     networks?: Network[];
-    pools?: StoragePool[];
     onSuccess?: () => void;
   }
 
@@ -21,7 +20,6 @@
     template = null,
     images = [],
     networks = [],
-    pools = [],
     onSuccess
   }: Props = $props();
 

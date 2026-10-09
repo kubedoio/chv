@@ -33,7 +33,7 @@ const _selectedResource = $derived(
 				actions: [
 					{ label: 'Open host', href: `/nodes/${node.id}` },
 					{ label: 'Instances', href: `/vms?node_id=${node.id}` },
-					{ label: 'Storage', href: `/storage?node_id=${node.id}` }
+					{ label: 'Storage', href: `/volumes?node_id=${node.id}` }
 				]
 			};
 		}

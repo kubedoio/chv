@@ -114,9 +114,9 @@ claims themselves remain accurate.
 | C1 | Local backend self-labels | `local.rs` (42 `"local"` literals before the test module at `:1087`) | error `backend:` labels and export metadata — correct self-labeling, no action |
 | C2 | chvctl storage create doc | `cmd/chvctl/src/commands/storage.rs:20` | documents `"local", "ceph", "iscsi"` — omits `lvm` (cosmetic; the command itself is dead, §2.6) |
 | C3 | Agent inventory probe | `crates/chv-agent-core/src/inventory.rs:94-102` (`:128`) | `KNOWN = ["localdisk", "ceph", "nfs"]` probed as *directories* under `storage_base_dir` — misses `lvm`, includes `nfs` (not a stord backend), and never consults stord's `backend_type` |
-| C4 | `storage_pools` catalog | migration `0015_storage_pools.sql:1-12`; BFF `handlers/storage.rs:63-130`; CP stub `api/stub.rs:23-99`, `api/router.rs:128-131` | a UI-facing catalog table with a create route (`backend_class` default `'localdisk'`, `0015:5`) that nothing in provisioning reads or writes — see §2.5 |
+| C4 | `storage_pools` catalog | migration `0015_storage_pools.sql:1-12`; BFF `handlers/storage.rs:63-130`; CP stub `api/stub.rs:23-99`, `api/router.rs:128-131` | a UI-facing catalog table with a create route (`backend_class` default `'localdisk'`, `0015:5`) that nothing in provisioning reads or writes — see §2.5. *Resolved: the whole catalog was removed in #514 (routes, stub, UI page, table).* |
 | C5 | BFF volume display | `handlers/volumes.rs:135`, `:202`, `:483` | `storage_class` is surfaced (`COALESCE(v.storage_class,'')`) and the proto viewmodel carries it (`proto/webui/webui-bff.proto:239`) — displays the empty string today |
-| C6 | UI types | `ui/src/lib/api/types.ts:55-73` | `CreateStoragePoolInput.pool_type: 'localdisk'` only; the volumes UI has no create surface (list + detail pages only) |
+| C6 | UI types | `ui/src/lib/api/types.ts:55-73` | `CreateStoragePoolInput.pool_type: 'localdisk'` only; the volumes UI has no create surface (list + detail pages only). *Resolved 2026-10-08 (#514): `CreateStoragePoolInput`/`StoragePool` and their client calls were removed with the catalog; the file:line refs above are historical.* |
 
 **Store-model truth (premise correction).** The issue's phrase "volume
 models hardcode backend class 'local'" is imprecise in a useful way:
@@ -240,7 +240,9 @@ What an operator does today, and what each layer knows:
   (currently unknowable — stord exposes no status/config RPC; #385
   §2.5 recorded that gap), capacity (nothing reports free extents; the
   `storage_pools.total_bytes`/`used_bytes` columns are never populated
-  by anything but the BFF create route), and placement policy (which
+  by anything but the BFF create route [resolved 2026-10-08, #514:
+  columns and route both removed — see the C4 row]), and placement
+  policy (which
   node offers which class — see §2.5).
 - **What the agent does know:** nothing about stord's backend. It does
   not read `stord.toml` except the supervisor's respawn validation,
@@ -275,7 +277,8 @@ pool model but are mutually inconsistent and dead end-to-end:
 3. **The `storage_pools` table + BFF/CP create routes** (C4) accept an
    operator-invented `pool_type` string with operator-supplied
    capacity, connected to no provisioning, no placement, and no stord
-   configuration.
+   configuration. [Resolved 2026-10-08, #514: removed wholesale — see
+   the C4 row.]
 
 Any "storage-class pool" design (Option B, §4) is building on plumbing
 that must first be made truthful — or deleted.
@@ -313,8 +316,11 @@ that must first be made truthful — or deleted.
   exposes `POST /v1/storage-pools/create` with `pool_type`/
   `backend_class` (`handlers/storage.rs:80-85`; routes
   `router.rs:155-156`, `:306-307`) — the command is dead-on-arrival
-  today. **Overlap note (not designed here):** any volume-create API
-  from #379 adds a route + field vocabulary on the same BFF/chvctl
+  today. [Both sides of this recount are historical since 2026-10-08,
+  #514: the chvctl command went with #372's removal, and the BFF
+  route/handler went with #514's catalog removal.] **Overlap note
+  (not designed here):** any volume-create API from #379 adds a route
+  + field vocabulary on the same BFF/chvctl
   surface #372 plans to reconcile. The two issues should agree on field
   names and route shapes once, in #372's contract pass, rather than
   churning the surface twice (§5 DP6).
@@ -340,7 +346,8 @@ that must first be made truthful — or deleted.
 capacity-aware scheduling; mixed-backend nodes (stord stays
 single-backend per daemon); live backend migration of existing volumes;
 #378's Core execution modeling; #372's contract reconciliation; making
-the `storage_pools` catalog truthful (unless DP4 opts in).
+the `storage_pools` catalog truthful (unless DP4 opts in) [resolved
+2026-10-08, #514: the catalog was removed instead].
 
 ## 4. Options
 
@@ -405,7 +412,9 @@ backend per node. It also has to decide the fate of three dead surfaces
 (storage_pools, fleet datastores, the probe) — each a small design
 decision of its own. [Corrected 2026-10-07, #546:] the fleet
 datastores member of that list is no longer dead (see §2.5 item 2's
-correction); `storage_pools` and the probe remain as stated. B should
+correction); `storage_pools` and the probe remain as stated.
+[Corrected 2026-10-08, #514:] `storage_pools` is no longer dead — the
+whole catalog was removed (see the C4 resolution note). B should
 be the *destination*, not the first step.
 
 ### Option C — config-driven node-level default (the minimal-change option)
@@ -730,8 +739,11 @@ New tests per piece:
    the enrollment string array into class-named entries with unknown
    (`Option`) capacities and suppresses `DATASTORE_NOT_FOUND` for
    offered classes (§2.5 item 2's correction); `storage_pools` and the
-   inventory probe remain as stated. An operator reading the UI's
-   storage page can believe pools exist that nothing serves.
+   inventory probe remain as stated. [Corrected 2026-10-08, #514:]
+   `storage_pools` is resolved — the catalog, its routes, and the
+   unreachable UI page were removed (the `/storage` route redirects to
+   `/volumes`); an operator can no longer read a pools page at all.
+   The inventory probe (C3) remains as stated.
 6. **Seed images on LVM are unsupported (DP2 scope cut).** A VM create
    with an `image_ref` and an LVM class disk has no seed path; if PR 3
    doesn't reject that combination at accept time, it fails at
