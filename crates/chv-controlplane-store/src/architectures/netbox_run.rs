@@ -444,6 +444,32 @@ impl NetboxProjectionRunRepository {
     }
 }
 
+/// Substring that identifies the store's one-active-run rejection
+/// inside a [`StoreError::Conflict`] reason. [`active_run_conflict`]
+/// uses this constant as its reason verbatim, so the classification
+/// ([`is_active_run_conflict`]) and the produced error cannot drift
+/// apart. Callers that need to distinguish the one-active rejection
+/// from other conflicts (the projection worker's sweep coalescing, the
+/// BFF's 409 `NETBOX_RUN_ACTIVE`) must match through the helper, never
+/// by inlining the string.
+pub const ACTIVE_RUN_CONFLICT_MARKER: &str = "active run already exists";
+
+/// Whether `err` is the store's one-active-run rejection: another
+/// queued/running run exists for the architecture (the
+/// `netbox_projection_runs_one_active` partial unique index). The
+/// worker treats this as a coalescing skip; the BFF answers 409
+/// `NETBOX_RUN_ACTIVE`; any other conflict falls through to the
+/// caller's generic handling.
+pub fn is_active_run_conflict(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Conflict {
+            reason,
+            ..
+        } if reason.contains(ACTIVE_RUN_CONFLICT_MARKER)
+    )
+}
+
 /// Conflict used when the `netbox_projection_runs_one_active` partial
 /// unique index rejects a write: another queued/running run exists for
 /// the architecture.
@@ -451,7 +477,7 @@ fn active_run_conflict(id: String) -> StoreError {
     StoreError::Conflict {
         entity: ENTITY,
         id,
-        reason: "an active run already exists for this architecture",
+        reason: ACTIVE_RUN_CONFLICT_MARKER,
     }
 }
 

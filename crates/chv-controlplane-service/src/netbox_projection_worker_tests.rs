@@ -414,8 +414,9 @@ async fn add_apply_run(
 }
 
 /// Backdate an apply run's `created_at` so "most recent" is
-/// deterministic (the column has second resolution; a same-second tie
-/// would fall to the `id ASC` tiebreak).
+/// deterministic in the fixture (the column has second resolution;
+/// without distinct timestamps the ordering falls to the `rowid DESC`
+/// insertion-order tiebreak).
 async fn backdate_apply_run(db: &TestDb, apply_id: &str, created_at: &str) {
     sqlx::query("UPDATE architecture_apply_runs SET created_at = $2 WHERE id = $1")
         .bind(apply_id)
@@ -2196,4 +2197,62 @@ async fn post_apply_failure_does_not_break_other_architectures() {
     assert_eq!(healthy[0].trigger_kind, NetboxProjectionTrigger::PostApply);
     assert_eq!(healthy[0].architecture_version_id, vid("v-1b"));
     assert_eq!(healthy[0].requested_by, None);
+}
+
+/// Isolation (the plan's PR-6 "failed projection enqueue leaves apply
+/// run `Succeeded`" scenario, asserted explicitly): a post_apply run
+/// that fails during execution — here against the dead-endpoint
+/// outage fixture — leaves the apply run that triggered it untouched:
+/// still `Succeeded`, `finished_at` exactly as seeded. The projection
+/// pipeline can never rewrite apply-run state.
+#[tokio::test]
+async fn post_apply_failure_leaves_apply_run_succeeded() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    // Stamp a known terminal state on the apply run: its `finished_at`
+    // is the canary the isolation assertions compare against.
+    sqlx::query(
+        "UPDATE architecture_apply_runs SET \
+         started_at = '2025-01-01T00:00:00Z', finished_at = '2025-01-01T00:01:00Z' \
+         WHERE id = 'apply-1'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("stamp apply-run terminal timestamps");
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    // The sweep enqueued a post_apply run and the same tick executed
+    // it against the dead endpoint: the execution failed (transient
+    // class → auto-requeued) and the failure is recorded on the row.
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(runs.len(), 1, "one post_apply run: {runs:?}");
+    let run = &runs[0];
+    assert!(run.attempt_count >= 1, "the post_apply execution failed");
+    assert!(
+        run.error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("unreachable")),
+        "failure recorded: {:?}",
+        run.error_message
+    );
+
+    // The triggering apply run is untouched: still Succeeded, its
+    // terminal timestamps exactly as seeded.
+    let apply = ApplyRunRepository::new(db.pool.clone())
+        .get(&appid("apply-1"), None)
+        .await
+        .expect("apply run lookup");
+    assert_eq!(apply.status, RunStatus::Succeeded);
+    let seeded_finished_at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:01:00Z")
+        .expect("seeded finished_at parses")
+        .with_timezone(&chrono::Utc);
+    assert_eq!(
+        apply.finished_at,
+        Some(seeded_finished_at),
+        "the failed projection must not touch the apply run's finished_at"
+    );
 }

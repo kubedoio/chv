@@ -43,8 +43,9 @@ use std::time::Duration;
 
 use chv_architecture_validate::model::CHVArchitecture;
 use chv_controlplane_store::{
-    ApplyRunRepository, EventAppendInput, EventRepository, NetboxProjectionConfigRepository,
-    NetboxProjectionRunCreateInput, NetboxProjectionRunRepository, StoreError, VersionRepository,
+    is_active_run_conflict, ApplyRunRepository, EventAppendInput, EventRepository,
+    NetboxProjectionConfigRepository, NetboxProjectionRunCreateInput,
+    NetboxProjectionRunRepository, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
     ArchitectureVersionId, NetboxProjectionMode, NetboxProjectionRun, NetboxProjectionRunId,
@@ -249,6 +250,15 @@ impl NetboxProjectionWorker {
     ///   on to the next architecture; only a total failure of the
     ///   config listing bubbles to the tick loop's existing
     ///   warn-and-continue discipline.
+    /// - **Enqueue-time snapshot**: the `architecture_version_id`
+    ///   persisted on a post_apply run is a best-effort snapshot taken
+    ///   at enqueue. Execution re-resolves the most recent `succeeded`
+    ///   version per the PR-4 provenance rule, so a run enqueued for
+    ///   v2 may project v3 if a newer apply succeeded in between — the
+    ///   next sweep then enqueues a run for v3, whose execution is
+    ///   idempotent (external-id match → no-op). Benign, and recorded
+    ///   in the run's result envelope
+    ///   (`resolved_architecture_version_id`).
     ///
     /// No audit event is emitted at enqueue: the API contract's event
     /// set (`architecture_netbox_export_succeeded` / `_failed`,
@@ -267,9 +277,11 @@ impl NetboxProjectionWorker {
 
         for config in configs {
             // Apply-run listing: `list_for_architecture` orders
-            // `created_at DESC` (newest first) and does not filter by
-            // status, so the first `Succeeded` row here is provably
-            // the most recent successful apply.
+            // `created_at DESC, rowid DESC` — newest first, with
+            // SQLite's insertion-ordered `rowid` breaking same-second
+            // ties — and does not filter by status, so the first
+            // `Succeeded` row here is the most recent successful
+            // apply.
             let apply_runs = match self
                 .apply_run_repo
                 .list_for_architecture(&config.architecture_id, None)
@@ -358,9 +370,7 @@ impl NetboxProjectionWorker {
                 // The one-active partial index rejected the insert: an
                 // active run (manual or post_apply) already holds the
                 // architecture's slot — coalesce per the plan.
-                Err(StoreError::Conflict { reason, .. })
-                    if reason.contains("active run already exists") =>
-                {
+                Err(e) if is_active_run_conflict(&e) => {
                     debug!(
                         architecture_id = %config.architecture_id,
                         architecture_version_id = %version_id,
@@ -480,9 +490,11 @@ impl NetboxProjectionWorker {
         // recent `succeeded` apply run's version — never the editable
         // draft, and never blindly the run row's enqueued version id
         // (a newer apply may have succeeded between enqueue and
-        // execution). `list_for_architecture` orders `created_at DESC`
-        // (newest first) and does not filter by status, so the first
-        // `Succeeded` row here is provably the most recent one.
+        // execution). `list_for_architecture` orders
+        // `created_at DESC, rowid DESC` — newest first, with SQLite's
+        // insertion-ordered `rowid` breaking same-second ties — and
+        // does not filter by status, so the first `Succeeded` row
+        // here is the most recent successful apply.
         let apply_runs = self
             .apply_run_repo
             .list_for_architecture(&run.architecture_id, None)

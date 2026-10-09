@@ -178,7 +178,9 @@ config token redaction, active-run 409, error-code stability.
 
 > **Deviation note (implemented shape).** The apply-run terminal transition
 > site named above does not exist: `apply_plan`
-> (`chv-architecture-reconcile`) transitions runs only to `Running`, and its
+> (`chv-architecture-reconcile`) never transitions runs to a terminal
+> `Succeeded`/`PartiallyFailed` state (only `Running`, plus rollback
+> `Cancelled`/`Failed` paths), and its
 > module doc defers the terminal `Succeeded` / `PartiallyFailed` / `Failed`
 > transitions to the (not-yet-implemented) orchestrator — "this module only
 > puts the run on the rails". PR 6 is therefore implemented as a

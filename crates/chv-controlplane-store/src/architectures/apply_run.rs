@@ -138,6 +138,15 @@ impl ApplyRunRepository {
         row_to_run(&row)
     }
 
+    /// List apply runs for an architecture, newest first.
+    ///
+    /// `created_at` has second resolution, so both branches break
+    /// same-second ties with SQLite's implicit `rowid` (insertion-
+    /// ordered: the table is an ordinary rowid table — TEXT primary
+    /// key, not `WITHOUT ROWID`; see migration `0050`). Callers that
+    /// pick the first `Succeeded` row (the post-apply sweep, the BFF's
+    /// applied-version resolution) therefore get the most recent
+    /// successful apply, never an arbitrary same-second sibling.
     pub async fn list_for_architecture(
         &self,
         architecture_id: &ArchitectureId,
@@ -149,7 +158,7 @@ impl ApplyRunRepository {
                     r#"
                     SELECT * FROM architecture_apply_runs
                     WHERE architecture_id = $1
-                    ORDER BY created_at DESC, id ASC
+                    ORDER BY created_at DESC, rowid DESC
                     "#,
                 )
                 .bind(architecture_id.as_str())
@@ -163,7 +172,7 @@ impl ApplyRunRepository {
                     JOIN architecture_topologies t ON t.id = r.architecture_id
                     WHERE r.architecture_id = $1
                       AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
-                    ORDER BY r.created_at DESC
+                    ORDER BY r.created_at DESC, r.rowid DESC
                     "#,
                 )
                 .bind(architecture_id.as_str())
