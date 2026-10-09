@@ -300,7 +300,8 @@ Two carriers exist for that dispatch:
 capacity-aware scheduling; attach-at-create *execution* (DP4 defers
 the key itself); seeding standalone volumes from images; iscsi/ceph
 enablement; mixed-backend nodes; the `storage_pools` catalog's fate
-(#379 Option B); the Option C typed contract crate.
+(#379 Option B) [resolved 2026-10-08, #514: the catalog was removed
+wholesale]; the Option C typed contract crate.
 
 ## 4. Options — the dispatch carrier (the one genuinely open shape)
 

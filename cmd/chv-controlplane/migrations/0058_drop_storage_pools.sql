@@ -1,0 +1,26 @@
+-- 0058: drop the phantom `storage_pools` catalog
+--
+-- The `storage_pools` table (migration 0015) was written only by the
+-- BFF `/v1/storage-pools/create` route and the CP stub API's create
+-- endpoint, which accepted an operator-invented `pool_type` string
+-- (defaulting to 'localdisk' — a value outside the #379 DP3 backend
+-- class vocabulary) with operator-supplied capacity. The catalog was
+-- connected to no provisioning, no placement, and no stord
+-- configuration: nothing on any real path ever read it to place or
+-- create a volume (#514). Its last readers were the list routes and
+-- the UI's storage page — itself unreachable since the /storage route
+-- began 307-redirecting to /volumes (the truthful storage inventory:
+-- volumes + backend class via the #379 storage-class surface).
+--
+-- The fleet-wide datastore surface that IS consumed — the
+-- architecture tooling's `list_datastores` — reads
+-- `node_inventory.storage_classes` (the reported, never-fabricated
+-- class list, #546), not this table.
+--
+-- Rows in this table, if any, were operator-entered fiction that no
+-- runtime ever acted on; dropping them loses no live configuration.
+-- Migration 0015 itself stays in place (applied migration history is
+-- append-only; deleting it would break the `_sqlx_migrations` ledger
+-- on deployed databases).
+
+DROP TABLE IF EXISTS storage_pools;
