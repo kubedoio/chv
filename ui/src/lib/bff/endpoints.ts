@@ -54,9 +54,6 @@ export const BFFEndpoints = {
 	createBackupJob: '/v1/backups/jobs',
 	listBackupHistory: '/v1/backup-history',
 
-	// Storage pool endpoints
-	listStoragePools: '/v1/storage-pools',
-
 	// Architecture Designer endpoints (Phase 0 skeleton)
 	listArchitectures: '/v1/architectures/list',
 	getArchitecture: '/v1/architectures/get',

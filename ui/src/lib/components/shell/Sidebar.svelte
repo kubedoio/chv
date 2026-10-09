@@ -23,7 +23,7 @@
     { href: '/', label: 'Overview', icon: LayoutDashboard },
     { href: '/install', label: 'Install', icon: Wrench },
     { href: '/networks', label: 'Networks', icon: Network },
-    { href: '/storage', label: 'Storage', icon: HardDrive },
+    { href: '/volumes', label: 'Storage', icon: HardDrive },
     { href: '/images', label: 'Images', icon: ImageIcon },
     { href: '/vms', label: 'Virtual Machines', icon: Cpu },
     { href: '/templates', label: 'Templates', icon: Box },
