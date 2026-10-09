@@ -982,6 +982,12 @@ async fn pause_signal_latches_for_senders_not_yet_at_their_gate() {
     .await
     .expect("trigger must be served");
     let inner = resp.into_inner();
+    // #582 T=0 skew guard: the trigger response must echo the mode the
+    // sender will actually run.
+    assert!(
+        inner.pause_first,
+        "a pause-first trigger must echo the mode back"
+    );
     assert_eq!(
         inner.result.as_ref().map(|r| r.status.as_str()),
         Some("OK"),
@@ -1104,6 +1110,12 @@ async fn resume_after_completion_is_a_benign_noop() {
     .await
     .expect("trigger must be served")
     .into_inner();
+    // #582 T=0 skew guard: the trigger response must echo the mode the
+    // sender will actually run.
+    assert!(
+        resp.pause_first,
+        "a pause-first trigger must echo the mode back"
+    );
     assert_eq!(
         resp.result.as_ref().map(|r| r.status.as_str()),
         Some("OK"),

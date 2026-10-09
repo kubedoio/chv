@@ -178,18 +178,15 @@ The follow-up the DP3 ruling deferred to. What landed:
   --pause-first` set it.
 - **Boundary**: the WebUI does not expose the toggle (API/chvctl
   only) — recorded follow-up work, not part of this change.
-- **Boundary (version skew, disclosed)**: the fail-closed posture is
-  within-version. An older stord that predates the field silently
-  ignores `pause_first` (proto3 unknown field) and runs the default
-  quiescent-assumed path — the operator's stop-the-world request
-  degrades silently across a version-skewed deploy. The realistic
-  exposure is low (agent and stord are co-deployed node daemons from
-  the same package), but the honest statement is that the mode's
-  "never silently degrade" invariant is enforced at the sender (no
-  task ⇒ fail before connecting), not across peer versions. A
-  considered-and-deferred hardening: echo `pause_first` in
-  `TriggerDiskMigrationResponse` and fail the migration at T=0 when
-  the echo comes back false.
+- **Boundary (version skew — guard landed 2026-10-09, #582)**: the
+  T=0 echo guard is now in place: stord echoes `pause_first` in
+  `TriggerDiskMigrationResponse`, and the agent fails the migration
+  at trigger time when a pause-first request gets no echo back (a
+  pre-guard stord drops the unknown field and would silently run the
+  default quiescent-assumed path). Default-mode requests never
+  require an echo (one-directional guard). Within-version, the
+  fail-closed posture also holds at the sender (no task ⇒ fail
+  before connecting).
 - **Boundary (pre-existing CP convergence looseness, disclosed)**:
   the CP state machine's `wait_for_convergence` declares convergence
   on `dirty_remaining <= threshold` without a bytes-or-phase guard,

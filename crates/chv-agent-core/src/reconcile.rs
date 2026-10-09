@@ -2874,6 +2874,9 @@ mod tests {
                         human_summary: "".to_string(),
                     }),
                     migration_id: "dm-mock-123".to_string(),
+                    // Echoes default mode — the reconcile tests never
+                    // request pause-first.
+                    pause_first: false,
                 },
             ))
         }
