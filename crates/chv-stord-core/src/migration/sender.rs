@@ -335,6 +335,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                     let mut state = task.state.write().await;
                     state.phase = MigrationPhase::Failed;
                     state.error_message = "pause channel closed".to_string();
+                    state.needs_vm_pause = false;
                     return Err(tonic::Status::cancelled("pause channel closed"));
                 }
             }
@@ -457,6 +458,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                         let mut state = task.state.write().await;
                         state.phase = MigrationPhase::Failed;
                         state.error_message = "pause channel closed".to_string();
+                        state.needs_vm_pause = false;
                         return Err(tonic::Status::cancelled("pause channel closed"));
                     }
                 }
@@ -551,6 +553,13 @@ impl<B: StorageBackend> MigrationSender<B> {
                         if let Some(ref task) = self.task {
                             let mut state = task.state.write().await;
                             state.phase = MigrationPhase::Completed;
+                            // No pause wait is pending anymore (the VM is
+                            // paused and stays paused until the agent's
+                            // memory-migration flow resumes it on the
+                            // destination) — leaving the flag set made a
+                            // finished task report `needs_vm_pause=true`
+                            // forever (#582 review residue).
+                            state.needs_vm_pause = false;
                         }
                         info!(volume_id = %self.volume_id, "migration finalized successfully");
                         return Ok(());
@@ -576,6 +585,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                             let mut state = task.state.write().await;
                             state.phase = MigrationPhase::Failed;
                             state.error_message = status.message().to_string();
+                            state.needs_vm_pause = false;
                         }
                         return Err(status);
                     }
@@ -924,6 +934,10 @@ impl<B: StorageBackend> MigrationSender<B> {
             let mut state = task.state.write().await;
             state.phase = MigrationPhase::Failed;
             state.error_message = status.message().to_string();
+            // Terminal: no pause wait is pending (#582) — uniform with
+            // the other terminal transitions even though the canary
+            // trips before the flag is ever set in the default flow.
+            state.needs_vm_pause = false;
         }
         Err(status)
     }
