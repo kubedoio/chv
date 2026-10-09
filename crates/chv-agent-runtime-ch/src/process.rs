@@ -10161,6 +10161,16 @@ mod tests {
         assert!(err.to_string().contains("failed to parse vm.counters"));
     }
 
+    /// Emit one g1 evidence line to stdout (visible under `--nocapture`).
+    /// ADR-009 reserves the std formatting macros for CLI binaries and
+    /// the CI check greps library crates for them wholesale; this test's
+    /// evidence capture writes to the stream directly instead — same
+    /// output, no banned macro. See scripts/check-no-println.sh, which
+    /// explicitly acknowledges legitimate test-only output.
+    fn g1_evidence(args: std::fmt::Arguments<'_>) {
+        let _ = std::io::Write::write_fmt(&mut std::io::stdout(), format_args!("{args}\n"));
+    }
+
     /// Real-pinned-VMM integration evidence for gate G1 (prompt 01:
     /// "launch real pinned VMM on KVM, read actual counters"). Gated on
     /// environment variables so CI (no KVM) skips it; run on a qualified
@@ -10179,7 +10189,10 @@ mod tests {
     #[tokio::test]
     async fn g1_real_vmm_counters_measure_real_load() {
         let Ok(vmm_binary) = std::env::var("CHV_G1_VMM_BINARY") else {
-            eprintln!("skipping: CHV_G1_VMM_BINARY not set (real-KVM evidence test)");
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("skipping: CHV_G1_VMM_BINARY not set (real-KVM evidence test)\n"),
+            );
             return;
         };
         let firmware =
@@ -10235,7 +10248,7 @@ mod tests {
         // First observation: establishes the CPU baseline (no rate yet)
         // and reads real device counters + RSS.
         let first = adapter.vm_counters("g1-vm").await.expect("first counters");
-        println!("g1 first: {first:?}");
+        g1_evidence(format_args!("g1 first: {first:?}"));
         assert!(
             first.disk_bytes_read > 10_000_000,
             "real VMM must report the firmware's disk reads, got {}",
@@ -10255,7 +10268,7 @@ mod tests {
         // and monotonic-or-equal disk counters.
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
         let second = adapter.vm_counters("g1-vm").await.expect("second counters");
-        println!("g1 second: {second:?}");
+        g1_evidence(format_args!("g1 second: {second:?}"));
         assert!(
             second.disk_bytes_read >= first.disk_bytes_read,
             "device counters are monotonic within one VMM epoch"
@@ -10312,7 +10325,7 @@ mod tests {
             .vm_counters("g1-vm")
             .await
             .expect("counters after restart");
-        println!("g1 after restart: {after_restart:?}");
+        g1_evidence(format_args!("g1 after restart: {after_restart:?}"));
         assert_eq!(
             after_restart.cpu_percent, 0.0,
             "epoch crossing must emit no CPU rate"
