@@ -22,7 +22,7 @@ CREATE TABLE monitoring_samples_v1 (
   source TEXT NOT NULL,
   observed_at_ms INTEGER NOT NULL,
   received_at_ms INTEGER NOT NULL,
-  value REAL NOT NULL,
+  value REAL, -- absent for quality != valid; never a placeholder
   quality TEXT NOT NULL,
   boot_id TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (
@@ -36,7 +36,7 @@ CREATE INDEX monitoring_samples_lookup_v1
   );
 ```
 
-This is a **design outline**, not a production migration. Actual schema must include bounded dimension dictionaries, monotonic counter reset markers, integer-safe handling of byte counters, authenticated tenant/project mapping, retention indexes, and migration versioning. Do not store large `u64` counter values in IEEE-754 floats. Prefer a typed sample value in implementation and integer columns where appropriate. `boot_id` participates in the primary key so a source restart cannot collide two samples at the same `observed_at_ms`; series without a boot identity (no restartable counter source) use the empty-string default, and implementations may substitute a cleaner sentinel (for example a generated `identity_epoch` column) as long as restart-distinct samples cannot collide.
+This is a **design outline**, not a production migration. Actual schema must include bounded dimension dictionaries, monotonic counter reset markers, integer-safe handling of byte counters, authenticated tenant/project mapping, retention indexes, and migration versioning. Do not store large `u64` counter values in IEEE-754 floats. Prefer a typed sample value in implementation and integer columns where appropriate. `value` is nullable because non-valid samples carry no value — `value` MUST be absent for `quality != valid` per the [metric contract](../contracts/chv-monitoring-metrics-v1.md); never store a placeholder. `boot_id` participates in the primary key so a source restart cannot collide two samples at the same `observed_at_ms`; series without a boot identity (no restartable counter source) use the empty-string default, and implementations may substitute a cleaner sentinel (for example a generated `identity_epoch` column) as long as restart-distinct samples cannot collide.
 
 Rollups use counters (last-first/reset-safe delta), gauges (min/max/avg/count and last), and quality coverage. The schema must preserve unit and metric kind. Rollup windows use UTC-aligned boundaries and are idempotent. Do not average CPU percentages without a valid time weighting policy.
 

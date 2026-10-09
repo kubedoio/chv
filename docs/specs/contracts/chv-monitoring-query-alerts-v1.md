@@ -77,7 +77,9 @@ A **missing series** returns an empty `points` array and a reason. Absence class
 | missing (source down or never collected) | `unavailable`, `insufficient_samples` | `not_collected` |
 | missing (nothing stored in the requested range) | — no points exist | `no_history` |
 | stale | `stale` | `stale` |
-| — (point-level only) | `invalid` | a series containing only invalid points reports `not_collected` |
+| — (point-level only) | `invalid` | `not_collected` |
+
+`invalid` is point-level only: an invalid sample appears as a non-valid point, and a series containing only invalid points reports `not_collected`.
 
 It MUST NOT synthesize zero-valued points for any absence class.
 
@@ -126,7 +128,7 @@ Typed rule example:
 
 ## Incident states
 
-Incident states: `pending`, `firing`, `resolved`. Separate `acknowledged_at`, `acknowledged_by`, `silenced_until` fields. Do not conflate acknowledgment with recovery. On evaluator restart, restore active incident and notification dedup keys. Alerts carry resource identity, rule version, first/last occurrence, last good measurement, effective severity, and runbook link.
+Incident states: `pending`, `firing`, `resolved`. Separate `acknowledged_at`, `acknowledged_by`, `silenced_until` fields. Do not conflate acknowledgment with recovery. On evaluator restart, restore active incident and notification dedup keys. Alerts carry resource identity, rule version, first/last occurrence, last good measurement, effective severity, and runbook link. Storing this incident model in the existing `alerts` table requires a compatible additive migration and column review — the current schema predates several of these fields, so the implementing PR must not assume the table as-is.
 
 ## Notifications and integrations
 

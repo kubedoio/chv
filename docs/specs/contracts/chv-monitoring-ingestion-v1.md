@@ -19,7 +19,7 @@ The guest route is a dedicated agent-auth endpoint in `chv-controlplane`, isolat
 
 The manager's default deployment binds loopback (`127.0.0.1`) and TLS is terminated by an optional edge reverse proxy. Guest ingestion changes that exposure requirement and must be an explicit deployment decision, not a side effect:
 
-- Enabling guest ingestion requires the manager HTTPS listener — or its TLS-terminating edge — to be reachable from the VM network on a documented address and port. The listener must not derive any trust from network position: TLS plus the enrolled agent credential is the only authentication.
+- Enabling guest ingestion requires a manager listener **with TLS provisioned** — the control plane's own TLS configuration or its TLS-terminating edge — to be reachable from the VM network on a documented address and port. In the default shape no listener has TLS provisioned; turning on guest ingestion therefore also turns on an explicit TLS provisioning decision (control-plane TLS config or edge TLS). The plain-HTTP loopback listener MUST NOT be exposed to the VM network as the ingest endpoint. The listener must not derive any trust from network position: TLS plus the enrolled agent credential is the only authentication.
 - When TLS is terminated by a reverse proxy, the proxy either forwards agent mTLS credentials unchanged to the manager, or terminates mTLS itself and forwards the verified identity over a private loopback/Unix-socket connection via a trusted header. A user-supplied identity header arriving on a public listener must be ignored.
 - Deployments that do not expose the manager to VM networks keep guest ingestion disabled; node-native metrics and history are unaffected (ADR-026 keeps the agent optional).
 - The G3 guest-agent qualification must verify the exact listener, interface, and proxy trust chain of the default single-node install, not only a lab topology.
@@ -30,6 +30,7 @@ The manager's default deployment binds loopback (`127.0.0.1`) and TLS is termina
 {
   "schema_version": 1,
   "agent_id": "a8cdd2ae-a2a0-4a56-b5fb-0b889681fd94",
+  "install_id": "9f3c1a20-6d4e-4c2f-9b1a-2e8d5f7a4b6c",
   "boot_id": "b2e65145-70d1-4a6b-8eab-5fb785238e6c",
   "sequence": 37,
   "sent_at_ms": 1791576000000,
@@ -54,7 +55,7 @@ The manager's default deployment binds loopback (`127.0.0.1`) and TLS is termina
 }
 ```
 
-This JSON is illustrative v1 guest wire format. The normative protobuf implementation MUST preserve type and optional-field semantics, especially integer counter precision. For values above `2^53 - 1`, guest JSON MUST encode exact integers as decimal strings.
+This JSON is illustrative v1 guest wire format. `install_id` identifies the installing image (cloned-image detection per the [security contract](chv-monitor-agent-security-plugins-v1.md)); it is authenticated metadata, not part of the deduplication key. The normative protobuf implementation MUST preserve type and optional-field semantics, especially integer counter precision. For values above `2^53 - 1`, guest JSON MUST encode exact integers as decimal strings.
 
 ## Limits (initial defaults, validated before release)
 
