@@ -1,0 +1,37 @@
+{
+    "count": 1,
+    "next": null,
+    "previous": null,
+    "results": [
+        {
+            "created": "2026-10-09T12:00:00.000000Z",
+            "custom_fields": {
+                "chv_architecture_id": "arch_01HX",
+                "chv_external_id": "arch:arch_01HX:instance/vm-01/backend:3",
+                "chv_managed_by": "chv",
+                "chv_mapping_version": "v1"
+            },
+            "description": "backend",
+            "display": "backend",
+            "id": 11,
+            "last_updated": "2026-10-09T12:00:00.000000Z",
+            "name": "backend",
+            "tags": [
+                {
+                    "id": 1,
+                    "name": "chv-team",
+                    "slug": "chv-team"
+                }
+            ],
+            "type": {
+                "label": "Virtual",
+                "value": "virtual"
+            },
+            "url": "http://netbox.example.com/api/virtualization/interfaces/11/",
+            "virtual_machine": {
+                "id": 2,
+                "name": "vm-01"
+            }
+        }
+    ]
+}

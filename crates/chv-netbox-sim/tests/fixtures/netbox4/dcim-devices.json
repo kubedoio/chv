@@ -1,0 +1,39 @@
+{
+    "count": 1,
+    "next": null,
+    "previous": null,
+    "results": [
+        {
+            "created": "2026-10-09T12:00:00.000000Z",
+            "custom_fields": {
+                "chv_architecture_id": "arch_01HX",
+                "chv_architecture_version": 3,
+                "chv_cpu_cores": 8,
+                "chv_external_id": "arch:arch_01HX:server/chv-node-01:3",
+                "chv_managed_by": "chv",
+                "chv_managed_state": "active",
+                "chv_mapping_version": "v1"
+            },
+            "display": "chv-node-01",
+            "id": 7,
+            "last_updated": "2026-10-09T12:00:00.000000Z",
+            "name": "chv-node-01",
+            "site": {
+                "id": 4,
+                "name": "dc1"
+            },
+            "status": {
+                "label": "Active",
+                "value": "active"
+            },
+            "tags": [
+                {
+                    "id": 1,
+                    "name": "chv-team",
+                    "slug": "chv-team"
+                }
+            ],
+            "url": "http://netbox.example.com/api/dcim/devices/7/"
+        }
+    ]
+}

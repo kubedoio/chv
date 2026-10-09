@@ -1,0 +1,42 @@
+[package]
+name = "chv-netbox-sim"
+version = "0.3.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# NetBox `created`/`last_updated` timestamps (microsecond ISO-8601 UTC);
+# same pin style as chv-netbox-adapter's dev-dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+# Gates the `netbox-sim` binary target (see [[bin]] below) so
+# `cargo build --workspace` — and release packaging, which builds
+# default features only — never builds the dev tool unintentionally.
+bin = []
+
+[[bin]]
+name = "netbox-sim"
+path = "src/bin/netbox-sim.rs"
+required-features = ["bin"]
+
+[dev-dependencies]
+# Enables the adapter's test-only plain-HTTP client constructor so the
+# compatibility suite can run the REAL NetBoxClient against this
+# in-process simulator, proving wire compatibility in both directions.
+# This edge is dev-only by construction (the adapter never depends on
+# the simulator); NEVER enable it in a production dependency graph.
+chv-netbox-adapter = { path = "../chv-netbox-adapter", features = ["test-http"] }
+# Raw HTTP access to the `__`-prefixed control plane and to response
+# shapes the adapter client does not expose. Plain HTTP only, so no TLS
+# feature is needed.
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
