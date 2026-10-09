@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn real_proc_root_parses_self() {
-        // The real /proc must parse this process's own stat and statm.
+        // The real /proc must parse this process's own stat and status (VmRSS).
         let stat = read_proc_stat(Path::new("/proc"), std::process::id()).unwrap();
         assert_eq!(stat.pid, std::process::id());
         assert!(read_rss_bytes(Path::new("/proc"), std::process::id()).unwrap() > 0);
