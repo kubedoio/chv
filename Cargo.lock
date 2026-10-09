@@ -1006,6 +1006,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chv-netbox-sim"
+version = "0.3.0"
+dependencies = [
+ "axum 0.7.9",
+ "chrono",
+ "chv-netbox-adapter",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "chv-nwd"
 version = "0.3.0"
 dependencies = [

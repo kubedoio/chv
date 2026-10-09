@@ -1,5 +1,9 @@
 # Binaries
 bin/
+# ...but Rust bin *sources* live in `src/bin/` subdirectories (e.g. the
+# chv-netbox-sim dev tool) and must stay tracked. Re-include them
+# explicitly; the last matching pattern wins.
+!crates/chv-netbox-sim/src/bin/
 *.exe
 *.dll
 *.so

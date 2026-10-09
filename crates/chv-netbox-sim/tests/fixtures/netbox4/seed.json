@@ -1,0 +1,110 @@
+{
+  "vlans": [
+    {
+      "id": 42,
+      "vid": 42,
+      "name": "backend",
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:network/backend#vlan:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_mapping_version": "v1"
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ],
+  "prefixes": [
+    {
+      "id": 3,
+      "prefix": "10.42.0.0/24",
+      "vlan": { "vid": 42 },
+      "description": "backend (vlan)",
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:network/backend:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_mapping_version": "v1"
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ],
+  "ip_addresses": [
+    {
+      "id": 21,
+      "address": "10.42.0.5/24",
+      "assigned_object_type": "virtualization.vminterface",
+      "assigned_object_id": 11,
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:instance/vm-01/backend#10.42.0.5:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_mapping_version": "v1"
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ],
+  "interfaces": [
+    {
+      "id": 11,
+      "name": "backend",
+      "virtual_machine": { "name": "vm-01" },
+      "description": "backend",
+      "type": "virtual",
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:instance/vm-01/backend:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_mapping_version": "v1"
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ],
+  "virtual_machines": [
+    {
+      "id": 9,
+      "name": "vm-01",
+      "status": "active",
+      "cluster": null,
+      "device": { "name": "chv-node-01" },
+      "vcpus": 2,
+      "memory": 2048,
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:instance/vm-01:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_mapping_version": "v1"
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ],
+  "devices": [
+    {
+      "id": 7,
+      "name": "chv-node-01",
+      "status": "active",
+      "site": { "name": "dc1" },
+      "tags": ["chv-team"],
+      "custom_fields": {
+        "chv_external_id": "arch:arch_01HX:server/chv-node-01:3",
+        "chv_architecture_id": "arch_01HX",
+        "chv_managed_by": "chv",
+        "chv_managed_state": "active",
+        "chv_architecture_version": 3,
+        "chv_mapping_version": "v1",
+        "chv_cpu_cores": 8
+      },
+      "created": "2026-10-09T12:00:00.000000Z",
+      "last_updated": "2026-10-09T12:00:00.000000Z"
+    }
+  ]
+}
