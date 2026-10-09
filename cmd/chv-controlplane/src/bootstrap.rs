@@ -461,10 +461,22 @@ pub async fn build_service(
     // (HTTPS-only) and the binary's behavior is byte-identical.
     #[cfg(feature = "netbox-demo")]
     let netbox_projection_worker = {
-        tracing::warn!(
-            "NETBOX DEMO MODE: plain-HTTP NetBox client enabled \
-             (feature netbox-demo + CHV_NETBOX_ALLOW_HTTP=1) — NOT FOR PRODUCTION"
-        );
+        // Same exact-match check the factory closure enforces
+        // (`netbox_demo::allow_http_env`) — one source of truth, so
+        // the log can never claim a gate state the code does not
+        // enforce.
+        if chv_controlplane_service::netbox_demo::allow_http_env() {
+            tracing::warn!(
+                "NETBOX DEMO MODE: plain-HTTP NetBox client enabled \
+                 (feature netbox-demo + CHV_NETBOX_ALLOW_HTTP=1) — NOT FOR PRODUCTION"
+            );
+        } else {
+            tracing::warn!(
+                "netbox-demo feature is compiled in but CHV_NETBOX_ALLOW_HTTP is \
+                 not \"1\" — the projection worker stays HTTPS-only (the demo \
+                 plain-HTTP client factory fails closed)"
+            );
+        }
         netbox_projection_worker
             .with_client_factory(chv_controlplane_service::netbox_demo::plain_http_client_factory())
     };

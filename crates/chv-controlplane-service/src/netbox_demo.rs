@@ -49,6 +49,17 @@ use crate::netbox_projection_worker::ClientFactory;
 /// this env var is set to exactly `1`.
 const ALLOW_HTTP_ENV: &str = "CHV_NETBOX_ALLOW_HTTP";
 
+/// Whether the runtime half of the double gate is open
+/// (`CHV_NETBOX_ALLOW_HTTP` set to exactly `"1"`).
+///
+/// Single source of truth for the exact-match check: the factory
+/// closure below and the controlplane's startup log marker
+/// (`cmd/chv-controlplane/src/bootstrap.rs`) both call this, so the
+/// log can never drift from what is actually enforced.
+pub fn allow_http_env() -> bool {
+    std::env::var(ALLOW_HTTP_ENV).ok().as_deref() == Some("1")
+}
+
 /// Build the demo-mode NetBox [`ClientFactory`]: a closure that
 /// constructs clients via the adapter's test-only plain-HTTP
 /// constructor — but only when the runtime gate
@@ -69,7 +80,7 @@ const ALLOW_HTTP_ENV: &str = "CHV_NETBOX_ALLOW_HTTP";
 /// process cannot cache an early gate decision.
 pub fn plain_http_client_factory() -> ClientFactory {
     Arc::new(|endpoint: &str, token: NetBoxToken| {
-        if std::env::var(ALLOW_HTTP_ENV).ok().as_deref() != Some("1") {
+        if !allow_http_env() {
             return Err(ClientError::HttpsRequired {
                 endpoint: endpoint.to_string(),
             });
@@ -86,12 +97,25 @@ mod tests {
     /// gate is process-global state). std-only, no extra dev-dep.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Removes the gate env var and returns the previous value so the
-    /// caller can restore it.
-    fn unset_gate() -> Option<String> {
-        let previous = std::env::var(ALLOW_HTTP_ENV).ok();
-        std::env::remove_var(ALLOW_HTTP_ENV);
-        previous
+    /// Restores `CHV_NETBOX_ALLOW_HTTP` to the value it had when the
+    /// guard was captured — on *every* scope exit, including panics and
+    /// `?`/`return` unwinds, so a failing assertion can never leak the
+    /// mutation into other test binaries' threads.
+    struct EnvGuard(Option<String>);
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self(std::env::var(ALLOW_HTTP_ENV).ok())
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var(ALLOW_HTTP_ENV, value),
+                None => std::env::remove_var(ALLOW_HTTP_ENV),
+            }
+        }
     }
 
     #[test]
@@ -106,7 +130,8 @@ mod tests {
         let token = NetBoxToken::new("demo-token".to_string());
 
         // --- Gate closed: env var absent → fail closed, both gates named.
-        let previous = unset_gate();
+        let _env = EnvGuard::capture();
+        std::env::remove_var(ALLOW_HTTP_ENV);
         let error = factory("http://127.0.0.1:8080", token.clone())
             .expect_err("factory must fail closed without the env gate");
         assert!(
@@ -139,12 +164,7 @@ mod tests {
             format!("{client:?}").contains("http://127.0.0.1:8080"),
             "client must be pointed at the http endpoint: {client:?}"
         );
-
-        // Restore whatever the environment had before the test.
-        match previous {
-            Some(value) => std::env::set_var(ALLOW_HTTP_ENV, value),
-            None => std::env::remove_var(ALLOW_HTTP_ENV),
-        }
+        // `_env` restores the previous env value on scope exit (Drop).
     }
 
     #[test]
@@ -152,7 +172,7 @@ mod tests {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var(ALLOW_HTTP_ENV).ok();
+        let _env = EnvGuard::capture();
         std::env::set_var(ALLOW_HTTP_ENV, "1");
 
         let factory = plain_http_client_factory();
@@ -164,10 +184,6 @@ mod tests {
             factory("https://netbox.example.internal", token).is_ok(),
             "https endpoints must still construct in demo mode"
         );
-
-        match previous {
-            Some(value) => std::env::set_var(ALLOW_HTTP_ENV, value),
-            None => std::env::remove_var(ALLOW_HTTP_ENV),
-        }
+        // `_env` restores the previous env value on scope exit (Drop).
     }
 }

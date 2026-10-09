@@ -18,9 +18,13 @@ The script builds and boots, all on `127.0.0.1`:
 | `chv-controlplane` | Built with `--features netbox-demo,dev` against a throwaway sqlite DB, serving the built Web UI (`ui/build`) |
 | Seeded state | Bootstrap admin user, the first starter topology, a seeded *applied* version + succeeded apply run, and the NetBox projection config pointing at the simulator |
 
-Everything lives in a `mktemp -d` workspace that is removed on exit
-(`--keep` preserves it; re-running with `--keep` reuses the DB and the
-seed steps are idempotent). `Ctrl-C` tears both processes down.
+By default everything lives in a `mktemp -d` workspace that is removed
+on exit. `--keep` preserves it (DB, credentials, logs), and
+`--workspace <dir>` reuses a kept workspace: the simulator token is
+re-read from its `demo.env` (so the stored projection config keeps
+matching the sim), and the seed steps skip what already exists —
+admin user, demo version, apply run, projection config. `Ctrl-C` tears
+both processes down.
 
 ## What it proves
 
@@ -36,7 +40,7 @@ seed steps are idempotent). `Ctrl-C` tears both processes down.
 
 - Rust toolchain (repo pin), `sqlite3`, `openssl`, `curl`, `jq`
 - `python3` with **PyYAML** (YAML → normalized-model seeding) and
-  **bcrypt** (`pip3 install bcrypt pyyaml`; `htasswd` from
+  **bcrypt** (`pip3 install bcrypt pyyaml`; `htpasswd` from
   `apache2-utils`/`httpd-tools` works as the bcrypt fallback)
 - `node`/`npm` — only when `ui/build` is missing or stale; the script
   runs `cd ui && npm install && npm run build` in that case
@@ -85,14 +89,28 @@ curl -s -X POST http://127.0.0.1:18081/__faults \
 curl -s -X POST http://127.0.0.1:18081/__faults \
      -H 'Content-Type: application/json' -d '{"latency_ms": 2000}' | jq .
 
-# Clear all faults:
+# Clear the GLOBAL fault config ('{}' replaces it with all-false).
+# Per-kind entries are NOT touched by this — clear those separately:
 curl -s -X POST http://127.0.0.1:18081/__faults \
      -H 'Content-Type: application/json' -d '{}' | jq .
+
+# Clear a PER-KIND fault: an all-false entry for that kind replaces
+# whatever the global config says for it:
+curl -s -X POST http://127.0.0.1:18081/__faults \
+     -H 'Content-Type: application/json' \
+     -d '{"kind": "virtual_machine"}' | jq .
+
+# Nuclear option — clear faults AND every object in the simulator:
+curl -s -X POST http://127.0.0.1:18081/__reset | jq .
 ```
 
-Watch how the controlplane behaves: a dry run during an outage answers
-`NETBOX_UNREACHABLE`; an exported run during an outage is requeued with
-backoff and retried — never lost, never duplicated.
+Watch how the controlplane behaves: a dry run against a *stopped*
+simulator (or with `connection_drop` injected) answers
+`502 NETBOX_UNREACHABLE` — a connect-level failure. A `server_error`
+fault, by contrast, is an API-level response: the dry run answers a
+5xx `INTERNAL_ERROR` instead. Either way, an exported run during an
+outage is requeued with backoff and retried — never lost, never
+duplicated.
 
 ## The plain-HTTP double gate (and why it never ships)
 
@@ -127,16 +145,25 @@ conditions (feature name, env var, factory seams) is a high-risk change
 ## Options
 
 ```sh
-./scripts/netbox-demo.sh --port 18080 --sim-port 18081 [--no-seed] [--keep]
+./scripts/netbox-demo.sh --port 18080 --sim-port 18081 \
+    [--no-seed] [--keep] [--workspace DIR]
 ```
 
 - `--port` / `--sim-port` — controlplane HTTP / simulator ports
   (defaults `18080` / `18081`; the controlplane's gRPC port is `18443`).
 - `--no-seed` — skip the demo architecture / projection-config seeding;
-  you land on the UI with the six starters but no NetBox config.
+  you land on the UI with the six starters but no NetBox config. (The
+  admin user is always seeded — the UI needs it to log in.)
 - `--keep` — keep the workspace on exit; the workspace's `demo.env`
   records the URLs, the simulator token, and the seeded architecture id
   for shell-driven experiments.
+- `--workspace DIR` — reuse a workspace (e.g. one preserved by
+  `--keep`): its sqlite DB, admin credentials (recovered from
+  `admin_password`), and simulator token (re-read from `demo.env`, so
+  the stored projection config keeps matching the sim) are reused, and
+  the seed steps skip what already exists. The dir is created if
+  missing and is never deleted on exit (implies `--keep`). Default: a
+  fresh `mktemp -d` workspace, removed on exit.
 
 `CHV_NETBOX_DEMO_SKIP_BUILD=1` skips the cargo builds (binaries must
 already exist in `target/debug`).

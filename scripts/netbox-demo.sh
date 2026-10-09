@@ -22,10 +22,18 @@
 # Options:
 #   --port PORT     Controlplane HTTP port (default: 18080)
 #   --sim-port PORT netbox-sim port       (default: 18081)
-#   --no-seed       Skip seeding the admin user / demo architecture /
-#                   projection config (you land on an empty-ish UI)
-#   --keep          Keep the temp workspace on exit (re-running with
-#                   --keep reuses the same DB: seeding is idempotent)
+#   --no-seed       Skip the demo architecture / projection-config
+#                   seeding only (the admin user is ALWAYS seeded — the
+#                   UI needs it to log in; you land on the six starters
+#                   with no NetBox config)
+#   --workspace DIR Reuse a workspace dir (e.g. one preserved with
+#                   --keep): its sqlite DB, admin credentials, and sim
+#                   token are reused and the seed steps skip what
+#                   already exists. The dir is created if missing and
+#                   is never deleted (implies --keep). Default: a
+#                   fresh mktemp -d, removed on exit.
+#   --keep          Keep the workspace on exit; re-run against it with
+#                   --workspace DIR
 #   --help          This help
 #
 # Environment:
@@ -36,9 +44,10 @@
 # sqlite3, openssl, curl, jq, python3 with PyYAML, and python3-bcrypt
 # (or htpasswd) for the admin seed. See docs/dev/netbox-demo.md.
 #
-# Safety: everything lives in a mktemp workspace that is removed on
-# exit (unless --keep); both servers bind 127.0.0.1 only; Ctrl-C tears
-# everything down.
+# Safety: by default everything lives in a mktemp workspace that is
+# removed on exit; --keep preserves it and --workspace DIR reuses one
+# (and is never deleted). Both servers bind 127.0.0.1 only; Ctrl-C
+# tears everything down.
 
 set -euo pipefail
 
@@ -53,7 +62,10 @@ warn()    { echo "[netbox-demo] [WARN] $*" >&2; }
 fatal()   { echo "[netbox-demo] [FATAL] $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Print the header comment (everything from line 2 up to the first
+    # line that is not part of it) as the help text.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+        "${BASH_SOURCE[0]}"
     exit 0
 }
 
@@ -65,6 +77,7 @@ SIM_PORT="18081"
 GRPC_PORT="18443"
 SEED=true
 KEEP=false
+WORKSPACE_ARG=""
 SKIP_BUILD="${CHV_NETBOX_DEMO_SKIP_BUILD:-0}"
 
 while [[ $# -gt 0 ]]; do
@@ -73,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --sim-port)   SIM_PORT="${2:?--sim-port requires a value}"; shift 2 ;;
         --no-seed)    SEED=false; shift ;;
         --keep)       KEEP=true; shift ;;
+        --workspace)  WORKSPACE_ARG="${2:?--workspace requires a value}"; shift 2 ;;
         --help|-h)    usage ;;
         *)            fatal "unknown option: $1 (try --help)" ;;
     esac
@@ -93,13 +107,32 @@ cd "$REPO_ROOT"
 # ---------------------------------------------------------------------------
 # Workspace + process tracking; teardown on any exit path
 # ---------------------------------------------------------------------------
-WORKSPACE="$(mktemp -d /tmp/chv-netbox-demo.XXXXXX)"
+# Default: a fresh mktemp -d, removed on exit. --workspace DIR reuses a
+# named directory (typically one preserved by a previous --keep run):
+# it is created if missing and NEVER deleted — a workspace the user
+# pointed at explicitly is not ours to remove (implies --keep).
+if [[ -n "$WORKSPACE_ARG" ]]; then
+    mkdir -p "$WORKSPACE_ARG"
+    WORKSPACE="$(cd "$WORKSPACE_ARG" && pwd)"
+else
+    WORKSPACE="$(mktemp -d /tmp/chv-netbox-demo.XXXXXX)"
+fi
 DB_PATH="${WORKSPACE}/controlplane.db"
 CONFIG_PATH="${WORKSPACE}/controlplane.toml"
 CRED_FILE="${WORKSPACE}/admin_password"
 ENV_FILE="${WORKSPACE}/demo.env"
 CP_LOG="${WORKSPACE}/controlplane.log"
 SIM_LOG="${WORKSPACE}/netbox-sim.log"
+
+# Reuse detection: a --workspace dir that carries a kept demo.env with
+# a sim token. On reuse the token is re-read from that file (below) —
+# the DB's stored projection config authenticates against the sim with
+# that exact token, so regenerating it would invalidate the kept DB.
+REUSE=false
+if [[ -n "$WORKSPACE_ARG" ]] && [[ -f "$ENV_FILE" ]] && \
+   grep -q '^SIM_TOKEN=' "$ENV_FILE" 2>/dev/null; then
+    REUSE=true
+fi
 
 SIM_PID=""
 CP_PID=""
@@ -115,10 +148,11 @@ cleanup() {
     fi
     [[ -n "$CP_PID" ]] && wait "$CP_PID" 2>/dev/null || true
     [[ -n "$SIM_PID" ]] && wait "$SIM_PID" 2>/dev/null || true
-    if [[ "$KEEP" == true ]]; then
-        info "workspace kept (--keep): ${WORKSPACE}"
+    if [[ "$KEEP" == true || -n "$WORKSPACE_ARG" ]]; then
+        info "workspace kept: ${WORKSPACE}"
         info "  controlplane log: ${CP_LOG}"
         info "  simulator log:    ${SIM_LOG}"
+        info "  re-run against it: ./scripts/netbox-demo.sh --workspace ${WORKSPACE}"
     else
         rm -rf "$WORKSPACE"
         info "workspace removed"
@@ -161,7 +195,18 @@ fi
 # ---------------------------------------------------------------------------
 # Generated secrets + controlplane config
 # ---------------------------------------------------------------------------
-SIM_TOKEN="$(openssl rand -hex 24)"
+if [[ "$REUSE" == true ]]; then
+    # Reuse the kept sim token: the stored projection-config row
+    # authenticates with it, so a regenerated token would leave the
+    # kept DB unable to talk to the (new) simulator process.
+    SIM_TOKEN="$(grep '^SIM_TOKEN=' "$ENV_FILE" | cut -d= -f2)"
+    [[ -n "$SIM_TOKEN" ]] || fatal "failed to read SIM_TOKEN from ${ENV_FILE}"
+    info "reusing workspace ${WORKSPACE} (sim token re-read from ${ENV_FILE})"
+else
+    SIM_TOKEN="$(openssl rand -hex 24)"
+fi
+# The JWT secret is per-process (old sessions simply log in again) and
+# the admin password is recovered from the cred file on reuse (below).
 JWT_SECRET="$(openssl rand -hex 32)"
 ADMIN_PASSWORD="$(openssl rand -base64 18 | tr -d '\n' | tr '+/' '-_')"
 
@@ -184,7 +229,7 @@ enabled = true
 dir = "${REPO_ROOT}/ui/build"
 TOML
 
-# Key facts for --keep re-runs and for driving the demo from a shell.
+# Key facts for --workspace re-runs and for driving the demo from a shell.
 cat > "$ENV_FILE" <<ENV
 # Generated by scripts/netbox-demo.sh
 CONTROLPLANE_URL=${CP_URL}
@@ -245,9 +290,20 @@ $(tail -n 30 "$SIM_LOG")"
 start_controlplane
 info "waiting for the controlplane /health endpoint..."
 wait_for "chv-controlplane" "${CP_URL}/health"
+# The HTTP listener answers /health before component construction
+# finishes (the demo-mode marker is logged during component
+# bootstrap), so a warm start can win the race — retry briefly before
+# declaring the binary wrongly built.
 if ! grep -q "NETBOX DEMO MODE" "$CP_LOG"; then
-    fatal "controlplane started but the NETBOX DEMO MODE marker is missing from its log — \
+    MARKER_OK=""
+    for _ in $(seq 1 20); do
+        if grep -q "NETBOX DEMO MODE" "$CP_LOG"; then MARKER_OK=1; break; fi
+        sleep 0.5
+    done
+    if [[ -z "$MARKER_OK" ]]; then
+        fatal "controlplane started but the NETBOX DEMO MODE marker is missing from its log — \
 the binary was probably built without --features netbox-demo"
+    fi
 fi
 info "demo-mode marker confirmed in the controlplane log"
 info "phase 1 boot done (migrations + starter topologies); stopping for offline seeding..."
@@ -271,8 +327,9 @@ wait_for "netbox-sim" "${SIM_URL}/api/ipam/vlans/?limit=1" -H "Authorization: To
 seed_admin_user() {
     info "seeding bootstrap admin user (sqlite direct, bcrypt cost 12)..."
 
-    # Idempotent: an existing admin row (a --keep re-run) is left alone so
-    # the stored password keeps working; recover it from the 0600 cred file.
+    # Idempotent: an existing admin row (a --workspace re-run) is left
+    # alone so the stored password keeps working; recover it from the
+    # 0600 cred file.
     if [[ -f "$DB_PATH" ]] && \
        [[ "$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM users WHERE username = 'admin';" 2>/dev/null)" == "1" ]]; then
         if [[ -r "$CRED_FILE" ]]; then
@@ -385,7 +442,7 @@ sim_token = os.environ["DEMO_SIM_TOKEN"]
 db = sqlite3.connect(os.path.join(ws, "controlplane.db"))
 cur = db.cursor()
 
-# Idempotent on --keep re-runs: one demo version + one demo apply run.
+# Idempotent on --workspace re-runs: one demo version + one demo apply run.
 cur.execute(
     "SELECT id FROM architecture_versions WHERE architecture_id = ? AND change_summary = 'netbox-demo'",
     (arch_id,),
@@ -435,11 +492,22 @@ if cur.fetchone() is None:
     db.commit()
     print("[netbox-demo] [INFO] seeded netbox projection config pointing at the simulator")
 else:
-    print("[netbox-demo] [INFO] netbox projection config already seeded — reusing")
+    # Keep the stored config in lockstep with this run's sim: the
+    # token is re-read from demo.env on workspace reuse (so normally a
+    # no-op), and the endpoint is refreshed in case the sim port
+    # changed. Without this, a stale row would 401 against the new
+    # simulator process.
+    cur.execute(
+        "UPDATE netbox_projection_config SET endpoint = ?, token_ciphertext = ? "
+        "WHERE architecture_id = ?",
+        (sim_url, sim_token, arch_id),
+    )
+    db.commit()
+    print("[netbox-demo] [INFO] netbox projection config already seeded — reusing (endpoint/token synced)")
 db.close()
 PYEOF
 
-    # Persist the chosen architecture for --keep re-runs / shell driving.
+    # Persist the chosen architecture for --workspace re-runs / shell driving.
     echo "ARCH_ID=${arch_id}" >> "$ENV_FILE"
 }
 
@@ -499,6 +567,14 @@ fi
 # ---------------------------------------------------------------------------
 # Tell the human what to do
 # ---------------------------------------------------------------------------
+WORKSPACE_NOTE="(removed on exit; --keep to preserve)"
+if [[ "$REUSE" == true ]]; then
+    WORKSPACE_NOTE="(reused workspace)"
+fi
+if [[ "$KEEP" == true || -n "$WORKSPACE_ARG" ]]; then
+    WORKSPACE_NOTE="${WORKSPACE_NOTE} — kept on exit; re-run with: ./scripts/netbox-demo.sh --workspace ${WORKSPACE}"
+fi
+
 cat <<BANNER
 
 ==============================================================
@@ -511,7 +587,7 @@ cat <<BANNER
 
   NetBox simulator:  ${SIM_URL}   (token: ${SIM_TOKEN})
   Simulator state:   curl -s ${SIM_URL}/__state | jq .
-  Workspace:         ${WORKSPACE}   (removed on exit; --keep to preserve)
+  Workspace:         ${WORKSPACE} ${WORKSPACE_NOTE}
 
   Click-path (what this demo proves):
     1. Open ${CP_URL} and log in with the demo credentials.
@@ -533,9 +609,17 @@ cat <<BANNER
     # Add latency, or drop connections mid-response:
     curl -s -X POST ${SIM_URL}/__faults \\
          -H 'Content-Type: application/json' -d '{"latency_ms": 2000}' | jq .
-    # Clear all faults:
+    # Clear the GLOBAL fault config ('{}' replaces it with all-false).
+    # NOTE: per-kind entries are NOT touched by this — clear those
+    # separately (next example):
     curl -s -X POST ${SIM_URL}/__faults \\
          -H 'Content-Type: application/json' -d '{}' | jq .
+    # Clear a PER-KIND fault: an all-false entry for that kind replaces
+    # whatever the global config says for it:
+    curl -s -X POST ${SIM_URL}/__faults \\
+         -H 'Content-Type: application/json' -d '{"kind": "virtual_machine"}' | jq .
+    # Nuclear option — clear faults AND every object in the simulator:
+    curl -s -X POST ${SIM_URL}/__reset | jq .
 
   Press Ctrl-C to tear everything down.
 ==============================================================
