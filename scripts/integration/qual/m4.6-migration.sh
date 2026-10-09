@@ -59,11 +59,15 @@
 #      COMPLETED + digest match.
 #
 # Non-claims (recorded in the evidence doc):
-#   - Dirty-block *transfer* under concurrent writes (#394): the source
-#     bitmap is only populated by LocalFileBackend::write_block; a
-#     deployment-realistic concurrent-writer leg does not exist. Proven at
-#     protocol level by crates/chv-stord-core/tests/migration_e2e.rs
-#     (dirty_rounds_transfer_concurrent_writes) only.
+#   - Concurrent-write migration (#394): on a real host this scenario's
+#     legs are quiescent-only. Since the #394 Option A write canary, a
+#     concurrent source write fails the migration fail-fast at the
+#     first dirty-round boundary — proven at protocol level by
+#     crates/chv-stord-core/tests/migration_e2e.rs
+#     (concurrent_source_write_fails_fast; dirty-block transfer itself
+#     by dirty_rounds_converge_preseeded_writes — [renamed 2026-10-08,
+#     #394 Option A: was dirty_rounds_transfer_concurrent_writes]). No
+#     real-host concurrent-writer leg has run.
 #   - The CP-orchestrated migration path (agent migrate_vm) fails closed
 #     in core-managed mode by design (single-writer enforcement) and is
 #     NOT exercised; this scenario drives stord↔stord directly.

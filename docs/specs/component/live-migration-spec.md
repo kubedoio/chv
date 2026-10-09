@@ -174,6 +174,7 @@ message MigrationConfig {
   uint32 max_convergence_rounds = 2;  // default: 10
   uint32 block_size_bytes = 3;        // default: 4194304 (4MB)
   uint32 total_timeout_seconds = 4;   // 0 = use calculated default
+  bool pause_first = 5;               // issue #394 Option C: stop-the-world
 }
 
 message MigrationProgress {
@@ -202,7 +203,14 @@ enum MigrationPhase {
 
 Note: the `MigrationConfig` values are advisory CP-side inputs (they size
 convergence polling and phase timeouts); the stord-side convergence threshold,
-round cap, and block size are constants — see Configuration.
+round cap, and block size are constants — see Configuration. `pause_first`
+(issue #394, Option C) is the exception — the agent reads it: when true, the
+source agent pauses the VM before triggering stord's bulk copy (the
+`PAUSED_PRE_COPY` handshake) instead of only at final sync, making the disk
+transfer correct by construction at the cost of stop-the-world downtime; it
+is set per-migration from the BFF vm-mutate migrate action's `pause_first`
+field (`chvctl migrate start --pause-first` / `chvctl vm migrate
+--pause-first`), and the WebUI does not expose it yet.
 
 ## Operation Integration
 

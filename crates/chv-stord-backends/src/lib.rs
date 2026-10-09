@@ -37,4 +37,7 @@ pub use ceph::CephRbdBackend;
 pub use iscsi::IscsiBackend;
 pub use local::LocalFileBackend;
 pub use lvm::LVMBackend;
-pub use r#trait::{BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE};
+pub use r#trait::{
+    BackendHealth, StorageBackend, VolumeExport, WriteCanaryCapability, WriteCanaryFingerprint,
+    DIRTY_TRACKING_BLOCK_SIZE,
+};

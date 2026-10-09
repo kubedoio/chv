@@ -38,7 +38,7 @@
 		{ id: 'overview', label: 'Overview', icon: LayoutGrid, href: '/' },
 		{ id: 'global-images', label: 'Images', icon: ImageIcon, href: '/images' },
 		{ id: 'global-networks', label: 'Networks', icon: Network, href: '/networks' },
-		{ id: 'global-storage', label: 'Storage Pools', icon: HardDrive, href: '/storage' },
+		{ id: 'global-storage', label: 'Storage Pools', icon: HardDrive, href: '/volumes' },
 		{ id: 'settings', label: 'Settings', icon: Settings, href: '/settings' },
 	];
 

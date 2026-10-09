@@ -1999,6 +1999,13 @@ impl LifecycleService for LifecycleServiceImplementation {
             }
         }
 
+        // Issue #394 Option C: the correlation_id is the only carrier from
+        // this RPC's `MigrationConfig` to the migration state machine (the
+        // orchestrator rebuilds the config from it via
+        // `from_correlation_id`), so the operator's stop-the-world opt-in
+        // must ride it — dropping the key here would silently downgrade
+        // the request to quiescent-assumed.
+        let pause_first = request.config.as_ref().is_some_and(|c| c.pause_first);
         let (operation_id, _, _) = self
             .create_operation_and_emit(
                 "MigrateVm",
@@ -2007,8 +2014,10 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(vm_id.clone()),
                 &meta,
                 Some(format!(
-                    "source={}:dest={}",
-                    request.source_node_id, request.destination_node_id
+                    "source={}:dest={}{}",
+                    request.source_node_id,
+                    request.destination_node_id,
+                    if pause_first { ":pause_first=true" } else { "" }
                 )),
             )
             .await?;

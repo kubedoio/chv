@@ -1,6 +1,6 @@
 use crate::r#trait::{
-    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
-    MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES,
+    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, WriteCanaryCapability,
+    WriteCanaryFingerprint, DIRTY_TRACKING_BLOCK_SIZE, MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES,
 };
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
@@ -872,6 +872,15 @@ impl StorageBackend for LocalFileBackend {
 
     /// Initialize the dirty bitmap for an opened volume.
     ///
+    /// **#394 R1:** this bitmap is stord-private state marked only by
+    /// [`StorageBackend::write_block`] — it cannot observe guest/host
+    /// writes that bypass stord, and in production nothing calls
+    /// `write_block` on a *source* volume during migration. The dirty
+    /// rounds driven by it are protocol machinery, not live-migration
+    /// support; the sender's write canary
+    /// ([`StorageBackend::write_canary_probe`]) is what rejects a
+    /// concurrently-written source.
+    ///
     /// The bitmap has one bit per 4 MiB block and starts all-clear. Reusing
     /// an existing tracker (idempotent re-open or trigger-time re-enable)
     /// updates its size bound and grows the bitmap in place, preserving the
@@ -946,6 +955,47 @@ impl StorageBackend for LocalFileBackend {
                 id: handle.to_string(),
             }),
         }
+    }
+
+    /// Write canary for the file-backed backend (#394, Option A): stat
+    /// the backing file and report a [`WriteCanaryCapability::FileStat`]
+    /// fingerprint.
+    ///
+    /// Every `write(2)` through *any* file descriptor — Cloud
+    /// Hypervisor's included — updates a regular file's mtime/ctime, so
+    /// the (mtime, ctime, size) triple is a reliable tripwire for
+    /// *whether* the source was written during a migration. It says
+    /// nothing about *where*, which is why the canary is an early
+    /// failure signal layered in front of the #392 whole-volume
+    /// finalize digest, not a replacement for it. `atime` is not
+    /// sampled: the sender's own `read_block` reads would otherwise
+    /// trip the canary on `relatime` mounts.
+    async fn write_canary_probe(
+        &self,
+        volume_id: &str,
+        handle: &str,
+    ) -> Result<WriteCanaryFingerprint, ChvError> {
+        let path = self.path_from_handle(volume_id, handle)?;
+        tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::metadata(&path).map_err(|e| ChvError::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+            Ok(WriteCanaryFingerprint {
+                capability: WriteCanaryCapability::FileStat,
+                mtime_sec: md.mtime(),
+                mtime_nsec: md.mtime_nsec(),
+                ctime_sec: md.ctime(),
+                ctime_nsec: md.ctime_nsec(),
+                size: md.len(),
+            })
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("write_canary_probe task panicked: {}", e),
+        })?
     }
 
     async fn read_block(
@@ -1795,6 +1845,72 @@ mod tests {
             .unwrap();
         assert!(!bitmap.is_empty());
         assert!(bitmap.iter().all(|&b| b == 0));
+    }
+
+    /// #394 Option A: the write canary probe reports a `FileStat`
+    /// fingerprint for an open volume, and the fingerprint moves when
+    /// the backing file is written — including through a file
+    /// descriptor stord never handed out (simulated here by a plain
+    /// `std::fs::write`, the same write path the hypervisor's image
+    /// writes take).
+    #[tokio::test]
+    async fn write_canary_probe_reports_file_stat_and_moves_on_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) =
+            open_tracked_volume(dir.path(), "vol-1", "canary.img", 8_388_608).await;
+
+        let baseline = backend.write_canary_probe("vol-1", &handle).await.unwrap();
+        assert_eq!(
+            baseline.capability,
+            WriteCanaryCapability::FileStat,
+            "local backend must report a FileStat canary"
+        );
+
+        // An out-of-band write to the backing file (not via stord's
+        // write_block — this is the write path the dirty bitmap cannot
+        // see) must move the fingerprint. In-place, no truncate: a
+        // guest write never changes the file's size, so the trip must
+        // come from mtime/ctime, exactly as in production.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.path().join("canary.img"))
+                .unwrap();
+            f.seek(SeekFrom::Start(1024)).unwrap();
+            f.write_all(&[0x42u8; 512]).unwrap();
+            f.sync_all().unwrap();
+        }
+        let after = backend.write_canary_probe("vol-1", &handle).await.unwrap();
+        assert!(
+            !baseline.stat_matches(&after),
+            "an out-of-band write must trip the file-stat canary"
+        );
+
+        // Re-probing without further writes is stable (the sender's own
+        // reads must not trip the canary: atime is not sampled).
+        let again = backend.write_canary_probe("vol-1", &handle).await.unwrap();
+        assert!(
+            after.stat_matches(&again),
+            "re-probing an unwritten file must be stable"
+        );
+    }
+
+    /// The canary probe fails closed for a handle this backend does not
+    /// own — never a silent Unavailable, which would disarm the canary.
+    #[tokio::test]
+    async fn write_canary_probe_rejects_foreign_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let err = backend
+            .write_canary_probe("vol-1", "local-other-unknown.img")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChvError::BackendUnavailable { .. }),
+            "foreign handle must be rejected, got: {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -487,6 +487,7 @@ impl StordClient {
         volume_id: &str,
         attachment_handle: &str,
         dest_endpoint: &str,
+        pause_first: bool,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
         let req = TriggerDiskMigrationRequest {
@@ -500,6 +501,7 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             attachment_handle: attachment_handle.to_string(),
             dest_endpoint: dest_endpoint.to_string(),
+            pause_first,
         };
         let span = tracing::info_span!(
             "trigger_disk_migration",
@@ -1473,7 +1475,18 @@ mod tests {
     use chv_stord_api::chv_stord_api::storage_service_server::StorageService;
     use tonic::{Request, Response, Status};
 
-    struct MockStord;
+    #[derive(Default)]
+    struct MockStord {
+        /// When set, `trigger_disk_migration` captures the request and
+        /// answers OK instead of `unimplemented` — the wire-contract pin
+        /// for the agent→stord thread (issue #394 Option C).
+        capture_trigger: Option<
+            std::sync::Arc<
+                std::sync::Mutex<Option<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>>,
+            >,
+        >,
+    }
+
     #[tonic::async_trait]
     impl StorageService for MockStord {
         async fn list_volume_sessions(
@@ -1563,9 +1576,22 @@ mod tests {
         }
         async fn trigger_disk_migration(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
+            req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
         {
+            if let Some(capture) = &self.capture_trigger {
+                *capture.lock().unwrap() = Some(req.into_inner());
+                return Ok(Response::new(
+                    chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse {
+                        result: Some(chv_stord_api::chv_stord_api::Result {
+                            status: "OK".to_string(),
+                            error_code: "OK".to_string(),
+                            human_summary: String::new(),
+                        }),
+                        migration_id: "dm-mock-1".to_string(),
+                    },
+                ));
+            }
             Err(Status::unimplemented(""))
         }
         async fn get_disk_migration_status(
@@ -1722,7 +1748,7 @@ mod tests {
             tonic::transport::Server::builder()
                 .add_service(
                     chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
-                        MockStord,
+                        MockStord::default(),
                     ),
                 )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -1772,7 +1798,7 @@ mod tests {
             tonic::transport::Server::builder()
                 .add_service(
                     chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
-                        MockStord,
+                        MockStord::default(),
                     ),
                 )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
@@ -1786,6 +1812,64 @@ mod tests {
         let mut client = StordClient::connect(&socket).await.unwrap();
         let result = client.resize_volume("vol-1", 1024, Some("op-1")).await;
         assert!(matches!(result, Err(ChvError::BackendUnavailable { .. })));
+    }
+
+    /// Issue #394 Option C wire pin: `StordClient::trigger_disk_migration`
+    /// must place `pause_first` (and the identifying fields) on the
+    /// `TriggerDiskMigrationRequest` — the agent→stord hop of the
+    /// stop-the-world opt-in. The e2e tiers pin the CLI→BFF→CP and
+    /// handler→sender hops; this is the one between them.
+    #[tokio::test]
+    async fn stord_trigger_disk_migration_carries_pause_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+
+        let captured: std::sync::Arc<
+            std::sync::Mutex<Option<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mock = MockStord {
+            capture_trigger: Some(captured.clone()),
+        };
+
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                        mock,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+
+        let mut client = StordClient::connect(&socket).await.unwrap();
+        let migration_id = client
+            .trigger_disk_migration(
+                "vol-pf",
+                "handle-pf",
+                "https://10.0.0.5:50052",
+                true,
+                Some("op-pf"),
+            )
+            .await
+            .expect("trigger must succeed against the capturing mock");
+        assert_eq!(migration_id, "dm-mock-1");
+
+        let req = captured.lock().unwrap().take().expect("request captured");
+        assert_eq!(req.volume_id, "vol-pf");
+        assert_eq!(req.attachment_handle, "handle-pf");
+        assert_eq!(req.dest_endpoint, "https://10.0.0.5:50052");
+        assert!(
+            req.pause_first,
+            "the stop-the-world opt-in must ride the trigger request"
+        );
+        assert_eq!(
+            req.meta.expect("meta present").operation_id,
+            "op-pf",
+            "the operation id must thread for tracing"
+        );
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ pub trait MutationService: Send + Sync {
         &self,
         vm_id: String,
         target_node_id: String,
+        pause_first: bool,
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError>;
 

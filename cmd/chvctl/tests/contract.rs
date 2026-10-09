@@ -74,11 +74,14 @@
 //! PR 3 (landed, #520 — the #372 dead-group removals) removed the
 //! `storage` and `backup` command groups (design §2.2/DP3 and §2.4/DP5):
 //! every subcommand 404'd on routes that do not exist, and the removals
-//! are CLI-surface only — the BFF's `/v1/storage-pools` and
-//! `/v1/backups/*` routes stay (the UI's storage and backup catalog
-//! pages call them), and the BackupWorker scaffold is untouched CP
-//! machinery. Their 6 rows (storage ×4, backup ×2) left this file with
-//! the groups; `chvctl storage ...` / `chvctl backup ...` now fail at
+//! are CLI-surface only — the BFF's `/v1/backups/*` routes stay (the
+//! UI's backup catalog page calls them), and the BackupWorker
+//! scaffold is untouched CP machinery. The BFF's `/v1/storage-pools`
+//! routes were later removed with the whole phantom catalog (#514:
+//! the table was connected to no provisioning, and the UI's storage
+//! page had been an unreachable redirect to /volumes since long
+//! before #372 (d6836446, 2026-04-17)). Their 6 rows (storage ×4,
+//! backup ×2) left this file with the groups; `chvctl storage ...` / `chvctl backup ...` now fail at
 //! argument parsing with "unrecognized subcommand" — truthful (design
 //! residual risk 2).
 //!
@@ -267,9 +270,13 @@ impl MutationService for RecordingMutations {
         &self,
         vm_id: String,
         target_node_id: String,
+        pause_first: bool,
         _requested_by: String,
     ) -> Result<chv_webui_bff_api::chv_webui_bff_v1::MutateVmResponse, BffError> {
-        self.record(format!("migrate_vm:{vm_id}:{target_node_id}"));
+        self.record(format!(
+            "migrate_vm:{vm_id}:{target_node_id}:{}",
+            if pause_first { "pause_first" } else { "live" }
+        ));
         Ok(vm_response(&vm_id))
     }
     async fn snapshot_vm(
@@ -1294,12 +1301,38 @@ async fn vm_migrate_row() {
         vm::VmCommands::Migrate {
             vm_id: "vm-1".to_string(),
             to: "n-2".to_string(),
+            pause_first: false,
         },
         &OutputFormat::Json,
     )
     .await
     .expect("chvctl vm migrate against POST /v1/vms/mutate");
-    h.mutations.assert_recorded("migrate_vm:vm-1:n-2");
+    h.mutations.assert_recorded("migrate_vm:vm-1:n-2:live");
+}
+
+/// `chvctl vm migrate --pause-first` — the issue #394 Option C opt-in
+/// must survive the whole thread: CLI flag → mutate body → BFF handler
+/// → mutation service.
+#[tokio::test]
+async fn vm_migrate_pause_first_row() {
+    let h = Harness::start().await;
+    h.seed_node().await;
+    h.seed_vm("vm-1").await;
+    let token = h.seed_jwt_as("operator").await;
+
+    vm::execute(
+        &h.client(Some(token)),
+        vm::VmCommands::Migrate {
+            vm_id: "vm-1".to_string(),
+            to: "n-2".to_string(),
+            pause_first: true,
+        },
+        &OutputFormat::Json,
+    )
+    .await
+    .expect("chvctl vm migrate --pause-first against POST /v1/vms/mutate");
+    h.mutations
+        .assert_recorded("migrate_vm:vm-1:n-2:pause_first");
 }
 
 /// `chvctl vm resize` — GREEN (`cpu_count` / `memory_bytes` field names).
@@ -2867,12 +2900,13 @@ async fn migrate_start_row() {
         migrate::MigrateCommands::Start {
             vm_id: "vm-1".to_string(),
             target_node: "n-2".to_string(),
+            pause_first: false,
         },
         &OutputFormat::Json,
     )
     .await
     .expect("chvctl migrate start against POST /v1/vms/mutate");
-    h.mutations.assert_recorded("migrate_vm:vm-1:n-2");
+    h.mutations.assert_recorded("migrate_vm:vm-1:n-2:live");
 }
 
 /// `chvctl migrate status` — GREEN since the PR 4 repoint (design

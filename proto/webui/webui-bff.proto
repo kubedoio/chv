@@ -149,6 +149,11 @@ message MutateVmRequest {
   string vm_id = 1;
   string action = 2;
   bool force = 3;
+  // Read by the "migrate" action (the axum JSON route, not this
+  // generated type): the destination node, and the issue #394 Option C
+  // opt-in stop-the-world mode (defaults false).
+  string target_node_id = 4;
+  bool pause_first = 5;
 }
 
 message MutateVmResponse {

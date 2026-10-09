@@ -617,6 +617,11 @@ message MigrationConfig {
   uint32 max_convergence_rounds = 2;  // default: 10
   uint32 block_size_bytes = 3;        // default: 4194304 (4MB)
   uint32 total_timeout_seconds = 4;   // 0 = use calculated default
+  // Issue #394 Option C: opt-in stop-the-world disk migration — the agent
+  // pauses the VM before triggering stord's bulk copy (the
+  // PAUSED_PRE_COPY handshake) instead of only at final sync. Downtime
+  // equals the full disk+memory transfer; correctness by construction.
+  bool pause_first = 5;
 }
 
 message MigrationProgress {

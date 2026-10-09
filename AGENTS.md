@@ -58,7 +58,7 @@ If you change `.proto` files:
 cargo build --workspace
 ```
 
-The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rust`. Do not hand-edit generated files.
+The workspace `build.rs` files use `tonic-prost-build` (the tonic 0.14 codegen crate) to regenerate code in `/gen/rust`. Do not hand-edit generated files.
 
 ## Backend Implementation Rules
 

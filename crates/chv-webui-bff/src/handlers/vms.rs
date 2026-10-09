@@ -1295,9 +1295,23 @@ pub async fn mutate_vm(
                 BffError::BadRequest("missing target_node_id for migrate action".into())
             })?
             .to_string();
+        // Issue #394 Option C: the opt-in stop-the-world mode. Optional,
+        // defaults to false (quiescent-assumed). A *present* non-bool
+        // value is rejected rather than coerced: `"pause_first":
+        // "true"` silently downgrading to quiescent-assumed would be
+        // exactly the "operator asked for the pause, didn't get it"
+        // failure the mode exists to prevent. Deliberately not exposed
+        // in the WebUI yet — operator surface today is the API/chvctl;
+        // the UI toggle is a recorded follow-up.
+        let pause_first = match payload.get("pause_first") {
+            None => false,
+            Some(v) => v.as_bool().ok_or_else(|| {
+                BffError::BadRequest("pause_first for migrate action must be a boolean".into())
+            })?,
+        };
         state
             .mutations
-            .migrate_vm(vm_id, target_node_id, claims.sub)
+            .migrate_vm(vm_id, target_node_id, pause_first, claims.sub)
             .await?
     } else {
         state
