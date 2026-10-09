@@ -198,8 +198,10 @@ different question and no lane substitutes for another:
 - **Demo harness** (`make netbox-demo`): boots the simulator plus a
   controlplane (sqlite, converged UI+BFF serving) for interactive use. The
   plain-HTTP client escape hatch is double-gated — the default-off
-  `netbox-demo` cargo feature **and** `CHV_NETBOX_ALLOW_HTTP=1` at runtime —
-  and cannot reach a shipped binary. Default-feature builds keep the
+  `netbox-demo` cargo feature (forwarded to every crate owning a NetBox
+  client seam: the worker's factory and the BFF's dry-run client)
+  **and** `CHV_NETBOX_ALLOW_HTTP=1` at runtime — and cannot reach a
+  shipped binary. Default-feature builds keep the
   fail-closed HTTPS-only client untouched.
 - **Qualification** (`deploy/netbox-qualification/`): a pinned docker
   compose runs the **same** composed scenarios against real NetBox

@@ -450,6 +450,24 @@ pub async fn build_service(
         chv_controlplane_store::ApplyRunRepository::new(pool.clone()),
         chv_controlplane_store::VersionRepository::new(pool.clone()),
     );
+    // Demo-mode override (issue #586 / ADR-024 decision 5): with the
+    // `netbox-demo` feature compiled in, swap the worker's HTTPS-only
+    // client factory for the double-gated plain-HTTP one so the
+    // controlplane can project into the local `chv-netbox-sim`
+    // simulator. The factory itself re-checks
+    // `CHV_NETBOX_ALLOW_HTTP=1` at runtime and fails closed without
+    // it — both gates must be open. Default-feature builds never
+    // compile this block: the worker keeps `NetBoxClient::new`
+    // (HTTPS-only) and the binary's behavior is byte-identical.
+    #[cfg(feature = "netbox-demo")]
+    let netbox_projection_worker = {
+        tracing::warn!(
+            "NETBOX DEMO MODE: plain-HTTP NetBox client enabled \
+             (feature netbox-demo + CHV_NETBOX_ALLOW_HTTP=1) — NOT FOR PRODUCTION"
+        );
+        netbox_projection_worker
+            .with_client_factory(chv_controlplane_service::netbox_demo::plain_http_client_factory())
+    };
     let netbox_projection_worker_handle =
         tokio::spawn(netbox_projection_worker.run(shutdown_rx.clone()));
 

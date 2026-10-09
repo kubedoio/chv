@@ -203,7 +203,12 @@ single stateful double instead of two half-ones (suite stays small).
     seam) uses the plain-HTTP constructor **only** when
     `CHV_NETBOX_ALLOW_HTTP=1` is also set — double gate, loud comments, and a
     startup log line marking demo mode. Default-feature builds keep the
-    fail-closed HTTPS-only path untouched.
+    fail-closed HTTPS-only path untouched. (Implementation note: the feature
+    is forwarded to `chv-webui-bff` as well — its synchronous dry-run owns a
+    second client seam that carries the same double gate; and because the
+    BFF's config-upsert enforces HTTPS on accept, the demo script seeds the
+    projection config row directly in sqlite — see
+    `docs/dev/netbox-demo.md`.)
 - `scripts/netbox-demo.sh`:
   1. builds `netbox-sim` (bin feature) and `chv-controlplane --features
      netbox-demo`, plus `ui && npm run build` if `ui/build` is stale;

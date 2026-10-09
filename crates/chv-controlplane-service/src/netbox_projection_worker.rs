@@ -81,7 +81,13 @@ pub const EVENT_NETBOX_DRY_RUN: &str = "architecture_netbox_dry_run";
 /// Seam for tests: how the worker builds its NetBox client from the
 /// stored config. Production uses [`NetBoxClient::new`] (HTTPS-only);
 /// the wiremock suites inject the test-only unchecked constructor.
-type ClientFactory =
+///
+/// Public so the `netbox-demo` feature's
+/// [`crate::netbox_demo::plain_http_client_factory`] (itself
+/// feature-gated) can hand a factory to
+/// [`NetboxProjectionWorker::with_client_factory`] from the binary
+/// crate. This is a type alias only — it grants no new capability.
+pub type ClientFactory =
     Arc<dyn Fn(&str, NetBoxToken) -> Result<NetBoxClient, ClientError> + Send + Sync>;
 
 /// Background worker that claims queued NetBox projection runs and

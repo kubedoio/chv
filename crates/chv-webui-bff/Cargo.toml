@@ -64,3 +64,13 @@ wiremock = "0.6"
 # dependencies: the dry-run handler must stay on the HTTPS-only
 # `NetBoxClient::new`.
 test-http = ["chv-netbox-adapter/test-http"]
+# Double-gated plain-HTTP demo path for the synchronous dry-run seam
+# (ADR-024 decision 5, issue #586): default-off, forwarded from
+# chv-controlplane-service's `netbox-demo` feature for the
+# `make netbox-demo` harness. Unlike `test-http` above, this variant
+# re-checks `CHV_NETBOX_ALLOW_HTTP=1` at runtime and fails closed
+# without it, so the BFF's dry-run path carries the same double gate
+# as the projection worker's demo factory. Release packaging builds
+# default features only. Changes to this gate are high-risk (ADR-024
+# consequences).
+netbox-demo = ["chv-netbox-adapter/test-http"]

@@ -47,6 +47,20 @@ x509-parser = { version = "0.18", features = ["verify"] }
 
 [features]
 dev = []
+# Double-gated plain-HTTP demo path (ADR-024 decision 5, issue #586):
+# default-off, enables the adapter's test-only plain-HTTP client
+# constructor for the `make netbox-demo` harness. The compile-time gate
+# alone is NOT sufficient — the demo factory additionally requires
+# `CHV_NETBOX_ALLOW_HTTP=1` at runtime and fails closed otherwise.
+# The chv-webui-bff forwarding covers the BFF's synchronous dry-run
+# seam with the same runtime-gated variant. Release packaging builds
+# default features only, so this feature can never reach a shipped
+# binary. Reviewers: changes to this gate are high-risk (see the
+# ADR's consequences section).
+netbox-demo = [
+    "chv-netbox-adapter/test-http",
+    "chv-webui-bff/netbox-demo",
+]
 
 [dev-dependencies]
 tempfile = "3"

@@ -1107,7 +1107,25 @@ fn build_netbox_client(endpoint: &str, token: NetBoxToken) -> Result<NetBoxClien
     NetBoxClient::new_unchecked_for_tests(endpoint, token)
 }
 
-#[cfg(not(feature = "test-http"))]
+/// Demo-mode variant of the seam (ADR-024 decision 5, issue #586):
+/// plain HTTP is allowed **only** when the runtime half of the double
+/// gate (`CHV_NETBOX_ALLOW_HTTP=1`) is also open — mirroring
+/// `chv-controlplane-service`'s `netbox_demo::plain_http_client_factory`
+/// for the worker path, so the BFF's synchronous dry-run carries the
+/// same double gate. Fails closed with the stable
+/// [`ClientError::HttpsRequired`] otherwise. Default-off feature,
+/// never in release packaging; see this crate's Cargo.toml.
+#[cfg(all(feature = "netbox-demo", not(feature = "test-http")))]
+fn build_netbox_client(endpoint: &str, token: NetBoxToken) -> Result<NetBoxClient, ClientError> {
+    if std::env::var("CHV_NETBOX_ALLOW_HTTP").ok().as_deref() != Some("1") {
+        return Err(ClientError::HttpsRequired {
+            endpoint: endpoint.to_string(),
+        });
+    }
+    NetBoxClient::new_unchecked_for_tests(endpoint, token)
+}
+
+#[cfg(not(any(feature = "test-http", feature = "netbox-demo")))]
 fn build_netbox_client(endpoint: &str, token: NetBoxToken) -> Result<NetBoxClient, ClientError> {
     NetBoxClient::new(endpoint, token)
 }
