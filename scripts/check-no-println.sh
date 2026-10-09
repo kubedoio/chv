@@ -16,6 +16,9 @@
 #     which is conventional CLI surface.
 #   - cmd/*/build.rs uses println! to emit cargo:rustc-env directives, which
 #     is the documented Cargo build-script API and not application logging.
+# Cargo-convention CLI binaries under crates/*/src/bin/ are excluded for the
+# same reason (ADR-009: "CLI tools may use println! for user-facing output
+# only"); chv-netbox-sim's `netbox-sim` dev tool is the first such bin.
 #
 # Test code (#[cfg(test)] blocks, tests/ trees) is also out of scope: tracing
 # is for production diagnostics; tests can use stdout freely. We exclude
@@ -44,6 +47,7 @@ PATTERN='\b(println|eprintln|print|eprint)!'
 violations="$(grep -rEn \
   --include='*.rs' \
   --exclude-dir='target' \
+  --exclude-dir='bin' \
   "$PATTERN" \
   "${SEARCH_ROOTS[@]}" 2>/dev/null || true)"
 
