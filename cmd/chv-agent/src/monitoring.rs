@@ -1011,4 +1011,245 @@ mod tests {
         assert!(proto.value.is_none());
         assert_eq!(proto.quality, "insufficient_samples");
     }
+
+    /// G2 gate evidence (real-host, qualified pin): a real cloud-
+    /// hypervisor VM, created through the PRODUCTION `create_vm` path
+    /// (not an adopted stray process), sampled twice through the
+    /// production `VmSampleSource`, and its samples durably ingested
+    /// into a real file-backed monitoring store and read back through
+    /// the history/current query paths — the entire agent-side
+    /// pipeline of PR-2 on a qualified real-host VM.
+    ///
+    /// Skipped unless the qualified-pin env vars are set (CI has no
+    /// KVM); the real-host record lives in
+    /// `docs/evidence/native-monitoring/g2/README.md`:
+    ///
+    /// ```sh
+    /// CHV_G1_VMM_BINARY=/tmp/opencode/g0b/cloud-hypervisor \
+    /// CHV_G1_FIRMWARE=/var/lib/chv/qual/hypervisor-fw \
+    /// CHV_G1_IMAGE=/var/lib/chv/qual/images/noble-qual-patched.img \
+    /// cargo test -p chv-agent --bin chv-agent g2_real_vmm -- --nocapture
+    /// ```
+    #[tokio::test]
+    async fn g2_real_vmm_samples_persist_to_bounded_history() {
+        fn checkpoint(msg: &str) {
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("g2 checkpoint: {msg}\n"),
+            );
+        }
+        let Ok(vmm_binary) = std::env::var("CHV_G1_VMM_BINARY") else {
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("skipping: CHV_G1_VMM_BINARY not set (real-KVM evidence test)\n"),
+            );
+            return;
+        };
+        let firmware =
+            std::env::var("CHV_G1_FIRMWARE").expect("CHV_G1_FIRMWARE with CHV_G1_VMM_BINARY");
+        let image = std::env::var("CHV_G1_IMAGE").expect("CHV_G1_IMAGE with CHV_G1_VMM_BINARY");
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        // The qualified image is qcow2 content under an `.img` name; the
+        // production adapter derives the VMM's `image_type` from the file
+        // extension, so expose it under its true extension via a
+        // read-only symlink (same bytes — the pinned image is never
+        // written, `readonly=on` stays in force).
+        let image_qcow2 = dir.path().join("qual-disk.qcow2");
+        std::os::unix::fs::symlink(&image, &image_qcow2).expect("symlink the qualified image");
+        let adapter = chv_agent_runtime_ch::ProcessCloudHypervisorAdapter::new(
+            std::path::PathBuf::from(&vmm_binary),
+        );
+        let runtime = chv_agent_core::vm_runtime::VmRuntime::new(Arc::new(adapter));
+
+        // The qualification shape (G0b/G1): 2 vCPU, 512 MiB, firmware
+        // boot, one READ-ONLY disk — the pinned image is never written.
+        let config = chv_hypervisor_api::VmConfig {
+            vm_id: "g2-vm".to_string(),
+            cpus: 2,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: std::path::PathBuf::from("/dev/null"),
+            firmware_path: Some(std::path::PathBuf::from(&firmware)),
+            disks: vec![chv_hypervisor_api::VmDiskConfig {
+                path: image_qcow2,
+                read_only: true,
+                id: None,
+            }],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/g2-vm/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        checkpoint("creating vm");
+        runtime
+            .create_vm("g2-vm", "g2-1", &config, None)
+            .await
+            .expect("production create_vm boots the qualified VMM");
+        checkpoint("create_vm done");
+        runtime
+            .start_vm("g2-vm", None)
+            .await
+            .expect("production start_vm confirms the running VM");
+        checkpoint("start_vm done");
+
+        let source = VmSampleSource::new(runtime.clone());
+
+        // Let the firmware's early boot settle (G1 harness discipline:
+        // the counters endpoint reports real device activity within the
+        // first seconds; an immediate probe races the VMM's own boot).
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        // First collection: baselines the CPU interval (no rate yet —
+        // insufficient_samples, never zero) and reads real device
+        // counters + RSS with the epoch fence.
+        checkpoint("collecting first");
+        let first = source.collect_vm("g2-vm").await.expect("first samples");
+        checkpoint("first samples collected");
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!("g2 first samples: {first:#?}\n"),
+        );
+        let first_cpu = first
+            .iter()
+            .find(|s| s.metric_id == "vm.cpu.cores_used")
+            .unwrap();
+        assert!(
+            first_cpu.value.is_none() && first_cpu.quality == SampleQuality::InsufficientSamples,
+            "first observation has no CPU interval: {first_cpu:?}"
+        );
+        let first_memory = first
+            .iter()
+            .find(|s| s.metric_id == "vm.memory.host_accounted_bytes")
+            .unwrap();
+        assert!(
+            matches!(first_memory.value, Some(SampleValue::Integer(m)) if m > 10_000_000),
+            "real VMM RSS for a 512M VM must be well above 10 MB: {first_memory:?}"
+        );
+        let first_disk = first
+            .iter()
+            .find(|s| s.metric_id == "vm.block.read_bytes_total")
+            .expect("per-device disk counter");
+        assert!(
+            matches!(first_disk.value, Some(SampleValue::Integer(v)) if v > 1_000_000),
+            "real VMM must report the firmware's disk reads: {first_disk:?}"
+        );
+        assert!(first_disk.boot_id.is_some() && first_disk.identity_epoch.is_some());
+
+        // Second collection after a real interval: a measured CPU rate
+        // (the booting guest is I/O- and CPU-active) and the same
+        // epoch-fenced counter series.
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        checkpoint("collecting second");
+        let second = source.collect_vm("g2-vm").await.expect("second samples");
+        checkpoint("second samples collected");
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!("g2 second samples: {second:#?}\n"),
+        );
+        let second_cpu = second
+            .iter()
+            .find(|s| s.metric_id == "vm.cpu.cores_used")
+            .unwrap();
+        assert!(
+            matches!(second_cpu.value, Some(SampleValue::Float(_))),
+            "a real CPU interval over a booting guest yields a rate: {second_cpu:?}"
+        );
+        let second_disk = second
+            .iter()
+            .find(|s| s.metric_id == "vm.block.read_bytes_total")
+            .unwrap();
+        assert_eq!(
+            second_disk.identity_epoch, first_disk.identity_epoch,
+            "same VMM incarnation, same epoch fence"
+        );
+
+        // Durable history: ingest both collections as node batches into
+        // a real file-backed monitoring store (the CP-side service does
+        // exactly this after its validation), then read the history
+        // back through the query path the BFF serves.
+        let store_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let store = Arc::new(
+            chv_monitoring_store::MonitoringStore::connect(
+                chv_monitoring_store::MonitoringStoreConfig {
+                    database_url: format!("sqlite://{}/monitoring.db", store_dir.path().display()),
+                    migrations_dir: std::path::PathBuf::from(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../cmd/chv-controlplane/monitoring-migrations"
+                    )),
+                    ..chv_monitoring_store::MonitoringStoreConfig::default()
+                },
+            )
+            .await
+            .expect("monitoring store connect"),
+        );
+        checkpoint("ingesting to store");
+        let now = chv_monitoring_core::node_os::unix_now_ms();
+        for (sequence, samples) in [(0u64, &first), (1, &second)] {
+            let batch = chv_monitoring_store::NodeBatch {
+                boot_id: "g2-agent-boot".to_string(),
+                sequence,
+                sent_at_ms: now,
+                samples: samples.clone(),
+            };
+            let outcome = store
+                .ingest_node_batch("g2-node", &batch, now)
+                .await
+                .expect("durable ingest");
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("g2 ingest batch {sequence}: {outcome:?}\n"),
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    chv_monitoring_store::IngestOutcome::Accepted { .. }
+                ),
+                "batch {sequence} durably accepted: {outcome:?}"
+            );
+        }
+
+        let series = store
+            .query_history(
+                &chv_monitoring_core::model::TargetKind::Vm,
+                "g2-vm",
+                &[
+                    "vm.cpu.cores_used".to_string(),
+                    "vm.block.read_bytes_total".to_string(),
+                ],
+                None,
+                now - 60_000,
+                now,
+                100,
+                chv_monitoring_store::Resolution::Raw,
+            )
+            .await
+            .expect("history query");
+        let cores = series
+            .iter()
+            .find(|s| s.metric_id == "vm.cpu.cores_used")
+            .expect("cores series in history");
+        let valid_points: Vec<_> = cores
+            .points
+            .iter()
+            .filter(|p| p.quality == SampleQuality::Valid)
+            .collect();
+        assert!(
+            !valid_points.is_empty(),
+            "the measured second observation is in durable history: {cores:?}"
+        );
+        let disk = series
+            .iter()
+            .find(|s| s.metric_id == "vm.block.read_bytes_total")
+            .expect("disk series in history");
+        assert!(
+            disk.points
+                .iter()
+                .any(|p| p.quality == SampleQuality::Valid),
+            "epoch-fenced disk counters are in durable history: {disk:?}"
+        );
+
+        checkpoint("query done; cleaning up");
+        let _ = runtime.delete_vm("g2-vm", None).await;
+        checkpoint("delete_vm done");
+    }
 }

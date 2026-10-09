@@ -11,6 +11,7 @@ This directory contains operational runbooks for backup, restore, and disaster r
 | [Backup Artifact Restore](backup-artifact-restore.md) | Restore a VM from a shipped S3/NFS backup artifact | **Manual** — no restore worker yet | 10–30 min |
 | [Control Plane DR](control-plane-dr.md) | Recover the control plane after a host failure | Partially automated + manual steps | 15–30 min |
 | [Full Site Recovery](full-site-recovery.md) | Rebuild entire site from backups | Manual | 1–4 hrs |
+| [Monitoring Store](monitoring-store.md) | Monitoring history degraded/corrupted/disabled (retention, disk headroom, reset) | Automatic degradation + manual recovery | 5–10 min |
 
 ## Severity Levels
 

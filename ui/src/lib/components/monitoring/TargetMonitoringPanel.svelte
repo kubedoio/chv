@@ -75,7 +75,9 @@
 <SectionCard title="Monitoring" icon={BarChart3}>
 	<div class="panel-header">
 		<span class="source-note">
-			{targetKind === 'vm' ? 'Host-accounted measurements from the VMM process' : 'Node OS measurements'}
+			{targetKind === 'vm'
+				? 'Host-accounted measurements from the VMM process; guest-visible metrics appear only when a guest agent reports them'
+				: 'Node OS measurements, collected by the agent on this node'}
 		</span>
 		<TimeRangePicker value={selectedRange} onChange={setRange} />
 	</div>

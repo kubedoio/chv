@@ -264,7 +264,16 @@
 					<TargetMonitoringPanel
 						targetKind="vm"
 						targetId={detail.summary.vm_id}
-						metricIds={['vm.cpu.cores_used', 'vm.memory.host_accounted_bytes']}
+						metricIds={[
+							'vm.cpu.cores_used',
+							'vm.cpu.capacity_ratio',
+							'vm.memory.host_accounted_bytes',
+							'vm.memory.guest_available_bytes',
+							'vm.block.read_bytes_total',
+							'vm.block.write_bytes_total',
+							'vm.net.rx_bytes_total',
+							'vm.net.tx_bytes_total'
+						]}
 					/>
 				{:else if detail.currentTab === 'summary'}
 					<VmDetailSummaryTab

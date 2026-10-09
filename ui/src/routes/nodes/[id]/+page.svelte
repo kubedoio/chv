@@ -138,7 +138,11 @@ import Button from '#lib/components/primitives/Button.svelte';
 							'node.cpu.load1',
 							'node.memory.available_bytes',
 							'node.swap.used_bytes',
-							'node.fs.available_bytes'
+							'node.fs.available_bytes',
+							'node.net.rx_bytes_total',
+							'node.net.tx_bytes_total',
+							'node.block.read_bytes_total',
+							'node.block.write_bytes_total'
 						]}
 					/>
 				</SectionCard>

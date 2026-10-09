@@ -39,3 +39,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+chv-monitoring-store = { path = "../../crates/chv-monitoring-store" }

@@ -717,6 +717,7 @@ dependencies = [
  "chv-errors",
  "chv-hypervisor-api",
  "chv-monitoring-core",
+ "chv-monitoring-store",
  "chv-observability",
  "control-plane-node-api",
  "rustls",

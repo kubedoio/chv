@@ -36,6 +36,10 @@ async fn monitoring_store(dir: &std::path::Path) -> Arc<MonitoringStore> {
 struct Fixture {
     _ops_db: TestDb,
     _monitoring_dir: tempfile::TempDir,
+    store: Arc<MonitoringStore>,
+    node_repo: NodeRepository,
+    observed_state_repo: ObservedStateRepository,
+    health: MonitoringHealth,
     service: MonitoringIngestImplementation,
     node_id: String,
     vm_id: String,
@@ -43,6 +47,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_headroom_floor(0).await
+    }
+
+    /// `min_headroom_bytes` above the tempdir filesystem's real free
+    /// space is exactly the disk-full condition production sees (the
+    /// same statvfs read, the same comparison).
+    async fn with_headroom_floor(min_headroom_bytes: u64) -> Self {
         let ops_db = TestDb::new().await;
         let node_repo = NodeRepository::new(ops_db.pool.clone());
         let observed_state_repo = ObservedStateRepository::new(ops_db.pool.clone());
@@ -95,21 +106,40 @@ impl Fixture {
             .await
             .unwrap();
 
+        let health = MonitoringHealth::new();
         let service = MonitoringIngestImplementation::new(
-            Some(store),
-            node_repo,
-            observed_state_repo,
-            MonitoringHealth::new(),
+            Some(store.clone()),
+            node_repo.clone(),
+            observed_state_repo.clone(),
+            health.clone(),
             20,
-            0, // headroom floor 0: never trips in tests
+            min_headroom_bytes,
         );
         Fixture {
             _ops_db: ops_db,
             _monitoring_dir: dir,
+            store,
+            node_repo,
+            observed_state_repo,
+            health,
             service,
             node_id: node_id.to_string(),
             vm_id: vm_id.to_string(),
         }
+    }
+
+    /// Rebuild the ingest service with a new headroom floor over the
+    /// SAME store and shared health handle — how recovery looks when
+    /// the filesystem frees space (the floor comparison flips back).
+    fn set_headroom_floor(&mut self, min_headroom_bytes: u64) {
+        self.service = MonitoringIngestImplementation::new(
+            Some(self.store.clone()),
+            self.node_repo.clone(),
+            self.observed_state_repo.clone(),
+            self.health.clone(),
+            20,
+            min_headroom_bytes,
+        );
     }
 
     fn request(
@@ -337,4 +367,87 @@ async fn unavailable_store_is_a_typed_outcome() {
     assert_eq!(resp.outcome, "ingestion_unavailable");
     assert_eq!(resp.accepted_samples, 0);
     assert_eq!(service.health().snapshot().unavailable_batches, 1);
+}
+
+/// G2 gate evidence (disk-full trigger): a full monitoring filesystem
+/// degrades monitoring with the typed `ingestion_unavailable` outcome
+/// and a headroom-flavored health reason, while VM lifecycle — the
+/// operational store's state-report path, the same database
+/// reconciliation depends on — keeps accepting writes. When headroom
+/// returns, the next batch is accepted and the degradation clears.
+///
+/// Disk-full is induced by a headroom floor above the tempdir
+/// filesystem's real free space: the identical statvfs read and
+/// comparison production performs every batch.
+#[tokio::test]
+async fn disk_full_degrades_monitoring_but_not_lifecycle() {
+    let mut fixture = Fixture::new().await;
+    let real_free = chv_monitoring_store::headroom::available_bytes(fixture._monitoring_dir.path())
+        .expect("statvfs on the monitoring dir");
+    fixture.set_headroom_floor(real_free + 1);
+
+    // Disk-full: typed outcome, nothing committed, health degrades
+    // with the headroom reason and counts the unavailable batch.
+    let now = now_ms();
+    let resp = fixture.ingest(0, vec![node_cpu_sample(now, 0.42)]).await;
+    assert_eq!(resp.outcome, "ingestion_unavailable");
+    assert_eq!(resp.accepted_samples, 0);
+    let snapshot = fixture.health.snapshot();
+    let reason = snapshot.degraded_reason.expect("monitoring degraded");
+    assert!(reason.contains("headroom"), "reason: {reason}");
+    assert_eq!(snapshot.unavailable_batches, 1);
+    // The store genuinely has nothing: degraded is not a silent drop
+    // of a batch the sender believes was committed.
+    let stored = fixture
+        .store
+        .query_current(
+            &chv_monitoring_core::model::TargetKind::Node,
+            &fixture.node_id,
+            &["node.cpu.capacity_ratio".to_string()],
+            None,
+            now as u64,
+        )
+        .await
+        .expect("query the degraded store's committed data");
+    assert!(stored.is_empty(), "nothing committed while degraded");
+
+    // VM lifecycle is unaffected: the operational store — the same
+    // database the state-report and reconciliation paths use — still
+    // accepts an observed-state transition while monitoring is
+    // degraded.
+    fixture
+        .observed_state_repo
+        .upsert_vm(&chv_controlplane_store::VmObservedStateInput {
+            vm_id: chv_controlplane_types::domain::ResourceId::new(&fixture.vm_id).unwrap(),
+            observed_generation: Generation::new(2),
+            runtime_status: "running".to_string(),
+            health_status: Some("ok".to_string()),
+            node_id: Some(chv_controlplane_types::domain::NodeId::new(&fixture.node_id).unwrap()),
+            cloud_hypervisor_pid: None,
+            api_socket_path: None,
+            last_error: None,
+            last_transition_unix_ms: None,
+            observed_unix_ms: now,
+        })
+        .await
+        .expect("state-report path keeps working while monitoring is degraded");
+
+    // Headroom returns (floor back under the real free space): the
+    // next batch is durably accepted and the shared health handle
+    // clears the degradation.
+    fixture.set_headroom_floor(0);
+    let resp = fixture
+        .ingest(1, vec![node_cpu_sample(now_ms(), 0.42)])
+        .await;
+    assert_eq!(resp.outcome, "accepted");
+    assert_eq!(resp.accepted_samples, 1);
+    let snapshot = fixture.health.snapshot();
+    assert!(
+        snapshot.degraded_reason.is_none(),
+        "recovered: {snapshot:?}"
+    );
+    assert_eq!(
+        snapshot.unavailable_batches, 1,
+        "history preserved, not reset"
+    );
 }
