@@ -62,4 +62,4 @@ mod integration_tests;
 mod netbox_projection_worker_tests;
 
 #[cfg(test)]
-mod netbox_projection_e2e_tests;
+mod netbox_projection_sim_tests;
