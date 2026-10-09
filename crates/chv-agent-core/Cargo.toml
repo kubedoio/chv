@@ -11,6 +11,7 @@ chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
 chv-config = { path = "../chv-config" }
 chv-hypervisor-api = { path = "../chv-hypervisor-api" }
+chv-monitoring-core = { path = "../chv-monitoring-core" }
 cellhv-core-types = { path = "../cellhv-core-types" }
 cellhv-core-operations = { path = "../cellhv-core-operations" }
 cellhv-core-executor = { path = "../cellhv-core-executor" }

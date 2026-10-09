@@ -930,9 +930,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .metrics_bind
         .clone()
         .unwrap_or_else(|| "0.0.0.0:9100".to_string());
-    let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(
-        cache.lock().await.node_id.clone(),
-    )));
+    let node_id = cache.lock().await.node_id.clone();
+    let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(node_id.clone())));
+    // Native monitoring sampler (G1, #602): one bounded task,
+    // independent of reconciliation and state reports, collecting node
+    // contract samples through chv-monitoring-core. Health counters are
+    // exported on /metrics without VM identifiers; the latest samples
+    // feed PR-2's ingest.
+    let (sampler_health, _latest_node_samples) = monitoring::spawn_monitoring_sampler(
+        node_id,
+        chv_monitoring_core::sampler::SamplerConfig::default(),
+    );
+    metrics_state.lock().await.sampler_health = Some(sampler_health);
     let metrics_state_clone = metrics_state.clone();
     tokio::spawn(async move {
         let app = metrics_router(metrics_state_clone);
@@ -1415,7 +1424,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reported_unix_ms: now_unix_ms(),
                 cpu_percent: 0.0,
                 memory_bytes_used: 0,
-                memory_bytes_total: 0,
+                // Configured guest memory is configuration, not a
+                // measurement — the spec (VmRecord) is authoritative
+                // here; the sampler's measured host-accounted used
+                // bytes fill the field below.
+                memory_bytes_total: vm.memory_bytes as i64,
                 disk_bytes_read: 0,
                 disk_bytes_written: 0,
                 net_bytes_rx: 0,
@@ -1426,7 +1439,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(c) = reconciler.vm_runtime().vm_counters(&vm.vm_id).await {
                     counters.cpu_percent = c.cpu_percent;
                     counters.memory_bytes_used = c.memory_bytes_used as i64;
-                    counters.memory_bytes_total = c.memory_bytes_total as i64;
+                    // memory_bytes_total stays the spec-derived value
+                    // above: the adapter returns 0 for it by contract
+                    // (configuration, not measurement — see VmCounters'
+                    // field docs), so overwriting here would zero the
+                    // configured total for every Running VM.
                     counters.disk_bytes_read = c.disk_bytes_read as i64;
                     counters.disk_bytes_written = c.disk_bytes_written as i64;
                     counters.net_bytes_rx = c.net_bytes_rx as i64;
@@ -1615,6 +1632,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// Native monitoring sampler wiring (gate G1, #602).
+mod monitoring;
 
 #[cfg(test)]
 mod tests {

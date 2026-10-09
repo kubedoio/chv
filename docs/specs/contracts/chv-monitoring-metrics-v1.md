@@ -45,11 +45,11 @@ For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or 
 | `node.fs.total_bytes` | gauge bytes | node_os | Filesystem total, keyed by mount identity |
 | `node.net.rx_bytes_total`, `tx_bytes_total` | counter bytes | node_os | Interface counters, not summed blindly across bridges |
 | `node.block.read_bytes_total`, `write_bytes_total` | counter bytes | node_os | Device counters keyed by stable device |
-| `vm.cpu.cores_used` | gauge cores | vmm, vm_cgroup | CPU seconds delta divided by monotonic wall seconds |
+| `vm.cpu.cores_used` | gauge cores | vmm, vm_cgroup | CPU seconds delta divided by monotonic wall seconds. The `vmm` arm reads the identity-fenced VMM process's `/proc/<pid>/stat` `utime+stime` deltas (the qualified v53.0 `vm.counters` exposes no CPU counter — G0b); the `vm_cgroup` arm reads a verified runtime-owned cgroup's `cpu.stat` when one exists |
 | `vm.cpu.capacity_ratio` | gauge ratio | derived | `cores_used / assigned_vcpus`, only when both valid |
 | `vm.cpu.assigned_vcpus` | gauge count | derived | Provisioned vCPU count, not usage |
 | `vm.memory.provisioned_bytes` | gauge bytes | derived | Configured guest memory |
-| `vm.memory.host_accounted_bytes` | gauge bytes | vm_cgroup | Host cgroup accounted memory; not guest working set |
+| `vm.memory.host_accounted_bytes` | gauge bytes | vm_cgroup, vmm | Host-accounted VM memory; not guest working set. The `vm_cgroup` arm reads a verified runtime-owned cgroup's `memory.current`; the `vmm` arm reads the identity-fenced VMM process's resident set (`VmRSS`) when no dedicated per-VM cgroup exists — the two arms measure the same phenomenon at different scopes and carry their source honestly |
 | `vm.memory.guest_available_bytes` | gauge bytes | guest_agent | Memory available inside guest OS |
 | `vm.block.read_bytes_total`, `write_bytes_total` | counter bytes | vmm, storage_provider | Per-VM virtual block bytes when attributable |
 | `vm.net.rx_bytes_total`, `tx_bytes_total` | counter bytes | vmm, network_provider | Per-VM virtual NIC bytes when attributable |

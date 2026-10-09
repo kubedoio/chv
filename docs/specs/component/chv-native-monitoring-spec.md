@@ -33,8 +33,8 @@ This spec defines a **read-only** `chv-monitoring-core` library and an optional 
 | Node disk space | `statvfs` per configured filesystem | Root is not equivalent to VM storage pool capacity |
 | Node block I/O | `/proc/diskstats` or owned provider counters | Handle stacked devices and double counting |
 | Node network | `/sys/class/net/*/statistics` | Exclude duplicates at bond/bridge/physical levels when aggregating |
-| VM CPU | Verified VM cgroup `cpu.stat` (primary on the qualified pin — G0b fixtures show v53.0 `vm.counters` exposes no CPU counters; the VMM arm stays available if a future pin adds one) | Name `vm.cpu.cores_used` and normalized utilization separately |
-| VM memory | Owned VMM cgroup `memory.current`, with documented semantics | Host resident accounting, not guest in-use memory |
+| VM CPU | Identity-fenced VMM process `/proc/<pid>/stat` `utime+stime` deltas (the `vmm` source arm; G1-implemented — the pinned v53.0 `vm.counters` exposes no CPU counter). A verified runtime-owned cgroup's `cpu.stat` remains the `vm_cgroup` arm when a dedicated per-VM cgroup exists | Name `vm.cpu.cores_used` and normalized utilization separately; epoch-scoped to the process's start ticks so a restart or pid recycle emits no rate |
+| VM memory | `vmm` arm: the identity-fenced VMM process's `VmRSS` (G1-implemented); `vm_cgroup` arm: owned VMM cgroup `memory.current`, with documented semantics | Host resident accounting, not guest in-use memory |
 | VM network/disk | Pinned VMM counters; mapping of virtio, TAP and provider path | Classify unsupported offloaded/vhost-user paths |
 | VM configured vCPU/RAM | Core VM definition | Label as provisioned, never use as utilization |
 | Storage pool/volume | `chv-stord` public read-only telemetry | Do not infer Ceph/RBD health from local root filesystem |

@@ -706,6 +706,7 @@ dependencies = [
 name = "chv-agent"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "axum 0.7.9",
  "cellhv-core-runtime-owner",
  "cellhv-core-startup",
@@ -715,6 +716,7 @@ dependencies = [
  "chv-config",
  "chv-errors",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
  "chv-observability",
  "control-plane-node-api",
  "rustls",
@@ -742,6 +744,7 @@ dependencies = [
  "chv-config",
  "chv-errors",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
  "chv-nwd-api",
  "chv-observability",
  "chv-stord-api",
@@ -780,6 +783,7 @@ dependencies = [
  "chv-common",
  "chv-errors",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
  "chv-observability",
  "metrics",
  "metrics-util",
@@ -986,6 +990,20 @@ dependencies = [
  "nix",
  "serde",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "chv-monitoring-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
