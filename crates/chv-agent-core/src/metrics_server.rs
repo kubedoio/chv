@@ -135,9 +135,11 @@ fn collect_host_resources() -> HostResources {
         // the quality instead).
         cpu_usage_percent: snapshot.cpu_capacity_ratio.unwrap_or(0.0) as f32 * 100.0,
         memory_total_bytes: snapshot.memory_total_bytes,
-        // sysinfo's used_memory ≈ total − available − reclaimable; the
-        // collector exposes the kernel's MemAvailable directly, which
-        // is the pressure-check semantic, so used = total − available.
+        // On Linux, sysinfo's used_memory() is exactly
+        // total − available (the kernel's MemAvailable already nets
+        // out reclaimable caches), so total − available here matches
+        // what sysinfo itself would report — we just compute it from
+        // the snapshot instead of a second, less-documented field.
         memory_used_bytes: snapshot
             .memory_total_bytes
             .saturating_sub(snapshot.memory_available_bytes),

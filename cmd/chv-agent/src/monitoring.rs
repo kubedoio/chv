@@ -117,6 +117,7 @@ impl NodeOsSource for NodeOsSampleSource {
         let NodeOsSnapshot {
             observed_at_ms,
             cpu_capacity_ratio,
+            cpu_observed_at_ms,
             load1,
             load5,
             load15,
@@ -129,10 +130,17 @@ impl NodeOsSource for NodeOsSampleSource {
         } = snapshot;
 
         // CPU: no valid interval yet ⇒ insufficient_samples, never zero.
+        // The sample's observed_at is the measurement time, not the
+        // cycle time — a retained reading (sub-interval cycle) is older
+        // than this cycle and must not be stamped as fresh.
         samples.push(node_sample(
             &self.node_id,
             "node.cpu.capacity_ratio",
-            observed_at_ms,
+            if cpu_capacity_ratio.is_some() && cpu_observed_at_ms > 0 {
+                cpu_observed_at_ms
+            } else {
+                observed_at_ms
+            },
             cpu_capacity_ratio.map(SampleValue::Float),
         )?);
         for (metric, value) in [
@@ -191,53 +199,76 @@ impl NodeOsSource for NodeOsSampleSource {
         }
 
         // Per-interface and per-block-device counters, labeled — never
-        // summed blindly across bridges or stacked devices.
-        let boot_id = chv_monitoring_core::process_probe::read_boot_id(self.proc_root)
-            .map_err(|e| SamplerError::Source(e.to_string()))?;
-        if let Ok(interfaces) = chv_monitoring_core::proc_net::read_net_dev(self.proc_root) {
-            for (iface, counters) in interfaces {
-                let series = format!("iface-{iface}");
-                samples.push(node_counter_sample(
-                    &self.node_id,
-                    "node.net.rx_bytes_total",
-                    observed_at_ms,
-                    &boot_id,
-                    &series,
-                    counters.rx_bytes,
-                    ("interface_id", iface.as_str()),
-                )?);
-                samples.push(node_counter_sample(
-                    &self.node_id,
-                    "node.net.tx_bytes_total",
-                    observed_at_ms,
-                    &boot_id,
-                    &series,
-                    counters.tx_bytes,
-                    ("interface_id", iface.as_str()),
-                )?);
+        // summed blindly across bridges or stacked devices. Counter
+        // samples need the boot epoch; if /proc is unreadable we keep
+        // the gauge samples above (memory, fs, …) and skip counters
+        // this cycle rather than failing the whole batch — a source
+        // failure is counted by the sampler's health counters either
+        // way, and the log line names the actual cause.
+        let boot_id = chv_monitoring_core::process_probe::read_boot_id(self.proc_root);
+        let boot_id = match &boot_id {
+            Ok(b) => Some(b.as_str()),
+            Err(e) => {
+                tracing::warn!(error = %e, "node sampler: boot_id unreadable, skipping counter samples this cycle");
+                None
             }
-        }
-        if let Ok(devices) = chv_monitoring_core::proc_net::read_diskstats(self.proc_root) {
-            for (device, counters) in devices {
-                let series = format!("block-{device}");
-                samples.push(node_counter_sample(
-                    &self.node_id,
-                    "node.block.read_bytes_total",
-                    observed_at_ms,
-                    &boot_id,
-                    &series,
-                    counters.read_bytes,
-                    ("block_device_id", device.as_str()),
-                )?);
-                samples.push(node_counter_sample(
-                    &self.node_id,
-                    "node.block.write_bytes_total",
-                    observed_at_ms,
-                    &boot_id,
-                    &series,
-                    counters.write_bytes,
-                    ("block_device_id", device.as_str()),
-                )?);
+        };
+        if let Some(boot_id) = boot_id {
+            match chv_monitoring_core::proc_net::read_net_dev(self.proc_root) {
+                Ok(interfaces) => {
+                    for (iface, counters) in interfaces {
+                        let series = format!("iface-{iface}");
+                        samples.push(node_counter_sample(
+                            &self.node_id,
+                            "node.net.rx_bytes_total",
+                            observed_at_ms,
+                            boot_id,
+                            &series,
+                            counters.rx_bytes,
+                            ("interface_id", iface.as_str()),
+                        )?);
+                        samples.push(node_counter_sample(
+                            &self.node_id,
+                            "node.net.tx_bytes_total",
+                            observed_at_ms,
+                            boot_id,
+                            &series,
+                            counters.tx_bytes,
+                            ("interface_id", iface.as_str()),
+                        )?);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "node sampler: /proc/net/dev unreadable, skipping interface counters this cycle");
+                }
+            }
+            match chv_monitoring_core::proc_net::read_diskstats(self.proc_root) {
+                Ok(devices) => {
+                    for (device, counters) in devices {
+                        let series = format!("block-{device}");
+                        samples.push(node_counter_sample(
+                            &self.node_id,
+                            "node.block.read_bytes_total",
+                            observed_at_ms,
+                            boot_id,
+                            &series,
+                            counters.read_bytes,
+                            ("block_device_id", device.as_str()),
+                        )?);
+                        samples.push(node_counter_sample(
+                            &self.node_id,
+                            "node.block.write_bytes_total",
+                            observed_at_ms,
+                            boot_id,
+                            &series,
+                            counters.write_bytes,
+                            ("block_device_id", device.as_str()),
+                        )?);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "node sampler: /proc/diskstats unreadable, skipping block counters this cycle");
+                }
             }
         }
 
@@ -361,13 +392,27 @@ mod tests {
         ] {
             assert!(ids.contains(&expected), "missing {expected}");
         }
-        // On a real host there is at least one interface and device.
-        assert!(samples
-            .iter()
-            .any(|s| s.metric_id == "node.net.rx_bytes_total"));
-        assert!(samples
-            .iter()
-            .any(|s| s.metric_id == "node.block.read_bytes_total"));
+        // Interface/block samples appear only when the host actually
+        // reports them (a namespace with only `lo` or a masked
+        // diskstats legitimately yields none).
+        let has_interfaces =
+            !chv_monitoring_core::proc_net::read_net_dev(std::path::Path::new("/proc"))
+                .map(|m| m.is_empty())
+                .unwrap_or(true);
+        if has_interfaces {
+            assert!(samples
+                .iter()
+                .any(|s| s.metric_id == "node.net.rx_bytes_total"));
+        }
+        let has_devices =
+            !chv_monitoring_core::proc_net::read_diskstats(std::path::Path::new("/proc"))
+                .map(|m| m.is_empty())
+                .unwrap_or(true);
+        if has_devices {
+            assert!(samples
+                .iter()
+                .any(|s| s.metric_id == "node.block.read_bytes_total"));
+        }
         // Counters carry their epoch.
         for s in samples
             .iter()

@@ -154,11 +154,19 @@ mod tests {
 
     #[test]
     fn real_host_reads() {
+        // Real-/proc smoke: parsing must succeed and `lo` must be
+        // excluded. The environment may legitimately offer nothing to
+        // read — a network namespace with only `lo` yields no
+        // interfaces, a masked /proc/diskstats may be empty, and a
+        // present-but-idle interface has all-zero counters — so the
+        // parser's correctness is pinned by the fixture tests above,
+        // not by host state.
         let root = Path::new("/proc");
         let net = read_net_dev(root).unwrap();
-        assert!(!net.is_empty());
-        assert!(net.values().any(|c| c.rx_bytes > 0 || c.tx_bytes > 0));
+        assert!(!net.contains_key("lo"));
         let disks = read_diskstats(root).unwrap();
-        assert!(!disks.is_empty());
+        for device in disks.keys() {
+            assert!(!device.starts_with("loop") && !device.starts_with("ram"));
+        }
     }
 }

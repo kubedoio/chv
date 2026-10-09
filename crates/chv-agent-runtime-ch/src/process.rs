@@ -4271,25 +4271,42 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // the process's own start ticks (a recycled pid or a re-spawned
         // VMM changes the epoch and emits no rate for the crossing
         // interval). Host-accounted memory is the VMM process RSS.
+        //
+        // The /proc reads happen BEFORE the write lock: they are
+        // filesystem reads that can block, and holding the vms map
+        // across them would stall every other VM operation. The locked
+        // section only consumes the already-read values and re-checks
+        // the entry still holds the same pid — a concurrently replaced
+        // entry is detected there (and the epoch fencing would reject
+        // a stale reading regardless).
         let mut cpu_percent = 0.0f64;
         let mut memory_used = 0u64;
-        {
-            let mut map = self.vms.write().await;
-            if let Some(proc) = map.get_mut(vm_id) {
-                if let Some(pid) = proc.child.vmm_pid() {
-                    let proc_root = std::path::Path::new("/proc");
-                    if let Ok(stat) =
-                        chv_monitoring_core::process_probe::read_proc_stat(proc_root, pid)
-                    {
-                        let now = std::time::Instant::now();
-                        // The boot component of the epoch comes from the
-                        // host; an unreadable boot id still fences via
-                        // the start-ticks identity (the agent does not
-                        // survive a host reboot).
-                        let boot_id = chv_monitoring_core::process_probe::read_boot_id(proc_root)
-                            .unwrap_or_default();
-                        let epoch = chv_monitoring_core::Epoch::new(boot_id, stat.identity_epoch());
-                        let ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
+        let pid = {
+            let map = self.vms.read().await;
+            map.get(vm_id).and_then(|proc| proc.child.vmm_pid())
+        };
+        if let Some(pid) = pid {
+            let proc_root = std::path::Path::new("/proc");
+            if let Ok(stat) = chv_monitoring_core::process_probe::read_proc_stat(proc_root, pid) {
+                let now = std::time::Instant::now();
+                // The boot component of the epoch comes from the
+                // host; an unreadable boot id still fences via
+                // the start-ticks identity (the agent does not
+                // survive a host reboot).
+                let boot_id =
+                    chv_monitoring_core::process_probe::read_boot_id(proc_root).unwrap_or_default();
+                let epoch = chv_monitoring_core::Epoch::new(boot_id, stat.identity_epoch());
+                let ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
+                memory_used =
+                    chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid).unwrap_or(0);
+
+                let mut map = self.vms.write().await;
+                if let Some(proc) = map.get_mut(vm_id) {
+                    // Identity re-check: the entry must still hold the
+                    // pid whose /proc was read. A concurrent replace
+                    // (restart, removal) fails this and the values
+                    // above are simply not applied.
+                    if proc.child.vmm_pid() == Some(pid) {
                         if let chv_monitoring_core::DeltaOutcome::Delta(delta_ticks) =
                             proc.cpu_ticks.observe(epoch, ticks)
                         {
@@ -4310,15 +4327,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         // regression): no rate for this interval —
                         // never a fabricated spike.
                         proc.last_cpu_at = Some(now);
-                        memory_used =
-                            chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid)
-                                .unwrap_or(0);
                     }
-                    // A missing stat (process gone between the map
-                    // lookup and the read) reports zeros this cycle; the
-                    // reaper/watchdog owns exit detection.
                 }
             }
+            // A missing stat (process gone between the map lookup
+            // and the read) reports zeros this cycle; the
+            // reaper/watchdog owns exit detection.
         }
 
         // memory_bytes_total stays 0 here: it is configuration, not a
@@ -10078,11 +10092,16 @@ mod tests {
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         // A live busy-loop process stands in for the VMM: real
         // /proc/<pid>/stat utime+stime deltas and a real VmRSS reading.
+        // kill_on_drop: if the test panics mid-way, dropping the child
+        // (with the adapter and its map) still kills the loop instead
+        // of leaving it burning a core; the success path below kills
+        // AND reaps explicitly.
         let child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg("while :; do :; done")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .unwrap();
         insert_vm_process(&adapter, "vm-1", sock.clone(), VmmChild::Owned(child)).await;
@@ -10107,12 +10126,17 @@ mod tests {
         // over ~0.4 s cannot exceed, say, 400% of one core.
         assert!(second.cpu_percent < 400.0);
 
-        // Cleanup: kill the stand-in process.
-        let mut map = adapter.vms.write().await;
-        if let Some(proc) = map.get_mut("vm-1") {
-            let _ = proc.child.kill(std::path::Path::new("/dev/null"), None);
+        // Cleanup: take the stand-in process out of the map, kill and
+        // REAP it. Killing without waiting leaves a zombie; the map is
+        // dropped with the adapter at test end, but the entry is
+        // removed here so the wait is deterministic.
+        let proc = adapter.vms.write().await.remove("vm-1");
+        if let Some(proc) = proc {
+            if let VmmChild::Owned(mut child) = proc.child {
+                child.start_kill().unwrap();
+                let _ = child.wait().await;
+            }
         }
-        drop(map);
     }
 
     #[tokio::test]
@@ -10168,6 +10192,7 @@ mod tests {
             .arg("null")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .expect("spawn pinned VMM");
         let vmm_pid = vmm.id().expect("vmm pid");
@@ -10253,6 +10278,7 @@ mod tests {
             .arg("null")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .expect("spawn fresh VMM");
         let fresh_pid = fresh.id().expect("fresh vmm pid");

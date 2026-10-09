@@ -930,16 +930,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .metrics_bind
         .clone()
         .unwrap_or_else(|| "0.0.0.0:9100".to_string());
-    let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(
-        cache.lock().await.node_id.clone(),
-    )));
+    let node_id = cache.lock().await.node_id.clone();
+    let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(node_id.clone())));
     // Native monitoring sampler (G1, #602): one bounded task,
     // independent of reconciliation and state reports, collecting node
     // contract samples through chv-monitoring-core. Health counters are
     // exported on /metrics without VM identifiers; the latest samples
     // feed PR-2's ingest.
     let (sampler_health, _latest_node_samples) = monitoring::spawn_monitoring_sampler(
-        cache.lock().await.node_id.clone(),
+        node_id,
         chv_monitoring_core::sampler::SamplerConfig::default(),
     );
     metrics_state.lock().await.sampler_health = Some(sampler_health);
@@ -1440,7 +1439,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(c) = reconciler.vm_runtime().vm_counters(&vm.vm_id).await {
                     counters.cpu_percent = c.cpu_percent;
                     counters.memory_bytes_used = c.memory_bytes_used as i64;
-                    counters.memory_bytes_total = c.memory_bytes_total as i64;
+                    // memory_bytes_total stays the spec-derived value
+                    // above: the adapter returns 0 for it by contract
+                    // (configuration, not measurement — see VmCounters'
+                    // field docs), so overwriting here would zero the
+                    // configured total for every Running VM.
                     counters.disk_bytes_read = c.disk_bytes_read as i64;
                     counters.disk_bytes_written = c.disk_bytes_written as i64;
                     counters.net_bytes_rx = c.net_bytes_rx as i64;

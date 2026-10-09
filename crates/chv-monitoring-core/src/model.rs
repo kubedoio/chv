@@ -97,17 +97,21 @@ pub enum SampleQuality {
 }
 
 /// A sample's value. Ratios and cores are finite f64; byte and operation
-/// counters are exact unsigned integers (integer precision must survive the
-/// whole pipeline — JS transports them as decimal strings beyond the
-/// JS-safe range).
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
+/// counters are exact unsigned integers. On the JSON wire, integers
+/// beyond the JS-safe range (2^53) serialize as **decimal strings** so
+/// integer precision survives any JavaScript transport (the v1
+/// contract's rule); smaller integers stay plain numbers.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SampleValue {
     /// Finite, non-NaN. Gauges/ratios only.
     Float(f64),
     /// Exact counters (bytes, operations, counts).
     Integer(u64),
 }
+
+/// Integers above this serialize as decimal strings (JS `Number` loses
+/// integer precision beyond 2^53).
+pub const JS_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991; // 2^53 - 1
 
 impl SampleValue {
     /// Finite f64 view of the value (integer counters convert exactly up
@@ -116,6 +120,54 @@ impl SampleValue {
         match self {
             SampleValue::Float(v) => *v,
             SampleValue::Integer(v) => *v as f64,
+        }
+    }
+
+    /// The exact integer value when this is an integer counter.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            SampleValue::Float(_) => None,
+            SampleValue::Integer(v) => Some(*v),
+        }
+    }
+}
+
+impl serde::Serialize for SampleValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SampleValue::Float(v) => serializer.serialize_f64(*v),
+            SampleValue::Integer(v) if *v > JS_SAFE_INTEGER_MAX => {
+                // Decimal string: exact through any JS transport.
+                serializer.serialize_str(&v.to_string())
+            }
+            SampleValue::Integer(v) => serializer.serialize_u64(*v),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SampleValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        match raw {
+            serde_json::Value::Number(n) => {
+                if let Some(u) = n.as_u64() {
+                    Ok(SampleValue::Integer(u))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(SampleValue::Float(f))
+                } else {
+                    Err(serde::de::Error::custom(
+                        "sample value is not a finite number",
+                    ))
+                }
+            }
+            serde_json::Value::String(s) => {
+                s.parse::<u64>().map(SampleValue::Integer).map_err(|_| {
+                    serde::de::Error::custom("sample value string is not a decimal integer")
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "sample value must be a number or a decimal integer string",
+            )),
         }
     }
 }
@@ -269,6 +321,8 @@ pub enum SampleError {
     InvalidCounterValue(f64),
     #[error("valid counter sample for {0:?} must carry boot_id and identity_epoch")]
     MissingCounterEpoch(String),
+    #[error("dimension {key:?} is not registered for metric {metric:?}")]
+    DimensionNotAllowed { metric: String, key: String },
     #[error(transparent)]
     Dimension(#[from] DimensionError),
 }
@@ -282,8 +336,9 @@ impl SampleBuilder {
         source: Source,
         observed_at_ms: u64,
     ) -> Result<Self, SampleError> {
-        // The registry lookup also fixes kind/unit and validates the source;
-        // do that once at build() so the error carries the final context.
+        // Fail fast on unknown metrics at construction (build()
+        // re-validates against the registry with full context — kind,
+        // unit, sources, dimensions — for the final sample).
         let _ = crate::registry::lookup(metric_id)
             .ok_or_else(|| SampleError::UnknownMetric(metric_id.to_string()))?;
         Ok(Self {
@@ -339,6 +394,20 @@ impl SampleBuilder {
                 metric: self.metric_id,
                 layer: self.source,
             });
+        }
+
+        // Dimensions are a registered allowlist, never arbitrary labels:
+        // every key the sample carries must be declared for the metric
+        // (the contract forbids unregistered keys outright — `tenant`,
+        // `vm_id`, `pid`, … — and the registry test pins its own names
+        // to the contract's closed set).
+        for (key, _) in self.dimensions.iter() {
+            if !def.dimensions.contains(&key.as_str()) {
+                return Err(SampleError::DimensionNotAllowed {
+                    metric: self.metric_id,
+                    key: key.clone(),
+                });
+            }
         }
 
         if self.quality != SampleQuality::Valid {
@@ -536,6 +605,59 @@ mod tests {
         two.insert("a", "2").unwrap();
         assert_eq!(two.len(), 1);
         assert_eq!(two.get("a"), Some("2"));
+    }
+
+    #[test]
+    fn unregistered_dimension_is_rejected() {
+        // node.cpu.capacity_ratio declares no dimensions.
+        let err = node_builder("node.cpu.capacity_ratio")
+            .dimension("interface_id", "eth0")
+            .unwrap()
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SampleError::DimensionNotAllowed { key, .. } if key == "interface_id"
+        ));
+        // A registered dimension for a metric that declares it builds.
+        SampleBuilder::new(
+            TargetKind::Node,
+            "node-1",
+            "node.net.rx_bytes_total",
+            Source::NodeOs,
+            0,
+        )
+        .unwrap()
+        .dimension("interface_id", "eth0")
+        .unwrap()
+        .epoch("boot", "iface-eth0")
+        .value(SampleValue::Integer(1))
+        .build()
+        .unwrap();
+    }
+
+    #[test]
+    fn big_integers_serialize_as_decimal_strings() {
+        // The v1 contract: integer counters beyond the JS-safe range
+        // travel as decimal strings so precision survives JS transports.
+        let over = SampleValue::Integer(u64::MAX);
+        let json = serde_json::to_value(over).unwrap();
+        assert_eq!(json, serde_json::json!("18446744073709551615"));
+        let back: SampleValue = serde_json::from_value(json).unwrap();
+        assert_eq!(back, over);
+        assert_eq!(back.as_u64(), Some(u64::MAX));
+
+        // Within the safe range they stay plain numbers.
+        let under = SampleValue::Integer(9_007_199_254_740_991);
+        assert_eq!(
+            serde_json::to_value(under).unwrap(),
+            serde_json::json!(9_007_199_254_740_991u64)
+        );
+        // Floats stay numbers.
+        assert_eq!(
+            serde_json::to_value(SampleValue::Float(1.25)).unwrap(),
+            serde_json::json!(1.25)
+        );
     }
 
     #[test]
