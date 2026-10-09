@@ -409,8 +409,8 @@ impl NetworkExecutor for RecordingExecutor {
     }
 }
 
-async fn make_client(socket: PathBuf) -> NetworkServiceClient<tonic::transport::Channel> {
-    let channel = Endpoint::try_from("http://[::]:50051")
+async fn make_channel(socket: PathBuf) -> tonic::transport::Channel {
+    Endpoint::try_from("http://[::]:50051")
         .unwrap()
         .connect_with_connector(service_fn(move |_: Uri| {
             let s = socket.clone();
@@ -420,8 +420,70 @@ async fn make_client(socket: PathBuf) -> NetworkServiceClient<tonic::transport::
             }
         }))
         .await
-        .unwrap();
-    NetworkServiceClient::new(channel)
+        .unwrap()
+}
+
+async fn make_client(socket: PathBuf) -> NetworkServiceClient<tonic::transport::Channel> {
+    NetworkServiceClient::new(make_channel(socket).await)
+}
+
+/// **gRPC health endpoint answers after the tonic 0.14 stack bump**
+/// (#235): the server composes `health + NetworkService` through
+/// tonic 0.14's axum-backed `Router` (`Server::add_service`), and the
+/// health reporter's methods changed to `&self` in tonic-health 0.14 —
+/// startup alone does not prove that the composed health service still
+/// *answers*. This pins both the overall (`""`) status and the
+/// service-specific status the server sets
+/// (`chv.node.nwd.v1.NetworkService`) as `SERVING` over the same UDS
+/// endpoint the daemon tests already exercise.
+#[tokio::test]
+async fn grpc_health_endpoint_reports_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let channel = make_channel(socket).await;
+    let mut health = tonic_health::pb::health_client::HealthClient::new(channel);
+
+    use tonic_health::pb::{
+        health_check_response::ServingStatus, HealthCheckRequest, HealthCheckResponse,
+    };
+
+    // Overall health (the empty service name).
+    let resp: HealthCheckResponse = health
+        .check(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("overall health Check must answer")
+        .into_inner();
+    assert_eq!(
+        resp.status,
+        ServingStatus::Serving as i32,
+        "overall health must be SERVING"
+    );
+
+    // The service-specific status the server sets via
+    // `set_serving::<NetworkServiceServer<..>>()`.
+    let resp: HealthCheckResponse = health
+        .check(HealthCheckRequest {
+            service: "chv.node.nwd.v1.NetworkService".to_string(),
+        })
+        .await
+        .expect("service-specific health Check must answer")
+        .into_inner();
+    assert_eq!(
+        resp.status,
+        ServingStatus::Serving as i32,
+        "chv.node.nwd.v1.NetworkService health must be SERVING"
+    );
 }
 
 #[tokio::test]

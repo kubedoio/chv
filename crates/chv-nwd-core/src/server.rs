@@ -69,7 +69,7 @@ impl<E: NetworkExecutor> NetworkServer<E> {
 
         let uds_stream = UnixListenerStream::new(uds);
 
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_serving::<NetworkServiceServer<NetworkServiceImpl<E>>>()
             .await;

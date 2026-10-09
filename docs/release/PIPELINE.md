@@ -66,9 +66,11 @@
 3. Merge as a reviewable tooling change. Never let a workflow select a
    different toolchain than the pin declares.
 4. Cadence: bump deliberately (e.g. with each minor release line), not
-   automatically. Coordinate MSRV-sensitive migrations (e.g. the deferred
-   tonic 0.12 → 0.14 upgrade, which changes generated output and MSRV) with a
-   bump so the two changes do not fight each other.
+   automatically. Coordinate MSRV-sensitive migrations (e.g. tonic major
+   bumps, which change generated output) with a toolchain bump so the two
+   changes do not fight each other. (The tonic 0.12 → 0.14 upgrade, #235,
+   needed no toolchain change: the pinned compiler already exceeded
+   tonic 0.14's MSRV.)
 
 
 ---

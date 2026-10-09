@@ -165,6 +165,13 @@ message TriggerDiskMigrationRequest {
   string volume_id = 2;
   string attachment_handle = 3;
   string dest_endpoint = 4;
+  // Issue #394 Option C: opt-in stop-the-world mode. When true, stord
+  // requests the VM pause BEFORE reading any source byte (the
+  // PAUSED_PRE_COPY status phase) and the whole transfer runs against a
+  // quiescent source — correct by construction for any write pattern, at
+  // the cost of downtime equal to the transfer time. Default false keeps
+  // the quiescent-assumed contract (write canary + finalize digest).
+  bool pause_first = 5;
 }
 
 message TriggerDiskMigrationResponse {
@@ -185,6 +192,9 @@ message GetDiskMigrationStatusResponse {
     PAUSED_FINAL_SYNC = 3;
     COMPLETED = 4;
     FAILED = 5;
+    // Issue #394 Option C: pause-first mode — the task is waiting for the
+    // VM pause BEFORE bulk copy (no bytes transferred yet).
+    PAUSED_PRE_COPY = 6;
   }
   Phase phase = 2;
   uint32 convergence_round = 3;

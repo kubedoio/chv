@@ -168,10 +168,13 @@ Response:
 
 `runs/get` request `{ "id": "arch_01HX...", "run_id": "netrun_01HX..." }` →
 full run including `plan_json` entries and per-entry `result_json` outcomes.
+<<<<<<< HEAD
 The worker persists `result_json` inside a provenance envelope
 (`resolved_architecture_version_id` + `result`); the BFF unwraps it, serving
 the flat outcome as `result_json` and the resolved version id as a nullable
 `resolved_architecture_version_id` field (null for rows without an envelope).
+=======
+>>>>>>> origin/main
 
 `runs/retry` request `{ "id": "arch_01HX...", "run_id": "netrun_01HX..." }` →
 `{ "run_id": "netrun_01HX...", "status": "queued" }` — only from `failed`

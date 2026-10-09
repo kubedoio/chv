@@ -7,7 +7,8 @@ publish = false
 
 [dependencies]
 tonic = { workspace = true }
+tonic-prost = { workspace = true }
 prost = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = { workspace = true }

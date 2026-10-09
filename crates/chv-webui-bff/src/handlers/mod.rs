@@ -19,7 +19,6 @@ pub mod overview;
 pub mod quotas;
 pub mod settings;
 pub mod snapshots;
-pub mod storage;
 pub mod tasks;
 pub mod templates;
 pub mod tokens;

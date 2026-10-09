@@ -79,6 +79,10 @@ pub struct MigrationConfig {
     /// A value > 1.0 extends all phase timeouts proportionally, useful for
     /// migrations involving slow backends (e.g., NFS, remote storage).
     pub timeout_multiplier: f64,
+    /// Issue #394 Option C: opt-in stop-the-world mode — pause the VM
+    /// before disk pre-copy instead of only at final sync. Not
+    /// representable in the correlation-id format (defaults false there).
+    pub pause_first: bool,
 }
 
 impl Default for MigrationConfig {
@@ -89,6 +93,7 @@ impl Default for MigrationConfig {
             block_size_bytes: 4_194_304, // 4MB
             total_timeout_seconds: 0,    // 0 = use calculated default
             timeout_multiplier: 1.0,
+            pause_first: false,
         }
     }
 }
@@ -115,6 +120,7 @@ impl MigrationConfig {
             },
             total_timeout_seconds: proto.total_timeout_seconds,
             timeout_multiplier: defaults.timeout_multiplier,
+            pause_first: proto.pause_first,
         }
     }
 
@@ -125,11 +131,21 @@ impl MigrationConfig {
             max_convergence_rounds: self.max_convergence_rounds,
             block_size_bytes: self.block_size_bytes,
             total_timeout_seconds: self.total_timeout_seconds,
+            pause_first: self.pause_first,
         }
     }
 
     /// Parse from correlation_id format:
     /// `source={source_node_id}:dest={dest_node_id}:threshold={N}:rounds={N}:block_size={N}:timeout={N}:timeout_multiplier={F}`
+    ///
+    /// Issue #394 Option C adds an optional `pause_first=true` key (any
+    /// other value means false — the format's other keys are equally
+    /// lenient with unparseable values). Without the key the mode is off:
+    /// the correlation_id is the ONLY carrier from the RPC's
+    /// `MigrationConfig` to the migration state machine, so a dropped key
+    /// would silently downgrade an operator's stop-the-world request to
+    /// quiescent-assumed — the exact #394 failure mode the mode exists to
+    /// close.
     pub fn from_correlation_id(corr: &str) -> (String, String, Self) {
         let mut source_node = String::new();
         let mut dest_node = String::new();
@@ -155,6 +171,10 @@ impl MigrationConfig {
             } else if let Some(val) = part.strip_prefix("timeout=") {
                 if let Ok(v) = val.parse::<u32>() {
                     config.total_timeout_seconds = v;
+                }
+            } else if let Some(val) = part.strip_prefix("pause_first=") {
+                if val == "true" {
+                    config.pause_first = true;
                 }
             }
         }
@@ -1839,6 +1859,23 @@ mod tests {
         assert_eq!(config.total_timeout_seconds, 0);
     }
 
+    /// Issue #394 Option C: the correlation_id is the only carrier from
+    /// the `MigrateVm` RPC's config to the migration state machine — the
+    /// pause-first opt-in must survive the trip, and any non-`true` value
+    /// (or absence) must mean false, never a parse error.
+    #[test]
+    fn test_migration_config_pause_first_from_correlation_id() {
+        let (.., config) = MigrationConfig::from_correlation_id("source=a:dest=b:pause_first=true");
+        assert!(config.pause_first, "pause_first=true must carry");
+
+        let (.., config) =
+            MigrationConfig::from_correlation_id("source=a:dest=b:pause_first=false");
+        assert!(!config.pause_first, "pause_first=false must stay off");
+
+        let (.., config) = MigrationConfig::from_correlation_id("source=a:dest=b");
+        assert!(!config.pause_first, "absence must mean false (the default)");
+    }
+
     #[test]
     fn test_migration_config_from_proto() {
         let proto_config = proto::MigrationConfig {
@@ -1846,6 +1883,7 @@ mod tests {
             max_convergence_rounds: 15,
             block_size_bytes: 8_388_608,
             total_timeout_seconds: 7200,
+            pause_first: true,
         };
         let config = MigrationConfig::from_proto(&proto_config);
 
@@ -1853,6 +1891,7 @@ mod tests {
         assert_eq!(config.max_convergence_rounds, 15);
         assert_eq!(config.block_size_bytes, 8_388_608);
         assert_eq!(config.total_timeout_seconds, 7200);
+        assert!(config.pause_first);
     }
 
     #[test]
@@ -1862,6 +1901,7 @@ mod tests {
             max_convergence_rounds: 0,
             block_size_bytes: 0,
             total_timeout_seconds: 0,
+            pause_first: false,
         };
         let config = MigrationConfig::from_proto(&proto_config);
         let defaults = MigrationConfig::default();

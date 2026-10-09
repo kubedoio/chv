@@ -12,6 +12,11 @@ pub enum MigrateCommands {
         vm_id: String,
         /// Target node to migrate to
         target_node: String,
+        /// Pause the VM before disk transfer (stop-the-world, issue #394
+        /// Option C): correct by construction, downtime equals the full
+        /// transfer. Omit for the default quiescent-assumed mode.
+        #[arg(long)]
+        pause_first: bool,
     },
     /// Check status of a migration
     Status {
@@ -33,7 +38,11 @@ pub async fn execute(
     format: &OutputFormat,
 ) -> Result<(), CliError> {
     match command {
-        MigrateCommands::Start { vm_id, target_node } => {
+        MigrateCommands::Start {
+            vm_id,
+            target_node,
+            pause_first,
+        } => {
             // #372 DP4: there is no POST /v1/migrations route — the real
             // entry point is the vm-mutate migrate action, the exact path
             // `chvctl vm migrate` drives. The wire field is
@@ -43,6 +52,7 @@ pub async fn execute(
                 "vm_id": vm_id,
                 "action": "migrate",
                 "target_node_id": target_node,
+                "pause_first": pause_first,
             });
             let resp = client.post("/v1/vms/mutate", &body).await?;
             println!("Migration initiated for VM {vm_id} to node {target_node}.");

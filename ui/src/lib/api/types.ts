@@ -52,26 +52,6 @@ export interface CreateNetworkInput {
   gateway_ip: string;
 }
 
-export interface StoragePool {
-  id: string;
-  name: string;
-  pool_type: string;
-  path: string;
-  is_default: boolean;
-  status: string;
-  capacity_bytes?: number;
-  allocatable_bytes?: number;
-  created_at: string;
-}
-
-export interface CreateStoragePoolInput {
-  name: string;
-  pool_type: 'localdisk';
-  path: string;
-  capacity_bytes?: number;
-  allocatable_bytes?: number;
-}
-
 export interface Image {
   id: string;
   name: string;

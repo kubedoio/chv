@@ -142,7 +142,7 @@
 					{ label: 'Open host', hint: 'Details', run: () => goto(`/nodes/${resource.id}`) },
 					{ label: 'Show instances', hint: 'Filtered list', run: () => goto(`/vms?node_id=${resource.id}`) },
 					{ label: 'Show networks', hint: 'Host scope', run: () => goto(`/networks?node_id=${resource.id}`) },
-					{ label: 'Show storage', hint: 'Host scope', run: () => goto(`/storage?node_id=${resource.id}`) }
+					{ label: 'Show storage', hint: 'Host scope', run: () => goto(`/volumes?node_id=${resource.id}`) }
 				]
 			};
 		} else if (target === 'vm' && resource) {

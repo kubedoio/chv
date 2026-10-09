@@ -1218,7 +1218,26 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 .unwrap_or("x")
         );
 
-        let (task, _pause_rx) = MigrationTask::new(
+        // The returned pause receiver is deliberately kept alive inside
+        // the spawned sender future (see below): a tokio watch channel
+        // with zero receivers is closed, and `pause_tx.send` from
+        // `ResumeDiskMigration` would fail while the sender has not yet
+        // reached its pause gate — the multi-volume staggered case
+        // (issue #394 Option C review: the agent pauses and resumes ALL
+        // volumes when the FIRST one requests the pause; a sibling still
+        // connecting would abort the whole migration, and without a
+        // latched value it would later deadlock at its own gate).
+        // Holding one receiver open keeps `send` succeeding and the
+        // value latched, so a sender that subscribes late sees the pause
+        // already signaled and proceeds immediately.
+        //
+        // Known residue (out of scope here): the guard drops when a
+        // sender future exits, so a resume aimed at an already-terminal
+        // sibling still hits a closed channel and errors — unreachable
+        // in the pause handshake flow (the agent fires resume-all once,
+        // before any volume can complete), and strictly narrower than
+        // the pre-fix behavior.
+        let (task, pause_rx) = MigrationTask::new(
             req.volume_id.clone(),
             req.attachment_handle.clone(),
             req.dest_endpoint.clone(),
@@ -1269,8 +1288,18 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         let handle = req.attachment_handle.clone();
         let tasks = self.migration_tasks.clone();
         let mig_id = migration_id.clone();
+        // Issue #394 Option C: the opt-in stop-the-world mode threads from
+        // the trigger request into the sender.
+        let req_pause_first = req.pause_first;
 
         tokio::spawn(async move {
+            // Keep the pause channel open for this migration's lifetime
+            // (see the comment at the `MigrationTask::new` call): the
+            // sender subscribes to `pause_tx` only when it reaches a
+            // pause gate, and a resume arriving before that must latch,
+            // not fail.
+            let _pause_channel_guard = pause_rx;
+
             tracing::info!(
                 migration_id = %mig_id,
                 volume_id = %volume_id,
@@ -1286,6 +1315,7 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 backend,
                 tls_config,
                 Some(task_clone),
+                req_pause_first,
             )
             .await;
 
@@ -1348,6 +1378,9 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             MigrationPhase::BulkCopy => proto::get_disk_migration_status_response::Phase::BulkCopy,
             MigrationPhase::DirtySync => {
                 proto::get_disk_migration_status_response::Phase::DirtySync
+            }
+            MigrationPhase::PausedPreCopy => {
+                proto::get_disk_migration_status_response::Phase::PausedPreCopy
             }
             MigrationPhase::PausedFinalSync => {
                 proto::get_disk_migration_status_response::Phase::PausedFinalSync
