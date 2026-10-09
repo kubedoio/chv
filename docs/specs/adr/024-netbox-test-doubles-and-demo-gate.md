@@ -46,7 +46,8 @@ reinvent per campaign.
 
 2. **The simulator is never the source of truth for the wire format.** Its
    behavioral requirements are the mapping contract
-   (`netbox-mapping-contract.md`); its wire shapes are pinned by golden
+   (`docs/specs/architecture-designer/contracts/netbox-mapping-contract.md`);
+   its wire shapes are pinned by golden
    fixtures under `crates/chv-netbox-sim/tests/fixtures/` with recorded
    provenance. Fixtures are never hand-edited after a real capture; they are
    refreshed only by the qualification `--record` mode against a live
@@ -107,8 +108,10 @@ reinvent per campaign.
   `netbox-qualification.yml` workflow. No production dependency graph, wire
   contract, or behavior change.
 - The composed e2e suite consolidates onto the simulator; wiremock survives
-  only for protocol-level client tests (malformed bodies, status
-  classification). Suite count stays flat while coverage deepens
+  only for protocol-level client tests (`client_wire_tests.rs`: redirect
+  refusal, pagination same-origin `next`-link guards, status classification
+  — malformed-body/parse-failure cases are in-crate unit tests in
+  `client.rs`). Suite count stays flat while coverage deepens
   (state-based assertions via `/__state` instead of request counting).
 - `cmd/chv-controlplane` grows a `netbox-demo` feature; reviewers must treat
   any change to the gate conditions (feature name, env var, factory seam) as

@@ -52,12 +52,12 @@ integrations. Full NetBox (docker compose: netbox + postgres + redis) stays
 out of PR CI and becomes an on-demand qualification lane that also validates
 the simulator itself (same scenarios, two backends).
 
-| Question | Lane |
+| Question | Answered by |
 |---|---|
-| Does the projection logic behave (idempotent, safe, isolated)? | unit + wiremock (exists) |
-| Does the client speak real NetBox wire format & semantics? | **simulator** (new) |
-| Can a human use it end-to-end (config → export → runs)? | **`make netbox-demo`** (new) |
-| Does it work against today's real NetBox? | **qualification compose** (new, on-demand) |
+| Does the projection logic behave (idempotent, safe, isolated)? | unit + wiremock (exists) — lane 1 |
+| Does the client speak real NetBox wire format & semantics? | **simulator** (new) — lane 2 |
+| Can a human use it end-to-end (config → export → runs)? | **`make netbox-demo`** — built on the simulator, not a separate lane |
+| Does it work against today's real NetBox? | **qualification compose** (new, on-demand + weekly) — lane 3 |
 
 ## Implementation-surface analysis (where the code goes)
 
@@ -130,7 +130,9 @@ simulator's fidelity rules are agreed before any infrastructure lands.
     - `GET` list: `limit`/`offset` pagination with `count`/`next`/`previous`
       (absolute URLs, `next` null on last page); server-side filtering by the
       exact query params the client sends (natural keys per kind +
-      custom-field filters); `limit=0` = server max page like NetBox.
+      custom-field filters); `limit=0` = server max page like NetBox
+      (pinned by the first `--record` qualification run before it is
+      wired in).
     - `POST` → `201` with assigned `id`/`url`; duplicate natural key → `400`
       with NetBox's error body shape; `PATCH` → `200`; `DELETE` → `204`;
       missing id → `404` `{"detail": "Not found."}`.
@@ -167,17 +169,21 @@ seed/reset/state round-trip.
   (mirrors the existing wiremock self-dev-dep comment block: never in the
   production graph).
 - New `netbox_projection_sim_tests.rs` (or the e2e file parameterized over
-  the backend) running the five merged scenarios against the in-process sim:
-  full-lifecycle export → re-export all `no_op`; foreign-occupied natural key
-  → conflict, no write; outage → apply result unchanged; partial failure →
-  requeue → resume without duplicate create; double enqueue → one active run.
-  Assertions switch from wiremock request counting to `GET /__state` (stronger:
-  asserts resulting NetBox state, not just calls made).
+  the backend) running the five merged composed scenarios against the
+  in-process sim: full lifecycle (apply → export → re-export leaves sim
+  state unchanged — the all-`no_op` property, currently proven only in the
+  worker suite, becomes a state-based assertion); foreign-occupied natural
+  key → conflict, no write; outage → apply result unchanged; partial
+  failure → requeue → resume without duplicate create; double enqueue → one
+  active run. Assertions switch from wiremock request counting to
+  `GET /__state` (stronger: asserts resulting NetBox state, not just calls
+  made).
 - The stateful wiremock mounts in `netbox_projection_e2e_tests.rs` are
   removed once the sim suite covers them; wiremock stays only for
-  protocol-level client tests (`client_wire_tests.rs`: malformed JSON, status
-  classification, header shape) where a raw socket-level double is the right
-  tool.
+  protocol-level client tests (`client_wire_tests.rs`: redirect refusal,
+  pagination same-origin `next`-link guards, status classification —
+  malformed-body/parse-failure cases are in-crate unit tests in
+  `client.rs`) where a raw socket-level double is the right tool.
 - Outage/retry scenarios move to `/__faults` injection.
 
 **Proves:** end-to-end projection behavior against NetBox-shaped state;
@@ -218,7 +224,7 @@ zero NetBox installation — the "we can use it" gate.
 
 ---
 
-## PR 5 — Lane 3: real-NetBox qualification (on-demand + nightly)
+## PR 5 — Lane 3: real-NetBox qualification (on-demand + weekly)
 
 **Scope:**
 
