@@ -154,8 +154,9 @@ services:
             defaults={"name": "chv"},
         )
         device_type, _ = DeviceType.objects.get_or_create(
+            manufacturer=manufacturer,
             slug="chv-host",
-            defaults={"manufacturer": manufacturer, "model": "chv-host"},
+            defaults={"model": "chv-host"},
         )
         print(f"device type {device_type.slug} ready")
         for slug in ("chv-team", "chv-env-production"):

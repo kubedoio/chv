@@ -297,6 +297,15 @@ async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
         &json!({ "name": "chv-team", "slug": "chv-team" }),
     )
     .await?;
+    // Both tags the fixture architecture's metadata produces (team
+    // label + environment), mirroring the compose init's tag list.
+    ensure(
+        live,
+        "/api/extras/tags/",
+        "slug=chv-env-production",
+        &json!({ "name": "chv-env-production", "slug": "chv-env-production" }),
+    )
+    .await?;
     let site = ensure(
         live,
         "/api/dcim/sites/",
