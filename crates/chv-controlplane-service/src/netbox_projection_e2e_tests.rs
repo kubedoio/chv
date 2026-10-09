@@ -14,6 +14,17 @@
 //!   → outage leg (mock down) → apply result still Succeeded
 //! ```
 //!
+//! Plus two composed partial scenarios:
+//!
+//! - **partial failure mid-plan** — a 5xx on a later kind's create
+//!   auto-requeues the run with backoff, and the resumed attempt
+//!   resolves the half-created object by its natural key instead of
+//!   duplicating it (the sweep/tick composition of the worker suite's
+//!   `partial_failure_aborts_and_retry_resumes_without_duplicate_create`);
+//! - **manual double enqueue** — a second manual export while one is
+//!   active answers the store's one-active conflict, and the sweep
+//!   coalesces onto the single active run.
+//!
 //! Everything is driven through the real composition root —
 //! [`crate::NetboxProjectionWorker::tick`] (reclaim → post-apply sweep
 //! → claim) over a real in-memory store and a real HTTP wire
@@ -32,9 +43,13 @@
 use std::collections::BTreeMap;
 
 use chv_architecture_validate::model::{CHVArchitecture, InstanceResources, Network, NetworkType};
-use chv_controlplane_store::ApplyRunRepository;
+use chv_controlplane_store::{
+    is_active_run_conflict, ApplyRunRepository, NetboxProjectionRunCreateInput,
+    NetboxProjectionRunRepository,
+};
 use chv_controlplane_types::architecture::{
-    NetboxProjectionRunStatus, NetboxProjectionTrigger, RunStatus,
+    NetboxProjectionMode, NetboxProjectionRunId, NetboxProjectionRunStatus,
+    NetboxProjectionTrigger, RunStatus,
 };
 use chv_netbox_adapter::ownership::CustomFieldNames;
 use chv_netbox_adapter::plan::RetentionPolicy;
@@ -47,10 +62,10 @@ use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::netbox_projection_worker_tests::{
-    add_succeeded_apply_run, appid, audit_events, backdate_apply_run, desired_objects,
-    fixture_architecture, get_run, kind_path, mount_creates, mount_empty_lists,
+    add_succeeded_apply_run, aid, appid, audit_events, backdate_apply_run, desired_objects,
+    fixture_architecture, get_run, kind_path, mount_creates, mount_empty_lists, mount_empty_remote,
     mount_ip_fixup_patch, outcome_of, page, remote_fixture, request_count, request_paths,
-    setup_post_apply_config, setup_projection, setup_topology_and_version, worker_for,
+    setup_post_apply_config, setup_projection, setup_topology_and_version, vid, worker_for,
     CREATE_MOCKS, SITE, TOKEN,
 };
 
@@ -799,5 +814,308 @@ async fn foreign_object_at_natural_key_is_never_written() {
             .filter(|r| r.method.as_str() != "GET")
             .all(|r| !r.url.path().contains("/55")),
         "no write of any method may target the foreign object"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test D — partial failure mid-plan: auto-requeue, resume, no duplicate
+// ---------------------------------------------------------------------------
+
+/// A transient failure partway through the plan (a 5xx on a later
+/// kind's create) fails the run and auto-requeues it with a backoff;
+/// once the backoff elapses, the resumed attempt finds the
+/// half-created object through its natural key and resolves to a no-op
+/// — THE key assertion: the wiremock POST count to the half-created
+/// kind's create endpoint is still 1, so no duplicate object was ever
+/// created. The sweep/tick composition of the worker suite's
+/// `partial_failure_aborts_and_retry_resumes_without_duplicate_create`
+/// (which proves the mechanism against a manually enqueued run; here
+/// the run comes from the post-apply sweep and both attempts go
+/// through the claim loop).
+#[tokio::test]
+async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
+    let db = chv_controlplane_store::test_util::TestDb::new().await;
+    let server = MockServer::start().await;
+    let model = crate::netbox_projection_worker_tests::model_json();
+
+    // Phase 1 — topology + v1 + a SUCCEEDED apply run + a
+    // post-apply-enabled config.
+    setup_topology_and_version(&db, "topo-partial", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-partial", "topo-partial", "v-1").await;
+    setup_post_apply_config(&db, &server.uri(), "topo-partial").await;
+
+    // Phase 2 — first attempt: NetBox holds nothing of ours; the first
+    // resource kind's create (the VLAN) succeeds, the next create (the
+    // prefix) answers 500. A 5xx is a transient failure class, so the
+    // run is auto-requeued with a backoff rather than left failed.
+    mount_empty_remote(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/vlans/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 101 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/prefixes/"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("netbox exploded"))
+        .mount(&server)
+        .await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let runs = crate::netbox_projection_worker_tests::post_apply_runs(&db, "topo-partial").await;
+    assert_eq!(runs.len(), 1, "exactly one post_apply run: {runs:?}");
+    let run_id = runs[0].id.to_string();
+    let run = &runs[0];
+    assert_eq!(
+        run.status,
+        NetboxProjectionRunStatus::Queued,
+        "transient 5xx auto-requeued"
+    );
+    assert_eq!(
+        run.attempt_count, 1,
+        "the failed execution consumed an attempt"
+    );
+    let error = run.error_message.as_deref().expect("error message");
+    assert!(error.contains("status 500"), "5xx classification: {error}");
+    assert!(!error.contains(TOKEN), "the error is token-free");
+    assert!(
+        run.next_attempt_at
+            .is_some_and(|at| at > chrono::Utc::now()),
+        "retry backoff scheduled in the future: {:?}",
+        run.next_attempt_at
+    );
+
+    // The partial outcome ledger is persisted on the requeued run.
+    let outcome = outcome_of(run);
+    assert_eq!(outcome.summary.succeeded, 1, "the VLAN create landed");
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(
+        outcome.summary.not_attempted, 4,
+        "the rest was never attempted"
+    );
+
+    // Wire so far: exactly one create of each attempted kind.
+    assert_eq!(request_count(&server, "POST", "/api/ipam/vlans/").await, 1);
+    assert_eq!(
+        request_count(&server, "POST", "/api/ipam/prefixes/").await,
+        1
+    );
+
+    // Phase 3 — while the backoff is pending, a further tick neither
+    // re-claims the run (the backoff gates the claim) nor re-enqueues
+    // one (a post_apply run of any status counts as already attempted).
+    worker_for(&db).tick().await.expect("backoff tick succeeds");
+    assert_eq!(
+        crate::netbox_projection_worker_tests::post_apply_runs(&db, "topo-partial")
+            .await
+            .len(),
+        1,
+        "no re-enqueue on the backoff tick"
+    );
+    assert_eq!(
+        request_count(&server, "POST", "/api/").await,
+        2,
+        "the backoff prevented an early retry"
+    );
+
+    // Phase 4 — backdate the backoff (the existing fixture pattern) and
+    // heal NetBox: the VLAN written by the failed attempt is already
+    // remote (mirrored at the id its create returned), and the prefix
+    // create now succeeds. The healed mocks are mounted with priority 1
+    // so they shadow the phase-2 mocks WITHOUT resetting the server —
+    // the no-duplicate assertion below needs the full request log.
+    sqlx::query(
+        "UPDATE netbox_projection_runs SET next_attempt_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+    )
+    .bind(&run_id)
+    .execute(&db.pool)
+    .await
+    .expect("backdate retry backoff");
+
+    let vlan = desired_objects("topo-partial")
+        .into_iter()
+        .find(|object| matches!(object, NetBoxObject::Vlan(_)))
+        .expect("desired vlan");
+    Mock::given(method("GET"))
+        .and(path("/api/ipam/vlans/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(page(vec![remote_fixture(101, &vlan)])),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/prefixes/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 102 })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_creates(
+        &server,
+        &[
+            ("/api/ipam/ip-addresses/", 103),
+            ("/api/virtualization/interfaces/", 104),
+            ("/api/virtualization/virtual-machines/", 105),
+            ("/api/dcim/devices/", 106),
+        ],
+    )
+    .await;
+    mount_ip_fixup_patch(&server).await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let run = get_run(&db, &run_id).await;
+    assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    assert_eq!(
+        run.attempt_count, 1,
+        "the successful resume did not consume an attempt"
+    );
+    let outcome = outcome_of(&run);
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.summary.skipped, 1, "the written VLAN is a no_op");
+    assert_eq!(
+        outcome.summary.succeeded, 5,
+        "only the missing kinds create"
+    );
+
+    // THE key assertion: the resumed attempt did NOT re-create the
+    // half-created kind's object — the natural-key probe found the
+    // first attempt's VLAN and resolved to a no-op. The prefix create
+    // ran twice (the failed 500 + the healed 201); the VLAN create ran
+    // exactly once, ever.
+    assert_eq!(
+        request_count(&server, "POST", "/api/ipam/vlans/").await,
+        1,
+        "resume must not duplicate the already-written object"
+    );
+    assert_eq!(
+        request_count(&server, "POST", "/api/ipam/prefixes/").await,
+        2,
+        "the failed prefix create + the healed retry"
+    );
+    assert_eq!(request_count(&server, "POST", "/api/").await, 7);
+
+    // Phase 5 — the final remote state is complete: a dry-run over the
+    // mirrored remote (every object at the id its create handed out)
+    // is a full no-op.
+    server.reset().await;
+    mount_remote_state(&server, &v1_objects_at_created_ids("topo-partial")).await;
+
+    let architecture: CHVArchitecture = serde_json::from_str(&model).expect("applied model parses");
+    let input = NetboxProjectionInput {
+        architecture: &architecture,
+        architecture_id: "topo-partial",
+        architecture_version: 1,
+        snapshot: None,
+        site_name: Some(SITE),
+        retention: RetentionPolicy::MarkStale,
+        names: CustomFieldNames::new("chv_"),
+    };
+    let runner = NetboxProjectionRunner::new(
+        NetBoxClient::new_unchecked_for_tests(&server.uri(), NetBoxToken::new(TOKEN.to_string()))
+            .expect("test client"),
+    );
+    let plan = runner.dry_run(&input).await.expect("dry run computes");
+    assert_eq!(plan.summary.create, 0, "nothing left to create: {plan:?}");
+    assert_eq!(plan.summary.update, 0);
+    assert_eq!(
+        plan.summary.no_op, 6,
+        "every entry matched the converged remote"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test E — manual-export double enqueue coalesces onto the one active run
+// ---------------------------------------------------------------------------
+
+/// After a manual export run is queued, a second manual enqueue attempt
+/// — via `NetboxProjectionRunRepository::create` with trigger `manual`,
+/// exactly what the BFF's export handler does — returns the one-active
+/// conflict (classified with the shared `is_active_run_conflict`
+/// helper), and the runs table still holds exactly one active run. The
+/// subsequent tick composes the coalescing at the sweep level: the
+/// post-apply sweep does not enqueue a second run on top of the active
+/// manual one, and the claim loop executes the single run to
+/// completion. This composes the "idempotent manual export" Proves
+/// item.
+#[tokio::test]
+async fn manual_double_enqueue_coalesces_to_one_active_run() {
+    let db = chv_controlplane_store::test_util::TestDb::new().await;
+    let server = MockServer::start().await;
+    let model = crate::netbox_projection_worker_tests::model_json();
+
+    setup_topology_and_version(&db, "topo-coalesce", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-coalesce", "topo-coalesce", "v-1").await;
+    setup_post_apply_config(&db, &server.uri(), "topo-coalesce").await;
+
+    // The first manual export — the same repository call the BFF's
+    // export handler makes.
+    let run_repo = NetboxProjectionRunRepository::new(db.pool.clone());
+    let first_id = NetboxProjectionRunId::new("netrun-coalesce-1").expect("valid run id");
+    run_repo
+        .create(NetboxProjectionRunCreateInput {
+            id: first_id.clone(),
+            architecture_id: aid("topo-coalesce"),
+            architecture_version_id: vid("v-1"),
+            trigger_kind: NetboxProjectionTrigger::Manual,
+            mode: NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: Some("senol".to_string()),
+        })
+        .await
+        .expect("first manual enqueue");
+
+    // The second manual enqueue while the first is queued: the store's
+    // one-active partial unique index refuses it, and the conflict is
+    // classified through the same shared helper the BFF's export
+    // handler uses to map it onto 409 NETBOX_RUN_ACTIVE.
+    let err = run_repo
+        .create(NetboxProjectionRunCreateInput {
+            id: NetboxProjectionRunId::new("netrun-coalesce-2").expect("valid run id"),
+            architecture_id: aid("topo-coalesce"),
+            architecture_version_id: vid("v-1"),
+            trigger_kind: NetboxProjectionTrigger::Manual,
+            mode: NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: Some("senol".to_string()),
+        })
+        .await
+        .expect_err("the one-active index must refuse a second active run");
+    assert!(is_active_run_conflict(&err), "one-active conflict: {err}");
+
+    // The runs table still holds exactly one (active) run.
+    let runs = run_repo
+        .list_by_architecture(&aid("topo-coalesce"), 50)
+        .await
+        .expect("runs list");
+    assert_eq!(runs.len(), 1, "exactly one run row: {runs:?}");
+    assert_eq!(runs[0].status, NetboxProjectionRunStatus::Queued);
+
+    // One tick composes the whole coalescing: the post-apply sweep sees
+    // the active manual run holding the architecture's one-active slot
+    // and coalesces (no post_apply row is enqueued), then the claim
+    // loop executes the single active run to completion.
+    mount_empty_remote(&server).await;
+    mount_creates(&server, &CREATE_MOCKS).await;
+    mount_ip_fixup_patch(&server).await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let runs = run_repo
+        .list_by_architecture(&aid("topo-coalesce"), 50)
+        .await
+        .expect("runs list");
+    assert_eq!(
+        runs.len(),
+        1,
+        "the sweep coalesced — still exactly one run: {runs:?}"
+    );
+    assert_eq!(runs[0].id, first_id);
+    assert_eq!(runs[0].trigger_kind, NetboxProjectionTrigger::Manual);
+    assert_eq!(runs[0].status, NetboxProjectionRunStatus::Succeeded);
+    assert_eq!(
+        request_count(&server, "POST", "/api/").await,
+        6,
+        "one execution, one create per mapped kind"
     );
 }

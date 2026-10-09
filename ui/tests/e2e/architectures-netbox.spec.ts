@@ -279,24 +279,30 @@ async function installNetboxMocks(
 			trigger: run.trigger,
 			status: run.status,
 			mode: run.mode,
-			// Parsed plan shape (what the BFF serves when the worker's
-			// plan_json column parses): the executed-plan chip strip
-			// renders from `summary`.
-			plan_json: { ...EMPTY_PLAN, summary: run.summary ?? EMPTY_PLAN.summary },
-			result_json: {
-				plan: { ...EMPTY_PLAN, summary: run.summary ?? EMPTY_PLAN.summary },
-				entries: [
-					{
-						action: 'create',
-						kind: 'vlan',
-						chv_resource_ref: 'networks/backend',
-						status: 'succeeded',
-						error: null
-					}
-				],
-				summary: { succeeded: 1, failed: 0, skipped: 0, not_attempted: 0 },
-				error: null
-			},
+			// The REAL post-fix wire: `plan_json` is null in the current
+			// flow (both enqueue sites write None), and the executed-plan
+			// chips come from the FLAT outcome the BFF serves after
+			// unwrapping the worker's provenance envelope — with the
+			// envelope's version id surfaced as a first-class field.
+			plan_json: null,
+			result_json:
+				run.summary === null
+					? null
+					: {
+							plan: { ...EMPTY_PLAN, summary: run.summary },
+							entries: [
+								{
+									action: 'create',
+									kind: 'vlan',
+									chv_resource_ref: 'networks/backend',
+									status: 'succeeded',
+									error: null
+								}
+							],
+							summary: { succeeded: 1, failed: 0, skipped: 0, not_attempted: 0 },
+							error: null
+						},
+			resolved_architecture_version_id: 'ver-1',
 			summary: run.summary,
 			error_message: run.error_message,
 			attempt_count: run.attempt_count,
@@ -535,11 +541,20 @@ test.describe('Architecture Designer — NetBox projection tab', () => {
 		await expect(page.getByTestId('netbox-run-summary').first()).toContainText(/6 create/);
 
 		// Selecting a row renders the run detail with its per-entry
-		// outcomes and executed-plan chips.
+		// outcomes and executed-plan chips. The chips come from the
+		// outcome's plan.summary inside the flat result_json (the mock
+		// serves plan_json: null — the real wire), so the counts prove
+		// the real data flow.
 		await page.getByTestId('netbox-run-row-select').first().click();
 		await expect(page.getByTestId('netbox-run-detail')).toBeVisible();
 		await expect(page.getByTestId('netbox-run-outcome')).toHaveCount(1);
+		await expect(page.getByTestId('netbox-run-resolved-version')).toHaveText('ver-1');
 		await expect(page.getByTestId('netbox-executed-plan')).toBeVisible();
+		const executedChips = page.getByTestId('netbox-executed-plan-chip');
+		await expect(executedChips).toHaveCount(5);
+		await expect(
+			page.locator('[data-testid="netbox-executed-plan-chip"][data-netbox-action="create"] .chip-count')
+		).toHaveText('6');
 
 		// Retry: the failed row flips back to queued after the BFF
 		// acknowledges, and the request carried the run id.

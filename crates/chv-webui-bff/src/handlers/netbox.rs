@@ -305,6 +305,24 @@ pub struct NetboxRunGetRequest {
 /// `result_json`, parsed to JSON values when parseable (raw string
 /// otherwise, per the contract) and the version/bookkeeping columns the
 /// UI needs to render history.
+///
+/// # Result-envelope unwrap
+///
+/// The projection worker does not persist the adapter's outcome
+/// verbatim: it wraps it in a provenance envelope
+/// `{ "resolved_architecture_version_id": …, "result": … }`
+/// (`NetboxProjectionWorker::result_envelope`, recording the version
+/// that was actually projected). The API contract's runs/get serves the
+/// per-entry outcome, so [`run_detail_dto`] unwraps the envelope before
+/// serving: `result_json` carries the inner `result` (the flat outcome
+/// — plan, entries, summary, error) and `resolved_architecture_version_id`
+/// surfaces the envelope's version id as a first-class field. It is
+/// null for rows without an envelope — legacy rows, raw-string columns,
+/// and runs that failed before producing a result. The unwrap is
+/// defensive: a parsed object without both envelope keys (a string
+/// `resolved_architecture_version_id` and an object `result`) passes
+/// through unchanged, so a future envelope shape is served verbatim
+/// rather than guessed at.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NetboxRunDetailDto {
@@ -316,6 +334,10 @@ pub struct NetboxRunDetailDto {
     pub mode: NetboxProjectionMode,
     pub plan_json: Option<Value>,
     pub result_json: Option<Value>,
+    /// The architecture version the worker actually projected — lifted
+    /// out of the result envelope (see the struct doc). Null when the
+    /// row carries no envelope.
+    pub resolved_architecture_version_id: Option<String>,
     pub summary: Option<Value>,
     pub error_message: Option<String>,
     pub attempt_count: i64,
@@ -855,7 +877,10 @@ pub async fn netbox_runs_list(
 
 /// `POST /v1/architectures/netbox/runs/get` — one full run including
 /// `plan_json` and per-entry `result_json` (parsed JSON when parseable,
-/// raw string otherwise). A run that does not belong to this
+/// raw string otherwise). The worker's provenance envelope around
+/// `result_json` is unwrapped here, surfacing
+/// `resolved_architecture_version_id` as a first-class field (see
+/// [`NetboxRunDetailDto`]). A run that does not belong to this
 /// architecture — or does not exist — answers 404, so run ids cannot be
 /// used to probe other architectures.
 pub async fn netbox_runs_get(
@@ -1172,8 +1197,13 @@ fn run_summary_dto(r: NetboxProjectionRun) -> NetboxRunSummaryDto {
 
 /// Map a run row onto the runs/get detail DTO — summary fields plus the
 /// parsed `plan_json` / `result_json` (raw string when unparseable, per
-/// the contract).
+/// the contract). `result_json` additionally goes through
+/// [`unwrap_result_envelope`], which serves the worker's provenance
+/// envelope's inner outcome and lifts the resolved version id onto the
+/// DTO (see [`NetboxRunDetailDto`]'s doc).
 fn run_detail_dto(r: NetboxProjectionRun) -> NetboxRunDetailDto {
+    let (result_json, resolved_architecture_version_id) =
+        unwrap_result_envelope(parse_json_or_raw(r.result_json.as_deref()));
     NetboxRunDetailDto {
         id: r.id.into_inner(),
         architecture_id: r.architecture_id.into_inner(),
@@ -1182,7 +1212,8 @@ fn run_detail_dto(r: NetboxProjectionRun) -> NetboxRunDetailDto {
         status: r.status,
         mode: r.mode,
         plan_json: parse_json_or_raw(r.plan_json.as_deref()),
-        result_json: parse_json_or_raw(r.result_json.as_deref()),
+        result_json,
+        resolved_architecture_version_id,
         summary: parse_json_column(r.summary_json.as_deref()),
         error_message: r.error_message,
         attempt_count: r.attempt_count,
@@ -1191,6 +1222,34 @@ fn run_detail_dto(r: NetboxProjectionRun) -> NetboxRunDetailDto {
         finished_at: r.finished_at.map(|d| d.to_rfc3339()),
         next_attempt_at: r.next_attempt_at.map(|d| d.to_rfc3339()),
         created_at: r.created_at.to_rfc3339(),
+    }
+}
+
+/// Unwrap the projection worker's provenance envelope from a parsed
+/// `result_json` column. The worker persists
+/// `{ "resolved_architecture_version_id": <string>, "result": <object> }`
+/// (`NetboxProjectionWorker::result_envelope` in `chv-controlplane-service`);
+/// runs/get serves the inner outcome and surfaces the version id.
+///
+/// Defensive by design: the unwrap fires only when the parsed value is
+/// an object carrying BOTH a string `resolved_architecture_version_id`
+/// and an object `result`. Anything else — null, a raw string (already
+/// wrapped as a JSON string by [`parse_json_or_raw`]), or an object
+/// without both envelope keys — is returned unchanged with a null
+/// version id, so unknown shapes pass through verbatim (forward
+/// compatibility).
+fn unwrap_result_envelope(parsed: Option<Value>) -> (Option<Value>, Option<String>) {
+    let Some(Value::Object(envelope)) = &parsed else {
+        return (parsed, None);
+    };
+    match (
+        envelope.get("resolved_architecture_version_id"),
+        envelope.get("result"),
+    ) {
+        (Some(Value::String(version_id)), Some(result @ Value::Object(_))) => {
+            (Some(result.clone()), Some(version_id.clone()))
+        }
+        _ => (parsed, None),
     }
 }
 

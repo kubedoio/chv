@@ -3,18 +3,20 @@
 	import {
 		NETBOX_ACTION_LABELS,
 		NETBOX_PLAN_SUMMARY_CHIPS,
-		viewNetboxPlanSummary,
+		viewNetboxExecutedPlanSummary,
 		viewNetboxRunResult
 	} from './types.ts';
 
 	/**
 	 * Full view of one selected projection run: the run facts, the abort
-	 * error when one occurred, the executed plan's summary counts (from
-	 * `plan_json`, when the column holds the parsed plan shape), and the
-	 * per-entry outcomes from `result_json` (parsed payload, or the raw
-	 * column string for rows outside the adapter's outcome contract).
-	 * Extracted from NetboxRunHistory to keep both under the 300-line
-	 * component cap.
+	 * error when one occurred, the executed plan's summary counts, and
+	 * the per-entry outcomes from `result_json` (parsed payload, or the
+	 * raw column string for rows outside the adapter's outcome
+	 * contract). The executed-plan chips come from the outcome's
+	 * `plan.summary` — the real data flow, since `plan_json` is null in
+	 * the current worker — with the top-level `plan_json` column as a
+	 * defensive fallback. Extracted from NetboxRunHistory to keep both
+	 * under the 300-line component cap.
 	 */
 
 	interface Props {
@@ -42,9 +44,12 @@
 	}
 
 	const resultView = $derived(viewNetboxRunResult(run.result_json));
-	// Null when plan_json is a raw string / null / unexpected shape —
-	// the executed-plan row is skipped entirely in that case.
-	const planSummary = $derived(viewNetboxPlanSummary(run.plan_json));
+	// The executed plan's counts come from the outcome inside
+	// result_json (the real worker flow — plan_json is never written
+	// today); the top-level plan_json path stays as the defensive
+	// fallback. Null when neither source parses — the executed-plan row
+	// is skipped entirely in that case.
+	const planSummary = $derived(viewNetboxExecutedPlanSummary(resultView, run.plan_json));
 </script>
 
 <section class="detail" aria-label={`NetBox run ${run.id} details`} data-testid="netbox-run-detail">
@@ -69,6 +74,19 @@
 			<dt>Applied version</dt>
 			<dd>{run.architecture_version_id}</dd>
 		</div>
+		{#if run.resolved_architecture_version_id}
+			<div>
+				<dt>Projected version</dt>
+				<dd data-testid="netbox-run-resolved-version">
+					{run.resolved_architecture_version_id}
+					{#if run.resolved_architecture_version_id !== run.architecture_version_id}
+						<span class="resolved-note" title="A newer apply succeeded between enqueue and execution; the worker re-resolved at run time">
+							(re-resolved)
+						</span>
+					{/if}
+				</dd>
+			</div>
+		{/if}
 	</dl>
 	{#if run.error_message}
 		<div class="detail-error" role="alert" data-testid="netbox-run-detail-error">
@@ -154,6 +172,7 @@
 	.detail-facts { display: flex; gap: 1.25rem; flex-wrap: wrap; margin: 0; }
 	.detail-facts dt { font-size: 11px; font-weight: 600; color: var(--color-neutral-500); }
 	.detail-facts dd { margin: 0; font-size: 12px; color: var(--color-neutral-700); }
+	.resolved-note { font-size: 10px; color: var(--color-neutral-500); }
 	.detail-error {
 		padding: 0.5rem 0.75rem;
 		border-radius: var(--radius-xs);

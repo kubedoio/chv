@@ -23,8 +23,23 @@ Machine tests prove:
 - a v2 topology (modified VM, removed server, added network) produces update
   entries for still-desired objects, marks the removed server's device stale
   (`chv_managed_state: "stale"` + `status: "decommissioning"`, never a
-  delete), and creates the added objects — and re-running against the
-  converged remote is idempotent (every entry `no_op`, no writes);
+  delete), and creates the added objects. The literal no-op assertions here
+  are (a) the phase-3 dry-run over the v1 mirror is fully `no_op`, and
+  (b) phase 5's no-new-apply tick produces no further writes; the v2
+  re-export's full-no-op equivalence is proven at the worker-suite level
+  (`export_creates_all_objects_then_re_run_is_all_no_op`), not re-asserted
+  in this suite;
+- a partial failure mid-plan (a 5xx on a later kind's create after an
+  earlier kind's create landed) auto-requeues the run with a backoff, and
+  the resumed attempt resolves the half-created object by its natural key:
+  the create endpoint for the half-created kind is hit exactly once (no
+  duplicate object), the remaining kinds complete, and the final remote
+  state is converged (dry-run fully `no_op`);
+- a second manual export enqueue while one is queued/running answers the
+  one-active conflict (`is_active_run_conflict`, the same classification
+  the BFF maps onto 409 `NETBOX_RUN_ACTIVE`), and the post-apply sweep
+  coalesces onto the single active run — exactly one run row, executed
+  once;
 - every projection action lands in the audit trail with the run id, action,
   and target;
 - a NetBox outage never changes the apply result: with the mock unreachable
@@ -37,9 +52,11 @@ Machine tests prove:
 - the UI surfaces the whole contract: the config form renders `token_set`
   semantics (password-typed, never re-displayed) and `custom_field_prefix`,
   the dry-run table renders entries/chips/conflict cues, run history
-  renders rows with retry and detail (executed-plan chips), export shows
-  the 409 `NETBOX_RUN_ACTIVE` banner, and the upsert wire body carries the
-  token while config/get exposes only `token_set`.
+  renders rows with retry and detail (per-entry outcomes and executed-plan
+  chips from the flat `result_json` the BFF serves after unwrapping the
+  worker's provenance envelope — `plan_json` is null on the real wire),
+  export shows the 409 `NETBOX_RUN_ACTIVE` banner, and the upsert wire body
+  carries the token while config/get exposes only `token_set`.
 
 Qualification boundary: the mock NetBox implements only the bounded wire
 subset the adapter exercises (the read lists, creates, and PATCHes its tests
@@ -55,11 +72,13 @@ holds the interface).
 Focused verification (all run, all green):
 
 ```text
-cargo test -p chv-controlplane-service netbox_projection_e2e   # 3 passed
-cargo test -p chv-controlplane-service                          # 271 passed, 0 failed
-cargo clippy -p chv-controlplane-service --all-targets -- -D warnings  # clean
+cargo test -p chv-controlplane-service netbox_projection_e2e   # 5 passed
+cargo test -p chv-controlplane-service                          # 273 passed, 0 failed
+cargo test -p chv-webui-bff --test architecture_netbox_routes   # 21 passed, 0 failed
+cargo clippy -p chv-controlplane-service -p chv-webui-bff --all-targets -- -D warnings  # clean
 cargo fmt --all                                                 # applied
+cargo check --workspace                                         # clean
 cd ui && npm run check                                          # 0 errors, 0 warnings
-cd ui && npm run test                                           # 373 passed (41 files)
+cd ui && npm run test                                           # 374 passed (41 files)
 cd ui && npx playwright test tests/e2e/architectures-netbox.spec.ts  # 5 passed
 ```
