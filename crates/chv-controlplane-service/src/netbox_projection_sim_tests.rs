@@ -800,7 +800,13 @@ async fn netbox_outage_never_changes_the_apply_result() {
     ) {
         // A real NetBox has no fault control plane: the outage leg is
         // simulator-only. PR 5's qualification mode skips this
-        // scenario rather than faking an outage (see module docs).
+        // scenario rather than faking an outage (see module docs). A
+        // simulator that cannot inject faults is a regression, not a
+        // skip.
+        assert!(
+            !matches!(backend, NetboxBackend::Sim(_)),
+            "the simulator must support fault injection"
+        );
         return;
     }
 
@@ -937,7 +943,12 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
         // A real NetBox has no fault control plane: the failure leg
         // is simulator-only. PR 5's qualification mode skips this
         // scenario rather than faking a mid-plan failure (see module
-        // docs).
+        // docs). A simulator that cannot inject faults is a
+        // regression, not a skip.
+        assert!(
+            !matches!(backend, NetboxBackend::Sim(_)),
+            "the simulator must support fault injection"
+        );
         return;
     }
 

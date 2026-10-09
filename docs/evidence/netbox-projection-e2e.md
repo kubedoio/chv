@@ -44,7 +44,7 @@ Machine tests prove:
   simulator a mid-plan create failure cannot be faulted per HTTP
   method, so the half-created state is seeded via the control plane;
   the mid-plan-create + partial-ledger composition itself is proven at
-  the worker-suite level.);
+  the worker-suite level).";
 - a second manual export enqueue while one is queued/running answers the
   one-active conflict (`is_active_run_conflict`, the same classification
   the BFF maps onto 409 `NETBOX_RUN_ACTIVE`), and the post-apply sweep
