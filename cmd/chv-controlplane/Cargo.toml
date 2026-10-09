@@ -16,6 +16,14 @@ path = "src/main.rs"
 # forwarding, `cargo build -p chv-controlplane --features dev` fails because
 # the feature only existed on the dependency crate.
 dev = ["chv-controlplane-service/dev"]
+# Forwarded so `cargo build -p chv-controlplane --features netbox-demo`
+# (the build step of `make netbox-demo`, issue #586 / ADR-024 decision 5)
+# reaches the service crate's double-gated plain-HTTP demo module —
+# same forwarding pattern as `dev` above. Default-off; release
+# packaging builds default features only, so the plain-HTTP path can
+# never reach a shipped binary. Runtime additionally requires
+# CHV_NETBOX_ALLOW_HTTP=1 (the factory fails closed otherwise).
+netbox-demo = ["chv-controlplane-service/netbox-demo"]
 
 [dependencies]
 chv-config = { path = "../../crates/chv-config" }

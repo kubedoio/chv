@@ -14,6 +14,10 @@ mod lifecycle;
 pub mod migration;
 mod migration_reaper;
 mod netbox_projection_worker;
+// Entirely behind the feature: default-feature builds never see the
+// module (ADR-024's compile-time half of the plain-HTTP double gate).
+#[cfg(feature = "netbox-demo")]
+pub mod netbox_demo;
 mod node_client;
 mod node_client_pool;
 mod orchestrator;

@@ -68,14 +68,18 @@ reinvent per campaign.
 
 5. **The plain-HTTP demo gate is double-gated and never shipped.** The
    production client rejects non-HTTPS endpoints fail-closed; that invariant
-   is unchanged. A default-off `netbox-demo` cargo feature on
-   `cmd/chv-controlplane` may enable the adapter's test-only plain-HTTP
-   constructor **and only when `CHV_NETBOX_ALLOW_HTTP=1` is also set at
-   runtime**, for the `make netbox-demo` harness (simulator + controlplane +
-   built UI over sqlite). Release packaging builds default features only, so
-   the escape hatch cannot reach a shipped binary. Demo-mode startup logs a
-   loud marker. This is the recorded high-risk-change disclosure for that
-   gate.
+   is unchanged. A default-off `netbox-demo` cargo feature may enable the
+   adapter's test-only plain-HTTP constructor **and only when
+   `CHV_NETBOX_ALLOW_HTTP=1` is also set at runtime**, for the
+   `make netbox-demo` harness (simulator + controlplane + built UI over
+   sqlite). The feature is forwarded through the crates that own a NetBox
+   client seam: `cmd/chv-controlplane` → `chv-controlplane-service` (the
+   projection worker's `with_client_factory` seam) → `chv-webui-bff` (the
+   synchronous dry-run's client seam) — each seam applies the same double
+   gate and fails closed without it. Release packaging builds default
+   features only, so the escape hatch cannot reach a shipped binary.
+   Demo-mode startup logs a loud marker. This is the recorded
+   high-risk-change disclosure for that gate.
 
 6. **Future integrations extend, never reinvent.** Each new NetBox
    integration adds mapping-contract kinds, adapter unit tests, simulator
@@ -113,10 +117,11 @@ reinvent per campaign.
   — malformed-body/parse-failure cases are in-crate unit tests in
   `client.rs`). Suite count stays flat while coverage deepens
   (state-based assertions via `/__state` instead of request counting).
-- `cmd/chv-controlplane` grows a `netbox-demo` feature; reviewers must treat
-  any change to the gate conditions (feature name, env var, factory seam) as
-  high-risk and re-verify default-feature builds keep the fail-closed
-  HTTPS-only path.
+- `cmd/chv-controlplane` (and, via feature forwarding, the service and BFF
+  crates' NetBox client seams) grow a `netbox-demo` feature; reviewers must
+  treat any change to the gate conditions (feature name, env var, factory
+  seams) as high-risk and re-verify default-feature builds keep the
+  fail-closed HTTPS-only path.
 - Simulator fidelity is a maintained obligation: the weekly qualification
   run is the tripwire, and fixture refreshes are reviewable events.
 - The demo harness depends on the converged controlplane serving shape

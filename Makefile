@@ -12,6 +12,7 @@
 .PHONY: all build build-debug build-ui build-release release dev-install clean test fmt lint check
 .PHONY: package-deb package-rpm package-local package-smoke package-check bump-version
 .PHONY: integration-kvm integration-kvm-source integration-kvm-packages check-no-println
+.PHONY: netbox-demo
 
 BUMP_TYPE ?= patch
 
@@ -33,6 +34,14 @@ release: build-release
 
 dev-install:
 	sudo ./scripts/dev-install.sh
+
+# Interactive NetBox projection demo (issue #586, ADR-024): boots the
+# chv-netbox-sim simulator plus a demo-mode controlplane (plain-HTTP
+# NetBox client, double-gated) and the built UI on localhost, with a
+# seeded starter topology ready to Dry run / Export. See
+# docs/dev/netbox-demo.md for the click-path and fault simulation.
+netbox-demo:
+	./scripts/netbox-demo.sh
 
 test:
 	cargo test --workspace

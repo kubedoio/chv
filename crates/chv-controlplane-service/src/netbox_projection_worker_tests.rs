@@ -590,6 +590,39 @@ pub(crate) async fn audit_events(db: &TestDb, run_id: &str) -> Vec<(String, Opti
 }
 
 // ---------------------------------------------------------------------------
+// The default factory stays HTTPS-only (ADR-024 decision 5)
+// ---------------------------------------------------------------------------
+
+/// Structural pin for the `netbox-demo` double gate: the worker's
+/// **default** client construction is `NetBoxClient::new`, which
+/// rejects plain-HTTP endpoints fail-closed. This suite injects the
+/// unchecked constructor explicitly ([`worker_for`]); this test pins
+/// that the *default* path — what a default-feature build ships — can
+/// never talk to an `http://` NetBox endpoint, with or without the
+/// `netbox-demo` feature compiled in (the runtime env gate is the
+/// demo factory's own second gate, exercised in `netbox_demo.rs`).
+#[test]
+fn default_client_factory_rejects_plain_http() {
+    let token = chv_netbox_adapter::NetBoxToken::new(TOKEN.to_string());
+    let error = NetBoxClient::new("http://127.0.0.1:8080", token)
+        .expect_err("production constructor must reject http:// endpoints");
+    assert!(
+        matches!(error, chv_netbox_adapter::ClientError::HttpsRequired { .. }),
+        "expected HttpsRequired, got: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("NETBOX_HTTPS_REQUIRED"),
+        "stable code in message: {error}"
+    );
+    // And the positive control: https still constructs.
+    NetBoxClient::new(
+        "https://netbox.example.internal",
+        chv_netbox_adapter::NetBoxToken::new(TOKEN.to_string()),
+    )
+    .expect("https endpoints construct through the production path");
+}
+
+// ---------------------------------------------------------------------------
 // wiremock scaffolding
 // ---------------------------------------------------------------------------
 
