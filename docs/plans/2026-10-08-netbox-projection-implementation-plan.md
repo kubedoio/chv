@@ -24,7 +24,7 @@ References:
 | Token encryption | `credential_crypto.rs` (`CredentialEncryption::encrypt/decrypt`) | reuse as-is; no new crypto |
 | BFF wiring | `AppState` fields as `Arc<Repo>` (`router.rs:22-56`), POST-only routes | `handlers/netbox.rs` + route block after the architecture routes |
 | Worker | `chv-controlplane-service/src/backup_worker.rs` pattern | `netbox_projection_worker.rs`, spawned in `cmd/chv-controlplane/src/bootstrap.rs` |
-| Post-apply trigger | apply-run terminal transition site | best-effort enqueue hook (isolated; swallows errors) |
+| Post-apply trigger | apply-run terminal transition site (see PR 6: realized as a worker-side sweep — that site does not exist yet) | best-effort enqueue hook (isolated; swallows errors) |
 | Events | `EventRepository.append(EventAppendInput)` | five `architecture_netbox_*` event kinds |
 | UI | `ui/src/lib/bff/architectures.ts` + stores + `routes/architectures/[id]/` | NetBox panel: config form, dry-run table, run history |
 
@@ -175,6 +175,35 @@ config token redaction, active-run 409, error-code stability.
 
 **Tests:** failed projection enqueue leaves apply run `Succeeded`; no config
 → no run; `enable_post_apply = false` → no run; active run → coalesce.
+
+> **Deviation note (implemented shape).** The apply-run terminal transition
+> site named above does not exist: `apply_plan`
+> (`chv-architecture-reconcile`) never transitions runs to a terminal
+> `Succeeded`/`PartiallyFailed` state (only `Running`, plus rollback
+> `Cancelled`/`Failed` paths), and its
+> module doc defers the terminal `Succeeded` / `PartiallyFailed` / `Failed`
+> transitions to the (not-yet-implemented) orchestrator — "this module only
+> puts the run on the rails". PR 6 is therefore implemented as a
+> **worker-side sweep** in `NetboxProjectionWorker::tick`, checked after
+> `reclaim_stale_runs` and before the claim loop: each tick lists configs
+> with `enable_post_apply = true` (`NetboxProjectionConfigRepository::
+> list_post_apply_enabled`), takes each architecture's most recent
+> `succeeded` apply run, and enqueues a `queued` `post_apply` export run
+> (system-requested, no plan snapshot) for that version.
+> - *Idempotency* across ticks: `NetboxProjectionRunRepository::
+>   has_post_apply_for_version` — a `post_apply` run of **any status**
+>   counts as already attempted, so a permanently-failed post-apply run is
+>   not re-enqueued every tick (transient retries are owned by the PR-4
+>   bounded auto-requeue; after the attempt cap the operator retries).
+> - *Coalescing*: the `netbox_projection_runs_one_active` partial index —
+>   the enqueue's create fails with the store's active-run conflict, which
+>   the sweep treats as a skip.
+> - *Isolation*: the apply path calls nothing (a NetBox outage or a
+>   projection-store failure is structurally incapable of changing an apply
+>   result), and a per-architecture failure inside the sweep is warned and
+>   skipped without blocking the other architectures. Once the
+>   orchestrator's terminal transitions land, the sweep fires on the very
+>   next tick with zero changes.
 
 ---
 

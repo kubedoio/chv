@@ -22,7 +22,10 @@ mod tests;
 pub use apply_run::{ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput};
 pub use drift::{DriftReportCreateInput, DriftReportRepository};
 pub use netbox_config::{NetboxProjectionConfigRepository, NetboxProjectionConfigUpsertInput};
-pub use netbox_run::{NetboxProjectionRunCreateInput, NetboxProjectionRunRepository, MAX_ATTEMPTS};
+pub use netbox_run::{
+    is_active_run_conflict, NetboxProjectionRunCreateInput, NetboxProjectionRunRepository,
+    ACTIVE_RUN_CONFLICT_MARKER, MAX_ATTEMPTS,
+};
 pub use plan::{PlanCreateInput, PlanRepository, PlanStatusUpdateInput};
 pub use snapshot::{InventorySnapshotCreateInput, InventorySnapshotRepository};
 pub use topology::{

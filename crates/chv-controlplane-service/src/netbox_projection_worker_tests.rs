@@ -386,6 +386,18 @@ async fn setup_topology_and_version(
 }
 
 async fn add_succeeded_apply_run(db: &TestDb, apply_id: &str, topo_id: &str, version_id: &str) {
+    add_apply_run(db, apply_id, topo_id, version_id, RunStatus::Succeeded).await;
+}
+
+/// Seed an apply run with an arbitrary status (the succeeded helper's
+/// generalization — the post-apply sweep must skip non-succeeded runs).
+async fn add_apply_run(
+    db: &TestDb,
+    apply_id: &str,
+    topo_id: &str,
+    version_id: &str,
+    status: RunStatus,
+) {
     ApplyRunRepository::new(db.pool.clone())
         .create(ApplyRunCreateInput {
             id: appid(apply_id),
@@ -393,12 +405,25 @@ async fn add_succeeded_apply_run(db: &TestDb, apply_id: &str, topo_id: &str, ver
             architecture_version_id: vid(version_id),
             plan_id: None,
             task_id: None,
-            status: RunStatus::Succeeded,
+            status,
             requested_by: None,
             started_at: Some(chrono::Utc::now()),
         })
         .await
         .expect("apply run created");
+}
+
+/// Backdate an apply run's `created_at` so "most recent" is
+/// deterministic in the fixture (the column has second resolution;
+/// without distinct timestamps the ordering falls to the `rowid DESC`
+/// insertion-order tiebreak).
+async fn backdate_apply_run(db: &TestDb, apply_id: &str, created_at: &str) {
+    sqlx::query("UPDATE architecture_apply_runs SET created_at = $2 WHERE id = $1")
+        .bind(apply_id)
+        .bind(created_at)
+        .execute(&db.pool)
+        .await
+        .expect("backdate apply run");
 }
 
 async fn setup_config(
@@ -441,6 +466,57 @@ async fn enqueue_run(
         })
         .await
         .expect("run enqueued");
+}
+
+/// Config fixture with the post-apply trigger enabled — the sweep's
+/// enablement predicate. The endpoint is deliberately dead in most
+/// post-apply suites (see the section doc below).
+async fn setup_post_apply_config(db: &TestDb, endpoint: &str, topo_id: &str) {
+    NetboxProjectionConfigRepository::new(db.pool.clone())
+        .upsert(NetboxProjectionConfigUpsertInput {
+            architecture_id: aid(topo_id),
+            endpoint: endpoint.to_string(),
+            token: Some(TOKEN.to_string()),
+            token_secret_ref: format!("netbox-{topo_id}"),
+            retention_policy: NetboxRetentionPolicy::MarkStale,
+            enable_post_apply: true,
+            custom_field_prefix: "chv_".to_string(),
+            site_name: Some(SITE.to_string()),
+        })
+        .await
+        .expect("config upserted");
+}
+
+/// Seed a `post_apply`-triggered run directly (the sweep's own enqueue
+/// shape: system trigger, export mode, no plan snapshot).
+async fn enqueue_post_apply_run(db: &TestDb, run_id: &str, topo_id: &str, version_id: &str) {
+    NetboxProjectionRunRepository::new(db.pool.clone())
+        .create(NetboxProjectionRunCreateInput {
+            id: nid(run_id),
+            architecture_id: aid(topo_id),
+            architecture_version_id: vid(version_id),
+            trigger_kind: NetboxProjectionTrigger::PostApply,
+            mode: NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: None,
+        })
+        .await
+        .expect("post-apply run enqueued");
+}
+
+/// All `post_apply`-triggered projection runs for an architecture
+/// (any status).
+async fn post_apply_runs(
+    db: &TestDb,
+    topo_id: &str,
+) -> Vec<chv_controlplane_types::architecture::NetboxProjectionRun> {
+    NetboxProjectionRunRepository::new(db.pool.clone())
+        .list_by_architecture(&aid(topo_id), 50)
+        .await
+        .expect("runs list")
+        .into_iter()
+        .filter(|run| run.trigger_kind == NetboxProjectionTrigger::PostApply)
+        .collect()
 }
 
 /// Full happy-path scaffolding: topology + version + succeeded apply run
@@ -1794,5 +1870,389 @@ async fn ambiguous_natural_key_is_per_entry_conflict_not_run_failure() {
         request_count(&server, "POST", "/api/ipam/ip-addresses/").await,
         0,
         "the ambiguous entry must never be written"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Post-apply trigger sweep (PR 6)
+// ---------------------------------------------------------------------------
+//
+// The sweep runs inside `tick()` before the claim loop, so a run it
+// enqueues is claimed and executed on the SAME tick. The post-apply
+// suites below point the config at a deliberately dead endpoint
+// (`http://127.0.0.1:1`, the outage fixture): the enqueued run fails
+// transiently and lands back in `queued` via the bounded auto-requeue.
+// The enqueue facts under test — trigger kind, mode, projected version,
+// system-requested provenance, and the run count — are unaffected; the
+// requeue additionally proves the full pipeline is wired.
+
+/// No projection config → the sweep enqueues nothing, even with a
+/// succeeded apply run sitting there.
+#[tokio::test]
+async fn post_apply_no_config_creates_no_run() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    // Deliberately no netbox projection config.
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    assert!(
+        post_apply_runs(&db, "topo-1").await.is_empty(),
+        "no config → no post_apply run"
+    );
+    // No projection run of any trigger kind was created.
+    assert!(NetboxProjectionRunRepository::new(db.pool.clone())
+        .list_by_architecture(&aid("topo-1"), 10)
+        .await
+        .expect("runs list")
+        .is_empty());
+}
+
+/// A config with `enable_post_apply = false` is invisible to the sweep.
+#[tokio::test]
+async fn post_apply_disabled_config_creates_no_run() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    setup_config(
+        &db,
+        "http://127.0.0.1:1",
+        "topo-1",
+        NetboxRetentionPolicy::MarkStale,
+    )
+    .await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    assert!(
+        NetboxProjectionRunRepository::new(db.pool.clone())
+            .list_by_architecture(&aid("topo-1"), 10)
+            .await
+            .expect("runs list")
+            .is_empty(),
+        "enable_post_apply = false → no run at all"
+    );
+}
+
+/// The sweep enqueues exactly one run for the most recent **succeeded**
+/// apply run's version — an older succeeded apply and a newer failed
+/// apply are both passed over.
+#[tokio::test]
+async fn post_apply_enabled_enqueues_for_latest_succeeded_version() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    for (version_id, number) in [("v-2", 2), ("v-3", 3)] {
+        VersionRepository::new(db.pool.clone())
+            .create(VersionCreateInput {
+                id: vid(version_id),
+                architecture_id: aid("topo-1"),
+                version_number: number,
+                yaml_content: "x".to_string(),
+                design_graph_json: None,
+                normalized_model_json: Some(model.clone()),
+                change_summary: None,
+                created_by: None,
+            })
+            .await
+            .expect("version created");
+    }
+
+    // Newest-first ordering must be deterministic: backdate the older
+    // succeeded applies (created_at has second resolution).
+    add_apply_run(&db, "apply-1", "topo-1", "v-1", RunStatus::Succeeded).await;
+    backdate_apply_run(&db, "apply-1", "2020-01-01T00:00:00Z").await;
+    add_apply_run(&db, "apply-2", "topo-1", "v-2", RunStatus::Succeeded).await;
+    backdate_apply_run(&db, "apply-2", "2021-01-01T00:00:00Z").await;
+    // The newest apply run FAILED — it must not be projected.
+    add_apply_run(&db, "apply-3", "topo-1", "v-3", RunStatus::Failed).await;
+
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(runs.len(), 1, "exactly one post_apply run: {runs:?}");
+    let run = &runs[0];
+    assert_eq!(run.trigger_kind, NetboxProjectionTrigger::PostApply);
+    assert_eq!(run.mode, NetboxProjectionMode::Export);
+    assert_eq!(
+        run.architecture_version_id,
+        vid("v-2"),
+        "the most recent SUCCEEDED apply, not the newer failed one"
+    );
+    assert_eq!(run.requested_by, None, "system trigger: no requester");
+    // The same tick's claim loop executed the run against the dead
+    // endpoint; the transient failure auto-requeued it, so it is back
+    // in `queued` with a scheduled backoff (see the section doc).
+    assert_eq!(run.status, NetboxProjectionRunStatus::Queued);
+}
+
+/// An active (queued/running) run holds the architecture's one-active
+/// slot: the sweep coalesces — no post_apply run is stacked, and the
+/// existing run is left untouched.
+#[tokio::test]
+async fn post_apply_coalesces_on_active_run() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    // A manual run, currently running (inside its lease) — the
+    // one-active slot is taken.
+    enqueue_run(
+        &db,
+        "netrun-active",
+        "topo-1",
+        "v-1",
+        NetboxProjectionMode::Export,
+    )
+    .await;
+    NetboxProjectionRunRepository::new(db.pool.clone())
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .expect("claim")
+        .expect("queued run");
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    assert!(
+        post_apply_runs(&db, "topo-1").await.is_empty(),
+        "the sweep must coalesce behind the active run"
+    );
+    // The existing run was untouched: still running, never executed,
+    // never failed by the sweep.
+    let active = get_run(&db, "netrun-active").await;
+    assert_eq!(active.status, NetboxProjectionRunStatus::Running);
+    assert_eq!(active.trigger_kind, NetboxProjectionTrigger::Manual);
+    assert_eq!(active.error_message, None);
+    assert_eq!(active.attempt_count, 0);
+}
+
+/// The sweep is idempotent across ticks: exactly one post_apply run
+/// per (architecture, version), no matter how many ticks fire.
+#[tokio::test]
+async fn post_apply_is_idempotent_across_ticks() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    let worker = worker_for(&db);
+    worker.tick().await.expect("first tick succeeds");
+    worker.tick().await.expect("second tick succeeds");
+
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(runs.len(), 1, "no re-enqueue on the second tick");
+    assert_eq!(runs[0].status, NetboxProjectionRunStatus::Queued);
+    assert_eq!(
+        runs[0].attempt_count, 1,
+        "the second tick neither re-enqueued nor re-executed the run \
+         (the retry backoff gates the claim)"
+    );
+}
+
+/// A permanently-failed post_apply run counts as "already attempted":
+/// it is NOT re-enqueued by later sweeps (transient retries are owned
+/// by the bounded auto-requeue; after the cap the operator retries).
+#[tokio::test]
+async fn post_apply_failed_projection_run_is_not_re_enqueued() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    // A failed post_apply run for v-1 already exists (driven to
+    // terminal state through the repository, like any real failure).
+    enqueue_post_apply_run(&db, "netrun-once", "topo-1", "v-1").await;
+    let run_repo = NetboxProjectionRunRepository::new(db.pool.clone());
+    let claimed = run_repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .expect("claim")
+        .expect("queued run");
+    run_repo
+        .mark_failed(&claimed.id, Some("netbox unreachable".to_string()), None)
+        .await
+        .expect("run failed");
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(
+        runs.len(),
+        1,
+        "the failed post_apply run must not be re-enqueued"
+    );
+    assert_eq!(runs[0].id, nid("netrun-once"));
+    assert_eq!(runs[0].status, NetboxProjectionRunStatus::Failed);
+}
+
+/// A new succeeded apply for a NEW version enqueues a fresh post_apply
+/// run even though an earlier version's post_apply run already exists.
+#[tokio::test]
+async fn post_apply_new_version_after_reapply() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-2", &model, 2).await;
+    VersionRepository::new(db.pool.clone())
+        .create(VersionCreateInput {
+            id: vid("v-4"),
+            architecture_id: aid("topo-1"),
+            version_number: 4,
+            yaml_content: "x".to_string(),
+            design_graph_json: None,
+            normalized_model_json: Some(model.clone()),
+            change_summary: None,
+            created_by: None,
+        })
+        .await
+        .expect("version v-4 created");
+
+    add_succeeded_apply_run(&db, "apply-2", "topo-1", "v-2").await;
+    backdate_apply_run(&db, "apply-2", "2020-01-01T00:00:00Z").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    // The v-2 projection already ran to completion.
+    enqueue_post_apply_run(&db, "netrun-v2", "topo-1", "v-2").await;
+    let run_repo = NetboxProjectionRunRepository::new(db.pool.clone());
+    let claimed = run_repo
+        .claim_next_queued(&aid("topo-1"))
+        .await
+        .expect("claim")
+        .expect("queued run");
+    run_repo
+        .mark_succeeded(&claimed.id, None, None)
+        .await
+        .expect("run succeeded");
+
+    // A new apply at v-4 succeeds.
+    add_succeeded_apply_run(&db, "apply-4", "topo-1", "v-4").await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(runs.len(), 2, "one run per applied version: {runs:?}");
+    let v2 = runs
+        .iter()
+        .find(|run| run.architecture_version_id == vid("v-2"))
+        .expect("the original v-2 run");
+    assert_eq!(v2.status, NetboxProjectionRunStatus::Succeeded);
+    let v4 = runs
+        .iter()
+        .find(|run| run.architecture_version_id == vid("v-4"))
+        .expect("the new v-4 run");
+    assert_eq!(v4.trigger_kind, NetboxProjectionTrigger::PostApply);
+    assert_eq!(v4.mode, NetboxProjectionMode::Export);
+    assert_eq!(v4.requested_by, None);
+    // Enqueued then auto-requeued after the dead-endpoint execution
+    // (see the section doc).
+    assert_eq!(v4.status, NetboxProjectionRunStatus::Queued);
+}
+
+/// A per-architecture failure inside the sweep (here: a corrupt apply
+/// run row that cannot be mapped) is contained: the tick still
+/// succeeds and the other architectures still get their runs.
+#[tokio::test]
+async fn post_apply_failure_does_not_break_other_architectures() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-broken", "v-1", &model, 1).await;
+    setup_topology_and_version(&db, "topo-healthy", "v-1b", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-broken", "topo-broken", "v-1").await;
+    add_succeeded_apply_run(&db, "apply-healthy", "topo-healthy", "v-1b").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-broken").await;
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-healthy").await;
+
+    // Corrupt the broken architecture's apply-run row so its listing
+    // fails in the row mapper (an unparseable `created_at` — the
+    // status column has a CHECK constraint; the timestamp does not).
+    sqlx::query(
+        "UPDATE architecture_apply_runs SET created_at = 'not-a-timestamp' \
+         WHERE id = 'apply-broken'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("corrupt apply-run row");
+
+    worker_for(&db)
+        .tick()
+        .await
+        .expect("one architecture's sweep failure never fails the tick");
+
+    // The broken architecture was skipped (warn + continue)...
+    assert!(
+        post_apply_runs(&db, "topo-broken").await.is_empty(),
+        "the broken architecture enqueued nothing"
+    );
+    // ...while the healthy one still got its post_apply run.
+    let healthy = post_apply_runs(&db, "topo-healthy").await;
+    assert_eq!(healthy.len(), 1);
+    assert_eq!(healthy[0].trigger_kind, NetboxProjectionTrigger::PostApply);
+    assert_eq!(healthy[0].architecture_version_id, vid("v-1b"));
+    assert_eq!(healthy[0].requested_by, None);
+}
+
+/// Isolation (the plan's PR-6 "failed projection enqueue leaves apply
+/// run `Succeeded`" scenario, asserted explicitly): a post_apply run
+/// that fails during execution — here against the dead-endpoint
+/// outage fixture — leaves the apply run that triggered it untouched:
+/// still `Succeeded`, `finished_at` exactly as seeded. The projection
+/// pipeline can never rewrite apply-run state.
+#[tokio::test]
+async fn post_apply_failure_leaves_apply_run_succeeded() {
+    let db = TestDb::new().await;
+    let model = model_json();
+    setup_topology_and_version(&db, "topo-1", "v-1", &model, 1).await;
+    add_succeeded_apply_run(&db, "apply-1", "topo-1", "v-1").await;
+    // Stamp a known terminal state on the apply run: its `finished_at`
+    // is the canary the isolation assertions compare against.
+    sqlx::query(
+        "UPDATE architecture_apply_runs SET \
+         started_at = '2025-01-01T00:00:00Z', finished_at = '2025-01-01T00:01:00Z' \
+         WHERE id = 'apply-1'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("stamp apply-run terminal timestamps");
+    setup_post_apply_config(&db, "http://127.0.0.1:1", "topo-1").await;
+
+    worker_for(&db).tick().await.expect("tick succeeds");
+
+    // The sweep enqueued a post_apply run and the same tick executed
+    // it against the dead endpoint: the execution failed (transient
+    // class → auto-requeued) and the failure is recorded on the row.
+    let runs = post_apply_runs(&db, "topo-1").await;
+    assert_eq!(runs.len(), 1, "one post_apply run: {runs:?}");
+    let run = &runs[0];
+    assert!(run.attempt_count >= 1, "the post_apply execution failed");
+    assert!(
+        run.error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("unreachable")),
+        "failure recorded: {:?}",
+        run.error_message
+    );
+
+    // The triggering apply run is untouched: still Succeeded, its
+    // terminal timestamps exactly as seeded.
+    let apply = ApplyRunRepository::new(db.pool.clone())
+        .get(&appid("apply-1"), None)
+        .await
+        .expect("apply run lookup");
+    assert_eq!(apply.status, RunStatus::Succeeded);
+    let seeded_finished_at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:01:00Z")
+        .expect("seeded finished_at parses")
+        .with_timezone(&chrono::Utc);
+    assert_eq!(
+        apply.finished_at,
+        Some(seeded_finished_at),
+        "the failed projection must not touch the apply run's finished_at"
     );
 }

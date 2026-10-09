@@ -62,8 +62,8 @@
 use axum::{extract::State, Json};
 use chv_architecture_validate::model::CHVArchitecture;
 use chv_controlplane_store::{
-    EventAppendInput, NetboxProjectionConfigUpsertInput, NetboxProjectionRunCreateInput,
-    StoreError, VersionRepository,
+    is_active_run_conflict, EventAppendInput, NetboxProjectionConfigUpsertInput,
+    NetboxProjectionRunCreateInput, StoreError, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
     ArchitectureId, ArchitectureVersionId, NetboxProjectionConfig, NetboxProjectionMode,
@@ -785,16 +785,16 @@ pub async fn netbox_export(
         .map_err(|e| match e {
             // The one-active partial unique index: another queued or
             // running run exists for this architecture. The store also
-            // reports a duplicate run id as `Conflict`, so the reason
-            // is matched — only the active-run conflict is the
+            // reports a duplicate run id as `Conflict`, so the error
+            // is classified through the store's shared
+            // `is_active_run_conflict` helper (single-sourced with the
+            // worker's sweep) — only the active-run conflict is the
             // caller's 409 `NETBOX_RUN_ACTIVE`; any other conflict
             // (e.g. a collision on our freshly minted run id) is an
             // internal error, never a mislabeled NETBOX_RUN_ACTIVE.
-            StoreError::Conflict { reason, .. } if reason.contains("active run") => {
-                BffError::NetboxRunActive {
-                    architecture_id: id.to_string(),
-                }
-            }
+            err if is_active_run_conflict(&err) => BffError::NetboxRunActive {
+                architecture_id: id.to_string(),
+            },
             StoreError::Conflict {
                 entity,
                 id: conflict_id,
@@ -1053,8 +1053,10 @@ async fn latest_succeeded_apply_version_id(
         .apply_runs
         .list_for_architecture(architecture_id, None)
         .await?;
-    // `list_for_architecture` orders created_at DESC (newest first);
-    // the first Succeeded row is provably the most recent one.
+    // `list_for_architecture` orders created_at DESC, rowid DESC —
+    // newest first, with SQLite's insertion-ordered `rowid` breaking
+    // same-second ties; the first Succeeded row is the most recent
+    // successful apply.
     let latest_succeeded = apply_runs
         .iter()
         .find(|apply| apply.status == RunStatus::Succeeded)

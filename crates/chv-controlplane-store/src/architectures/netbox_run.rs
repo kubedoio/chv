@@ -410,6 +410,64 @@ impl NetboxProjectionRunRepository {
             })
             .collect()
     }
+
+    /// Whether a `post_apply`-triggered run of **any status** already
+    /// exists for the (architecture, version) pair — the post-apply
+    /// sweep's idempotency guard (PR 6).
+    ///
+    /// Any status, deliberately: a **failed** post_apply run still
+    /// counts as "already attempted". Without that rule every worker
+    /// tick would re-enqueue a permanently-failed post_apply run
+    /// forever (an unbounded re-enqueue sweep); transient failures are
+    /// instead owned by the bounded auto-requeue ([`Self::requeue`] /
+    /// [`MAX_ATTEMPTS`]), and once the attempt cap is exhausted the
+    /// operator retries manually.
+    pub async fn has_post_apply_for_version(
+        &self,
+        architecture_id: &ArchitectureId,
+        version_id: &ArchitectureVersionId,
+    ) -> Result<bool, StoreError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT 1 FROM netbox_projection_runs
+            WHERE trigger_kind = 'post_apply'
+              AND architecture_id = $1
+              AND architecture_version_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(architecture_id.as_str())
+        .bind(version_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+}
+
+/// Substring that identifies the store's one-active-run rejection
+/// inside a [`StoreError::Conflict`] reason. [`active_run_conflict`]
+/// uses this constant as its reason verbatim, so the classification
+/// ([`is_active_run_conflict`]) and the produced error cannot drift
+/// apart. Callers that need to distinguish the one-active rejection
+/// from other conflicts (the projection worker's sweep coalescing, the
+/// BFF's 409 `NETBOX_RUN_ACTIVE`) must match through the helper, never
+/// by inlining the string.
+pub const ACTIVE_RUN_CONFLICT_MARKER: &str = "active run already exists";
+
+/// Whether `err` is the store's one-active-run rejection: another
+/// queued/running run exists for the architecture (the
+/// `netbox_projection_runs_one_active` partial unique index). The
+/// worker treats this as a coalescing skip; the BFF answers 409
+/// `NETBOX_RUN_ACTIVE`; any other conflict falls through to the
+/// caller's generic handling.
+pub fn is_active_run_conflict(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Conflict {
+            reason,
+            ..
+        } if reason.contains(ACTIVE_RUN_CONFLICT_MARKER)
+    )
 }
 
 /// Conflict used when the `netbox_projection_runs_one_active` partial
@@ -419,7 +477,7 @@ fn active_run_conflict(id: String) -> StoreError {
     StoreError::Conflict {
         entity: ENTITY,
         id,
-        reason: "an active run already exists for this architecture",
+        reason: ACTIVE_RUN_CONFLICT_MARKER,
     }
 }
 
