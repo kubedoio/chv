@@ -33,7 +33,7 @@ This spec defines a **read-only** `chv-monitoring-core` library and an optional 
 | Node disk space | `statvfs` per configured filesystem | Root is not equivalent to VM storage pool capacity |
 | Node block I/O | `/proc/diskstats` or owned provider counters | Handle stacked devices and double counting |
 | Node network | `/sys/class/net/*/statistics` | Exclude duplicates at bond/bridge/physical levels when aggregating |
-| VM CPU | Pinned VMM `vm.counters` CPU time or verified VM cgroup `cpu.stat` | Name `cpu_cores_used` and normalized utilization separately |
+| VM CPU | Pinned VMM `vm.counters` CPU time or verified VM cgroup `cpu.stat` | Name `vm.cpu.cores_used` and normalized utilization separately |
 | VM memory | Owned VMM cgroup `memory.current`, with documented semantics | Host resident accounting, not guest in-use memory |
 | VM network/disk | Pinned VMM counters; mapping of virtio, TAP and provider path | Classify unsupported offloaded/vhost-user paths |
 | VM configured vCPU/RAM | Core VM definition | Label as provisioned, never use as utilization |
@@ -57,9 +57,9 @@ This spec defines a **read-only** `chv-monitoring-core` library and an optional 
 
 Every sample identifies `metric_id`, `target_kind`, `target_id`, `source`, `unit`, `kind`, `observed_at_ms`, `value`, `quality`, and optional bounded dimensions. The contract is [monitoring metrics v1](../contracts/chv-monitoring-metrics-v1.md).
 
-**CPU contract:** `cpu_cores_used` represents consumed CPU seconds divided by elapsed wall seconds. It may exceed 1 on multi-vCPU VMs. `cpu_capacity_ratio` divides that by assigned vCPU count and lies in [0,1] when measurements are valid. VM scheduled vCPU count is a provisioned measure. Do not silently clamp real counter anomalies; flag invalid samples.
+**CPU contract:** `vm.cpu.cores_used` represents consumed CPU seconds divided by elapsed wall seconds. It may exceed 1 on multi-vCPU VMs. `vm.cpu.capacity_ratio` divides that by assigned vCPU count and lies in [0,1] when measurements are valid. VM scheduled vCPU count is a provisioned measure. Do not silently clamp real counter anomalies; flag invalid samples.
 
-**Memory contract:** `vm_host_memory_bytes` means host-side accounted VM memory. `vm_guest_memory_available_bytes` requires trusted guest instrumentation. A VM may have host backing memory without guest application use.
+**Memory contract:** `vm.memory.host_accounted_bytes` means host-side accounted VM memory. `vm.memory.guest_available_bytes` requires trusted guest instrumentation. A VM may have host backing memory without guest application use.
 
 **Network and disk contract:** Store monotonically increasing byte and operation counters. Render rates from reset-safe deltas. Both bytes/sec and bits/sec are explicitly labeled. Do not double count host bridge or VMM devices.
 

@@ -21,7 +21,7 @@ Ship `chv-monitor-agent` as a separate opt-in package for Linux guests. Implemen
 
 - Real guest: install, claim, collect, stop/restart, manager offline, reconnect, revoke, purge and re-enroll.
 - Security: expired/reused/stolen claim, invalid TLS, forged target/project, wrong credential, cloned VM, replay conflict, oversized batch, cardinality flood, agent faking VM status.
-- Lifecycle: node continues VMs even if agent agent is removed/compromised.
+- Lifecycle: node continues VMs even if agent is removed/compromised.
 - Packaging: no package installed by default; non-root restrictions verified in actual systemd.
 
 ## Gate

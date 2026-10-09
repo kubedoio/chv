@@ -7,7 +7,7 @@
 
 This contract defines typed measurements from `chv-agent`, provider daemons, and optional `chv-monitor-agent`. It does not define VM lifecycle state, billing evidence, or a Prometheus scrape format. A metric value is always a **measurement**, not an authoritative desired state.
 
-**Metric** is a named, versioned phenomenon with a unit, type and allowed source. **Sample** is a timestamped observation. **Target** is an authorized `node`, `vm`, `volume`, `network`, or `agent_check`. **Source** records which observation layer generated the number.
+**Metric** is a named, versioned phenomenon with a unit, type and allowed source. **Sample** is a timestamped observation. **Target** is an authorized `node`, `vm`, `volume`, `network`, or `check`. **Source** records which observation layer generated the number.
 
 ## Required sample fields
 
