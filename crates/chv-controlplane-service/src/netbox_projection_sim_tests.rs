@@ -133,43 +133,53 @@ fn assert_run_status(
     context: &str,
 ) {
     if run.status != expected {
-        let mut diagnostics = format!(
-            "{context}: run status is {:?}, expected {:?}",
-            run.status, expected
-        );
-        if let Some(raw) = run.result_json.as_deref() {
-            let parsed = serde_json::from_str::<Value>(raw)
-                .ok()
-                .and_then(|envelope| {
-                    serde_json::from_value::<NetboxProjectionOutcome>(
-                        envelope.get("result").cloned()?,
-                    )
-                    .ok()
-                });
-            if let Some(outcome) = parsed {
-                diagnostics.push_str(&format!(
-                    "\nrunner error: {}",
-                    outcome
-                        .error
-                        .as_ref()
-                        .map(|error| error.message.as_str())
-                        .unwrap_or("(no abort error recorded)")
-                ));
-                diagnostics.push_str(&format!("\nsummary: {:?}", outcome.summary));
-                let non_succeeded: Vec<_> = outcome
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.status != NetboxEntryStatus::Succeeded)
-                    .collect();
-                diagnostics.push_str(&format!("\nnon-succeeded entries: {non_succeeded:#?}"));
-            } else {
-                diagnostics.push_str(&format!("\nraw result json: {raw}"));
-            }
-        } else {
-            diagnostics.push_str("\n(no persisted runner outcome)");
-        }
-        panic!("{diagnostics}");
+        panic!("{}", run_status_diagnostics(run, expected, context));
     }
+}
+
+/// The panic body of [`assert_run_status`] — the persisted-outcome
+/// diagnostics as a string, so callers with extra drift evidence
+/// (the qualification lane's raw-instance capture) can render one
+/// combined message.
+fn run_status_diagnostics(
+    run: &chv_controlplane_types::architecture::NetboxProjectionRun,
+    expected: NetboxProjectionRunStatus,
+    context: &str,
+) -> String {
+    let mut diagnostics = format!(
+        "{context}: run status is {:?}, expected {:?}",
+        run.status, expected
+    );
+    if let Some(raw) = run.result_json.as_deref() {
+        let parsed = serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|envelope| {
+                serde_json::from_value::<NetboxProjectionOutcome>(envelope.get("result").cloned()?)
+                    .ok()
+            });
+        if let Some(outcome) = parsed {
+            diagnostics.push_str(&format!(
+                "\nrunner error: {}",
+                outcome
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("(no abort error recorded)")
+            ));
+            diagnostics.push_str(&format!("\nsummary: {:?}", outcome.summary));
+            let non_succeeded: Vec<_> = outcome
+                .entries
+                .iter()
+                .filter(|entry| entry.status != NetboxEntryStatus::Succeeded)
+                .collect();
+            diagnostics.push_str(&format!("\nnon-succeeded entries: {non_succeeded:#?}"));
+        } else {
+            diagnostics.push_str(&format!("\nraw result json: {raw}"));
+        }
+    } else {
+        diagnostics.push_str("\n(no persisted runner outcome)");
+    }
+    diagnostics
 }
 
 // ---------------------------------------------------------------------------
@@ -254,13 +264,19 @@ impl NetboxBackend {
 
     /// Print the raw instance answers for the standard fixture's
     /// remote-state queries — per kind, the unfiltered list, the
-    /// by-architecture list, and the natural-key probe — to stderr
-    /// (captured in the qualification lane's run.log). Fixture-keyed
+    /// by-architecture list, and the natural-key probe — plus what
+    /// the runner's own client parses for the same queries at the
+    /// same instant (raw rows + zero parsed = a parsing problem;
+    /// zero rows + zero parsed = the instance; rows both places =
+    /// the fetch at run time saw something else). Fixture-keyed
     /// (vid 42, 10.42.0.0/24, chv-node-01, vm-01, backend,
     /// 10.42.0.5; limit 50 = the client's PAGE_LIMIT) because the
     /// scenarios share the standard fixture shape; the query forms
-    /// mirror the client's wire shapes.
-    async fn drift_dump(&self, architecture_id: &str) {
+    /// mirror the client's wire shapes. Rendered into the scenario's
+    /// panic message (ADR-009 bans direct console writes in library
+    /// crates — the panic output is what the lane's run.log
+    /// captures).
+    async fn drift_evidence(&self, architecture_id: &str) -> String {
         let cf = format!("cf_chv_architecture_id={architecture_id}");
         let queries: Vec<(String, &str)> = vec![
             ("/api/ipam/vlans/?limit=50".into(), "vlans unfiltered"),
@@ -327,10 +343,15 @@ impl NetboxBackend {
                 "ip probe",
             ),
         ];
+        let mut evidence = String::new();
         for (path, label) in queries {
             match self.raw_get(&path).await {
-                Some(body) => eprintln!("DRIFT EVIDENCE — {label} ({path}): {body}"),
-                None => eprintln!("DRIFT EVIDENCE — {label}: (simulator arm — in-process)"),
+                Some(body) => {
+                    evidence.push_str(&format!("\n\n{label} ({path}): {body}"));
+                }
+                None => {
+                    evidence.push_str(&format!("\n\n{label}: (simulator arm — in-process)"));
+                }
             }
         }
         // The client half: what the runner's own client (same
@@ -344,39 +365,43 @@ impl NetboxBackend {
                 live.base_url(),
                 NetBoxToken::new(live.token().to_string()),
             )
-            .expect("drift-dump client");
-            let evidence = |label: &str, found: &[chv_netbox_adapter::RemoteNetBoxObject]| {
-                let ids: Vec<i64> = found.iter().map(|entry| entry.netbox_id).collect();
-                eprintln!(
-                    "DRIFT EVIDENCE (client) — {label}: {} rows, ids {ids:?}",
-                    found.len()
-                );
-            };
+            .expect("drift-evidence client");
+            let record =
+                |evidence: &mut String,
+                 label: &str,
+                 found: &[chv_netbox_adapter::RemoteNetBoxObject]| {
+                    let ids: Vec<i64> = found.iter().map(|entry| entry.netbox_id).collect();
+                    evidence.push_str(&format!(
+                        "\n\n{label} (client): {} rows, ids {ids:?}",
+                        found.len()
+                    ));
+                };
             if let Ok(found) = client.get_vlans_by_vid(42).await {
-                evidence("vlan probe (vid 42)", &found);
+                record(&mut evidence, "vlan probe (vid 42)", &found);
             }
             if let Ok(found) = client.get_prefixes_by_cidr("10.42.0.0/24").await {
-                evidence("prefix probe", &found);
+                record(&mut evidence, "prefix probe", &found);
             }
             if let Ok(found) = client.get_devices_by_name("chv-node-01").await {
-                evidence("device probe", &found);
+                record(&mut evidence, "device probe", &found);
             }
             if let Ok(found) = client.get_virtual_machines_by_name("vm-01").await {
-                evidence("vm probe", &found);
+                record(&mut evidence, "vm probe", &found);
             }
             if let Ok(found) = client.get_interfaces_by_name("backend", "vm-01").await {
-                evidence("interface probe", &found);
+                record(&mut evidence, "interface probe", &found);
             }
             if let Ok(found) = client.get_ip_addresses_by_address("10.42.0.5").await {
-                evidence("ip probe", &found);
+                record(&mut evidence, "ip probe", &found);
             }
             if let Ok(found) = client
                 .list_vlans_by_architecture("chv_architecture_id", architecture_id)
                 .await
             {
-                evidence("vlans by architecture", &found);
+                record(&mut evidence, "vlans by architecture", &found);
             }
         }
+        evidence
     }
 
     /// Bulk-load objects at caller-chosen natural keys and ids (sim:
@@ -784,14 +809,16 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
     let run = get_run(&db, "netrun-reexport").await;
     if run.status != NetboxProjectionRunStatus::Succeeded {
         // Drift evidence: what the instance answers RIGHT NOW for the
-        // runner's exact queries (the persisted outcome says what the
-        // plan decided; only this says what the instance told the
-        // fetch that decided it). Qualification run 37980195431
-        // needed exactly this: five probes and five by-architecture
-        // lists allegedly returned empty pages over converged state
-        // that the unfiltered state dump showed — while the identical
-        // queries in `probes_find_converged_state` found everything.
-        backend.drift_dump("topo-sim").await;
+        // runner's exact queries, appended to the standard persisted
+        // outcome diagnostics (the outcome says what the plan decided;
+        // only this says what the instance told the fetch that decided
+        // it — the instrument that settled qualification run
+        // 37983487636's five-vs-one mystery).
+        panic!(
+            "{}\n\n--- drift evidence ---{}",
+            run_status_diagnostics(&run, NetboxProjectionRunStatus::Succeeded, "re-export"),
+            backend.drift_evidence("topo-sim").await
+        );
     }
     assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "re-export");
     // Secret-freedom: the recorded outcome (provenance envelope +
