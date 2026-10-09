@@ -58,9 +58,11 @@
 //!   adapter's `mark_stale`, which patches only the managed-state
 //!   field).
 //! - Foreign keys (device on a VM, parent VM on an interface, VLAN on
-//!   a prefix) are *not* validated against existing rows: the
-//!   mapping contract's kind order creates children before parents,
-//!   so the write path must accept not-yet-existing references.
+//!   a prefix) are *not* validated against existing rows — the
+//!   simulator's documented posture. The client's write forms
+//!   resolve in-loop under the contract's FK-dependency rank
+//!   (parents created before children); the lenience covers
+//!   resume and ambiguous orderings.
 //!   Nested relations carry a synthetic id from a per-instance
 //!   registry (or the real row id when the target exists). A
 //!   reference that explicitly carries an `id` and matches no row —

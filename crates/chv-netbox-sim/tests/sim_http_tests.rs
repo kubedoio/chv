@@ -6,6 +6,7 @@ mod common;
 
 use std::time::Instant;
 
+use chv_netbox_adapter::{CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER};
 use chv_netbox_sim::NetboxSim;
 use common::{delete, get, http, patch, post, seed, set_fault, start, start_with, state, TOKEN};
 use serde_json::{json, Value};
@@ -449,8 +450,8 @@ async fn missing_required_fields_are_400s() {
         "/api/dcim/devices/",
         json!({
             "status": "active",
-            "device_type": { "manufacturer": { "slug": "chv" }, "slug": "chv-host" },
-            "role": { "slug": "chv-node" },
+            "device_type": { "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE },
+            "role": { "slug": CHV_NETBOX_DEVICE_ROLE },
         }),
     )
     .await;

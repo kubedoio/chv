@@ -251,8 +251,10 @@ impl SimState {
         }
     }
 
-    /// Normalize a tags list (write form: slugs; merge form: nested
-    /// objects) to NetBox's nested read form.
+    /// Normalize a tags list (accepts bare slugs — legacy/lenient
+    /// posture, used by seed files — or the client's nested
+    /// `{name}`/`{name,slug,id}` write objects) to NetBox's nested
+    /// read form.
     fn normalize_tags(&mut self, object: &Map<String, Value>) -> Result<Value, WireError> {
         match object.get("tags") {
             None | Some(Value::Null) => Ok(json!([])),
@@ -898,6 +900,9 @@ impl SimShared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chv_netbox_adapter::{
+        CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER,
+    };
     use serde_json::json;
 
     fn device_body(name: &str) -> Value {
@@ -906,9 +911,10 @@ mod tests {
             "status": "active",
             "site": { "name": "dc1" },
             // NetBox 4.7 requires both on every device create; the
-            // simulator enforces their presence (see `create`).
-            "device_type": { "manufacturer": { "slug": "chv" }, "slug": "chv-host" },
-            "role": { "slug": "chv-node" },
+            // simulator enforces their presence (see `create`). Built
+            // from the adapter's consts so a rename cannot drift.
+            "device_type": { "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE },
+            "role": { "slug": CHV_NETBOX_DEVICE_ROLE },
             "tags": ["chv-team"],
             "custom_fields": { "chv_managed_by": "chv" },
         })

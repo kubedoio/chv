@@ -49,6 +49,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chv_netbox_adapter::ownership::CustomFieldNames;
+use chv_netbox_adapter::{CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER};
 use chv_netbox_sim::capture::{
     normalize_object, CaptureError, LiveNetBox, QUALIFICATION_TOKEN_ENV, QUALIFICATION_URL_ENV,
 };
@@ -446,8 +447,8 @@ async fn seed_canonical_set(
     } else {
         (
             json!({ "name": "dc1" }),
-            json!({ "manufacturer": { "slug": "chv" }, "slug": "chv-host" }),
-            json!({ "slug": "chv-node" }),
+            json!({ "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE }),
+            json!({ "slug": CHV_NETBOX_DEVICE_ROLE }),
         )
     };
     // The device's marker set extends the shared ownership surface

@@ -2,6 +2,7 @@
 
 //! Shared scaffolding for the simulator's integration test suites.
 
+use chv_netbox_adapter::{CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER};
 use chv_netbox_sim::{NetboxSim, NetboxSimConfig};
 use serde_json::Value;
 
@@ -116,9 +117,11 @@ pub fn device_body(name: &str) -> Value {
         "status": "active",
         "site": { "name": "dc1" },
         // Required by the simulator (mirroring NetBox 4.7's
-        // DeviceSerializer); existence is not validated.
-        "device_type": { "manufacturer": { "slug": "chv" }, "slug": "chv-host" },
-        "role": { "slug": "chv-node" },
+        // DeviceSerializer); existence is not validated. Composed from
+        // the adapter's consts so a rename cannot drift between the
+        // client's write form and the tests.
+        "device_type": { "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE },
+        "role": { "slug": CHV_NETBOX_DEVICE_ROLE },
         "tags": ["chv-team"],
         "custom_fields": { "chv_architecture_id": "arch-1", "chv_managed_by": "chv" },
     })

@@ -378,7 +378,7 @@ Versioned (`MAPPING_VERSION = "v1"`). Built by pure builders in `mapping.rs`.
 | CHV source | NetBox object | Key fields | Custom fields |
 |---|---|---|---|
 | `servers[]` + live `NodeInfo` | **DCIM Device** (device_role `chv-node`, device_type `chv-host`) | `name`, `site` (from env/labels), `serial`/asset none; `custom_fields` | external_id, arch_id, managed_by, state, version; CPU/mem stored in `device.custom_fields` when not otherwise placed |
-| `instances[]` | **Virtualization VirtualMachine** (role `chv-vm`) | `name`, `status` (from run drift/state: active/staged/offline when known) | external_id, arch_id, managed_by, state, version; placement via `cluster` or `device` = mapped server when resolvable |
+| `instances[]` | **Virtualization VirtualMachine** | `name`, `status` (from run drift/state: active/staged/offline when known) | external_id, arch_id, managed_by, state, version; placement via `cluster` or `device` = mapped server when resolvable |
 | `instances[].networks[]{name,ip}` | **Virtualization Interface** (`type virtual`, attached to the VM) | `name`, `mac` (none in v1 — not modelled), `description` = network name | external_id, arch_id, … |
 | `networks[]` | **IPAM Prefix** (+ **IPAM VLAN** when `type=vlan` / `vlan_id` present) | `prefix`=`cidr`, `vlan`=`vlan_id`, `description` | external_id, arch_id, … |
 | `instances[].networks[].ip` | **IPAM IPAddress** | `address`, `vrf` (from network), `dns_name` optionally | external_id, arch_id, … |
@@ -450,8 +450,9 @@ output remains policy-independent.
   the apply result (DP8).
 
 ### 8.3 Ordering & concurrency
-- Plan entries ordered by kind dependency (prefix/VLAN before IPAddress before
-  Interface before VM/Device) so parents exist before children.
+- Plan entries ordered by the mapping contract's kind rank
+  (vlan → prefix → device → VM → interface → IP), which is
+  FK-dependency-safe: parents exist before children (contract rule 3).
 - One active projection run per architecture (claim), preventing interleaved
   exports.
 

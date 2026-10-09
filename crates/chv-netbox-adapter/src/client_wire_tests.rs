@@ -13,8 +13,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::client::{ClientError, NetBoxClient, NetBoxToken};
 use crate::mapping::{
-    DeviceStatus, NetBoxDevice, NetBoxObject, NetBoxVlan, CHV_NETBOX_DEVICE_ROLE,
-    CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER,
+    DeviceStatus, NetBoxDevice, NetBoxInterface, NetBoxIpAddress, NetBoxObject, NetBoxPrefix,
+    NetBoxVirtualMachine, NetBoxVlan, VmStatus, CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE,
+    CHV_NETBOX_MANUFACTURER,
 };
 
 const TOKEN: &str = "wire-test-token";
@@ -173,48 +174,166 @@ async fn create_bodies_carry_netbox_write_reference_forms() {
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 42 })))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/prefixes/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 43 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/virtualization/virtual-machines/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 44 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/virtualization/interfaces/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 45 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/ip-addresses/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 46 })))
+        .mount(&server)
+        .await;
+    // The IP create with an assigned interface first resolves the
+    // interface's NetBox id by natural key (the inline half of the
+    // assignment path; the runner's post-loop fix-up is the other).
+    Mock::given(method("GET"))
+        .and(path("/api/virtualization/interfaces/"))
+        .and(query_param("name", "net-backend"))
+        .and(query_param("virtual_machine", "chv-vm-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 1,
+            "results": [{
+                "id": 45,
+                "name": "net-backend",
+                "virtual_machine": { "id": 44, "name": "chv-vm-01" },
+                "tags": []
+            }]
+        })))
+        .mount(&server)
+        .await;
 
     let client =
         NetBoxClient::new_unchecked_for_tests(&server.uri(), NetBoxToken::new(TOKEN.into()))
             .expect("test client");
+    let tags = vec!["chv-team".to_string(), "chv-env-production".to_string()];
     client
         .create_object(&NetBoxObject::Vlan(NetBoxVlan {
             vid: 42,
             name: "backend".to_string(),
-            tags: vec!["chv-team".to_string(), "chv-env-production".to_string()],
+            tags: tags.clone(),
             custom_fields: Default::default(),
         }))
         .await
         .expect("vlan create");
     client
+        .create_object(&NetBoxObject::Prefix(NetBoxPrefix {
+            prefix: "10.42.0.0/24".to_string(),
+            vlan: Some(42),
+            description: "backend (vlan)".to_string(),
+            network_name: "backend".to_string(),
+            tags: tags.clone(),
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("prefix create");
+    client
         .create_object(&NetBoxObject::Device(NetBoxDevice {
             name: "chv-node-01".to_string(),
             site: Some("dc1".to_string()),
             status: DeviceStatus::Active,
-            tags: vec!["chv-team".to_string()],
+            tags: tags.clone(),
             custom_fields: Default::default(),
         }))
         .await
         .expect("device create");
+    client
+        .create_object(&NetBoxObject::VirtualMachine(NetBoxVirtualMachine {
+            name: "chv-vm-01".to_string(),
+            status: VmStatus::Active,
+            cluster: None,
+            device: Some("chv-node-01".to_string()),
+            cpu: Some(2),
+            memory_mb: Some(2048),
+            tags: tags.clone(),
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("vm create");
+    client
+        .create_object(&NetBoxObject::Interface(NetBoxInterface {
+            name: "net-backend".to_string(),
+            virtual_machine: "chv-vm-01".to_string(),
+            description: "backend".to_string(),
+            tags: tags.clone(),
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("interface create");
+    client
+        .create_object(&NetBoxObject::IpAddress(NetBoxIpAddress {
+            address: "10.42.0.10/24".to_string(),
+            assigned_to_interface: Some("chv-vm-01/net-backend".to_string()),
+            tags: tags.clone(),
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("ip create");
 
     let requests = server.received_requests().await.expect("recording");
     let posts: Vec<&wiremock::Request> = requests
         .iter()
         .filter(|request| request.method.as_str() == "POST")
         .collect();
-    assert_eq!(posts.len(), 2, "exactly the two creates");
-    let mut bodies: Vec<serde_json::Value> = Vec::with_capacity(2);
+    assert_eq!(posts.len(), 6, "exactly the six creates");
+    let mut bodies: Vec<serde_json::Value> = Vec::with_capacity(6);
     for request in posts {
         bodies.push(serde_json::from_slice(&request.body).expect("create body is JSON"));
+    }
+    // Every kind serializes tags as name-dicts, never plain strings.
+    for body in &bodies {
+        assert_eq!(
+            body["tags"],
+            json!([{ "name": "chv-team" }, { "name": "chv-env-production" }]),
+            "tags serialize as name-dicts on every create body"
+        );
     }
     let vlan_body = bodies
         .iter()
         .find(|body| body.get("vid").is_some())
         .expect("vlan body");
+    assert_eq!(vlan_body["vid"], json!(42));
+    let prefix_body = bodies
+        .iter()
+        .find(|body| body.get("prefix").is_some())
+        .expect("prefix body");
+    assert_eq!(prefix_body["prefix"], json!("10.42.0.0/24"));
+    let vm_body = bodies
+        .iter()
+        .find(|body| body.get("cluster").is_some())
+        .expect("vm body");
+    assert_eq!(vm_body["device"], json!({ "name": "chv-node-01" }));
+    let interface_body = bodies
+        .iter()
+        .find(|body| body.get("virtual_machine").is_some())
+        .expect("interface body");
     assert_eq!(
-        vlan_body["tags"],
-        json!([{ "name": "chv-team" }, { "name": "chv-env-production" }]),
-        "tags serialize as name-dicts, never plain strings"
+        interface_body["virtual_machine"],
+        json!({ "name": "chv-vm-01" })
+    );
+    let ip_body = bodies
+        .iter()
+        .find(|body| body.get("address").is_some())
+        .expect("ip body");
+    assert_eq!(ip_body["address"], json!("10.42.0.10/24"));
+    assert_eq!(
+        ip_body["assigned_object_type"],
+        json!("virtualization.vminterface")
+    );
+    assert_eq!(
+        ip_body["assigned_object_id"],
+        json!(45),
+        "an unambiguous interface match is assigned inline"
     );
     let device_body = bodies
         .iter()
@@ -232,10 +351,5 @@ async fn create_bodies_carry_netbox_write_reference_forms() {
         device_body["role"],
         json!({ "slug": CHV_NETBOX_DEVICE_ROLE }),
         "NetBox 4.7 requires a role on device creates"
-    );
-    assert_eq!(
-        device_body["tags"],
-        json!([{ "name": "chv-team" }]),
-        "device tags use the same name-dict form"
     );
 }
