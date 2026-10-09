@@ -210,7 +210,8 @@ source agent pauses the VM before triggering stord's bulk copy (the
 transfer correct by construction at the cost of stop-the-world downtime; it
 is set per-migration from the BFF vm-mutate migrate action's `pause_first`
 field (`chvctl migrate start --pause-first` / `chvctl vm migrate
---pause-first`), and the WebUI does not expose it yet.
+--pause-first`, and the WebUI migrate modal's pause-first checkbox —
+landed via #582, with an honest downtime warning).
 
 ## Operation Integration
 

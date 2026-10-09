@@ -176,8 +176,17 @@ The follow-up the DP3 ruling deferred to. What landed:
   pause, didn't get it" failure the mode exists to prevent);
   `chvctl migrate start --pause-first` and `chvctl vm migrate
   --pause-first` set it.
-- **Boundary**: the WebUI does not expose the toggle (API/chvctl
-  only) — recorded follow-up work, not part of this change.
+- **Boundary (WebUI — landed 2026-10-09, #582)**: the migrate modal now
+  exposes the pause-first opt-in as a checkbox with an honest downtime
+  warning (downtime equals the full disk + memory transfer); the
+  modal's description switches from "the VM will remain running" to
+  the stop-the-world wording when checked. Threaded through the
+  vm-mutate migrate action's `pause_first` JSON field (the BFF hop
+  landed with #578). Version-skew note: the UI and BFF are
+  release-co-packaged, and as with the API/chvctl path the
+  fail-closed posture here is within-version only — a pre-`pause_first`
+  BFF drops the unknown JSON key and would run the request live
+  (the stord hop, by contrast, has the T=0 echo guard).
 - **Boundary (version skew — guard landed 2026-10-09, #582)**: the
   T=0 echo guard is now in place: stord echoes `pause_first` in
   `TriggerDiskMigrationResponse`, and the agent fails the migration
