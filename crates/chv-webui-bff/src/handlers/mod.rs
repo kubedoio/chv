@@ -11,6 +11,7 @@ pub mod imports;
 pub mod maintenance;
 pub mod metrics;
 pub mod migrations;
+pub mod netbox;
 pub mod networks;
 pub mod nodes;
 pub mod operations;

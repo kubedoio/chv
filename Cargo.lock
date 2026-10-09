@@ -1156,6 +1156,8 @@ dependencies = [
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-hypervisor-api",
+ "chv-netbox-adapter",
+ "chv-webui-bff",
  "chv-webui-bff-api",
  "hex",
  "jsonwebtoken",
@@ -1175,6 +1177,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

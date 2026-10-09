@@ -168,6 +168,53 @@ const ENDPOINTS: &[(&str, Tier, &str)] = &[
         Tier::Operator,
         r#"{"id":"arch-x","force_refresh":false}"#,
     ),
+    // NetBox projection (#239, PR 5) — all eight endpoints are
+    // operator-tier per the netbox API contract (viewer has no access
+    // to any netbox endpoint). The two data-level escalations —
+    // production export/config writes to Admin, delete-retention to
+    // Admin — are enforced inside the handlers against the persisted
+    // topology row (same pattern as /apply's enforce_production_guard),
+    // and are asserted in tests/architecture_netbox_routes.rs.
+    (
+        "/v1/architectures/netbox/config/get",
+        Tier::Operator,
+        r#"{"id":"arch-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/config/upsert",
+        Tier::Operator,
+        r#"{"id":"arch-x","expected_version":1,"endpoint":"https://netbox.example.internal","token_secret_ref":"ref","retention_policy":"mark_stale","enable_post_apply":false}"#,
+    ),
+    (
+        "/v1/architectures/netbox/config/delete",
+        Tier::Operator,
+        r#"{"id":"arch-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/export/dry-run",
+        Tier::Operator,
+        r#"{"id":"arch-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/export",
+        Tier::Operator,
+        r#"{"id":"arch-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/runs/list",
+        Tier::Operator,
+        r#"{"id":"arch-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/runs/get",
+        Tier::Operator,
+        r#"{"id":"arch-x","run_id":"netrun-x"}"#,
+    ),
+    (
+        "/v1/architectures/netbox/runs/retry",
+        Tier::Operator,
+        r#"{"id":"arch-x","run_id":"netrun-x"}"#,
+    ),
 ];
 
 const ALL_ROLES: &[&str] = &["viewer", "operator", "admin"];
@@ -302,6 +349,12 @@ async fn build_state() -> AppState {
         image_repo: ImageRepository::new(pool.clone()),
         apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
         drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
+        netbox_config: Arc::new(
+            chv_controlplane_store::NetboxProjectionConfigRepository::new(pool.clone()),
+        ),
+        netbox_runs: Arc::new(chv_controlplane_store::NetboxProjectionRunRepository::new(
+            pool.clone(),
+        )),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),

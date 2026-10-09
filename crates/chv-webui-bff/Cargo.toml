@@ -16,6 +16,11 @@ chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-architecture-reconcile = { path = "../chv-architecture-reconcile" }
+# NetBox projection adapter (#239): the dry-run handler drives
+# NetBoxClient/NetboxProjectionRunner directly (synchronous, bounded by
+# the client's request timeout) and validates the custom-field prefix at
+# config-upsert accept time.
+chv-netbox-adapter = { path = "../chv-netbox-adapter" }
 chv-common = { path = "../chv-common" }
 # #379 DP3: the single frozen backend-class vocabulary
 # (BACKEND_CLASSES / is_known_backend_class) used for accept-time
@@ -43,3 +48,19 @@ chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+# Self dev-dependency: turns this crate's `test-http` feature on for the
+# integration-test build only (the standard Cargo pattern for exercising
+# a feature-gated seam without enabling it in production builds).
+chv-webui-bff = { path = ".", features = ["test-http"] }
+# Mock NetBox for the dry-run wire tests (same version as
+# chv-controlplane-service's wiremock suites).
+wiremock = "0.6"
+
+[features]
+# Test-only passthrough of the adapter's plain-HTTP client constructor
+# (see the `build_netbox_client` seam in handlers/netbox.rs), mirroring
+# chv-controlplane-service's dev-only enablement of the adapter's
+# `test-http` feature. NEVER enable this feature in production
+# dependencies: the dry-run handler must stay on the HTTPS-only
+# `NetBoxClient::new`.
+test-http = ["chv-netbox-adapter/test-http"]

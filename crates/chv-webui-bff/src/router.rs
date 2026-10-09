@@ -10,8 +10,9 @@ use axum::{
 use chv_common::Clock;
 use chv_controlplane_store::{
     AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
-    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, StorePool, TopologyRepository,
+    DriftReportRepository, EventRepository, ImageRepository, NetboxProjectionConfigRepository,
+    NetboxProjectionRunRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
+    OperationRepository, StorePool, TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -44,6 +45,17 @@ pub struct AppState {
     /// cache the most recent report (5-minute TTL) and persist fresh
     /// computations. Stored as `Arc` so `AppState` stays cheap to clone.
     pub drift_reports: std::sync::Arc<DriftReportRepository>,
+    /// NetBox projection config repository (#239, PR 5). Wraps the
+    /// `netbox_projection_config` table; used by the netbox handlers for
+    /// config get/upsert/delete and the dry-run token decrypt. Stored as
+    /// `Arc` so `AppState` stays cheap to clone.
+    pub netbox_config: std::sync::Arc<NetboxProjectionConfigRepository>,
+    /// NetBox projection run repository (#239, PR 5). Wraps the
+    /// `netbox_projection_runs` table; used by the netbox handlers to
+    /// enqueue export runs and read/retry run history (the PR-4 worker
+    /// executes them). Stored as `Arc` so `AppState` stays cheap to
+    /// clone.
+    pub netbox_runs: std::sync::Arc<NetboxProjectionRunRepository>,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
@@ -470,6 +482,47 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/architectures/drift",
             post(crate::handlers::architectures::get_architecture_drift),
+        )
+        // NetBox projection (#239, PR 5) — the eight POST-only endpoints
+        // of docs/specs/architecture-designer/contracts/
+        // netbox-api-contract.md. All operator-tier (the contract:
+        // viewer has no access to any netbox endpoint). The two
+        // data-level escalations — production export (and production
+        // config writes / retries) to Admin, delete-retention to Admin —
+        // are enforced inside the handlers against the persisted
+        // topology row, mirroring how /apply mounts under operator
+        // middleware while enforce_production_guard escalates.
+        .route(
+            "/v1/architectures/netbox/config/get",
+            post(crate::handlers::netbox::netbox_config_get),
+        )
+        .route(
+            "/v1/architectures/netbox/config/upsert",
+            post(crate::handlers::netbox::netbox_config_upsert),
+        )
+        .route(
+            "/v1/architectures/netbox/config/delete",
+            post(crate::handlers::netbox::netbox_config_delete),
+        )
+        .route(
+            "/v1/architectures/netbox/export/dry-run",
+            post(crate::handlers::netbox::netbox_dry_run),
+        )
+        .route(
+            "/v1/architectures/netbox/export",
+            post(crate::handlers::netbox::netbox_export),
+        )
+        .route(
+            "/v1/architectures/netbox/runs/list",
+            post(crate::handlers::netbox::netbox_runs_list),
+        )
+        .route(
+            "/v1/architectures/netbox/runs/get",
+            post(crate::handlers::netbox::netbox_runs_get),
+        )
+        .route(
+            "/v1/architectures/netbox/runs/retry",
+            post(crate::handlers::netbox::netbox_runs_retry),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
