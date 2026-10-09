@@ -81,3 +81,23 @@ missed, and its findings supersede parts of §1–§4:
 
 Verification on the reconciled tree: `cargo deny --all-features check
 advisories` → ok; `cargo audit` → clean (exit 0).
+
+## 7. Addendum (2026-10-08) — rustls-pemfile residual debt resolved (#235)
+
+The §5 residual-debt line for `rustls-pemfile` is resolved, via the two-PR
+plan tracked in issue #235:
+
+1. **PR 1 (#574)**: the tonic 0.12 → 0.14.6 / prost 0.13 → 0.14.4 stack bump
+   removed the transitive edge (tonic 0.14 uses `rustls-pki-types` directly);
+   the crate became a direct dependency of `chv-stord-core` only.
+2. **PR 2**: the three remaining direct sites (the migration receiver TLS
+   config in `chv-stord-core/src/server.rs` plus the two migration mTLS test
+   files) migrated to `rustls-pki-types`' folded-in PEM parser (reached via
+   the `rustls::pki_types` re-export), and the dependency was dropped. The
+   crate is absent from `Cargo.lock` entirely.
+
+Consequently the `RUSTSEC-2025-0134` ignore was removed from both `deny.toml`
+and `.cargo/audit.toml` (dated removal notes in each, per the truth
+discipline). The §1–§6 snapshot above is untouched — this addendum records
+the resolution, it does not rewrite the baseline. Verification on the
+resolved tree: `cargo deny check` → ok; `cargo audit` → clean (exit 0).

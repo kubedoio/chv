@@ -46,6 +46,7 @@ impl MutationService for NoopMutations {
         &self,
         _vm_id: String,
         _target_node_id: String,
+        _pause_first: bool,
         _requested_by: String,
     ) -> Result<chv_webui_bff_api::chv_webui_bff_v1::MutateVmResponse, BffError> {
         unreachable!()

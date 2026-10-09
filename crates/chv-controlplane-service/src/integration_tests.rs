@@ -391,6 +391,7 @@ async fn test_disk_convergence_dirty_block_decrease() {
             block_size_bytes: 4_194_304,
             total_timeout_seconds: 0,
             timeout_multiplier: 1.0,
+            pause_first: false,
         },
         bytes_transferred: 0,
         total_bytes: 0,
@@ -912,6 +913,7 @@ async fn test_performance_baseline_block_streaming_throughput() {
             block_size_bytes: 4_194_304, // 4MB blocks
             total_timeout_seconds: 0,
             timeout_multiplier: 1.0,
+            pause_first: false,
         },
         bytes_transferred: 0,
         total_bytes: 0,
@@ -1219,6 +1221,7 @@ async fn test_migration_config_roundtrip_via_correlation_id() {
         block_size_bytes: 8_388_608,
         total_timeout_seconds: 5400,
         timeout_multiplier: 1.0,
+        pause_first: false,
     };
 
     let correlation_id = format!(
