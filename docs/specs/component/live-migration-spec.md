@@ -87,7 +87,7 @@ aligned (see Configuration).
 **Actions:**
 1. Source stord: each round atomically snapshots-and-clears the dirty bitmap (`snapshot_and_clear_dirty_bitmap`), streams only the dirty blocks (bracketed by `RoundStart` / `RoundComplete`), and waits for the round acknowledgment before the next round (`crates/chv-stord-core/src/migration/sender.rs` `dirty_sync_rounds`)
 2. Ack protocol: the receiver acks every 64 chunks while streaming, answers every `RoundComplete` with an `Ack` carrying its cumulative sequence number, and flushes its ack window at boundaries (`FinalSync`, pre-`FinalizeAck`), so the sender's per-round drains complete for arbitrary chunk counts (`crates/chv-stord-core/src/migration/receiver.rs`, issue #391)
-3. CP monitors: dirty_blocks_remaining / convergence_round, reported by the agent from stord's `GetDiskMigrationStatus` and persisted in the migrations table; `wait_for_convergence` polls that table (`crates/chv-controlplane-service/src/migration.rs`)
+3. CP monitors: dirty_blocks_remaining / convergence_round, reported by the agent from stord's `GetDiskMigrationStatus` and persisted in the migrations table; `wait_for_convergence` polls that table (`crates/chv-controlplane-service/src/migration.rs`). The convergence declaration is guarded (#582): the dirty-threshold check requires `convergence_round >= 1` (stord sets the round to 1 at the top of dirty-sync round 1, before any dirty count exists — round 0 means bulk copy has not finished), so the phase cannot exit while bulk copy is still running, with the disclosed exception of multi-volume skew (an early volume converged while a later one still bulks — see the adoption record `docs/design/issue-394-write-canary.md` for that boundary and its cost); diskless VMs (no dirty rounds ever) converge on the agent-reported `MemoryMigration` phase. Liveness is row freshness (the agent reports every ~5 s and the agent daemon flushes its pending telemetry queue every 5 s tick; a row un-updated for 90 s means the agent stopped reporting), and once dirty sync has begun the loop proceeds to the memory phase at the round cap — matching stord's forced cutover at MAX_DIRTY_ROUNDS
 4. Convergence check — constants, not config (see Configuration): a round with dirty_blocks == 0 ends the phase; dirty_blocks < DIRTY_THRESHOLD (1024 blocks = 4 GiB at the 4 MiB block size) ends the phase; a hard cap of MAX_DIRTY_ROUNDS (10) forces the exit (`crates/chv-stord-core/src/migration/sender.rs`)
 
 **Exit conditions:**
@@ -210,7 +210,8 @@ source agent pauses the VM before triggering stord's bulk copy (the
 transfer correct by construction at the cost of stop-the-world downtime; it
 is set per-migration from the BFF vm-mutate migrate action's `pause_first`
 field (`chvctl migrate start --pause-first` / `chvctl vm migrate
---pause-first`), and the WebUI does not expose it yet.
+--pause-first`, and the WebUI migrate modal's pause-first checkbox —
+landed via #582, with an honest downtime warning).
 
 ## Operation Integration
 

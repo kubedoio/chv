@@ -176,8 +176,17 @@ The follow-up the DP3 ruling deferred to. What landed:
   pause, didn't get it" failure the mode exists to prevent);
   `chvctl migrate start --pause-first` and `chvctl vm migrate
   --pause-first` set it.
-- **Boundary**: the WebUI does not expose the toggle (API/chvctl
-  only) — recorded follow-up work, not part of this change.
+- **Boundary (WebUI — landed 2026-10-09, #582)**: the migrate modal now
+  exposes the pause-first opt-in as a checkbox with an honest downtime
+  warning (downtime equals the full disk + memory transfer); the
+  modal's description switches from "the VM will remain running" to
+  the stop-the-world wording when checked. Threaded through the
+  vm-mutate migrate action's `pause_first` JSON field (the BFF hop
+  landed with #578). Version-skew note: the UI and BFF are
+  release-co-packaged, and as with the API/chvctl path the
+  fail-closed posture here is within-version only — a pre-`pause_first`
+  BFF drops the unknown JSON key and would run the request live
+  (the stord hop, by contrast, has the T=0 echo guard).
 - **Boundary (version skew — guard landed 2026-10-09, #582)**: the
   T=0 echo guard is now in place: stord echoes `pause_first` in
   `TriggerDiskMigrationResponse`, and the agent fails the migration
@@ -187,18 +196,73 @@ The follow-up the DP3 ruling deferred to. What landed:
   require an echo (one-directional guard). Within-version, the
   fail-closed posture also holds at the sender (no task ⇒ fail
   before connecting).
-- **Boundary (pre-existing CP convergence looseness, disclosed)**:
-  the CP state machine's `wait_for_convergence` declares convergence
-  on `dirty_remaining <= threshold` without a bytes-or-phase guard,
-  so it fires on the first 5 s status poll of *any* migration —
-  default mode included — while the disk transfer is still running.
-  Pause-first does not change this but makes the symptom more
-  visible: the DB phase reads `memory_migration` during the
-  pre-copy pause, and the remaining disk transfer runs under the
-  memory phase's timeout budget. Pre-existing behavior, unchanged
-  by this PR; recorded as follow-up (the phase-label and
-  timeout-budget interaction deserve their own fix with
-  default-mode regression coverage).
+- **Boundary (pre-existing CP convergence looseness — fixed
+  2026-10-09, #582)**: `wait_for_convergence` used to declare
+  convergence on `dirty_remaining <= threshold` without a
+  bytes-or-phase guard, firing on the first 5 s status poll of *any*
+  migration — default mode included — while the disk transfer was
+  still running (the memory phase then ran under its own timeout
+  budget with the VM paused for the remainder of the disk transfer).
+  The fix guards the dirty-threshold check with `convergence_round
+  >= 1`: stord sets the round to 1 at the top of dirty-sync round 1,
+  before any dirty count exists, so round 0 means bulk copy has not
+  finished (a Completed task always passes through at least round 1;
+  the agent forwards the max across volumes). Diskless VMs — which
+  skip the disk loop and never run a dirty round — converge via the
+  agent-reported `MemoryMigration` phase instead. Making the guard
+  real exposed that two of the loop's other safety nets were written
+  against a wrong model of the telemetry and would have false-fired
+  the moment they went live, so they were fixed in the same change:
+  the stall detector is re-keyed from byte movement (stord's
+  `bytes_transferred` only accumulates dirty re-send bytes — it
+  freezes at 0 through bulk copy, so a byte-based detector
+  false-fires ~65 s into any legitimate bulk) to row freshness
+  (`updated_at` older than 90 s ≈ 18 missed ~5 s reports means the
+  agent stopped reporting); and the dirty-sync caps (round cap /
+  poll cap) are gated on `round >= 1`, count only dirty-sync poll
+  time (bulk-copy polls are excluded), and now PROCEED to the memory
+  phase instead of failing — matching stord's own forced cutover at
+  MAX_DIRTY_ROUNDS (the sender moves to final sync there, it does
+  not fail) and the branch's original stated intent (erroring there
+  would roll back migrations stord is completing via forced
+  cutover). The freshness net required fixing a pre-existing agent
+  telemetry delivery bug that the vacuous check had masked: the
+  agent's migration progress reporter only ENQUEUED messages into
+  the cache's pending queue, which was drained solely on
+  (re)connect — during a stable connection nothing flushed it, so
+  the CP's migration row never updated at all (this also stranded
+  the agent's MemoryMigration/Completed phase reports, meaning the
+  memory-phase wait could never observe completion either). The
+  agent daemon now drains the queue on every 5 s tick while
+  connected — dispatching outside the cache lock, each dispatch
+  bounded by a 10 s deadline (a hung-but-established connection is
+  converted into a connectivity failure and a client drop instead
+  of wedging the tick loop), and subsuming the old dedicated
+  reconnect flush (which held the cache lock across unbounded
+  dispatch). Disclosed residual, pinned by a boundary test: in
+  multi-volume skew — an early volume converged (round >= 1, dirty
+  0) while a later volume is still in bulk copy — convergence is
+  declared early through either of two triggers: the max-dirty
+  signal is 0 (the round-based check passes), and in default mode
+  the agent reports `MemoryMigration` at the early volume's
+  final-sync pause (the phase-based check passes). The row cannot
+  express that state today (stord's `bytes_transferred` excludes
+  bulk bytes; the agent's phase vocabulary has no "all volumes
+  finished bulk" value). The migration still completes correctly
+  (the final sync waits for every volume); the cost is that the
+  memory phase's timeout budget starts early. Closing it needs a
+  telemetry contract change. The two fixes in this change (CP
+  guard, agent drain) are causally coupled and must deploy
+  together or agent-first: a new CP with a pre-fix agent never
+  sees refreshed migration rows over a stable connection and
+  would roll back every ConvergingDisk migration at the 90 s
+  freshness bound. One direction of observable change
+  worth naming for operators: bulk-copy time is now genuinely spent
+  in ConvergingDisk and bounded by `converging_disk_total_secs`
+  (default 3000 s) — a bulk slower than that now fails the phase
+  with a convergence timeout, where the vacuous check previously
+  masked it (the memory phase absorbed the transfer instead). Pinned
+  by default-mode regression tests, each behavior sabotage-verified.
 - **Tests**: `migration_e2e.rs::pause_first_pauses_before_bulk_copy`
   (pause arrives in `PausedPreCopy` with zero bytes, stays blocked,
   completes verified; a write during the blocked window is
