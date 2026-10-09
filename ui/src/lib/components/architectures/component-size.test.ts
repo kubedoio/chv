@@ -13,6 +13,12 @@
  * pipelines. When those grow, raise a separate refactor task; do not
  * piggy-back on the Phase-2 acceptance gate.
  *
+ * `netbox/` (issue #239, PR 7) is added to the guarded set: it is a new
+ * directory created after the rule existed, and its plan caps components
+ * at the same ~300 lines ("Svelte components stay under ~300 lines
+ * (extract subcomponents)"). Same rationale as the Phase-2 set — new
+ * surface, guard from day one rather than retrofitting.
+ *
  * If this test fails, do NOT raise the limit. Split the component instead.
  *
  * Implementation note: this file runs under the `node` test environment so
@@ -25,7 +31,7 @@
 import { describe, expect, it } from 'vitest';
 
 const MAX_LINES = 300;
-const PHASE_2_DIRS = ['canvas', 'nodes', 'inspector'];
+const PHASE_2_DIRS = ['canvas', 'nodes', 'inspector', 'netbox'];
 
 describe('Architecture Designer Phase-2 components must stay ≤ 300 lines', async () => {
 	const { globSync } = await import('glob');

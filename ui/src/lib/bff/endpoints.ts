@@ -84,5 +84,16 @@ export const BFFEndpoints = {
 	architecturesRunsList: '/v1/architectures/runs/list',
 
 	// Architecture Designer endpoints (Phase 6 — drift detection)
-	architecturesDrift: '/v1/architectures/drift'
+	architecturesDrift: '/v1/architectures/drift',
+
+	// Architecture Designer endpoints (NetBox projection — issue #239,
+	// docs/specs/architecture-designer/contracts/netbox-api-contract.md)
+	netboxConfigGet: '/v1/architectures/netbox/config/get',
+	netboxConfigUpsert: '/v1/architectures/netbox/config/upsert',
+	netboxConfigDelete: '/v1/architectures/netbox/config/delete',
+	netboxExportDryRun: '/v1/architectures/netbox/export/dry-run',
+	netboxExport: '/v1/architectures/netbox/export',
+	netboxRunsList: '/v1/architectures/netbox/runs/list',
+	netboxRunsGet: '/v1/architectures/netbox/runs/get',
+	netboxRunsRetry: '/v1/architectures/netbox/runs/retry'
 } as const;
