@@ -18,7 +18,7 @@
 | **Total** | **0** | **0** | **0** | **0** | **0** |
 
 **Previously reported gaps that are now resolved:**
-- Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
+- Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, the per-tick pending-queue drain (`drain_pending_control_plane_queue`), and agent-side RPC rejection.
 - VM resize is wired end-to-end (backend-for-frontend (BFF) → desired state → agent reconcile → Cloud Hypervisor (the VMM)).
 - Network mutations (`start`/`stop`/`restart`) are wired through BFF → control plane → agent → `chv-nwd`.
 - svelte-check reports **0 errors and 0 warnings**.
@@ -129,7 +129,7 @@ These areas were previously flagged as gaps but are now complete:
 
 | Area | Evidence |
 |------|----------|
-| **Partition policy (ADR-006)** | `crates/chv-agent-core/src/connectivity.rs` — `ConnectivityTracker` with `Connected`/`Disconnected`/`Reconnecting` states; `agent_server.rs:554` rejects `CreateVm` when disconnected; `agent_server.rs:1817` rejects `MigrateVm` when disconnected; `control_plane.rs:276` `flush_pending_messages` drains `NodeCache::pending_control_plane_messages` on reconnect |
+| **Partition policy (ADR-006)** | `crates/chv-agent-core/src/connectivity.rs` — `ConnectivityTracker` with `Connected`/`Disconnected`/`Reconnecting` states; `agent_server.rs:554` rejects `CreateVm` when disconnected; `agent_server.rs:1817` rejects `MigrateVm` when disconnected; `control_plane.rs` `drain_pending_control_plane_queue` drains `NodeCache::pending_control_plane_messages` on every tick and on reconnect |
 | **VM resize end-to-end** | `crates/chv-webui-bff/src/handlers/vms.rs:733-830` — BFF updates `vm_desired_state` cpu_count/memory_bytes and bumps generation; `crates/chv-agent-core/src/reconcile.rs:1318-1339` — agent detects drift and calls `vm_runtime.resize_vm()` |
 | **Network mutations end-to-end** | `crates/chv-webui-bff/src/handlers/networks.rs` — BFF lifecycle handlers. Network policy persists via the `networks/update` `firewall_rules` field (engine-vocabulary validated, #369 gate) into `network_desired_state.firewall_rules_json`, which `crates/chv-controlplane-service/src/orchestrator.rs` attaches to the VM spec at the next dispatch — core-managed nodes materialize it at attach time (#361, m4.4). Live re-dispatch of an updated ruleset to already-attached VMs lands with #355 (PR 1 carrier #565 + PR 2 journaling #566: the update journals an `UpdateNetworkPolicy` operation that the orchestrator fans out to every node with a live attached VM on the network), and the empty-ruleset boundary is the DP4 baseline (`[]` = DHCP/DNS/conntrack + default-deny, applied at dispatch and at attach — #355 PR 3). The `set_firewall_policy`/`set_nat_policy`/`ensure_dhcp_scope`/`ensure_dns_scope` reconcile call sites are the fenced `authority_mode = "legacy"` path, not the qualified one. |
 | **svelte-check warnings** | `npm run check` reports **0 errors and 0 warnings** |

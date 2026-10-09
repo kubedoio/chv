@@ -978,19 +978,32 @@ async fn disable_source_dirty_tracking(
 
 /// Query the volume IDs attached to a VM.
 /// Wait for disk convergence by polling the migration record.
-/// The agent reports progress via telemetry updates to `bytes_transferred` and `total_bytes`.
-/// Convergence is achieved when dirty_blocks_remaining (reported by agent) drops below threshold,
-/// OR when bytes_transferred >= total_bytes (indicating bulk copy complete and iterative
-/// sync has finished).
+/// Wait for disk convergence by polling the migration record.
 ///
-/// Uses progressive timeouts per round:
-/// - Rounds 1-3: 60s per round (initial bulk copy phase)
-/// - Rounds 4-6: 30s per round (iterative sync phase)
-/// - Rounds 7+: 15s per round (final convergence phase)
-/// - Max total: 7200s overall cap
+/// The agent reports stord's per-volume status (max convergence round, max
+/// dirty blocks remaining) via telemetry roughly every 5 s; this loop polls
+/// the persisted row on the same cadence.
 ///
-/// If no progress is detected between rounds (bytes_transferred unchanged), the
-/// migration is cancelled early to avoid wasting time on a stalled transfer.
+/// Convergence is declared when either:
+/// - the agent-reported dirty count drops to or below the configured
+///   threshold AND the disk transfer has demonstrably reached dirty sync
+///   (`convergence_round >= 1` — see the guard comment at the primary check
+///   below), or
+/// - the agent reports the disk work done (`MemoryMigration` phase or
+///   beyond) — the path diskless VMs converge through, since they skip the
+///   disk loop and never run a dirty round.
+///
+/// Safety nets:
+/// - Row freshness: if the row stops being updated the agent has stopped
+///   reporting, and the migration is rolled back.
+/// - Dirty-sync caps: once dirty sync has begun (`round >= 1`), the loop
+///   proceeds to the memory phase after the round cap or a bounded amount
+///   of dirty-sync poll time without convergence — matching stord's own
+///   forced cutover at MAX_DIRTY_ROUNDS (the sender moves to final sync
+///   there, it does not fail). The memory phase's timeout budget bounds
+///   the remaining work.
+/// - Max total: 7200 s hard cap, and the outer per-phase timeout
+///   (PhaseTimeouts) always applies.
 pub(crate) async fn wait_for_convergence(
     pool: &StorePool,
     state: &MigrationState,
@@ -998,20 +1011,18 @@ pub(crate) async fn wait_for_convergence(
     let max_rounds = state.config.max_convergence_rounds;
     let threshold = state.config.dirty_threshold_blocks as i64;
     let mut poll_count: u32 = 0;
-    let mut last_bytes_transferred: i64 = -1;
-    let mut stall_polls: u32 = 0;
+    let mut dirty_sync_polls: u32 = 0;
     let started = tokio::time::Instant::now();
     const MAX_TOTAL_SECS: u64 = 7200;
+    // The agent's disk-poll loop reports every ~5 s, so a row this old
+    // means ~18 consecutive missed reports — the agent (or its telemetry
+    // path) is dead or wedged. Bulk-copy progress is invisible in the row
+    // (stord's `bytes_transferred` only accumulates dirty re-send bytes),
+    // so freshness — not byte movement — is the liveness signal.
+    const STALE_ROW_SECS: i64 = 90;
 
     loop {
-        // Progressive poll interval based on current round:
-        // Rounds 1-3 (polls 1-36): 60s budget / ~5s polls = poll every 5s
-        // Rounds 4-6 (polls 37-54): 30s budget / ~5s polls = poll every 5s
-        // Rounds 7+ (polls 55+): 15s budget / ~5s polls = poll every 5s
-        // The outer timeout (from PhaseTimeouts) enforces per-round deadlines;
-        // here we use progressive stall detection thresholds.
-        let poll_interval = Duration::from_secs(5);
-        tokio::time::sleep(poll_interval).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         poll_count += 1;
 
         // Cooperative cancel check: observe the flag at every iteration. This
@@ -1046,8 +1057,8 @@ pub(crate) async fn wait_for_convergence(
             });
         }
 
-        let row: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
-            "SELECT phase, convergence_round, dirty_blocks_remaining, bytes_transferred, total_bytes FROM migrations WHERE migration_id = ?",
+        let row: Option<(String, i64, i64, String)> = sqlx::query_as(
+            "SELECT phase, convergence_round, dirty_blocks_remaining, updated_at FROM migrations WHERE migration_id = ?",
         )
         .bind(&state.migration_id)
         .fetch_optional(pool)
@@ -1057,7 +1068,7 @@ pub(crate) async fn wait_for_convergence(
         })?;
 
         match row {
-            Some((phase, round, dirty_remaining, bytes_transferred, total_bytes)) => {
+            Some((phase, round, dirty_remaining, updated_at)) => {
                 if phase == "Failed" || phase == "RolledBack" {
                     return Err(ChvError::Internal {
                         reason: format!(
@@ -1067,8 +1078,47 @@ pub(crate) async fn wait_for_convergence(
                     });
                 }
 
-                // Primary check: agent-reported dirty blocks below threshold
-                if dirty_remaining >= 0 && dirty_remaining <= threshold {
+                // Primary check: agent-reported dirty blocks below
+                // threshold — guarded by evidence that the disk
+                // transfer has actually reached dirty sync (#582).
+                //
+                // `dirty_blocks_remaining` is 0 until stord's first
+                // dirty-sync round snapshots the bitmap (and the
+                // migration row is created with 0), so a bare
+                // `dirty <= threshold` is vacuously true during bulk
+                // copy: it declared convergence on the first poll of
+                // any migration while the transfer was still running,
+                // and the memory phase then ran under its own timeout
+                // budget with the VM paused for the remainder of the
+                // disk transfer.
+                //
+                // `round >= 1` closes that: stord sets
+                // `convergence_round` to 1 at the top of dirty-sync
+                // round 1 — before any dirty count exists — and a
+                // Completed task always passes through at least round
+                // 1, so round >= 1 means bulk copy has finished. It
+                // also covers the pre-telemetry window (the row is
+                // created with round 0). The agent reports the max
+                // round across volumes, so this holds once ANY volume
+                // has finished bulk copy.
+                //
+                // Disclosed residual (#582, see the adoption record):
+                // in multi-volume skew — an early volume converged
+                // (round >= 1, dirty 0) while a later volume is still
+                // in bulk copy — the max-dirty signal is 0 and this
+                // check passes early. The row cannot express that
+                // state today: stord's `bytes_transferred` excludes
+                // bulk bytes and the agent's phase vocabulary has no
+                // "all volumes finished bulk" value. The migration
+                // still completes correctly (the final sync waits for
+                // every volume); the cost is that the memory phase's
+                // timeout budget starts early. Pinned by
+                // `test_wait_for_convergence_multi_volume_skew_residual_is_pinned`.
+                // (`dirty_remaining >= 0` is deliberate defense, not a
+                // tautology: the column is INTEGER NOT NULL but SQLite
+                // integers can be negative, and corrupt telemetry must
+                // not count as "below threshold".)
+                if round >= 1 && dirty_remaining >= 0 && dirty_remaining <= threshold {
                     info!(
                         migration_id = %state.migration_id,
                         round = round,
@@ -1078,71 +1128,116 @@ pub(crate) async fn wait_for_convergence(
                     return Ok(());
                 }
 
-                // Secondary check: bytes_transferred indicates bulk copy complete
-                if total_bytes > 0 && bytes_transferred >= total_bytes && dirty_remaining <= 0 {
+                // Agent-reported disk-work-done signal: the agent
+                // reports `MemoryMigration` once all volumes completed
+                // — or, in default mode, at the final-sync pause — and
+                // immediately for diskless VMs, which skip the disk
+                // loop entirely (no dirty rounds, so the round signal
+                // above can never fire for them). `Paused`/`Completed`
+                // are further still (accepted defensively: the agent
+                // does not report `Paused`/`Completed` during this
+                // window today, but they are unambiguous disk-done
+                // signals if its vocabulary grows). In multi-volume
+                // skew this fires early too — the early volume's
+                // final-sync pause — the phase-based trigger of the
+                // disclosed residual (the round-based trigger is at
+                // the primary check). The CP last wrote
+                // `ConvergingDisk` to this row, so any of these phases
+                // was written by the agent. Without this signal a
+                // diskless migration could never converge (pre-fix it
+                // "worked" only via the vacuous first-poll check).
+                if phase == "MemoryMigration" || phase == "Paused" || phase == "Completed" {
                     info!(
                         migration_id = %state.migration_id,
-                        bytes_transferred = bytes_transferred,
-                        total_bytes = total_bytes,
-                        "convergence achieved: all bytes transferred"
+                        phase = %phase,
+                        "convergence achieved: agent reported disk work complete"
                     );
                     return Ok(());
                 }
 
-                // Progressive stall detection: check if bytes_transferred is making progress.
-                // The stall threshold depends on which round we're in:
-                // - Rounds 1-3: allow up to 12 stall polls (60s of no progress)
-                // - Rounds 4-6: allow up to 6 stall polls (30s of no progress)
-                // - Rounds 7+: allow up to 3 stall polls (15s of no progress)
-                let max_stall_polls = if round <= 3 {
-                    12_u32 // 60s at 5s intervals
-                } else if round <= 6 {
-                    6_u32 // 30s at 5s intervals
-                } else {
-                    3_u32 // 15s at 5s intervals
-                };
-
-                if bytes_transferred == last_bytes_transferred && last_bytes_transferred >= 0 {
-                    stall_polls += 1;
-                    if stall_polls >= max_stall_polls {
+                // Liveness: the agent's disk-poll loop reports every
+                // ~5 s and the agent daemon flushes the pending
+                // telemetry queue every ~5 s tick, refreshing
+                // `updated_at` even when the values are unchanged
+                // (bulk copy freezes them at 0 — bulk progress is
+                // invisible in this row). A row older than
+                // STALE_ROW_SECS means the agent stopped reporting.
+                // (Both the row's timestamp and `Utc::now()` come from
+                // the same host, so only a forward clock step > 90 s
+                // during a healthy migration could false-fire this —
+                // fail-safe: it rolls back, it never corrupts.)
+                let row_age_secs = match chrono::DateTime::parse_from_rfc3339(&updated_at) {
+                    Ok(ts) => Some(chrono::Utc::now().signed_duration_since(ts).num_seconds()),
+                    Err(e) => {
+                        // The column is written by our own strftime
+                        // ('%Y-%m-%dT%H:%M:%SZ'), so this should be
+                        // impossible — fail open for this poll (the
+                        // outer timeouts still bound the phase) but
+                        // say so.
                         warn!(
                             migration_id = %state.migration_id,
-                            round = round,
-                            stall_polls = stall_polls,
-                            bytes_transferred = bytes_transferred,
-                            "no progress detected between rounds, cancelling early"
+                            updated_at = %updated_at,
+                            error = %e,
+                            "unparseable updated_at; freshness check skipped for this poll"
                         );
-                        return Err(ChvError::Internal {
-                            reason: format!(
-                                "migration {} stalled: no progress for {} polls (round {})",
-                                state.migration_id, stall_polls, round
-                            ),
-                        });
+                        None
                     }
-                } else {
-                    // Progress was made, reset stall counter
-                    stall_polls = 0;
+                };
+                if row_age_secs.is_some_and(|age| age > STALE_ROW_SECS) {
+                    warn!(
+                        migration_id = %state.migration_id,
+                        round = round,
+                        dirty_remaining = dirty_remaining,
+                        row_age_secs = row_age_secs,
+                        "migration row stale: agent stopped reporting"
+                    );
+                    return Err(ChvError::Internal {
+                        reason: format!(
+                            "migration {} stalled: no telemetry update for over {}s (round {})",
+                            state.migration_id, STALE_ROW_SECS, round
+                        ),
+                    });
                 }
-                last_bytes_transferred = bytes_transferred;
 
-                // Max rounds exceeded (each round is 5s, so max_rounds polls)
-                if round >= max_rounds as i64 || poll_count >= max_rounds * 6 {
-                    // Force convergence if we've waited long enough — the agent
-                    // may not be updating dirty_blocks_remaining. Proceed to
-                    // memory migration phase which will do a final sync.
+                // Dirty-sync time bookkeeping: count polls only once
+                // dirty sync has begun — bulk-copy time (round 0) must
+                // not consume the dirty-sync budget.
+                if round >= 1 {
+                    dirty_sync_polls += 1;
+                }
+
+                // Dirty-sync caps: once round >= 1, bound how long we
+                // wait for the dirty count to fall below threshold —
+                // the round cap, or a bounded amount of dirty-sync
+                // poll time (bulk-copy polls are excluded above). On
+                // cap we PROCEED to the memory phase — matching
+                // stord's own forced cutover at MAX_DIRTY_ROUNDS (the
+                // sender moves to final sync there, it does not fail)
+                // and this branch's original stated intent. The memory
+                // phase's timeout budget bounds the remaining work.
+                //
+                // During round 0 (bulk copy) these caps must not fire
+                // at all: bulk progress is invisible in the row, so a
+                // legitimately long bulk copy would otherwise be
+                // mistaken for non-convergence. Round-0 time is bounded
+                // by MAX_TOTAL_SECS and the outer phase timeout.
+                // `max_convergence_rounds` is operator-supplied and
+                // unvalidated above the proto layer's defaults, so bound
+                // the multiplication against overflow (a giant config
+                // value saturates the cap rather than wrapping).
+                if round >= 1
+                    && (round >= max_rounds as i64
+                        || dirty_sync_polls >= max_rounds.saturating_mul(6))
+                {
                     warn!(
                         migration_id = %state.migration_id,
                         rounds = round,
                         poll_count = poll_count,
+                        dirty_sync_polls = dirty_sync_polls,
                         dirty_remaining = dirty_remaining,
-                        "convergence round limit reached, forcing transition to memory migration"
+                        "convergence round limit reached, proceeding to memory migration"
                     );
-                    return Err(ChvError::Internal {
-                        reason: format!(
-                            "migration {} convergence failed: round limit reached (round={}, dirty_remaining={})",
-                            state.migration_id, round, dirty_remaining
-                        ),
-                    });
+                    return Ok(());
                 }
             }
             None => {

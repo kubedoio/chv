@@ -11,7 +11,7 @@
 		vmId: string;
 		currentNodeId: string;
 		submitting?: boolean;
-		onmigrate?: (targetNodeId: string) => void;
+		onmigrate?: (targetNodeId: string, pauseFirst: boolean) => void;
 		onclose?: () => void;
 	}
 
@@ -28,6 +28,7 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let selectedNodeId = $state('');
+	let pauseFirst = $state(false);
 
 	const eligibleNodes = $derived(
 		nodes.filter((n) => n.node_id !== currentNodeId && n.state === 'TenantReady')
@@ -36,6 +37,7 @@
 	$effect(() => {
 		if (open) {
 			selectedNodeId = '';
+			pauseFirst = false;
 			error = null;
 			fetchNodes();
 		}
@@ -58,7 +60,7 @@
 
 	function handleMigrate() {
 		if (!selectedNodeId || submitting) return;
-		onmigrate?.(selectedNodeId);
+		onmigrate?.(selectedNodeId, pauseFirst);
 	}
 </script>
 
@@ -66,8 +68,13 @@
 {#snippet children()}
 	<div class="form-fields">
 		<p class="description">
-			Select a target node to live-migrate VM <strong>{vmId}</strong>.
-			The VM will remain running during the migration.
+			{#if pauseFirst}
+				Migrate VM <strong>{vmId}</strong> in <strong>pause-first (stop-the-world)</strong> mode: the VM is
+				paused before any data is copied and stays paused until the migration completes.
+			{:else}
+				Select a target node to live-migrate VM <strong>{vmId}</strong>.
+				The VM will remain running during the migration.
+			{/if}
 		</p>
 
 		{#if loading}
@@ -90,6 +97,28 @@
 						<option value={node.node_id}>{node.name} ({node.node_id})</option>
 					{/each}
 				</select>
+			</div>
+			<div class="field">
+				<label for="migrate-pause-first" class="checkbox-label">
+					<input
+						id="migrate-pause-first"
+						type="checkbox"
+						bind:checked={pauseFirst}
+						disabled={submitting}
+						aria-describedby={pauseFirst ? 'migrate-pause-first-warning' : undefined}
+					/>
+					Pause-first (stop-the-world)
+				</label>
+				{#if pauseFirst}
+					<div class="downtime-warning" id="migrate-pause-first-warning" role="alert">
+						<AlertCircle size={14} />
+						<span>
+							Downtime equals the full disk and memory transfer — the VM is unreachable for the
+							entire migration. Use this only for workloads whose write pattern cannot
+							tolerate live migration.
+						</span>
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -168,5 +197,42 @@
 		border-radius: 0.25rem;
 		color: var(--status-failed-text);
 		font-size: var(--text-sm);
+	}
+
+	.field .checkbox-label {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--shell-text);
+		text-transform: none;
+		letter-spacing: normal;
+		cursor: pointer;
+	}
+
+	.checkbox-label input[type='checkbox'] {
+		width: 1rem;
+		height: 1rem;
+		accent-color: var(--shell-accent);
+		cursor: pointer;
+	}
+
+	.downtime-warning {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--status-warning-bg);
+		border: 1px solid var(--status-warning-border);
+		border-radius: 0.25rem;
+		color: var(--status-warning-text);
+		font-size: var(--text-xs);
+		line-height: 1.5;
+	}
+
+	.downtime-warning :global(svg) {
+		flex-shrink: 0;
+		margin-top: 1px;
 	}
 </style>
