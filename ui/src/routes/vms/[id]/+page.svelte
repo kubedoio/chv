@@ -153,14 +153,24 @@
 		}
 	}
 
-	async function executeMigrate(targetNodeId: string) {
+	async function executeMigrate(targetNodeId: string, pauseFirst: boolean) {
 		migrateSubmitting = true;
 		const token = getStoredToken() ?? undefined;
 		const vm_id = detail.summary.vm_id;
 
 		try {
 			await mutateWithRefresh(
-				() => mutateVm({ vm_id, action: 'migrate', force: false, target_node_id: targetNodeId }, token),
+				() =>
+					mutateVm(
+						{
+							vm_id,
+							action: 'migrate',
+							force: false,
+							target_node_id: targetNodeId,
+							pause_first: pauseFirst
+						},
+						token
+					),
 				{
 					patterns: ['vms:'],
 					detailId: vm_id,

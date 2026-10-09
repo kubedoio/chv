@@ -302,6 +302,7 @@ export type MutateVmRequest = {
 	action: string;
 	force: boolean;
 	target_node_id?: string;
+	pause_first?: boolean;
 };
 
 export type MutateVmResponse = {
