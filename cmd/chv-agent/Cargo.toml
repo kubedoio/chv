@@ -23,6 +23,7 @@ chv-config = { path = "../../crates/chv-config" }
 chv-observability = { path = "../../crates/chv-observability" }
 chv-agent-core = { path = "../../crates/chv-agent-core" }
 chv-monitoring-core = { path = "../../crates/chv-monitoring-core" }
+uuid = { workspace = true }
 async-trait = { workspace = true }
 chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
 chv-hypervisor-api = { path = "../../crates/chv-hypervisor-api" }

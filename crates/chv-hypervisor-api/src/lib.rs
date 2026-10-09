@@ -42,6 +42,31 @@ pub struct VmCounters {
     pub disk_bytes_written: u64,
     pub net_bytes_rx: u64,
     pub net_bytes_tx: u64,
+    /// Whether `cpu_percent` is a real measurement this cycle (a
+    /// process interval elapsed, the VMM identity held, and no epoch
+    /// reset intervened). `false` ⇒ the legacy transport flattens to
+    /// `0`; the v1 sample path must emit a non-valid quality sample,
+    /// never a zero.
+    pub cpu_percent_measured: bool,
+    /// Whether `memory_bytes_used` is a real reading (the VMM process
+    /// identity held for the `/proc/<pid>/stat` read). Same honesty
+    /// rule as `cpu_percent_measured`.
+    pub memory_measured: bool,
+    /// Per-device cumulative counters keyed by the VMM's device id
+    /// (`_disk0`, `_net1`, …), straight from the pinned flat
+    /// `vm.counters` map — never summed across devices. The summed
+    /// `disk_*`/`net_*` fields stay for the legacy transport.
+    pub disk_read_by_device: std::collections::BTreeMap<String, u64>,
+    pub disk_write_by_device: std::collections::BTreeMap<String, u64>,
+    pub net_rx_by_device: std::collections::BTreeMap<String, u64>,
+    pub net_tx_by_device: std::collections::BTreeMap<String, u64>,
+    /// `(boot_id, vmm start ticks)` identity of the VMM process that
+    /// produced these counters — the epoch fence for every counter in
+    /// this struct. `None` ⇒ the process identity could not be
+    /// established this cycle, and counter samples must not be emitted
+    /// (a counter without its epoch cannot be delta-subtracted safely
+    /// across a VMM restart).
+    pub counter_epoch: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]

@@ -1,28 +1,33 @@
-//! Native monitoring sampler wiring for `chv-agent` (gate G1, prompt 01
-//! task 7).
+//! Native monitoring sampler wiring for `chv-agent` (gates G1/G2,
+//! #602).
 //!
 //! One bounded sampling task, **independent of reconciliation and state
 //! reports**, collects node-level contract samples (CPU ratio, load
 //! averages, memory, swap, root filesystem, per-interface and
 //! per-block-device counters) through `chv-monitoring-core`'s
-//! [`run_sampler`]. Its bounds and health counters live in the sampler
-//! crate; this module provides:
+//! [`run_sampler`], and VM samples (host-accounted CPU/memory gauges and
+//! per-device block/net counters from the pinned `vm.counters` map) on
+//! the slower VM cadence. Its bounds and health counters live in the
+//! sampler crate; this module provides:
 //!
 //! - [`NodeOsSampleSource`] — the node source adapter (retained
 //!   `NodeOsCollector` plus per-cycle `/proc/net/dev` and
 //!   `/proc/diskstats` reads);
+//! - [`VmSampleSource`] — the VM source adapter over the agent's
+//!   `VmRuntime` (identity-fenced `/proc` process readings plus the
+//!   VMM's own device counters);
 //! - [`LatestSamples`] — the bounded latest-sample store the sink
-//!   consumer maintains (per metric+target+dimension key; PR-2's ingest
-//!   replaces this with the versioned node transport);
+//!   consumer maintains (per metric+target+dimension key);
 //! - [`spawn_monitoring_sampler`] — spawns the loop and returns the
-//!   health handle for the `/metrics` surface.
-//!
-//! VM samples still ride the existing VmStateReport transport in this
-//! PR (repaired to real values); moving VM collection behind the
-//! sampler + ingest is PR-2's scope.
+//!   health handle for the `/metrics` surface;
+//! - [`spawn_monitoring_ingest_sender`] — the 15 s batch sender that
+//!   ships the latest samples to the control plane over the versioned
+//!   node metric batch transport (ingestion contract v1), on a
+//!   **dedicated** control-plane client so manager backpressure can
+//!   never pause reconciliation.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chv_monitoring_core::model::{
@@ -31,6 +36,7 @@ use chv_monitoring_core::model::{
 use chv_monitoring_core::node_os::{NodeOsCollector, NodeOsSnapshot};
 use chv_monitoring_core::sampler::{
     run_sampler, NodeOsSource, SamplerConfig, SamplerError, SamplerHealth, SamplerSources,
+    VmRuntimeSource,
 };
 use tokio::sync::Mutex;
 
@@ -276,6 +282,170 @@ impl NodeOsSource for NodeOsSampleSource {
     }
 }
 
+/// VM sample source over the agent's `VmRuntime`. Read-only: the
+/// observed-set is `VmRuntime::list()` filtered to running VMs, and
+/// every reading comes from `vm_counters` (the identity-fenced `/proc`
+/// process probe plus the pinned flat `vm.counters` device map). This
+/// adapter never mutates VM state and never blocks reconciliation.
+pub struct VmSampleSource {
+    runtime: chv_agent_core::vm_runtime::VmRuntime,
+}
+
+impl VmSampleSource {
+    pub fn new(runtime: chv_agent_core::vm_runtime::VmRuntime) -> Self {
+        Self { runtime }
+    }
+}
+
+fn vm_sample_err(e: chv_monitoring_core::model::SampleError) -> SamplerError {
+    SamplerError::Source(e.to_string())
+}
+
+/// One VM gauge sample; `value: None` ⇒ a non-valid quality sample
+/// (missing data is never zero).
+fn vm_gauge(
+    vm_id: &str,
+    metric: &str,
+    observed_ms: u64,
+    value: Option<SampleValue>,
+    quality: SampleQuality,
+) -> Result<Sample, SamplerError> {
+    let mut b = SampleBuilder::new(TargetKind::Vm, vm_id, metric, Source::Vmm, observed_ms)
+        .map_err(vm_sample_err)?;
+    match value {
+        Some(v) => b = b.value(v),
+        None => b = b.quality(quality),
+    }
+    b.build().map_err(vm_sample_err)
+}
+
+/// One VM counter sample with its VMM-process epoch fence.
+fn vm_counter(
+    vm_id: &str,
+    metric: &str,
+    observed_ms: u64,
+    boot_id: &str,
+    identity_epoch: &str,
+    value: u64,
+    dimension: (&str, &str),
+) -> Result<Sample, SamplerError> {
+    SampleBuilder::new(TargetKind::Vm, vm_id, metric, Source::Vmm, observed_ms)
+        .map_err(vm_sample_err)?
+        .dimension(dimension.0, dimension.1)
+        .map_err(vm_sample_err)?
+        .epoch(boot_id, identity_epoch)
+        .value(SampleValue::Integer(value))
+        .build()
+        .map_err(vm_sample_err)
+}
+
+#[async_trait::async_trait]
+impl VmRuntimeSource for VmSampleSource {
+    async fn vm_ids(&self) -> Result<Vec<String>, SamplerError> {
+        Ok(self
+            .runtime
+            .list()
+            .await
+            .into_iter()
+            .filter(|record| record.runtime_status == "Running")
+            .map(|record| record.vm_id)
+            .collect())
+    }
+
+    async fn collect_vm(&self, vm_id: &str) -> Result<Vec<Sample>, SamplerError> {
+        let counters = self
+            .runtime
+            .vm_counters(vm_id)
+            .await
+            .map_err(|e| SamplerError::Source(e.to_string()))?;
+        let observed_ms = chv_monitoring_core::node_os::unix_now_ms();
+        let mut samples = Vec::with_capacity(8);
+
+        // Host-accounted CPU: percent-of-one-core across the VMM
+        // process. Unmeasured (first interval, epoch reset, lost
+        // identity) ⇒ insufficient_samples, never zero.
+        samples.push(vm_gauge(
+            vm_id,
+            "vm.cpu.cores_used",
+            observed_ms,
+            if counters.cpu_percent_measured {
+                Some(SampleValue::Float(counters.cpu_percent / 100.0))
+            } else {
+                None
+            },
+            SampleQuality::InsufficientSamples,
+        )?);
+
+        // Host-accounted memory (VMM RSS). Unreadable identity ⇒
+        // unavailable, never zero.
+        samples.push(vm_gauge(
+            vm_id,
+            "vm.memory.host_accounted_bytes",
+            observed_ms,
+            if counters.memory_measured {
+                Some(SampleValue::Integer(counters.memory_bytes_used))
+            } else {
+                None
+            },
+            SampleQuality::Unavailable,
+        )?);
+
+        // Per-device counters, attributed to the VMM's own device ids —
+        // never summed across devices. Without the epoch fence (the
+        // VMM process identity could not be established this cycle) no
+        // counter is emitted: a counter that cannot be fenced across a
+        // VMM restart cannot be delta-subtracted safely.
+        if let Some((boot_id, identity_epoch)) = &counters.counter_epoch {
+            for (device, value) in &counters.disk_read_by_device {
+                samples.push(vm_counter(
+                    vm_id,
+                    "vm.block.read_bytes_total",
+                    observed_ms,
+                    boot_id,
+                    identity_epoch,
+                    *value,
+                    ("block_device_id", device.as_str()),
+                )?);
+            }
+            for (device, value) in &counters.disk_write_by_device {
+                samples.push(vm_counter(
+                    vm_id,
+                    "vm.block.write_bytes_total",
+                    observed_ms,
+                    boot_id,
+                    identity_epoch,
+                    *value,
+                    ("block_device_id", device.as_str()),
+                )?);
+            }
+            for (device, value) in &counters.net_rx_by_device {
+                samples.push(vm_counter(
+                    vm_id,
+                    "vm.net.rx_bytes_total",
+                    observed_ms,
+                    boot_id,
+                    identity_epoch,
+                    *value,
+                    ("interface_id", device.as_str()),
+                )?);
+            }
+            for (device, value) in &counters.net_tx_by_device {
+                samples.push(vm_counter(
+                    vm_id,
+                    "vm.net.tx_bytes_total",
+                    observed_ms,
+                    boot_id,
+                    identity_epoch,
+                    *value,
+                    ("interface_id", device.as_str()),
+                )?);
+            }
+        }
+
+        Ok(samples)
+    }
+}
+
 /// Bounded store of the latest sample per series key
 /// (metric, target, dimensions). The node surface is inherently small
 /// (registry metrics × node × interfaces/devices); the store replaces
@@ -338,9 +508,10 @@ impl LatestSamples {
 
 /// Spawn the monitoring sampler: the bounded loop plus the sink consumer
 /// that maintains [`LatestSamples`]. Returns the shared health handle
-/// for the `/metrics` surface and the store for future consumers.
+/// for the `/metrics` surface and the store for the batch sender.
 pub fn spawn_monitoring_sampler(
     node_id: String,
+    vm_runtime: chv_agent_core::vm_runtime::VmRuntime,
     config: SamplerConfig,
 ) -> (Arc<SamplerHealth>, Arc<LatestSamples>) {
     let health = Arc::new(SamplerHealth::new());
@@ -349,9 +520,9 @@ pub fn spawn_monitoring_sampler(
 
     let sources = SamplerSources {
         node: Arc::new(NodeOsSampleSource::new(node_id)),
-        // VM samples ride the repaired VmStateReport transport in this
-        // PR; PR-2's ingest moves VM collection behind the sampler.
-        vms: None,
+        // VM samples: host-accounted process gauges plus the pinned
+        // vm.counters device map, on the slower VM cadence.
+        vms: Some(Arc::new(VmSampleSource::new(vm_runtime))),
         // stord/nwd expose no attributable v1 metrics yet (volume health
         // exists but is not a registry metric) — no adapters wired, no
         // coverage faked.
@@ -368,6 +539,191 @@ pub fn spawn_monitoring_sampler(
     });
 
     (health, store)
+}
+
+/// The batch send cadence (15 s; the native spec's node batch timer).
+const SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// Hard cap per batch (mirrors the control plane's ingestion cap).
+const MAX_SAMPLES_PER_BATCH: usize = 512;
+/// Reconnect backoff bounds for the dedicated ingest client.
+const RECONNECT_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+const RECONNECT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Convert one contract sample to the wire shape. The sample was built
+/// through the contract-validating `SampleBuilder`, so this is a pure
+/// field mapping — the control plane re-validates everything anyway.
+fn sample_to_proto(
+    sample: &Sample,
+) -> control_plane_node_api::control_plane_node_api::MetricSampleV1 {
+    use control_plane_node_api::control_plane_node_api as proto;
+    proto::MetricSampleV1 {
+        target_kind: sample.target_kind.as_str().to_string(),
+        target_id: sample.target_id.clone(),
+        metric_id: sample.metric_id.clone(),
+        source: sample.source.as_str().to_string(),
+        kind: sample.kind.as_str().to_string(),
+        unit: sample.unit.as_str().to_string(),
+        observed_at_ms: sample.observed_at_ms as i64,
+        value: sample.value.as_ref().map(|v| match v {
+            SampleValue::Float(f) => proto::metric_sample_v1::Value::FloatValue(*f),
+            SampleValue::Integer(i) => proto::metric_sample_v1::Value::IntegerValue(*i),
+        }),
+        quality: sample.quality.as_str().to_string(),
+        dimensions: sample
+            .dimensions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        boot_id: sample.boot_id.clone().unwrap_or_default(),
+        identity_epoch: sample.identity_epoch.clone().unwrap_or_default(),
+    }
+}
+
+/// Spawn the node metric batch sender (ingestion contract v1): every
+/// 15 s, drain [`LatestSamples`] and ship the samples as
+/// `IngestNodeMetricBatch` requests on a **dedicated** control-plane
+/// client.
+///
+/// Delivery semantics:
+/// - `boot_id` is a **per-agent-run UUID** (a fresh value on agent
+///   start, never the host boot id): a restarted agent must never
+///   collide with its previous incarnation's sequences.
+/// - `sequence` advances only on a durably-committed outcome
+///   (`accepted`/`duplicate`); an unknown-fate transport failure
+///   retries the same sequence. If the retry carries different
+///   samples, the control plane answers `replay_conflict` and the
+///   sender starts a fresh epoch (new boot id, sequence 0) — the
+///   durable store keeps the first-committed batch, so no double
+///   counting is possible either way.
+/// - Every failure degrades to retry; nothing here can crash the
+///   agent, block reconciliation, or backpressure the sampler (the
+///   sender reads the latest-per-series store, so a stalled sender
+///   costs freshness, not memory).
+pub fn spawn_monitoring_ingest_sender(
+    node_id: String,
+    samples: Arc<LatestSamples>,
+    endpoint: String,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    ca_cert: Option<PathBuf>,
+) {
+    tokio::spawn(async move {
+        // Per-agent-run sender epoch (ingestion contract v1). Regenerated
+        // on replay_conflict/stale_sequence, which a single incarnation
+        // should never see — defensively, not as a normal path.
+        let mut boot_id = uuid::Uuid::new_v4().to_string();
+        let mut sequence: u64 = 0;
+        let mut client: Option<chv_agent_core::control_plane::ControlPlaneClient> = None;
+        let mut backoff = RECONNECT_BACKOFF_MIN;
+
+        loop {
+            // (Re)connect with bounded backoff. Connection failures are
+            // expected during control-plane outages and enrollment gaps;
+            // monitoring simply waits.
+            if client.is_none() {
+                match chv_agent_core::control_plane::ControlPlaneClient::new(
+                    &endpoint,
+                    tls_cert.as_deref(),
+                    tls_key.as_deref(),
+                    ca_cert.as_deref(),
+                )
+                .await
+                {
+                    Ok(c) => {
+                        client = Some(c);
+                        backoff = RECONNECT_BACKOFF_MIN;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "monitoring ingest client connect failed; retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, RECONNECT_BACKOFF_MAX);
+                        continue;
+                    }
+                }
+            }
+
+            tokio::time::sleep(SEND_INTERVAL).await;
+
+            let all = samples.all().await;
+            if all.is_empty() {
+                continue;
+            }
+            // Chunk to the per-batch cap; each chunk is its own batch
+            // with its own sequence.
+            for chunk in all.chunks(MAX_SAMPLES_PER_BATCH) {
+                use control_plane_node_api::control_plane_node_api as proto;
+                let request = proto::NodeMetricBatchRequest {
+                    meta: None,
+                    node_id: node_id.clone(),
+                    schema_version: 1,
+                    boot_id: boot_id.clone(),
+                    sequence,
+                    sent_at_ms: chv_monitoring_core::node_os::unix_now_ms() as i64,
+                    samples: chunk.iter().map(sample_to_proto).collect(),
+                };
+                let Some(c) = client.as_mut() else {
+                    break;
+                };
+                match c.ingest_node_metric_batch(request).await {
+                    Ok(resp) => match resp.outcome.as_str() {
+                        "accepted" | "duplicate" => {
+                            sequence = sequence.wrapping_add(1);
+                        }
+                        "rate_limited" => {
+                            // Respect the advertised backoff; the batch
+                            // was not committed, so the sequence does
+                            // not advance and the same batch retries.
+                            let pause = resp.retry_after_seconds.clamp(1, 60) as u64;
+                            tokio::time::sleep(std::time::Duration::from_secs(pause)).await;
+                        }
+                        "replay_conflict" | "stale_sequence" => {
+                            // Defensive: this incarnation's sequence
+                            // history disagrees with the durable store.
+                            // Start a fresh sender epoch — never resend
+                            // the old one.
+                            tracing::warn!(
+                                outcome = resp.outcome.as_str(),
+                                "monitoring ingest sequence conflict; starting a fresh sender epoch"
+                            );
+                            boot_id = uuid::Uuid::new_v4().to_string();
+                            sequence = 0;
+                        }
+                        "ingestion_unavailable" => {
+                            // Monitoring degraded control-plane-side;
+                            // retry on the next tick.
+                        }
+                        other => {
+                            // invalid_batch / batch_too_large /
+                            // unsupported_metric / series_cap_exceeded:
+                            // our samples violate the contract or caps.
+                            // The samples will be replaced by the next
+                            // sampler cycle; log and move on — never
+                            // spin on a poison batch.
+                            tracing::warn!(
+                                outcome = other,
+                                accepted = resp.accepted_samples,
+                                "monitoring batch rejected"
+                            );
+                            sequence = sequence.wrapping_add(1);
+                        }
+                    },
+                    Err(e) => {
+                        // Unknown fate: the batch may or may not be
+                        // committed. Drop the client (reconnect next
+                        // tick) and retry the same sequence with the
+                        // then-latest samples — the durable dedup on
+                        // the control plane arbitrates.
+                        tracing::debug!(error = %e, "monitoring ingest transport failed");
+                        client = None;
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -464,6 +820,7 @@ mod tests {
     async fn sampler_end_to_end_fills_the_store() {
         let (health, store) = spawn_monitoring_sampler(
             "node-test".to_string(),
+            test_vm_runtime(chv_hypervisor_api::VmCounters::default()).await,
             SamplerConfig {
                 interval: std::time::Duration::from_millis(50),
                 ..SamplerConfig::default()
@@ -475,5 +832,183 @@ mod tests {
         assert!(!store.is_empty().await, "store filled");
         // The sampler and consumer tasks are detached; the test runtime
         // drops them at exit once the assertions hold.
+    }
+
+    /// A VmRuntime over the mock adapter whose `vm_counters` returns the
+    /// injected value, holding one running VM (`vm-1`).
+    async fn test_vm_runtime(
+        counters: chv_hypervisor_api::VmCounters,
+    ) -> chv_agent_core::vm_runtime::VmRuntime {
+        let adapter = chv_agent_runtime_ch::MockCloudHypervisorAdapter::default();
+        *adapter.counters_result.lock().unwrap() = Some(counters);
+        let runtime = chv_agent_core::vm_runtime::VmRuntime::new(Arc::new(adapter));
+        let config = chv_hypervisor_api::VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 1024,
+            kernel_path: std::path::PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: std::path::PathBuf::from("/tmp/chv-test-vm-1.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
+        runtime.start_vm("vm-1", None).await.unwrap();
+        runtime
+    }
+
+    #[tokio::test]
+    async fn vm_samples_carry_measured_values_and_epoch_fences() {
+        let mut counters = chv_hypervisor_api::VmCounters {
+            cpu_percent: 150.0, // 1.5 cores
+            cpu_percent_measured: true,
+            memory_bytes_used: 4096,
+            memory_measured: true,
+            counter_epoch: Some(("boot-1".to_string(), "ticks-42".to_string())),
+            ..Default::default()
+        };
+        counters
+            .disk_read_by_device
+            .insert("_disk0".to_string(), 1000);
+        counters.net_rx_by_device.insert("_net1".to_string(), 500);
+        let runtime = test_vm_runtime(counters).await;
+        let source = VmSampleSource::new(runtime);
+
+        let ids = source.vm_ids().await.unwrap();
+        assert_eq!(ids, vec!["vm-1".to_string()]);
+        let samples = source.collect_vm("vm-1").await.unwrap();
+
+        let cpu = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.cpu.cores_used")
+            .expect("cpu sample");
+        assert_eq!(
+            cpu.value,
+            Some(chv_monitoring_core::model::SampleValue::Float(1.5))
+        );
+        assert_eq!(cpu.source, Source::Vmm);
+
+        let memory = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.memory.host_accounted_bytes")
+            .expect("memory sample");
+        assert_eq!(
+            memory.value,
+            Some(chv_monitoring_core::model::SampleValue::Integer(4096))
+        );
+
+        let disk = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.block.read_bytes_total")
+            .expect("per-device disk counter");
+        assert_eq!(
+            disk.value,
+            Some(chv_monitoring_core::model::SampleValue::Integer(1000))
+        );
+        assert_eq!(disk.dimensions.get("block_device_id"), Some("_disk0"));
+        assert_eq!(disk.boot_id.as_deref(), Some("boot-1"));
+        assert_eq!(disk.identity_epoch.as_deref(), Some("ticks-42"));
+
+        let net = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.net.rx_bytes_total")
+            .expect("per-device net counter");
+        assert_eq!(
+            net.value,
+            Some(chv_monitoring_core::model::SampleValue::Integer(500))
+        );
+        assert_eq!(net.dimensions.get("interface_id"), Some("_net1"));
+    }
+
+    #[tokio::test]
+    async fn unmeasured_vm_data_is_never_zero() {
+        // All-default counters: nothing measured, no epoch — the honest
+        // "VM just started / identity unknown" shape.
+        let source =
+            VmSampleSource::new(test_vm_runtime(chv_hypervisor_api::VmCounters::default()).await);
+        let samples = source.collect_vm("vm-1").await.unwrap();
+
+        let cpu = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.cpu.cores_used")
+            .expect("cpu sample");
+        assert!(cpu.value.is_none(), "unmeasured CPU is not zero");
+        assert_eq!(
+            cpu.quality,
+            chv_monitoring_core::model::SampleQuality::InsufficientSamples
+        );
+
+        let memory = samples
+            .iter()
+            .find(|s| s.metric_id == "vm.memory.host_accounted_bytes")
+            .expect("memory sample");
+        assert!(memory.value.is_none(), "unmeasured memory is not zero");
+        assert_eq!(
+            memory.quality,
+            chv_monitoring_core::model::SampleQuality::Unavailable
+        );
+
+        // No epoch ⇒ no counter samples at all (never an unfenced
+        // counter, never a zero counter).
+        assert!(samples
+            .iter()
+            .all(|s| s.kind != chv_monitoring_core::model::MetricKind::Counter));
+    }
+
+    #[test]
+    fn sample_to_proto_maps_the_wire_fields() {
+        let sample = SampleBuilder::new(
+            TargetKind::Vm,
+            "vm-1",
+            "vm.block.read_bytes_total",
+            Source::Vmm,
+            1_700_000_000_000,
+        )
+        .unwrap()
+        .dimension("block_device_id", "_disk0")
+        .unwrap()
+        .epoch("boot-1", "ticks-42")
+        .value(SampleValue::Integer(1000))
+        .build()
+        .unwrap();
+        let proto = sample_to_proto(&sample);
+        assert_eq!(proto.target_kind, "vm");
+        assert_eq!(proto.target_id, "vm-1");
+        assert_eq!(proto.metric_id, "vm.block.read_bytes_total");
+        assert_eq!(proto.source, "vmm");
+        assert_eq!(proto.kind, "counter");
+        assert_eq!(proto.unit, "bytes");
+        assert_eq!(proto.observed_at_ms, 1_700_000_000_000);
+        assert_eq!(
+            proto.value,
+            Some(
+                control_plane_node_api::control_plane_node_api::metric_sample_v1::Value::IntegerValue(
+                    1000
+                )
+            )
+        );
+        assert_eq!(proto.quality, "valid");
+        assert_eq!(proto.dimensions.get("block_device_id").unwrap(), "_disk0");
+        assert_eq!(proto.boot_id, "boot-1");
+        assert_eq!(proto.identity_epoch, "ticks-42");
+
+        // Non-valid quality ⇒ no value on the wire (missing data is
+        // never encoded as zero).
+        let hole = SampleBuilder::new(
+            TargetKind::Node,
+            "node-1",
+            "node.cpu.capacity_ratio",
+            Source::NodeOs,
+            1_700_000_000_000,
+        )
+        .unwrap()
+        .quality(SampleQuality::InsufficientSamples)
+        .build()
+        .unwrap();
+        let proto = sample_to_proto(&hole);
+        assert!(proto.value.is_none());
+        assert_eq!(proto.quality, "insufficient_samples");
     }
 }
