@@ -133,43 +133,53 @@ fn assert_run_status(
     context: &str,
 ) {
     if run.status != expected {
-        let mut diagnostics = format!(
-            "{context}: run status is {:?}, expected {:?}",
-            run.status, expected
-        );
-        if let Some(raw) = run.result_json.as_deref() {
-            let parsed = serde_json::from_str::<Value>(raw)
-                .ok()
-                .and_then(|envelope| {
-                    serde_json::from_value::<NetboxProjectionOutcome>(
-                        envelope.get("result").cloned()?,
-                    )
-                    .ok()
-                });
-            if let Some(outcome) = parsed {
-                diagnostics.push_str(&format!(
-                    "\nrunner error: {}",
-                    outcome
-                        .error
-                        .as_ref()
-                        .map(|error| error.message.as_str())
-                        .unwrap_or("(no abort error recorded)")
-                ));
-                diagnostics.push_str(&format!("\nsummary: {:?}", outcome.summary));
-                let non_succeeded: Vec<_> = outcome
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.status != NetboxEntryStatus::Succeeded)
-                    .collect();
-                diagnostics.push_str(&format!("\nnon-succeeded entries: {non_succeeded:#?}"));
-            } else {
-                diagnostics.push_str(&format!("\nraw result json: {raw}"));
-            }
-        } else {
-            diagnostics.push_str("\n(no persisted runner outcome)");
-        }
-        panic!("{diagnostics}");
+        panic!("{}", run_status_diagnostics(run, expected, context));
     }
+}
+
+/// The panic body of [`assert_run_status`] — the persisted-outcome
+/// diagnostics as a string, so callers with extra drift evidence
+/// (the qualification lane's raw-instance capture) can render one
+/// combined message.
+fn run_status_diagnostics(
+    run: &chv_controlplane_types::architecture::NetboxProjectionRun,
+    expected: NetboxProjectionRunStatus,
+    context: &str,
+) -> String {
+    let mut diagnostics = format!(
+        "{context}: run status is {:?}, expected {:?}",
+        run.status, expected
+    );
+    if let Some(raw) = run.result_json.as_deref() {
+        let parsed = serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|envelope| {
+                serde_json::from_value::<NetboxProjectionOutcome>(envelope.get("result").cloned()?)
+                    .ok()
+            });
+        if let Some(outcome) = parsed {
+            diagnostics.push_str(&format!(
+                "\nrunner error: {}",
+                outcome
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("(no abort error recorded)")
+            ));
+            diagnostics.push_str(&format!("\nsummary: {:?}", outcome.summary));
+            let non_succeeded: Vec<_> = outcome
+                .entries
+                .iter()
+                .filter(|entry| entry.status != NetboxEntryStatus::Succeeded)
+                .collect();
+            diagnostics.push_str(&format!("\nnon-succeeded entries: {non_succeeded:#?}"));
+        } else {
+            diagnostics.push_str(&format!("\nraw result json: {raw}"));
+        }
+    } else {
+        diagnostics.push_str("\n(no persisted runner outcome)");
+    }
+    diagnostics
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +260,148 @@ impl NetboxBackend {
             },
             Self::Sim(_) => None,
         }
+    }
+
+    /// Print the raw instance answers for the standard fixture's
+    /// remote-state queries — per kind, the unfiltered list, the
+    /// by-architecture list, and the natural-key probe — plus what
+    /// the runner's own client parses for the same queries at the
+    /// same instant (raw rows + zero parsed = a parsing problem;
+    /// zero rows + zero parsed = the instance; rows both places =
+    /// the fetch at run time saw something else). Fixture-keyed
+    /// (vid 42, 10.42.0.0/24, chv-node-01, vm-01, backend,
+    /// 10.42.0.5; limit 50 = the client's PAGE_LIMIT) because the
+    /// scenarios share the standard fixture shape; the query forms
+    /// mirror the client's wire shapes. Rendered into the scenario's
+    /// panic message (ADR-009 bans direct console writes in library
+    /// crates — the panic output is what the lane's run.log
+    /// captures).
+    async fn drift_evidence(&self, architecture_id: &str) -> String {
+        let cf = format!("cf_chv_architecture_id={architecture_id}");
+        let queries: Vec<(String, &str)> = vec![
+            ("/api/ipam/vlans/?limit=50".into(), "vlans unfiltered"),
+            (
+                format!("/api/ipam/vlans/?{cf}&limit=50"),
+                "vlans by architecture",
+            ),
+            (
+                "/api/ipam/vlans/?vid=42&limit=50".into(),
+                "vlan probe (vid 42)",
+            ),
+            ("/api/ipam/prefixes/?limit=50".into(), "prefixes unfiltered"),
+            (
+                format!("/api/ipam/prefixes/?{cf}&limit=50"),
+                "prefixes by architecture",
+            ),
+            (
+                "/api/ipam/prefixes/?prefix=10.42.0.0/24&limit=50".into(),
+                "prefix probe",
+            ),
+            ("/api/dcim/devices/?limit=50".into(), "devices unfiltered"),
+            (
+                format!("/api/dcim/devices/?{cf}&limit=50"),
+                "devices by architecture",
+            ),
+            (
+                "/api/dcim/devices/?name=chv-node-01&limit=50".into(),
+                "device probe",
+            ),
+            (
+                "/api/virtualization/virtual-machines/?limit=50".into(),
+                "virtual machines unfiltered",
+            ),
+            (
+                format!("/api/virtualization/virtual-machines/?{cf}&limit=50"),
+                "virtual machines by architecture",
+            ),
+            (
+                "/api/virtualization/virtual-machines/?name=vm-01&limit=50".into(),
+                "vm probe",
+            ),
+            (
+                "/api/virtualization/interfaces/?limit=50".into(),
+                "interfaces unfiltered",
+            ),
+            (
+                format!("/api/virtualization/interfaces/?{cf}&limit=50"),
+                "interfaces by architecture",
+            ),
+            (
+                "/api/virtualization/interfaces/?name=backend&limit=50".into(),
+                "interface probe (name only, VM half client-side)",
+            ),
+            (
+                "/api/ipam/ip-addresses/?limit=50".into(),
+                "ip addresses unfiltered",
+            ),
+            (
+                format!("/api/ipam/ip-addresses/?{cf}&limit=50"),
+                "ip addresses by architecture",
+            ),
+            (
+                "/api/ipam/ip-addresses/?address=10.42.0.5&limit=50".into(),
+                "ip probe",
+            ),
+        ];
+        let mut evidence = String::new();
+        for (path, label) in queries {
+            match self.raw_get(&path).await {
+                Some(body) => {
+                    evidence.push_str(&format!("\n\n{label} ({path}): {body}"));
+                }
+                None => {
+                    evidence.push_str(&format!("\n\n{label}: (simulator arm — in-process)"));
+                }
+            }
+        }
+        // The client half: what the runner's own client (same
+        // construction the worker's test factory uses) parses for the
+        // same queries at this instant. Raw rows + zero parsed = a
+        // parsing problem; zero rows + zero parsed = the instance;
+        // rows both places = the fetch at run time saw something
+        // else (timing).
+        if let Self::Real(live) = self {
+            let client = NetBoxClient::new_unchecked_for_tests(
+                live.base_url(),
+                NetBoxToken::new(live.token().to_string()),
+            )
+            .expect("drift-evidence client");
+            let record =
+                |evidence: &mut String,
+                 label: &str,
+                 found: &[chv_netbox_adapter::RemoteNetBoxObject]| {
+                    let ids: Vec<i64> = found.iter().map(|entry| entry.netbox_id).collect();
+                    evidence.push_str(&format!(
+                        "\n\n{label} (client): {} rows, ids {ids:?}",
+                        found.len()
+                    ));
+                };
+            if let Ok(found) = client.get_vlans_by_vid(42).await {
+                record(&mut evidence, "vlan probe (vid 42)", &found);
+            }
+            if let Ok(found) = client.get_prefixes_by_cidr("10.42.0.0/24").await {
+                record(&mut evidence, "prefix probe", &found);
+            }
+            if let Ok(found) = client.get_devices_by_name("chv-node-01").await {
+                record(&mut evidence, "device probe", &found);
+            }
+            if let Ok(found) = client.get_virtual_machines_by_name("vm-01").await {
+                record(&mut evidence, "vm probe", &found);
+            }
+            if let Ok(found) = client.get_interfaces_by_name("backend", "vm-01").await {
+                record(&mut evidence, "interface probe", &found);
+            }
+            if let Ok(found) = client.get_ip_addresses_by_address("10.42.0.5").await {
+                record(&mut evidence, "ip probe", &found);
+            }
+            if let Ok(found) = client
+                .list_vlans_by_architecture("chv_architecture_id", architecture_id)
+                .await
+            {
+                record(&mut evidence, "vlans by architecture", &found);
+            }
+        }
+        evidence
     }
 
     /// Bulk-load objects at caller-chosen natural keys and ids (sim:
@@ -655,6 +807,19 @@ async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBac
     worker_for(&db).tick().await.expect("tick succeeds");
 
     let run = get_run(&db, "netrun-reexport").await;
+    if run.status != NetboxProjectionRunStatus::Succeeded {
+        // Drift evidence: what the instance answers RIGHT NOW for the
+        // runner's exact queries, appended to the standard persisted
+        // outcome diagnostics (the outcome says what the plan decided;
+        // only this says what the instance told the fetch that decided
+        // it — the instrument that settled qualification run
+        // 37983487636's five-vs-one mystery).
+        panic!(
+            "{}\n\n--- drift evidence ---{}",
+            run_status_diagnostics(&run, NetboxProjectionRunStatus::Succeeded, "re-export"),
+            backend.drift_evidence("topo-sim").await
+        );
+    }
     assert_run_status(&run, NetboxProjectionRunStatus::Succeeded, "re-export");
     // Secret-freedom: the recorded outcome (provenance envelope +
     // executed plan, the document the BFF later serves) carries no
