@@ -17,16 +17,27 @@
 //!
 //! # Backend abstraction
 //!
-//! [`NetboxBackend`] is the seam the scenarios drive. Today it has one
-//! variant, the simulator; PR 5 (lane 3, real-NetBox qualification)
-//! adds a `Real { base_url, token }` variant behind
-//! `NETBOX_QUALIFICATION_URL`/`NETBOX_QUALIFICATION_TOKEN` so the same
-//! scenario code runs against both backends — `seed` becomes
-//! API-driven creation, `state` a list-via-API dump, `reset` deletion
-//! of the created objects, and fault injection is unsupported (the
-//! outage scenarios must be skipped or faked there, which is why
-//! [`NetboxBackend::inject_fault`] reports support instead of being
-//! infallible).
+//! [`NetboxBackend`] is the seam the scenarios drive. It has two
+//! variants:
+//!
+//! - the in-process simulator (ADR-024 lane 2), the default for the
+//!   always-on `#[tokio::test]` scenarios below, and
+//! - `Real`, a live NetBox REST API behind
+//!   `NETBOX_QUALIFICATION_URL`/`NETBOX_QUALIFICATION_TOKEN`
+//!   (ADR-024 lane 3, the qualification lane): `seed` is API-driven
+//!   creation, `state` a list-via-API dump normalized to the sim's
+//!   dump shape, `reset` deletion of every object in the six
+//!   families, and fault injection is unsupported — the outage
+//!   scenarios skip their fault leg against a real NetBox, which is
+//!   why [`NetboxBackend::inject_fault`] reports support instead of
+//!   being infallible.
+//!
+//! The real arm runs through the five `qualification_*` wrappers
+//! (ignored by default; `scripts/netbox-qualify.sh` runs them with
+//! `-- --ignored` against a disposable compose-hosted NetBox). The
+//! wrappers serialize on a static async mutex and reset the instance
+//! between scenarios, because a real NetBox — unlike a fresh
+//! per-test simulator — is shared state.
 //!
 //! # Ported semantics — and what the state-based swap revealed
 //!
@@ -87,37 +98,37 @@ use chv_netbox_adapter::{
     NetBoxClient, NetBoxKind, NetBoxObject, NetBoxToken, NetboxEntryStatus, NetboxPlanAction,
     NetboxProjectionInput, NetboxProjectionRunner,
 };
-use chv_netbox_sim::{FaultConfig, NetboxSim, NetboxSimConfig, SeedPayload, SimKind};
+use chv_netbox_sim::capture::normalize_object;
+use chv_netbox_sim::{
+    FaultConfig, LiveNetBox, NetboxSim, NetboxSimConfig, SeedPayload, SimKind,
+    QUALIFICATION_TOKEN_ENV, QUALIFICATION_URL_ENV,
+};
 use serde_json::{json, Value};
 
 use crate::netbox_projection_worker_tests::{
     add_succeeded_apply_run, aid, appid, audit_events, backdate_apply_run, desired_objects,
     fixture_architecture, get_run, model_json, outcome_of, post_apply_runs,
-    setup_post_apply_config, setup_projection, setup_topology_and_version, vid, worker_for, SITE,
-    TOKEN,
+    setup_post_apply_config_with_token, setup_projection_with_token, setup_topology_and_version,
+    vid, worker_for, SITE, TOKEN,
 };
 
 // ---------------------------------------------------------------------------
-// Backend abstraction (PR 5 adds the real-NetBox qualification variant)
+// Backend abstraction (simulator + real-NetBox qualification variant)
 // ---------------------------------------------------------------------------
 
 /// The NetBox backend the composed scenarios run against.
-///
-/// Only the operations the five scenarios need; every method documents
-/// what the PR 5 `Real { base_url, token }` variant will do instead.
 enum NetboxBackend {
     /// The in-process stateful simulator (ADR-024 lane 2).
     Sim(NetboxSim),
+    /// A live NetBox REST API (ADR-024 lane 3, the qualification
+    /// lane) — see the module docs.
+    Real(LiveNetBox),
 }
 
 impl NetboxBackend {
     /// Start the suite's default backend: an in-process simulator on
     /// an ephemeral port that accepts exactly the projection config's
     /// token (so a successful run also proves authenticated writes).
-    ///
-    /// PR 5: when `NETBOX_QUALIFICATION_URL` +
-    /// `NETBOX_QUALIFICATION_TOKEN` are set, this starts the real
-    /// backend instead and the same scenarios run against it.
     async fn start() -> Self {
         Self::Sim(
             NetboxSim::start(NetboxSimConfig::new(TOKEN))
@@ -126,27 +137,78 @@ impl NetboxBackend {
         )
     }
 
+    /// Start the qualification backend from
+    /// `NETBOX_QUALIFICATION_URL` + `NETBOX_QUALIFICATION_TOKEN`.
+    /// Fails loudly (panics naming both variables) when either is
+    /// unset: the qualification wrappers are `#[ignore]`d precisely so
+    /// a default `cargo test` never reaches this, and a run without
+    /// the pair is a harness misconfiguration, not a skip.
+    async fn start_qualification() -> Self {
+        let url = std::env::var(QUALIFICATION_URL_ENV).unwrap_or_else(|_| {
+            panic!(
+                "the real-NetBox qualification lane requires ${QUALIFICATION_URL_ENV} \
+                 (and ${QUALIFICATION_TOKEN_ENV}) — run it through \
+                 scripts/netbox-qualify.sh or set both variables"
+            )
+        });
+        let token = std::env::var(QUALIFICATION_TOKEN_ENV).unwrap_or_else(|_| {
+            panic!(
+                "the real-NetBox qualification lane requires ${QUALIFICATION_TOKEN_ENV} \
+                 (and ${QUALIFICATION_URL_ENV}) — run it through \
+                 scripts/netbox-qualify.sh or set both variables"
+            )
+        });
+        Self::Real(LiveNetBox::new(&url, &token))
+    }
+
     /// The endpoint the projection config stores.
     fn base_url(&self) -> &str {
         match self {
             Self::Sim(sim) => sim.base_url(),
+            Self::Real(live) => live.base_url(),
         }
     }
 
     /// The token the projection config stores for this backend.
     fn token(&self) -> String {
-        TOKEN.to_string()
+        match self {
+            Self::Sim(_) => TOKEN.to_string(),
+            Self::Real(live) => live.token().to_string(),
+        }
     }
 
     /// Bulk-load objects at caller-chosen natural keys and ids (sim:
     /// the `/__seed` control plane; real backend: API-driven
-    /// creation).
-    fn seed(&self, payload: &Value) {
+    /// creation — the caller-chosen id is NetBox's to assign, and
+    /// the scenarios only ever use `seed` on freshly-reset state).
+    async fn seed(&self, payload: &Value) {
         match self {
             Self::Sim(sim) => {
                 let parsed: SeedPayload =
                     serde_json::from_value(payload.clone()).expect("seed payload parses");
                 sim.seed(&parsed).expect("seed succeeds");
+            }
+            Self::Real(live) => {
+                for kind in SimKind::ALL {
+                    for entry in payload[kind.collection()]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        let mut body = entry.clone();
+                        // The sim's seed format allows caller-chosen
+                        // ids and timestamps; a live NetBox assigns
+                        // its own.
+                        if let Some(map) = body.as_object_mut() {
+                            for field in ["id", "created", "last_updated"] {
+                                map.remove(field);
+                            }
+                        }
+                        live.create(kind, &body)
+                            .await
+                            .expect("qualification seed create succeeds");
+                    }
+                }
             }
         }
     }
@@ -155,43 +217,72 @@ impl NetboxBackend {
     /// (sim: the control-plane dump; real backend: a list-via-API
     /// dump normalized to the same shape).
     ///
-    /// The shape is a load-bearing contract for PR 5's qualification
-    /// mode: a top-level `objects` map keyed by collection name
+    /// The shape is a load-bearing contract for the qualification
+    /// lane: a top-level `objects` map keyed by collection name
     /// (`devices`, `virtual_machines`, `interfaces`, `prefixes`,
     /// `vlans`, `ip_addresses`), each collection an array in
     /// **deterministic ascending-id order** (the sim dumps in id
-    /// order; a real backend must sort likewise). Assertions index
+    /// order; the real backend sorts likewise). Assertions index
     /// this shape directly, and [`assert_state_unchanged`] byte-
     /// compares full dumps — the deterministic ordering is what makes
     /// that comparison meaningful.
-    fn state(&self) -> Value {
+    ///
+    /// The real arm reduces every live row through
+    /// [`normalize_object`] — the drift-sensitive core of the lane:
+    /// everything that survives it (field names, nested-relation
+    /// shapes, choice labels) is exactly what the scenarios pin, and
+    /// a real NetBox that outgrows the simulator's shapes fails here
+    /// rather than silently drifting. `faults`/`next_id` are
+    /// simulator-only dump keys (`null` on the real arm).
+    async fn state(&self) -> Value {
         match self {
             Self::Sim(sim) => {
                 let state = sim.shared().lock();
                 state.dump(sim.base_url())
             }
+            Self::Real(live) => {
+                let mut objects = serde_json::Map::new();
+                for kind in SimKind::ALL {
+                    let mut rows = Vec::new();
+                    for row in live.list(kind).await.expect("qualification list succeeds") {
+                        rows.push(normalize_object(kind, &row, live.base_url()));
+                    }
+                    rows.sort_by_key(|row| row["id"].as_i64().unwrap_or_default());
+                    objects.insert(kind.collection().to_string(), Value::Array(rows));
+                }
+                json!({
+                    "objects": objects,
+                    "faults": Value::Null,
+                    "next_id": Value::Null,
+                })
+            }
         }
     }
 
     /// Clear objects and faults (sim: `/__reset`; real backend: delete
-    /// the objects this suite created).
-    #[allow(dead_code)] // PR 5's qualification mode resets between scenario legs
-    fn reset(&self) {
+    /// every object in the six families, children first).
+    async fn reset(&self) {
         match self {
             Self::Sim(sim) => sim.reset(),
+            Self::Real(live) => {
+                live.delete_all()
+                    .await
+                    .expect("qualification reset deletes everything");
+            }
         }
     }
 
     /// Inject a fault, globally or for one kind. Returns whether the
     /// backend supports fault injection at all — a real NetBox has no
-    /// control plane, so PR 5's qualification mode must skip or fake
-    /// the outage scenarios when this returns `false`.
+    /// control plane, so the qualification lane skips the outage
+    /// scenarios' fault legs when this returns `false`.
     fn inject_fault(&self, scope: Option<SimKind>, fault: FaultConfig) -> bool {
         match self {
             Self::Sim(sim) => {
                 sim.shared().lock().set_fault(scope, fault);
                 true
             }
+            Self::Real(_) => false,
         }
     }
 
@@ -207,9 +298,15 @@ impl NetboxBackend {
                     state.set_fault(Some(kind), FaultConfig::default());
                 }
             }
+            Self::Real(_) => {}
         }
     }
 }
+
+/// Serializes the qualification wrappers: the scenarios assume an
+/// empty, exclusively-held NetBox, which a fresh per-test simulator
+/// provides by construction but a shared real instance does not.
+static QUALIFICATION_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // State-dump helpers (the request-counting assertions' replacements)
@@ -342,11 +439,9 @@ fn runner_for(backend: &NetboxBackend) -> NetboxProjectionRunner {
 
 /// Happy path + idempotency + update + removal, in numbered phases
 /// mirroring the plan's scenario lines — every wiremock request-count
-/// assertion replaced by a state assertion on the simulator's dump.
-#[tokio::test]
-async fn full_lifecycle_apply_to_projection_to_reapply() {
+/// assertion replaced by a state assertion on the backend's dump.
+async fn full_lifecycle_apply_to_projection_to_reapply_inner(backend: &NetboxBackend) {
     let db = TestDb::new().await;
-    let backend = NetboxBackend::start().await;
     let model_v1 = model_json();
 
     // -----------------------------------------------------------------
@@ -359,7 +454,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     setup_topology_and_version(&db, "topo-sim", "v-1", &model_v1, 1).await;
     add_succeeded_apply_run(&db, "apply-1", "topo-sim", "v-1").await;
     backdate_apply_run(&db, "apply-1", "2020-01-01T00:00:00Z").await;
-    setup_post_apply_config(&db, backend.base_url(), "topo-sim").await;
+    setup_post_apply_config_with_token(&db, backend.base_url(), "topo-sim", &backend.token()).await;
 
     // -----------------------------------------------------------------
     // Phase 2 — one worker tick: the post-apply sweep enqueues a
@@ -395,7 +490,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     // also proves every request was authenticated: the sim rejects
     // unauthenticated requests with 401, and it accepts exactly the
     // configured token.
-    let state = backend.state();
+    let state = backend.state().await;
     assert_one_object_per_kind(&state);
 
     let vm = find(&state, "virtual_machines", "name", "vm-01").expect("vm in state");
@@ -475,7 +570,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     // against a hand-mirrored remote, here as a state-based
     // assertion against what the projection itself wrote).
     // -----------------------------------------------------------------
-    let before = backend.state();
+    let before = backend.state().await;
     enqueue_manual_export(&db, "netrun-reexport", "topo-sim", "v-1").await;
 
     worker_for(&db).tick().await.expect("tick succeeds");
@@ -498,7 +593,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     assert_eq!(outcome.summary.succeeded, 0);
     assert_eq!(outcome.summary.failed, 0);
     assert_eq!(outcome.plan.summary.create, 0);
-    assert_state_unchanged(&before, &backend.state(), "re-export is all no_op");
+    assert_state_unchanged(&before, &backend.state().await, "re-export is all no_op");
 
     // -----------------------------------------------------------------
     // Phase 4 — topology update at v2 (one modified, one removed, one
@@ -570,7 +665,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     // the phase-2 objects, and the stale mark is visible on the
     // removed server's device — which is still present (mark_stale
     // retention never deletes).
-    let state = backend.state();
+    let state = backend.state().await;
     assert_eq!(
         total_objects(&state),
         8,
@@ -615,7 +710,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     // Phase 5 — idempotency: another tick with no new apply enqueues
     // nothing and leaves the simulator state byte-unchanged.
     // -----------------------------------------------------------------
-    let before = backend.state();
+    let before = backend.state().await;
     worker_for(&db)
         .tick()
         .await
@@ -627,7 +722,7 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     );
     assert_state_unchanged(
         &before,
-        &backend.state(),
+        &backend.state().await,
         "the idempotency tick writes nothing",
     );
 
@@ -658,6 +753,24 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
     );
 }
 
+#[tokio::test]
+async fn full_lifecycle_apply_to_projection_to_reapply() {
+    full_lifecycle_apply_to_projection_to_reapply_inner(&NetboxBackend::start().await).await;
+}
+
+/// The same lifecycle against a live NetBox (ADR-024 lane 3). Ignored
+/// by default — a real instance is provisioned and serialized by the
+/// qualification harness (`scripts/netbox-qualify.sh`), never by a
+/// bare `cargo test`.
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_full_lifecycle_apply_to_projection_to_reapply() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    full_lifecycle_apply_to_projection_to_reapply_inner(&backend).await;
+}
+
 // ---------------------------------------------------------------------------
 // Test B — foreign objects are never modified (state-based)
 // ---------------------------------------------------------------------------
@@ -669,12 +782,10 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
 /// not even its `last_updated` moved, so no write of any method
 /// touched it — and no chv ownership fields were added. The unoccupied
 /// kinds still create.
-#[tokio::test]
-async fn foreign_object_at_natural_key_is_never_written() {
+async fn foreign_object_at_natural_key_is_never_written_inner(backend: &NetboxBackend) {
     let db = TestDb::new().await;
-    let backend = NetboxBackend::start().await;
 
-    setup_projection(
+    setup_projection_with_token(
         &db,
         backend.base_url(),
         "topo-foreign",
@@ -682,17 +793,20 @@ async fn foreign_object_at_natural_key_is_never_written() {
         "apply-foreign",
         "netrun-foreign",
         NetboxRetentionPolicy::MarkStale,
+        &backend.token(),
     )
     .await;
 
     // A foreign VLAN (no ownership marker at all) squatting on the
     // desired vid, seeded through the control plane at a chosen id.
-    backend.seed(&json!({
-        "vlans": [
-            { "id": 55, "vid": 42, "name": "netops-backend" }
-        ]
-    }));
-    let before = backend.state();
+    backend
+        .seed(&json!({
+            "vlans": [
+                { "id": 55, "vid": 42, "name": "netops-backend" }
+            ]
+        }))
+        .await;
+    let before = backend.state().await;
     let foreign_before = vlan_with_vid(&before, 42)
         .expect("the seeded foreign vlan")
         .clone();
@@ -720,7 +834,7 @@ async fn foreign_object_at_natural_key_is_never_written() {
     // the ONLY vlan: the projection never created over the occupied
     // natural key. The five unoccupied kinds created exactly one
     // object each.
-    let state = backend.state();
+    let state = backend.state().await;
     let vlans = collection(&state, "vlans");
     assert_eq!(
         vlans.len(),
@@ -751,6 +865,23 @@ async fn foreign_object_at_natural_key_is_never_written() {
     );
 }
 
+#[tokio::test]
+async fn foreign_object_at_natural_key_is_never_written() {
+    foreign_object_at_natural_key_is_never_written_inner(&NetboxBackend::start().await).await;
+}
+
+/// The foreign-object guarantee against a live NetBox (ADR-024
+/// lane 3). Ignored by default — see
+/// [`qualification_full_lifecycle_apply_to_projection_to_reapply`].
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_foreign_object_at_natural_key_is_never_written() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    foreign_object_at_natural_key_is_never_written_inner(&backend).await;
+}
+
 // ---------------------------------------------------------------------------
 // Test C — a NetBox outage never changes the apply result
 // ---------------------------------------------------------------------------
@@ -765,10 +896,8 @@ async fn foreign_object_at_natural_key_is_never_written() {
 /// The outage is injected through the simulator's fault control plane
 /// (a global 5xx), replacing the wiremock suite's hand-mounted outage
 /// stubs and its dead-endpoint fixture (`http://127.0.0.1:1`).
-#[tokio::test]
-async fn netbox_outage_never_changes_the_apply_result() {
+async fn netbox_outage_never_changes_the_apply_result_inner(backend: &NetboxBackend) {
     let db = TestDb::new().await;
-    let backend = NetboxBackend::start().await;
     let model = model_json();
 
     // Phase 1 — topology + v1 + a SUCCEEDED apply run whose terminal
@@ -784,7 +913,8 @@ async fn netbox_outage_never_changes_the_apply_result() {
     .execute(&db.pool)
     .await
     .expect("stamp apply-run terminal timestamps");
-    setup_post_apply_config(&db, backend.base_url(), "topo-outage").await;
+    setup_post_apply_config_with_token(&db, backend.base_url(), "topo-outage", &backend.token())
+        .await;
 
     // Phase 2 — inject the outage (every request answers 5xx) and
     // tick: the sweep enqueues the post_apply run and the claim loop
@@ -840,7 +970,7 @@ async fn netbox_outage_never_changes_the_apply_result() {
         run.next_attempt_at
     );
     assert_eq!(
-        total_objects(&backend.state()),
+        total_objects(&backend.state().await),
         0,
         "the faulted attempt wrote nothing to NetBox"
     );
@@ -897,7 +1027,35 @@ async fn netbox_outage_never_changes_the_apply_result() {
         run.attempt_count, 1,
         "the successful retry did not consume an attempt"
     );
-    assert_one_object_per_kind(&backend.state());
+    assert_one_object_per_kind(&backend.state().await);
+}
+
+#[tokio::test]
+async fn netbox_outage_never_changes_the_apply_result() {
+    netbox_outage_never_changes_the_apply_result_inner(&NetboxBackend::start().await).await;
+}
+
+/// The outage isolation against a live NetBox (ADR-024 lane 3).
+/// Ignored by default — see
+/// [`qualification_full_lifecycle_apply_to_projection_to_reapply`].
+/// A real NetBox has no fault control plane, so this wrapper asserts
+/// the scenario's early-return path: the fault leg reports itself
+/// unsupported and the scenario skips without touching the instance
+/// (the outage semantics themselves stay simulator-owned — a real
+/// outage cannot be scheduled from a test).
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_netbox_outage_never_changes_the_apply_result() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    netbox_outage_never_changes_the_apply_result_inner(&backend).await;
+    // The real arm must have taken the unsupported-fault early return;
+    // a simulator reaching this wrapper would be a harness bug.
+    assert!(
+        !matches!(&backend, NetboxBackend::Sim(_)),
+        "the simulator arm must not run through the qualification wrapper"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -918,17 +1076,18 @@ async fn netbox_outage_never_changes_the_apply_result() {
 /// fails the run during the plan's remote-state fetch instead, and the
 /// half-created VLAN is seeded through the control plane at exactly
 /// the body the projection's own create would have sent.
-#[tokio::test]
-async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
+async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create_inner(
+    backend: &NetboxBackend,
+) {
     let db = TestDb::new().await;
-    let backend = NetboxBackend::start().await;
     let model = model_json();
 
     // Phase 1 — topology + v1 + a SUCCEEDED apply run + a
     // post-apply-enabled config.
     setup_topology_and_version(&db, "topo-partial", "v-1", &model, 1).await;
     add_succeeded_apply_run(&db, "apply-partial", "topo-partial", "v-1").await;
-    setup_post_apply_config(&db, backend.base_url(), "topo-partial").await;
+    setup_post_apply_config_with_token(&db, backend.base_url(), "topo-partial", &backend.token())
+        .await;
 
     // The transient failure: every prefix request answers 5xx. Check
     // fault support BEFORE seeding so a backend without a fault
@@ -959,7 +1118,9 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
         .into_iter()
         .find(|object| matches!(object, NetBoxObject::Vlan(_)))
         .expect("desired vlan");
-    backend.seed(&json!({ "vlans": [vlan_seed_body(&vlan)] }));
+    backend
+        .seed(&json!({ "vlans": [vlan_seed_body(&vlan)] }))
+        .await;
 
     worker_for(&db).tick().await.expect("tick succeeds");
 
@@ -988,7 +1149,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
 
     // State after the failed attempt: still exactly the seeded VLAN —
     // the faulted attempt created nothing.
-    let state = backend.state();
+    let state = backend.state().await;
     assert_eq!(total_objects(&state), 1);
     assert!(
         vlan_with_vid(&state, 42).is_some(),
@@ -999,7 +1160,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
     // re-claims the run (the backoff gates the claim) nor re-enqueues
     // one (a post_apply run of any status counts as already
     // attempted); the state is unchanged.
-    let before = backend.state();
+    let before = backend.state().await;
     worker_for(&db).tick().await.expect("backoff tick succeeds");
     assert_eq!(
         post_apply_runs(&db, "topo-partial").await.len(),
@@ -1008,7 +1169,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
     );
     assert_state_unchanged(
         &before,
-        &backend.state(),
+        &backend.state().await,
         "the backoff prevented an early retry",
     );
 
@@ -1046,7 +1207,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
     // half-created VLAN by its natural key instead of duplicating it
     // (the wiremock suite proved this as a POST count of 1 on the
     // vlan endpoint; here the resulting state itself is the proof).
-    let state = backend.state();
+    let state = backend.state().await;
     assert_one_object_per_kind(&state);
     let vlans = collection(&state, "vlans");
     assert_eq!(
@@ -1069,7 +1230,7 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
         retention: RetentionPolicy::MarkStale,
         names: CustomFieldNames::new("chv_"),
     };
-    let plan = runner_for(&backend)
+    let plan = runner_for(backend)
         .dry_run(&input)
         .await
         .expect("dry run computes");
@@ -1081,6 +1242,32 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
     );
     assert_eq!(plan.summary.conflict, 0);
     assert_eq!(plan.summary.stale, 0);
+}
+
+#[tokio::test]
+async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
+    partial_failure_requeues_and_retry_resumes_without_duplicate_create_inner(
+        &NetboxBackend::start().await,
+    )
+    .await;
+}
+
+/// The resume-without-duplicate guarantee against a live NetBox
+/// (ADR-024 lane 3). Ignored by default — see
+/// [`qualification_full_lifecycle_apply_to_projection_to_reapply`].
+/// Like the outage scenario, the mid-plan failure leg is
+/// simulator-only; the real arm asserts the early-return path.
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    partial_failure_requeues_and_retry_resumes_without_duplicate_create_inner(&backend).await;
+    assert!(
+        !matches!(&backend, NetboxBackend::Sim(_)),
+        "the simulator arm must not run through the qualification wrapper"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,15 +1284,14 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
 /// manual one, and the claim loop executes the single run to
 /// completion — one execution, one object per mapped kind in the
 /// NetBox state.
-#[tokio::test]
-async fn manual_double_enqueue_coalesces_to_one_active_run() {
+async fn manual_double_enqueue_coalesces_to_one_active_run_inner(backend: &NetboxBackend) {
     let db = TestDb::new().await;
-    let backend = NetboxBackend::start().await;
     let model = model_json();
 
     setup_topology_and_version(&db, "topo-coalesce", "v-1", &model, 1).await;
     add_succeeded_apply_run(&db, "apply-coalesce", "topo-coalesce", "v-1").await;
-    setup_post_apply_config(&db, backend.base_url(), "topo-coalesce").await;
+    setup_post_apply_config_with_token(&db, backend.base_url(), "topo-coalesce", &backend.token())
+        .await;
 
     // The first manual export — the same repository call the BFF's
     // export handler makes.
@@ -1164,5 +1350,22 @@ async fn manual_double_enqueue_coalesces_to_one_active_run() {
 
     // One execution, one create per mapped kind (the wiremock suite's
     // POST count of 6, as the resulting NetBox state).
-    assert_one_object_per_kind(&backend.state());
+    assert_one_object_per_kind(&backend.state().await);
+}
+
+#[tokio::test]
+async fn manual_double_enqueue_coalesces_to_one_active_run() {
+    manual_double_enqueue_coalesces_to_one_active_run_inner(&NetboxBackend::start().await).await;
+}
+
+/// The coalescing guarantee against a live NetBox (ADR-024 lane 3).
+/// Ignored by default — see
+/// [`qualification_full_lifecycle_apply_to_projection_to_reapply`].
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_manual_double_enqueue_coalesces_to_one_active_run() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    manual_double_enqueue_coalesces_to_one_active_run_inner(&backend).await;
 }

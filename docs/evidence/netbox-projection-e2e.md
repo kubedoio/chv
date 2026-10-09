@@ -70,15 +70,24 @@ Machine tests prove:
   export shows the 409 `NETBOX_RUN_ACTIVE` banner, and the upsert wire body
   carries the token while config/get exposes only `token_set`.
 
-Qualification boundary: the composed suite runs against `chv-netbox-sim`
-(ADR-024) — a first-party stateful emulator of the bounded wire subset the
-adapter exercises, whose read side does reflect mid-phase writes; it is
-still not a real NetBox. Real-NetBox qualification — including
-version-specific custom-field provisioning and pagination behavior — is a
-tracked follow-up (plan: out-of-scope list; delivery tracked in #586's
-PR 5). The apply-side leg is seeded via
-the existing test fixtures rather than driving the apply state machine
-itself.
+Qualification boundary: the composed suite's always-on arm runs
+against `chv-netbox-sim` (ADR-024) — a first-party stateful emulator
+of the bounded wire subset the adapter exercises, whose read side
+does reflect mid-phase writes; it is still not a real NetBox. The
+real-NetBox qualification lane exists now (ADR-024 decision 4): the
+same five scenarios run as `qualification_*` wrappers (ignored by
+default) against a pinned, disposable NetBox stood up by
+`deploy/netbox-qualification/docker-compose.yml` and driven by
+`scripts/netbox-qualify.sh` (`make netbox-qualify`), on a weekly
+schedule plus manual dispatch via
+`.github/workflows/netbox-qualification.yml`. `--record` re-captures
+the golden `netbox4` fixtures from the live instance — the tripwire
+that turns the fixtures from authored hypotheses into recorded
+evidence. The first real run's results are recorded below. The
+apply-side leg is seeded via the existing test fixtures rather than
+driving the apply state machine itself.
+
+<!-- first-run -->
 
 Focused verification (all run, all green):
 

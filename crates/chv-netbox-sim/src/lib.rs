@@ -62,7 +62,12 @@
 //!   mapping contract's kind order creates children before parents,
 //!   so the write path must accept not-yet-existing references.
 //!   Nested relations carry a synthetic id from a per-instance
-//!   registry (or the real row id when the target exists).
+//!   registry (or the real row id when the target exists). A
+//!   reference that explicitly carries an `id` and matches no row —
+//!   the shape the fixture recorder's seed files provide — honors
+//!   that id (the registry remembers it and its counter stays
+//!   monotonic), so re-seeded captures reproduce the relation ids
+//!   the capture observed.
 //! - Maskless IP addresses are stored with a `/32` (v4) or `/128`
 //!   (v6) suffix, like NetBox's own normalization.
 //! - IP-address uniqueness keys on the full with-mask address
@@ -99,6 +104,7 @@
 //! handlers (malformed input is a 400, unknown ids a 404), and
 //! serde output uses sorted maps so responses are byte-stable.
 
+pub mod capture;
 pub mod config;
 pub mod fault;
 pub mod kind;
@@ -106,6 +112,7 @@ pub mod server;
 pub mod state;
 pub mod wire;
 
+pub use capture::{CaptureError, LiveNetBox, QUALIFICATION_TOKEN_ENV, QUALIFICATION_URL_ENV};
 pub use config::NetboxSimConfig;
 pub use fault::FaultConfig;
 pub use kind::SimKind;
