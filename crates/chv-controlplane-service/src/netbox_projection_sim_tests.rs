@@ -237,6 +237,21 @@ impl NetboxBackend {
         }
     }
 
+    /// Raw (unparsed, unnormalized) body of an authenticated GET —
+    /// drift diagnostics for the qualification lane: when the
+    /// tripwire fires, this is what the instance actually answered
+    /// for the runner's exact queries. `None` on the simulator arm
+    /// (in-process state needs no evidence form).
+    async fn raw_get(&self, target: &str) -> Option<String> {
+        match self {
+            Self::Real(live) => match live.raw_get(target).await {
+                Ok((status, body)) => Some(format!("HTTP {status}: {body}")),
+                Err(error) => Some(format!("request failed: {error}")),
+            },
+            Self::Sim(_) => None,
+        }
+    }
+
     /// Bulk-load objects at caller-chosen natural keys and ids (sim:
     /// the `/__seed` control plane; real backend: API-driven
     /// creation — the caller-chosen id is NetBox's to assign, and
@@ -1436,4 +1451,289 @@ async fn qualification_manual_double_enqueue_coalesces_to_one_active_run() {
     let _guard = QUALIFICATION_MUTEX.lock().await;
     backend.reset().await;
     manual_double_enqueue_coalesces_to_one_active_run_inner(&backend).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test F — the runner's remote-state queries find what it wrote
+// ---------------------------------------------------------------------------
+
+/// Every plan after the first rests on two query families finding
+/// the objects the projection client itself wrote: the six
+/// by-architecture lists (`cf_<architecture>` bulk half of the
+/// remote-state fetch) and the six natural-key probes (the desired
+/// half). A probe that silently answers an empty 200 over converged
+/// state degrades the plan to duplicate creates, and the duplicates
+/// then trip NetBox's nested-reference ambiguity guards — observed
+/// in qualification run 37980195431: five probes missed converged
+/// state, the duplicate vlan made the prefix create fail with
+/// `Multiple objects match {'vid': 42}`, and the whole re-export
+/// degraded to a false drift report. This test converges the
+/// standard fixture through the real client (no worker scaffolding)
+/// and then runs exactly those queries; on mismatch it dumps the
+/// raw instance answers — the evidence only this lane can capture.
+async fn probes_find_converged_state_inner(backend: &NetboxBackend) {
+    let client = NetBoxClient::new_unchecked_for_tests(
+        backend.base_url(),
+        NetBoxToken::new(backend.token()),
+    )
+    .expect("test client");
+    let names = CustomFieldNames::new("chv_");
+    let architecture_id = "arch-probe";
+    let desired = desired_objects(architecture_id);
+
+    // Converge through the client — the same writes an apply run
+    // performs (rank order: vlan, prefix, device, vm, interface, ip;
+    // the ip's inline assignment resolves against the just-created
+    // interface).
+    for object in &desired {
+        client
+            .create_object(object)
+            .await
+            .expect("create converges against the backend");
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    for object in &desired {
+        match object {
+            NetBoxObject::Vlan(v) => {
+                let listed = client
+                    .list_vlans_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("vlan by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "vlans: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_vlans_by_vid(v.vid)
+                    .await
+                    .expect("vlan natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "vlan: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+            NetBoxObject::Prefix(p) => {
+                let listed = client
+                    .list_prefixes_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("prefix by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "prefixes: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_prefixes_by_cidr(&p.prefix)
+                    .await
+                    .expect("prefix natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "prefix: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+            NetBoxObject::Device(d) => {
+                let listed = client
+                    .list_devices_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("device by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "devices: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_devices_by_name(&d.name)
+                    .await
+                    .expect("device natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "device: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+            NetBoxObject::VirtualMachine(v) => {
+                let listed = client
+                    .list_virtual_machines_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("vm by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "virtual machines: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_virtual_machines_by_name(&v.name)
+                    .await
+                    .expect("vm natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "virtual machine: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+            NetBoxObject::Interface(i) => {
+                let listed = client
+                    .list_interfaces_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("interface by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "interfaces: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_interfaces_by_name(&i.name, &i.virtual_machine)
+                    .await
+                    .expect("interface natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "interface: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+            NetBoxObject::IpAddress(a) => {
+                let listed = client
+                    .list_ip_addresses_by_architecture(&names.architecture_id, architecture_id)
+                    .await
+                    .expect("ip by-architecture list");
+                if listed.len() != 1 {
+                    failures.push(format!(
+                        "ip addresses: by-architecture list returned {} rows",
+                        listed.len()
+                    ));
+                }
+                let probed = client
+                    .get_ip_addresses_by_address(&a.address)
+                    .await
+                    .expect("ip natural-key probe");
+                if probed.len() != 1 {
+                    failures.push(format!(
+                        "ip address: natural-key probe returned {} rows",
+                        probed.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        // The evidence dump: for every kind, the raw instance answer
+        // for the unfiltered list, the by-architecture list, and the
+        // natural-key probe (the query forms mirror the client's own
+        // wire shapes — limit 50 is the client's PAGE_LIMIT).
+        let limit = 50;
+        let mut dump = String::from("raw instance answers for the runner's queries:");
+        for object in &desired {
+            let (label, unfiltered, by_architecture, probe) = match object {
+                NetBoxObject::Vlan(v) => (
+                    "vlans",
+                    format!("/api/ipam/vlans/?limit={limit}"),
+                    format!(
+                        "/api/ipam/vlans/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    format!("/api/ipam/vlans/?vid={}&limit={limit}", v.vid),
+                ),
+                NetBoxObject::Prefix(p) => (
+                    "prefixes",
+                    format!("/api/ipam/prefixes/?limit={limit}"),
+                    format!(
+                        "/api/ipam/prefixes/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    format!("/api/ipam/prefixes/?prefix={}&limit={limit}", p.prefix),
+                ),
+                NetBoxObject::Device(d) => (
+                    "devices",
+                    format!("/api/dcim/devices/?limit={limit}"),
+                    format!(
+                        "/api/dcim/devices/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    format!("/api/dcim/devices/?name={}&limit={limit}", d.name),
+                ),
+                NetBoxObject::VirtualMachine(v) => (
+                    "virtual machines",
+                    format!("/api/virtualization/virtual-machines/?limit={limit}"),
+                    format!(
+                        "/api/virtualization/virtual-machines/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    format!(
+                        "/api/virtualization/virtual-machines/?name={}&limit={limit}",
+                        v.name
+                    ),
+                ),
+                NetBoxObject::Interface(i) => (
+                    "interfaces",
+                    format!("/api/virtualization/interfaces/?limit={limit}"),
+                    format!(
+                        "/api/virtualization/interfaces/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    // Name only — the VM half of the key is applied
+                    // client-side (see `get_interfaces_by_name`).
+                    format!(
+                        "/api/virtualization/interfaces/?name={}&limit={limit}",
+                        i.name
+                    ),
+                ),
+                NetBoxObject::IpAddress(a) => (
+                    "ip addresses",
+                    format!("/api/ipam/ip-addresses/?limit={limit}"),
+                    format!(
+                        "/api/ipam/ip-addresses/?cf_{}={architecture_id}&limit={limit}",
+                        names.architecture_id
+                    ),
+                    format!("/api/ipam/ip-addresses/?address={}&limit={limit}", a.address),
+                ),
+            };
+            for (what, path) in [
+                ("unfiltered", unfiltered),
+                ("by architecture", by_architecture),
+                ("natural-key probe", probe),
+            ] {
+                match backend.raw_get(&path).await {
+                    Some(body) => dump.push_str(&format!("\n\n{label} — {what} ({path}):\n{body}")),
+                    None => dump.push_str(&format!(
+                        "\n\n{label} — {what}: (simulator arm — in-process)"
+                    )),
+                }
+            }
+        }
+        panic!(
+            "the runner's remote-state queries missed converged state:\n{failures:#?}\n\n{dump}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn probes_find_converged_state() {
+    probes_find_converged_state_inner(&NetboxBackend::start().await).await;
+}
+
+/// The query-vs-write contract against a live NetBox (ADR-024 lane
+/// 3). Ignored by default — see
+/// [`qualification_full_lifecycle_apply_to_projection_to_reapply`].
+#[tokio::test]
+#[ignore = "real-NetBox qualification: set NETBOX_QUALIFICATION_URL + NETBOX_QUALIFICATION_TOKEN (scripts/netbox-qualify.sh)"]
+async fn qualification_probes_find_converged_state() {
+    let backend = NetboxBackend::start_qualification().await;
+    let _guard = QUALIFICATION_MUTEX.lock().await;
+    backend.reset().await;
+    probes_find_converged_state_inner(&backend).await;
 }

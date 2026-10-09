@@ -211,6 +211,17 @@ impl LiveNetBox {
         }
     }
 
+    /// An authenticated GET of `target` (an API path or absolute URL)
+    /// returning the status and the **raw parsed body**, with no
+    /// status check and no normalization — a convenience for drift
+    /// diagnostics, where the qualification lane prints exactly what
+    /// the instance answers for the runner's queries (the recorded
+    /// fixtures and the normalized state dump are the faithful,
+    /// comparable forms; this is the evidence form).
+    pub async fn raw_get(&self, target: &str) -> Result<(u16, Value), CaptureError> {
+        self.request(reqwest::Method::GET, target, None).await
+    }
+
     /// Create one object of `kind`; returns the created row (with the
     /// instance-assigned id).
     pub async fn create(&self, kind: SimKind, body: &Value) -> Result<Value, CaptureError> {
