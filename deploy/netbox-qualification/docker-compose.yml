@@ -19,9 +19,10 @@
 # The `qualification-init` one-shot service waits for NetBox to be
 # healthy (migrations applied, superuser created by the netbox
 # service), then creates the fixed v1 API token, provisions the
-# `chv_` custom fields, and publishes the qualification environment
-# (URL + token) to the shared `qualification-env` volume, which the
-# host-side script reads with:
+# prerequisite objects (site, manufacturer + device type, tags) and
+# the `chv_` custom fields, and publishes the qualification
+# environment (URL + token) to the shared `qualification-env` volume,
+# which the host-side script reads with:
 #
 #   docker compose exec -T netbox cat /run/qualification/netbox.env
 
@@ -72,13 +73,13 @@ services:
       # script (read-only here; only the init service writes it).
       - qualification-env:/run/qualification:ro
 
-  # One-shot: mint the fixed v1 API token, provision the `chv_`
-  # custom fields, and publish the qualification environment. Runs
-  # the image's own entrypoint first (DB wait + migrate --check, both
-  # no-ops once netbox is healthy), then the provisioning shell.
-  # `down -v` between runs makes it all idempotent anyway; the ORM
-  # get_or_create / delete+create calls are belt-and-braces for a
-  # reused volume.
+  # One-shot: mint the fixed v1 API token, provision the prerequisite
+  # objects and the `chv_` custom fields, and publish the
+  # qualification environment. Runs the image's own entrypoint first
+  # (DB wait + migrate --check, both no-ops once netbox is healthy),
+  # then the provisioning shell. `down -v` between runs makes it all
+  # idempotent anyway; the ORM get_or_create / delete+create calls are
+  # belt-and-braces for a reused volume.
   qualification-init:
     image: docker.io/netboxcommunity/netbox:v4.7-5.1.1
     depends_on:
@@ -124,6 +125,43 @@ services:
         )
         print("qualification token created")
         PY
+        # Provision the prerequisite objects a plain (no --record)
+        # qualification run needs: the `dc1` site, the `chv`
+        # manufacturer + `chv-host` device type (NetBox requires a
+        # device type on every device), and the tags the adapter
+        # derives from the fixture architecture's metadata (`chv-team`
+        # from the `team` label, `chv-env-production` from the
+        # environment). Without these the suite's device and tag
+        # writes 400 for a second, undocumented reason — the
+        # prerequisites must exist before the first scenario runs,
+        # not only when the recorder's provision() happens to run.
+        # DUPLICATION NOTE: the fixture recorder's `provision()`
+        # (crates/chv-netbox-sim/tests/record_fixtures.rs) creates the
+        # same objects over the REST API because it must work against
+        # any NetBox instance, not just this compose stack — keep the
+        # two sides in sync.
+        ./manage.py shell --no-startup --no-imports --interface python <<'PY'
+        from dcim.models import DeviceType, Manufacturer, Site
+        from extras.models import Tag
+
+        site, _ = Site.objects.get_or_create(
+            slug="dc1",
+            defaults={"name": "dc1", "status": "active"},
+        )
+        print(f"site {site.slug} ready")
+        manufacturer, _ = Manufacturer.objects.get_or_create(
+            slug="chv",
+            defaults={"name": "chv"},
+        )
+        device_type, _ = DeviceType.objects.get_or_create(
+            slug="chv-host",
+            defaults={"manufacturer": manufacturer, "model": "chv-host"},
+        )
+        print(f"device type {device_type.slug} ready")
+        for slug in ("chv-team", "chv-env-production"):
+            Tag.objects.get_or_create(slug=slug, defaults={"name": slug})
+            print(f"tag {slug} ready")
+        PY
         # Provision the `chv_` custom fields (type text, on the six
         # content types the projection writes) — the same fields the
         # recorder's provision() creates over the REST API. This is
@@ -132,9 +170,23 @@ services:
         # exist for the object type (v4.7
         # CustomFieldsDataField.to_internal_value: "Reject any unknown
         # custom field names" -> 400), and every adapter write carries
-        # the chv_ ownership markers. The suite's instance reset
-        # clears objects, never field definitions, so these survive
-        # between scenarios.
+        # the chv_ ownership markers (plus `chv_owner` whenever
+        # metadata.owner is set, and the device facts
+        # `chv_cpu_cores` / `chv_memory_gb` / `chv_datastores`). The
+        # suite's instance reset clears objects, never field
+        # definitions, so these survive between scenarios.
+        #
+        # SYNC NOTE — the names below are hardcoded because YAML
+        # cannot import Rust. The source of truth is
+        # `CustomFieldNames::ownership_fields` +
+        # `CustomFieldNames::enrichment_fields` in
+        # crates/chv-netbox-adapter/src/ownership.rs (pinned by that
+        # crate's
+        # `ownership_plus_enrichment_enumerates_the_full_provisioning_surface`
+        # test); when a field is added there, add it here in the same
+        # PR. All fields are NetBox `text` fields — the adapter only
+        # ever writes string values (numbers as their decimal strings,
+        # datastore facts as a comma-joined `name:kind` list).
         # ORM note: in NetBox 4.x the CustomField→ContentType M2M is
         # `object_types` (renamed from 3.x `content_types`); the REST
         # serializer field carries the same name.
@@ -160,7 +212,10 @@ services:
             "chv_managed_by",
             "chv_managed_state",
             "chv_mapping_version",
+            "chv_owner",
             "chv_cpu_cores",
+            "chv_memory_gb",
+            "chv_datastores",
         ):
             field, _ = CustomField.objects.get_or_create(
                 name=name,

@@ -48,6 +48,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chv_netbox_adapter::ownership::CustomFieldNames;
 use chv_netbox_sim::capture::{
     normalize_object, CaptureError, LiveNetBox, QUALIFICATION_TOKEN_ENV, QUALIFICATION_URL_ENV,
 };
@@ -74,18 +75,23 @@ const FIXTURE_ORDER: [SimKind; 6] = [
 /// max page.
 const LIST_PAGE: usize = 200;
 
-/// The `chv_` custom fields the canonical set writes (all provisioned
-/// as NetBox `text` fields — the adapter only ever writes string
-/// values).
-const CUSTOM_FIELDS: [&str; 7] = [
-    "chv_external_id",
-    "chv_architecture_id",
-    "chv_architecture_version",
-    "chv_managed_by",
-    "chv_managed_state",
-    "chv_mapping_version",
-    "chv_cpu_cores",
-];
+/// Every `chv_` custom-field name the adapter's mapping can write on
+/// a projected object — composed from the adapter's own
+/// [`CustomFieldNames`] (`ownership_fields()` + `enrichment_fields()`,
+/// the single source of truth), so a contract change there flows into
+/// this provisioning list instead of a second, forgettable list. All
+/// fields are provisioned as NetBox `text` fields: the adapter only
+/// ever writes string values (numbers as their decimal strings,
+/// datastore facts as a comma-joined `name:kind` list).
+fn qualification_custom_fields() -> Vec<String> {
+    let names = CustomFieldNames::default();
+    names
+        .ownership_fields()
+        .iter()
+        .map(|field| field.to_string())
+        .chain(names.enrichment_fields())
+        .collect()
+}
 
 /// The content types the custom fields are assigned to.
 const CONTENT_TYPES: [&str; 6] = [
@@ -275,6 +281,14 @@ async fn ensure(
 /// manufacturer + device type (NetBox requires one on every device),
 /// the `chv-team` tag, and the `chv_` custom fields as text fields on
 /// the six content types.
+///
+/// DUPLICATION NOTE: the qualification compose stack's
+/// `qualification-init` service
+/// (`deploy/netbox-qualification/docker-compose.yml`) provisions the
+/// same prerequisites through the ORM so a plain (no `--record`)
+/// qualification run starts provisioned too. This copy stays because
+/// the recorder must work against any NetBox instance, not just the
+/// compose one — keep the two sides in sync.
 async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
     ensure(
         live,
@@ -309,7 +323,7 @@ async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
         }),
     )
     .await?;
-    for name in CUSTOM_FIELDS {
+    for name in qualification_custom_fields() {
         ensure(
             live,
             "/api/extras/custom-fields/",
@@ -329,16 +343,28 @@ async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
     })
 }
 
-/// The ownership/provenance custom fields every canonical object
-/// carries — the same marker set the authored seed fixture uses, as
-/// string values (the adapter's write form).
+/// The full custom-field surface the adapter's `build_objects`
+/// writes for the fixture architecture's metadata: the six ownership
+/// marker fields (`ManagedMarker`) plus `chv_owner` (the
+/// architecture's `metadata.owner` is set, so the adapter writes the
+/// owner label on every object). Field names come from the adapter's
+/// [`CustomFieldNames`] so the canonical set cannot drift from the
+/// contract, and every value is a string — the adapter's write form,
+/// which is also what a real NetBox `text` custom field returns. This
+/// is the tripwire for the provisioning lists: if a `chv_` field is
+/// missing from [`provision`], seeding here fails with a 400 against
+/// a real NetBox instead of recording a silently partial surface.
 fn ownership_fields(external_id: &str) -> Value {
-    json!({
-        "chv_external_id": external_id,
-        "chv_architecture_id": "arch_01HX",
-        "chv_managed_by": "chv",
-        "chv_mapping_version": "v1",
-    })
+    let names = CustomFieldNames::default();
+    let mut fields = BTreeMap::new();
+    fields.insert(names.external_id.clone(), json!(external_id));
+    fields.insert(names.architecture_id.clone(), json!("arch_01HX"));
+    fields.insert(names.managed_by.clone(), json!("chv"));
+    fields.insert(names.managed_state.clone(), json!("active"));
+    fields.insert(names.architecture_version.clone(), json!("3"));
+    fields.insert(names.mapping_version.clone(), json!("v1"));
+    fields.insert(names.owner().clone(), json!("alice"));
+    Value::Object(fields.into_iter().collect())
 }
 
 /// Create the canonical one-object-per-family set, parents first so
@@ -386,15 +412,21 @@ async fn seed_canonical_set(
     } else {
         (json!({ "name": "dc1" }), None)
     };
-    // The device's marker set extends the shared ownership fields
-    // with the managed-state and resource-provenance markers.
+    // The device's marker set extends the shared ownership surface
+    // with the three device-enrichment facts the adapter's mapping
+    // writes when they exist (contract rules 2/6: cpu/memory from
+    // declared resources or the live snapshot, datastore facts as a
+    // sorted, comma-joined `name:kind` list). Seeding all three is
+    // what makes the recorder tripwire on the `chv_memory_gb` /
+    // `chv_datastores` provisioning, not just the ownership fields.
+    let names = CustomFieldNames::default();
     let mut device_fields = ownership_fields("arch:arch_01HX:server/chv-node-01:3")
         .as_object()
         .cloned()
         .unwrap_or_default();
-    device_fields.insert("chv_managed_state".to_string(), json!("active"));
-    device_fields.insert("chv_architecture_version".to_string(), json!("3"));
-    device_fields.insert("chv_cpu_cores".to_string(), json!("8"));
+    device_fields.insert(names.cpu_cores(), json!("8"));
+    device_fields.insert(names.memory_gb(), json!("16"));
+    device_fields.insert(names.datastores(), json!("ds-local:local,ds-nfs:nfs"));
     let mut device_body = json!({
         "name": "chv-node-01",
         "status": "active",

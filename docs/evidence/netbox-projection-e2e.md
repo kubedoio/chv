@@ -74,7 +74,7 @@ Qualification boundary: the composed suite's always-on arm runs
 against `chv-netbox-sim` (ADR-024) — a first-party stateful emulator
 of the bounded wire subset the adapter exercises, whose read side
 does reflect mid-phase writes; it is still not a real NetBox. The
-real-NetBox qualification lane exists now (ADR-024 decision 4): the
+real-NetBox qualification lane is wired (ADR-024 decision 4): the
 same five scenarios run as `qualification_*` wrappers (ignored by
 default) against a pinned, disposable NetBox stood up by
 `deploy/netbox-qualification/docker-compose.yml` and driven by
@@ -83,17 +83,33 @@ schedule plus manual dispatch via
 `.github/workflows/netbox-qualification.yml`. `--record` re-captures
 the golden `netbox4` fixtures from the live instance — the tripwire
 that turns the fixtures from authored hypotheses into recorded
-evidence. The first real run's results are recorded below. The
-apply-side leg is seeded via the existing test fixtures rather than
-driving the apply state machine itself.
+evidence.
+
+No real run has happened yet: the first dispatch happens after this
+merges (GitHub workflows cannot be dispatched from a branch), and its
+results will be recorded at the placeholder below. The review pass
+over the lane already surfaced the expected findings. The client
+write-path conformance gaps — tags sent as plain strings instead of
+NetBox's nested tag objects, create ordering versus foreign-key
+existence, and the missing `device_type` on device creates — are
+tracked for the follow-up PR; the mechanical provisioning gaps they
+sat on top of (the `chv_owner`/`chv_memory_gb`/`chv_datastores`
+custom fields and the site/manufacturer/device-type/tag prerequisites
+missing from the compose init) are fixed in this PR. Until the
+follow-up lands, the first dispatch is expected to fail on those
+client-side gaps, not on the simulator's fidelity. The apply-side leg
+is seeded via the existing test fixtures rather than driving the
+apply state machine itself.
 
 <!-- first-run -->
 
-Focused verification (all run, all green):
+Focused verification (all run, all green; the counts below are the
+simulator-backend and unit-level results — no real-NetBox dispatch
+has run yet):
 
 ```text
-cargo test -p chv-controlplane-service netbox_projection_sim   # 5 passed
-cargo test -p chv-controlplane-service                          # 274 passed, 0 failed
+cargo test -p chv-controlplane-service netbox_projection_sim   # 5 passed (simulator backend)
+cargo test -p chv-controlplane-service                          # 275 passed, 0 failed (simulator backend)
 cargo test -p chv-webui-bff --test architecture_netbox_routes   # 21 passed, 0 failed
 cargo clippy -p chv-controlplane-service -p chv-webui-bff --all-targets -- -D warnings  # clean
 cargo fmt --all                                                 # applied

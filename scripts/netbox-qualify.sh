@@ -57,7 +57,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-info()    { echo "[netbox-qualify] [INFO] $*"; }
+# All chatter goes to stderr: `eval "$(make netbox-qualify-env)"`
+# captures the script's stdout, so anything informational printed
+# there would be evaluated as shell input (and can abort `set -e`
+# callers). Only --print-env's two `export` lines ever use stdout.
+info()    { echo "[netbox-qualify] [INFO] $*" >&2; }
 warn()    { echo "[netbox-qualify] [WARN] $*" >&2; }
 fatal()   { echo "[netbox-qualify] [FATAL] $*" >&2; exit 1; }
 
@@ -189,8 +193,13 @@ export NETBOX_QUALIFICATION_URL NETBOX_QUALIFICATION_TOKEN
 # --print-env: hand the environment to a shell and leave the stack up
 # ---------------------------------------------------------------------------
 if [[ "$PRINT_ENV" == true ]]; then
-    echo "NETBOX_QUALIFICATION_URL=${NETBOX_QUALIFICATION_URL}"
-    echo "NETBOX_QUALIFICATION_TOKEN=${NETBOX_QUALIFICATION_TOKEN}"
+    # The ONLY stdout output of the whole script: two `export`
+    # assignment lines, so `eval "$(./scripts/netbox-qualify.sh
+    # --print-env)"` (and `eval "$(make netbox-qualify-env)"`)
+    # evaluates exactly the environment hand-off and nothing else —
+    # every informational line around it goes to stderr.
+    echo "export NETBOX_QUALIFICATION_URL=${NETBOX_QUALIFICATION_URL}"
+    echo "export NETBOX_QUALIFICATION_TOKEN=${NETBOX_QUALIFICATION_TOKEN}"
     info "--print-env: stack left up (implies --keep); run the suite manually with:"
     info "  NETBOX_QUALIFICATION_URL=... NETBOX_QUALIFICATION_TOKEN=... \\"
     info "    cargo test -p chv-controlplane-service --lib qualification -- --ignored --test-threads=1 --nocapture"

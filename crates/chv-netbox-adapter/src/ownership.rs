@@ -103,9 +103,35 @@ impl CustomFieldNames {
         ]
     }
 
+    /// The enrichment custom-field names (beyond the six ownership
+    /// fields) the adapter's mapping may write on projected objects:
+    /// `chv_owner` on every object when `metadata.owner` is set, plus
+    /// the device facts `chv_cpu_cores` / `chv_memory_gb` /
+    /// `chv_datastores` (mapping contract, object-mapping table).
+    ///
+    /// **Provisioning contract:** real NetBox 4.x rejects any write
+    /// whose `custom_fields` dict carries a name that does not exist
+    /// for the object type, so every surface that pre-provisions
+    /// custom fields — the qualification compose stack's
+    /// `qualification-init` service
+    /// (`deploy/netbox-qualification/docker-compose.yml`) and the
+    /// fixture recorder's `provision()`
+    /// (`chv-netbox-sim/tests/record_fixtures.rs`) — must enumerate
+    /// `ownership_fields()` **plus** this list. The compose file
+    /// hardcodes the names (it cannot import Rust); keep it in sync
+    /// with these two methods.
+    pub fn enrichment_fields(&self) -> [String; 4] {
+        [
+            self.owner(),
+            self.cpu_cores(),
+            self.memory_gb(),
+            self.datastores(),
+        ]
+    }
+
     /// Enrichment custom field recording `metadata.owner` (mapping
     /// contract, object-mapping table: "owner label recorded as a custom
-    /// field").
+    /// field"). See [`CustomFieldNames::enrichment_fields`].
     pub fn owner(&self) -> String {
         format!("{}owner", self.prefix)
     }
@@ -352,6 +378,38 @@ mod tests {
         assert_eq!(names.datastores(), "chv_datastores");
         assert_eq!(names.cpu_cores(), "chv_cpu_cores");
         assert_eq!(names.memory_gb(), "chv_memory_gb");
+    }
+
+    /// The provisioning surface: ownership + enrichment must enumerate
+    /// every custom-field name the adapter's mapping can write, with
+    /// no duplicates. A new contract field that is not reachable
+    /// through these two lists would be silently unprovisioned
+    /// against a real NetBox (400 on every write).
+    #[test]
+    fn ownership_plus_enrichment_enumerates_the_full_provisioning_surface() {
+        let names = CustomFieldNames::default();
+        let mut surface: Vec<String> = names
+            .ownership_fields()
+            .iter()
+            .map(|field| field.to_string())
+            .collect();
+        surface.extend(names.enrichment_fields());
+        assert_eq!(
+            surface,
+            vec![
+                "chv_external_id",
+                "chv_architecture_id",
+                "chv_managed_by",
+                "chv_managed_state",
+                "chv_architecture_version",
+                "chv_mapping_version",
+                "chv_owner",
+                "chv_cpu_cores",
+                "chv_memory_gb",
+                "chv_datastores",
+            ],
+            "the provisioning surface must stay in sync with the mapping's writes"
+        );
     }
 
     #[test]
