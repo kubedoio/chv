@@ -1,0 +1,23 @@
+# Excerpt: vmm/src/api/openapi/cloud-hypervisor.yaml @ v53.0 (pinned OpenAPI)
+# Fetched 2026-10-09 from
+#   https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/v53.0/vmm/src/api/openapi/cloud-hypervisor.yaml
+# Only the /vm.counters path and the VmCounters schema are retained verbatim.
+
+  /vm.counters:
+    get:
+      summary: Get counters from the VM
+      responses:
+        200:
+          description: The VM counters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VmCounters"
+
+  VmCounters:
+      type: object
+      additionalProperties:
+        type: object
+        additionalProperties:
+          type: integer
+          format: int64
