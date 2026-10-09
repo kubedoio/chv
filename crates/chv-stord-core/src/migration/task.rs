@@ -80,6 +80,9 @@ impl MigrationTask {
             Ok(mut state) => {
                 state.phase = MigrationPhase::Failed;
                 state.error_message = message;
+                // Terminal: no pause wait is pending anymore (#582) —
+                // the same clearing the sender does at `Completed`.
+                state.needs_vm_pause = false;
             }
             Err(_) => {
                 tracing::warn!(
