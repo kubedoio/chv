@@ -64,11 +64,18 @@ services:
       - "127.0.0.1:18780:8080"
     healthcheck:
       # The image's own health probe (curl /login/ on GRANIAN_PORT).
+      # Patient on purpose: NetBox's first boot runs its migrations
+      # before the app serves, and on a cold CI runner that outlasts
+      # a tight budget — the first qualification dispatch (2026-10-09)
+      # exhausted 90s + 5×15s at 151s and `up -d` aborted on the
+      # unhealthy dependency. start_period 300s + 20×15s keeps the
+      # wait inside the script's 900s boot timeout while tolerating a
+      # slow cold boot.
       test: /opt/netbox/health.sh
-      start_period: 90s
+      start_period: 300s
       timeout: 3s
       interval: 15s
-      retries: 5
+      retries: 20
     volumes:
       # Where qualification-init publishes netbox.env for the host
       # script (read-only here; only the init service writes it).
