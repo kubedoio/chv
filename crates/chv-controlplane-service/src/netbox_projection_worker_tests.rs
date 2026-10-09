@@ -45,13 +45,13 @@ use crate::NetboxProjectionWorker;
 
 /// Distinctive plaintext token; the redaction suites assert it never
 /// reaches a log line, a persisted error message, or an event payload.
-const TOKEN: &str = "netbox-secret-token-do-not-log-3f9a";
+pub(crate) const TOKEN: &str = "netbox-secret-token-do-not-log-3f9a";
 /// Site label used by every config fixture (must match
 /// [`desired_objects`] so the mirrored device content compares equal).
-const SITE: &str = "dc1";
+pub(crate) const SITE: &str = "dc1";
 
 /// Create (POST) mocks per kind path: (path, netbox id returned).
-const CREATE_MOCKS: [(&str, i64); 6] = [
+pub(crate) const CREATE_MOCKS: [(&str, i64); 6] = [
     ("/api/ipam/vlans/", 101),
     ("/api/ipam/prefixes/", 102),
     ("/api/ipam/ip-addresses/", 103),
@@ -155,11 +155,16 @@ mod log_capture {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn aid(s: &str) -> ArchitectureId {
+// The fixtures below this point are `pub(crate)` so the PR-8 composed
+// e2e suite (`netbox_projection_e2e_tests.rs`, a sibling `#[cfg(test)]`
+// module) can import them instead of duplicating the scaffolding. The
+// test functions themselves stay private.
+
+pub(crate) fn aid(s: &str) -> ArchitectureId {
     ArchitectureId::new(s).expect("valid architecture id")
 }
 
-fn vid(s: &str) -> ArchitectureVersionId {
+pub(crate) fn vid(s: &str) -> ArchitectureVersionId {
     ArchitectureVersionId::new(s).expect("valid version id")
 }
 
@@ -167,14 +172,14 @@ fn nid(s: &str) -> NetboxProjectionRunId {
     NetboxProjectionRunId::new(s).expect("valid run id")
 }
 
-fn appid(s: &str) -> ArchitectureApplyRunId {
+pub(crate) fn appid(s: &str) -> ArchitectureApplyRunId {
     ArchitectureApplyRunId::new(s).expect("valid apply-run id")
 }
 
 /// The projected architecture: one server, one VLAN network with a CIDR,
 /// one instance with a fixed IP on that network — exactly one object of
 /// each of the six mapped kinds.
-fn fixture_architecture() -> CHVArchitecture {
+pub(crate) fn fixture_architecture() -> CHVArchitecture {
     CHVArchitecture {
         api_version: "chv.kubedo.io/v1alpha1".to_string(),
         kind: "CHVArchitecture".to_string(),
@@ -241,13 +246,13 @@ fn fixture_architecture() -> CHVArchitecture {
 
 /// The model JSON stored in `architecture_versions.normalized_model_json`
 /// (what the worker parses back into a `CHVArchitecture`).
-fn model_json() -> String {
+pub(crate) fn model_json() -> String {
     serde_json::to_string(&fixture_architecture()).expect("model serializes")
 }
 
 /// The desired objects the worker's runner will build — computed here
 /// with the same pure-core call so remote fixtures mirror it exactly.
-fn desired_objects(architecture_id: &str) -> Vec<NetBoxObject> {
+pub(crate) fn desired_objects(architecture_id: &str) -> Vec<NetBoxObject> {
     let architecture = fixture_architecture();
     build_objects(&ProjectionInput {
         architecture: &architecture,
@@ -266,7 +271,7 @@ fn desired_objects(architecture_id: &str) -> Vec<NetBoxObject> {
 /// Render one desired object back into NetBox wire JSON (the inverse of
 /// the client's fail-closed `parse_remote`), so a mocked GET response
 /// parses to content byte-equal to the desired projection.
-fn remote_fixture(netbox_id: i64, object: &NetBoxObject) -> Value {
+pub(crate) fn remote_fixture(netbox_id: i64, object: &NetBoxObject) -> Value {
     let custom_fields =
         serde_json::to_value(object.custom_fields()).expect("custom fields serialize");
     match object {
@@ -330,7 +335,7 @@ fn remote_fixture(netbox_id: i64, object: &NetBoxObject) -> Value {
     }
 }
 
-fn kind_path(object: &NetBoxObject) -> &'static str {
+pub(crate) fn kind_path(object: &NetBoxObject) -> &'static str {
     match object.kind() {
         NetBoxKind::Vlan => "/api/ipam/vlans/",
         NetBoxKind::Prefix => "/api/ipam/prefixes/",
@@ -341,7 +346,7 @@ fn kind_path(object: &NetBoxObject) -> &'static str {
     }
 }
 
-fn page(results: Vec<Value>) -> Value {
+pub(crate) fn page(results: Vec<Value>) -> Value {
     json!({ "count": results.len(), "next": null, "results": results })
 }
 
@@ -349,7 +354,7 @@ fn page(results: Vec<Value>) -> Value {
 // Store + worker scaffolding
 // ---------------------------------------------------------------------------
 
-async fn setup_topology_and_version(
+pub(crate) async fn setup_topology_and_version(
     db: &TestDb,
     topo_id: &str,
     version_id: &str,
@@ -385,7 +390,12 @@ async fn setup_topology_and_version(
         .expect("version created");
 }
 
-async fn add_succeeded_apply_run(db: &TestDb, apply_id: &str, topo_id: &str, version_id: &str) {
+pub(crate) async fn add_succeeded_apply_run(
+    db: &TestDb,
+    apply_id: &str,
+    topo_id: &str,
+    version_id: &str,
+) {
     add_apply_run(db, apply_id, topo_id, version_id, RunStatus::Succeeded).await;
 }
 
@@ -417,7 +427,7 @@ async fn add_apply_run(
 /// deterministic in the fixture (the column has second resolution;
 /// without distinct timestamps the ordering falls to the `rowid DESC`
 /// insertion-order tiebreak).
-async fn backdate_apply_run(db: &TestDb, apply_id: &str, created_at: &str) {
+pub(crate) async fn backdate_apply_run(db: &TestDb, apply_id: &str, created_at: &str) {
     sqlx::query("UPDATE architecture_apply_runs SET created_at = $2 WHERE id = $1")
         .bind(apply_id)
         .bind(created_at)
@@ -471,7 +481,7 @@ async fn enqueue_run(
 /// Config fixture with the post-apply trigger enabled — the sweep's
 /// enablement predicate. The endpoint is deliberately dead in most
 /// post-apply suites (see the section doc below).
-async fn setup_post_apply_config(db: &TestDb, endpoint: &str, topo_id: &str) {
+pub(crate) async fn setup_post_apply_config(db: &TestDb, endpoint: &str, topo_id: &str) {
     NetboxProjectionConfigRepository::new(db.pool.clone())
         .upsert(NetboxProjectionConfigUpsertInput {
             architecture_id: aid(topo_id),
@@ -506,7 +516,7 @@ async fn enqueue_post_apply_run(db: &TestDb, run_id: &str, topo_id: &str, versio
 
 /// All `post_apply`-triggered projection runs for an architecture
 /// (any status).
-async fn post_apply_runs(
+pub(crate) async fn post_apply_runs(
     db: &TestDb,
     topo_id: &str,
 ) -> Vec<chv_controlplane_types::architecture::NetboxProjectionRun> {
@@ -521,7 +531,7 @@ async fn post_apply_runs(
 
 /// Full happy-path scaffolding: topology + version + succeeded apply run
 /// + config + queued export run.
-async fn setup_projection(
+pub(crate) async fn setup_projection(
     db: &TestDb,
     endpoint: &str,
     topo_id: &str,
@@ -546,7 +556,7 @@ async fn setup_projection(
 
 /// Worker wired to the test store with the wiremock-compatible
 /// (plain-HTTP) client constructor injected through the factory seam.
-fn worker_for(db: &TestDb) -> NetboxProjectionWorker {
+pub(crate) fn worker_for(db: &TestDb) -> NetboxProjectionWorker {
     NetboxProjectionWorker::new(
         NetboxProjectionRunRepository::new(db.pool.clone()),
         NetboxProjectionConfigRepository::new(db.pool.clone()),
@@ -557,7 +567,7 @@ fn worker_for(db: &TestDb) -> NetboxProjectionWorker {
     .with_client_factory(Arc::new(NetBoxClient::new_unchecked_for_tests))
 }
 
-async fn get_run(
+pub(crate) async fn get_run(
     db: &TestDb,
     run_id: &str,
 ) -> chv_controlplane_types::architecture::NetboxProjectionRun {
@@ -569,7 +579,7 @@ async fn get_run(
 }
 
 /// Audit events appended for one run (correlation id = run id).
-async fn audit_events(db: &TestDb, run_id: &str) -> Vec<(String, Option<String>)> {
+pub(crate) async fn audit_events(db: &TestDb, run_id: &str) -> Vec<(String, Option<String>)> {
     sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT message, details FROM events WHERE correlation_id = $1",
     )
@@ -585,7 +595,7 @@ async fn audit_events(db: &TestDb, run_id: &str) -> Vec<(String, Option<String>)
 
 /// Every GET on any `/api/…` path answers with an empty page — the
 /// "NetBox has nothing of ours" state (used with per-kind POST mocks).
-async fn mount_empty_remote(server: &MockServer) {
+pub(crate) async fn mount_empty_remote(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path_regex("^/api/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(page(Vec::new())))
@@ -595,7 +605,7 @@ async fn mount_empty_remote(server: &MockServer) {
 
 /// Empty pages for the given kind paths only (for suites that need other
 /// kinds populated — a catch-all would overlap those mocks).
-async fn mount_empty_lists(server: &MockServer, paths: &[&str]) {
+pub(crate) async fn mount_empty_lists(server: &MockServer, paths: &[&str]) {
     for kind_path in paths {
         Mock::given(method("GET"))
             .and(path(*kind_path))
@@ -606,7 +616,7 @@ async fn mount_empty_lists(server: &MockServer, paths: &[&str]) {
 }
 
 /// 201 create responses for the given (path, id) pairs.
-async fn mount_creates(server: &MockServer, mocks: &[(&str, i64)]) {
+pub(crate) async fn mount_creates(server: &MockServer, mocks: &[(&str, i64)]) {
     for (kind_path, netbox_id) in mocks {
         Mock::given(method("POST"))
             .and(path(*kind_path))
@@ -617,7 +627,7 @@ async fn mount_creates(server: &MockServer, mocks: &[(&str, i64)]) {
 }
 
 /// The runner's post-loop IP-assignment fix-up PATCH.
-async fn mount_ip_fixup_patch(server: &MockServer) {
+pub(crate) async fn mount_ip_fixup_patch(server: &MockServer) {
     Mock::given(method("PATCH"))
         .and(path_regex("^/api/ipam/ip-addresses/[0-9]+/$"))
         .respond_with(ResponseTemplate::new(200))
@@ -647,7 +657,11 @@ async fn mount_mirror_remote(server: &MockServer, architecture_id: &str, except:
 }
 
 /// Count received requests by method and path prefix.
-async fn request_count(server: &MockServer, http_method: &str, path_prefix: &str) -> usize {
+pub(crate) async fn request_count(
+    server: &MockServer,
+    http_method: &str,
+    path_prefix: &str,
+) -> usize {
     server
         .received_requests()
         .await
@@ -658,7 +672,7 @@ async fn request_count(server: &MockServer, http_method: &str, path_prefix: &str
 }
 
 /// Paths of all requests with the given method.
-async fn request_paths(server: &MockServer, http_method: &str) -> Vec<String> {
+pub(crate) async fn request_paths(server: &MockServer, http_method: &str) -> Vec<String> {
     server
         .received_requests()
         .await
@@ -669,7 +683,7 @@ async fn request_paths(server: &MockServer, http_method: &str) -> Vec<String> {
         .collect()
 }
 
-fn outcome_of(
+pub(crate) fn outcome_of(
     run: &chv_controlplane_types::architecture::NetboxProjectionRun,
 ) -> NetboxProjectionOutcome {
     serde_json::from_value(result_of(run)).expect("outcome parses")
@@ -677,7 +691,7 @@ fn outcome_of(
 
 /// The worker persists results inside a provenance envelope
 /// (`{ resolved_architecture_version_id, result }`); unwrap it.
-fn result_of(run: &chv_controlplane_types::architecture::NetboxProjectionRun) -> Value {
+pub(crate) fn result_of(run: &chv_controlplane_types::architecture::NetboxProjectionRun) -> Value {
     let envelope: Value = serde_json::from_str(run.result_json.as_deref().expect("result json"))
         .expect("result envelope parses");
     assert!(

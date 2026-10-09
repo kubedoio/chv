@@ -60,3 +60,6 @@ mod integration_tests;
 
 #[cfg(test)]
 mod netbox_projection_worker_tests;
+
+#[cfg(test)]
+mod netbox_projection_e2e_tests;
