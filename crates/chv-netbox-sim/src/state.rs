@@ -496,9 +496,19 @@ impl SimState {
     /// `DELETE`: remove the row, applying the cascade semantics the
     /// client's write paths rely on — deleting a VM removes its
     /// interfaces (and unassigns their IP addresses), deleting an
-    /// interface unassigns its IP addresses, deleting a VLAN clears
-    /// the reference from prefixes.
+    /// interface unassigns its IP addresses, deleting a device
+    /// nulls the `device` reference on VMs that carried it
+    /// (NetBox: `SET_NULL`), and deleting a VLAN referenced by a
+    /// prefix is **refused** (NetBox: `Prefix.vlan` is
+    /// `on_delete=PROTECT`) — see [`WireError::Protected`].
     pub fn delete(&mut self, kind: SimKind, id: i64) -> Result<(), WireError> {
+        // PROTECT checks run before the row is removed: a refused
+        // delete clears nothing.
+        if kind == SimKind::Vlan {
+            if let Some(message) = self.vlan_protected_by_prefix(id) {
+                return Err(WireError::Protected { message });
+            }
+        }
         let row = {
             let Some(table) = self.rows.get_mut(&kind) else {
                 return Err(WireError::NotFound);
@@ -537,27 +547,67 @@ impl SimState {
                 }
             }
             SimKind::Interface => self.unassign_ips_of_interface(id),
-            SimKind::Vlan => {
-                if let Some(vid) = row.get("vid").and_then(Value::as_i64) {
-                    if let Some(table) = self.rows.get_mut(&SimKind::Prefix) {
-                        for prefix in table.values_mut() {
-                            if prefix
-                                .get("vlan")
-                                .and_then(|vlan| vlan.get("vid"))
-                                .and_then(Value::as_i64)
-                                == Some(vid)
-                            {
-                                if let Some(map) = prefix.as_object_mut() {
-                                    map.insert("vlan".to_string(), Value::Null);
-                                }
-                            }
-                        }
-                    }
+            // Referencing prefixes were checked above (PROTECT):
+            // an unreferenced VLAN deletes without touching them.
+            SimKind::Vlan => {}
+            SimKind::Device => {
+                if let Some(device_name) = row.get("name").and_then(Value::as_str) {
+                    self.null_device_references(device_name);
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Why the VLAN `id` cannot be deleted: some prefix still
+    /// references it. NetBox's `Prefix.vlan` foreign key is
+    /// `on_delete=PROTECT`, so Django refuses the delete with a
+    /// `ProtectedError`; the REST API surfaces that as an HTTP 500,
+    /// which this simulator answers as a 409 with an explanatory
+    /// body instead — a documented deviation (see the crate docs'
+    /// fidelity notes). `None` when the VLAN is unreferenced (or
+    /// unknown — the row removal then reports the 404).
+    fn vlan_protected_by_prefix(&self, id: i64) -> Option<String> {
+        let vid = self
+            .rows
+            .get(&SimKind::Vlan)?
+            .get(&id)?
+            .get("vid")
+            .and_then(Value::as_i64)?;
+        let referenced = self.rows.get(&SimKind::Prefix)?.values().any(|prefix| {
+            prefix
+                .get("vlan")
+                .and_then(|vlan| vlan.get("vid"))
+                .and_then(Value::as_i64)
+                == Some(vid)
+        });
+        referenced.then(|| {
+            format!(
+                "Cannot delete VLAN {vid}: it is referenced by one or more prefixes \
+                 (NetBox protects this reference; delete the prefixes first)."
+            )
+        })
+    }
+
+    /// NetBox's `VirtualMachine.device` foreign key is
+    /// `on_delete=SET_NULL`: deleting a device nulls the reference
+    /// on every VM that carried it (the VMs themselves survive).
+    fn null_device_references(&mut self, device_name: &str) {
+        if let Some(table) = self.rows.get_mut(&SimKind::VirtualMachine) {
+            for vm in table.values_mut() {
+                if vm
+                    .get("device")
+                    .and_then(|device| device.get("name"))
+                    .and_then(Value::as_str)
+                    == Some(device_name)
+                {
+                    if let Some(map) = vm.as_object_mut() {
+                        map.insert("device".to_string(), Value::Null);
+                    }
+                }
+            }
+        }
     }
 
     fn unassign_ips_of_interface(&mut self, interface_id: i64) {
@@ -917,6 +967,99 @@ mod tests {
         // The derived read form shows no assignment either.
         let read = state.read_form(SimKind::IpAddress, row, "http://x");
         assert_eq!(read["assigned_object"], Value::Null);
+    }
+
+    #[test]
+    fn ip_uniqueness_keys_on_the_full_with_mask_address() {
+        let mut state = SimState::new();
+        state
+            .create(SimKind::IpAddress, &json!({ "address": "10.42.0.5/24" }))
+            .expect("first mask");
+        // NetBox's unique constraint includes the mask: the same
+        // host address with a different mask coexists.
+        state
+            .create(SimKind::IpAddress, &json!({ "address": "10.42.0.5/32" }))
+            .expect("different mask coexists");
+        // The identical with-mask address is still a duplicate…
+        let err = state
+            .create(SimKind::IpAddress, &json!({ "address": "10.42.0.5/24" }))
+            .expect_err("duplicate");
+        assert_eq!(
+            err.body(),
+            json!({ "address": ["This field must be unique."] })
+        );
+        // …and a maskless create normalizes to /32 before the check.
+        state
+            .create(SimKind::IpAddress, &json!({ "address": "10.42.0.5" }))
+            .expect_err("maskless normalizes to /32");
+    }
+
+    #[test]
+    fn deleting_a_vlan_referenced_by_a_prefix_is_refused() {
+        let mut state = SimState::new();
+        let vlan = state
+            .create(SimKind::Vlan, &json!({ "vid": 42, "name": "backend" }))
+            .expect("vlan");
+        let prefix = state
+            .create(
+                SimKind::Prefix,
+                &json!({ "prefix": "10.42.0.0/24", "vlan": { "vid": 42 } }),
+            )
+            .expect("prefix");
+
+        // NetBox's Prefix.vlan is on_delete=PROTECT: the delete is
+        // refused (409, see the fidelity notes) and nothing clears.
+        let err = state
+            .delete(SimKind::Vlan, vlan)
+            .expect_err("protected delete refused");
+        assert_eq!(err.status(), 409);
+        assert!(
+            err.body()["detail"]
+                .as_str()
+                .expect("detail")
+                .contains("VLAN 42"),
+            "body explains the conflict: {}",
+            err.body()["detail"]
+        );
+        assert!(state.row(SimKind::Vlan, vlan).is_some());
+        let prefix_row = state.row(SimKind::Prefix, prefix).expect("prefix survives");
+        assert_eq!(prefix_row["vlan"]["vid"], json!(42));
+
+        // Once the referencing prefix is gone, the VLAN deletes.
+        state
+            .delete(SimKind::Prefix, prefix)
+            .expect("prefix delete");
+        state.delete(SimKind::Vlan, vlan).expect("vlan delete");
+        assert!(state.row(SimKind::Vlan, vlan).is_none());
+    }
+
+    #[test]
+    fn deleting_a_device_nulls_referencing_vms() {
+        let mut state = SimState::new();
+        let device = state
+            .create(SimKind::Device, &device_body("chv-node-01"))
+            .expect("device");
+        let vm = state
+            .create(
+                SimKind::VirtualMachine,
+                &json!({
+                    "name": "vm-01",
+                    "status": "active",
+                    "device": { "name": "chv-node-01" }
+                }),
+            )
+            .expect("vm");
+        assert_eq!(
+            state.row(SimKind::VirtualMachine, vm).expect("vm")["device"]["name"],
+            json!("chv-node-01")
+        );
+
+        // NetBox's VirtualMachine.device is on_delete=SET_NULL.
+        state
+            .delete(SimKind::Device, device)
+            .expect("device delete");
+        let vm_row = state.row(SimKind::VirtualMachine, vm).expect("vm survives");
+        assert_eq!(vm_row["device"], Value::Null);
     }
 
     #[test]

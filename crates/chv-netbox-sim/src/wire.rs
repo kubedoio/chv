@@ -36,6 +36,14 @@ pub enum WireError {
     /// Non-field failure — `{"detail": "<message>"}`.
     #[error("{message}")]
     Detail { message: &'static str },
+    /// A delete refused because other objects still reference this
+    /// one through a PROTECT foreign key (a VLAN referenced by a
+    /// prefix). Answered as `409 {"detail": ...}`; real NetBox
+    /// surfaces Django's `ProtectedError` through the REST API as
+    /// an HTTP 500 — a documented deviation (see the crate docs'
+    /// fidelity notes).
+    #[error("protected delete: {message}")]
+    Protected { message: String },
 }
 
 impl WireError {
@@ -43,6 +51,7 @@ impl WireError {
     pub fn status(&self) -> u16 {
         match self {
             WireError::NotFound => 404,
+            WireError::Protected { .. } => 409,
             WireError::Field { .. } | WireError::Detail { .. } => 400,
         }
     }
@@ -57,6 +66,7 @@ impl WireError {
                 Value::Object(body)
             }
             WireError::Detail { message } => json!({ "detail": message }),
+            WireError::Protected { message } => json!({ "detail": message }),
         }
     }
 }
@@ -270,7 +280,12 @@ pub(crate) fn strip_mask(address: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 /// The natural key of a stored row, as `(field, value)` pairs —
-/// exactly the keys the adapter client filters on.
+/// the basis of the create/patch uniqueness check, matching the
+/// keys the adapter client filters on. One deliberate exception:
+/// an IP address's key is the full with-mask address, because
+/// NetBox's unique constraint includes the mask (`10.42.0.5/24`
+/// and `10.42.0.5/32` are distinct rows). List *filtering* stays
+/// mask-independent (see [`row_matches`]).
 pub(crate) fn natural_key(kind: SimKind, row: &Value) -> Vec<(String, String)> {
     let name = || {
         row.get("name")
@@ -308,12 +323,13 @@ pub(crate) fn natural_key(kind: SimKind, row: &Value) -> Vec<(String, String)> {
         )],
         SimKind::IpAddress => vec![(
             "address".to_string(),
-            strip_mask(
-                row.get("address")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )
-            .to_string(),
+            // The full with-mask address: NetBox's unique
+            // constraint includes the mask (stored rows always
+            // carry one — see `with_mask`).
+            row.get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         )],
     }
 }
@@ -443,16 +459,26 @@ fn link(
     format!("{base}{path}?{}", pairs.join("&"))
 }
 
-/// The `next`/`previous` links for a page, following Django REST
-/// framework's `LimitOffsetPagination` semantics (which NetBox uses):
+/// The `next`/`previous` links for a page, following the
+/// LimitOffsetPagination semantics NetBox 4.x inherits from DRF
+/// (`rest_framework/pagination.py`):
 ///
 /// - `next` is present iff `offset + limit < count`, pointing at
 ///   `offset + limit`;
 /// - `previous` is present iff `offset > 0`, pointing at
-///   `offset - limit` (the `offset` parameter is omitted when the
-///   target is 0);
+///   `offset - limit` (the `offset` parameter is removed when the
+///   target is 0, like DRF's `remove_query_param`);
 /// - links are absolute URLs preserving the filter parameters and
-///   the effective `limit`.
+///   carrying the **effective** `limit`. DRF's
+///   `get_next_link`/`get_previous_link` — which NetBox 4.x's
+///   `OptionalLimitOffsetPagination` inherits unchanged — rewrite
+///   the request URL with
+///   `replace_query_param(url, "limit", self.limit)`: the request's
+///   own `limit`/`offset` parameters are dropped and the effective
+///   (defaulted or clamped) page size is appended after the
+///   filters, exactly as [`link`] builds them. A request without a
+///   `limit` therefore gets the default page size in its links,
+///   and an oversized `limit` is echoed as the clamped value.
 pub(crate) fn page_links(
     base: &str,
     path: &str,
@@ -461,8 +487,12 @@ pub(crate) fn page_links(
     limit: usize,
     offset: usize,
 ) -> (Option<String>, Option<String>) {
-    let next = if offset + limit < count {
-        Some(link(base, path, filters, limit, Some(offset + limit)))
+    // saturating_add: a hostile `offset=18446744073709551615` must
+    // not overflow-panic the math (a saturated sum simply exceeds
+    // `count`, so there is no next page).
+    let next_offset = offset.saturating_add(limit);
+    let next = if next_offset < count {
+        Some(link(base, path, filters, limit, Some(next_offset)))
     } else {
         None
     };
@@ -574,6 +604,48 @@ mod tests {
             previous.as_deref(),
             Some("http://x/api/ipam/vlans/?limit=2&offset=8")
         );
+    }
+
+    #[test]
+    fn page_links_survive_a_hostile_huge_offset() {
+        // usize::MAX must saturate, not overflow-panic (debug
+        // builds abort on overflow — this test runs in one).
+        let (next, previous) = page_links("http://x", "/api/ipam/vlans/", &[], 3, 50, usize::MAX);
+        assert_eq!(next, None, "no next page past the end");
+        assert_eq!(
+            previous.as_deref(),
+            Some("http://x/api/ipam/vlans/?limit=50&offset=18446744073709551565")
+        );
+    }
+
+    #[test]
+    fn protected_errors_answer_409_with_a_detail_body() {
+        let error = WireError::Protected {
+            message: "Cannot delete VLAN 42.".to_string(),
+        };
+        assert_eq!(error.status(), 409);
+        assert_eq!(
+            error.body(),
+            serde_json::json!({ "detail": "Cannot delete VLAN 42." })
+        );
+    }
+
+    #[test]
+    fn ip_natural_key_includes_the_mask() {
+        // NetBox's unique constraint is on the full with-mask
+        // address; the list-filter key stays mask-independent
+        // (row_matches strips masks on both sides).
+        let key = |address: &str| {
+            natural_key(
+                SimKind::IpAddress,
+                &serde_json::json!({ "address": address }),
+            )
+        };
+        assert_eq!(key("10.42.0.5/24"), key("10.42.0.5/24"));
+        assert_ne!(key("10.42.0.5/24"), key("10.42.0.5/32"));
+        // Stored rows always carry a mask: a maskless write is
+        // normalized to /32 first (see `with_mask`, covered by
+        // `masks_are_normalized_and_stripped`).
     }
 
     #[test]

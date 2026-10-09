@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// be cleared again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaultConfig {
-    /// Force `401 {"detail": "Invalid token"}` for every request,
+    /// Force `401 {"detail": "Invalid token."}` for every request,
     /// regardless of the presented token.
     #[serde(default)]
     pub auth_failure: bool,

@@ -314,10 +314,13 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
 
     // Delete everything; the by-architecture lists empty out.
     // (id, kind) pairs in creation order: vlan, prefix, interface,
-    // vm, device, ip.
+    // vm, device, ip — but the PREFIX is deleted before the VLAN
+    // it references: NetBox's Prefix.vlan is on_delete=PROTECT, so
+    // the sim refuses a VLAN delete while a prefix still
+    // references it.
     let deletions = [
-        (ids[0], NetBoxKind::Vlan),
         (ids[1], NetBoxKind::Prefix),
+        (ids[0], NetBoxKind::Vlan),
         (ids[2], NetBoxKind::Interface),
         (ids[3], NetBoxKind::VirtualMachine),
         (ids[4], NetBoxKind::Device),

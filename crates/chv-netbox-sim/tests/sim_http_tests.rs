@@ -149,6 +149,81 @@ async fn default_page_size_applies_without_a_limit_parameter() {
     );
 }
 
+#[tokio::test]
+async fn malformed_pagination_parameters_fall_back_to_the_defaults() {
+    // NetBox's paginator (OptionalLimitOffsetPagination.get_limit /
+    // DRF's get_offset) wraps the parse in try/except: garbage or
+    // negative limit/offset values silently fall back to the
+    // default page size / offset 0 instead of failing the request.
+    let sim = start_with(chv_netbox_sim::NetboxSimConfig::new(TOKEN).with_page_sizes(2, 100)).await;
+    seed_devices(&sim, 5).await;
+
+    let response = get(&sim, "/api/dcim/devices/?limit=abc&offset=-5").await;
+    assert_eq!(response.status(), 200);
+    let page = response.json::<Value>().await.expect("page is JSON");
+    assert_eq!(page["count"], json!(5));
+    // Default page size, first page.
+    assert_eq!(page["results"].as_array().expect("results").len(), 2);
+    assert_eq!(page["previous"], Value::Null);
+}
+
+#[tokio::test]
+async fn pagination_links_carry_the_effective_limit() {
+    // DRF's LimitOffsetPagination.get_next_link — inherited
+    // unchanged by NetBox 4.x's OptionalLimitOffsetPagination —
+    // rewrites the request URL with
+    // replace_query_param(url, "limit", self.limit): links carry the
+    // EFFECTIVE page size. A request without a limit gets the
+    // default in its links; an oversized limit is echoed as the
+    // clamped value (never the raw request string).
+    let sim = start_with(chv_netbox_sim::NetboxSimConfig::new(TOKEN).with_page_sizes(2, 4)).await;
+    seed_devices(&sim, 5).await;
+
+    // No limit sent: the default (2) appears in the link.
+    let page = get(&sim, "/api/dcim/devices/")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(
+        page["next"].as_str().expect("next link"),
+        format!("{}/api/dcim/devices/?limit=2&offset=2", sim.base_url())
+    );
+
+    // limit=7 clamps to the max page (4): the link carries the
+    // clamped value, exactly like replace_query_param.
+    let page = get(&sim, "/api/dcim/devices/?limit=7")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["results"].as_array().expect("results").len(), 4);
+    assert_eq!(
+        page["next"].as_str().expect("next link"),
+        format!("{}/api/dcim/devices/?limit=4&offset=4", sim.base_url())
+    );
+}
+
+#[tokio::test]
+async fn huge_offset_yields_an_empty_page_without_overflow() {
+    let sim = start().await;
+    seed_devices(&sim, 3).await;
+
+    // usize::MAX must not overflow-panic the next-link math (debug
+    // builds abort on overflow; this test runs in one).
+    let response = get(&sim, "/api/dcim/devices/?offset=18446744073709551615").await;
+    assert_eq!(response.status(), 200);
+    let page = response.json::<Value>().await.expect("page is JSON");
+    assert_eq!(page["count"], json!(3));
+    assert_eq!(page["results"], json!([]));
+    assert_eq!(page["next"], Value::Null);
+    // previous still walks back one page.
+    assert!(page["previous"]
+        .as_str()
+        .expect("previous link")
+        .contains("offset="));
+}
+
 // ---------------------------------------------------------------------------
 // Filtering
 // ---------------------------------------------------------------------------
@@ -449,6 +524,175 @@ async fn delete_returns_204_and_removes_the_object() {
     );
 }
 
+#[tokio::test]
+async fn ip_uniqueness_includes_the_mask_but_filtering_stays_mask_independent() {
+    let sim = start().await;
+
+    // NetBox's unique constraint is on the full with-mask address:
+    // the same host address with different masks coexists.
+    let response = post(
+        &sim,
+        "/api/ipam/ip-addresses/",
+        json!({ "address": "10.42.0.5/24" }),
+    )
+    .await;
+    assert_eq!(response.status(), 201);
+    let response = post(
+        &sim,
+        "/api/ipam/ip-addresses/",
+        json!({ "address": "10.42.0.5/32" }),
+    )
+    .await;
+    assert_eq!(response.status(), 201);
+
+    // The identical with-mask address is still a duplicate…
+    let response = post(
+        &sim,
+        "/api/ipam/ip-addresses/",
+        json!({ "address": "10.42.0.5/24" }),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "address": ["This field must be unique."] })
+    );
+    // …and a maskless create normalizes to /32 before the check.
+    let response = post(
+        &sim,
+        "/api/ipam/ip-addresses/",
+        json!({ "address": "10.42.0.5" }),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+
+    // The read/filter path stays mask-independent: one probe
+    // (without a mask) sees both rows.
+    let page = get(&sim, "/api/ipam/ip-addresses/?address=10.42.0.5")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["count"], json!(2));
+}
+
+#[tokio::test]
+async fn deleting_a_vlan_referenced_by_a_prefix_is_refused_with_409() {
+    let sim = start().await;
+
+    let vlan = post(
+        &sim,
+        "/api/ipam/vlans/",
+        json!({ "vid": 42, "name": "backend" }),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .expect("vlan");
+    let vlan_id = vlan["id"].as_i64().expect("id");
+    let prefix = post(
+        &sim,
+        "/api/ipam/prefixes/",
+        json!({ "prefix": "10.42.0.0/24", "vlan": { "vid": 42 } }),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .expect("prefix");
+    let prefix_id = prefix["id"].as_i64().expect("id");
+
+    // NetBox's Prefix.vlan is on_delete=PROTECT: the delete fails
+    // and nothing is cleared. (Real NetBox surfaces Django's
+    // ProtectedError as a 500; this sim answers 409 with a clear
+    // body — a documented deviation, see the crate docs' fidelity
+    // notes.)
+    let response = delete(&sim, &format!("/api/ipam/vlans/{vlan_id}/")).await;
+    assert_eq!(response.status(), 409);
+    let body = response.json::<Value>().await.expect("error body");
+    assert!(
+        body["detail"].as_str().expect("detail").contains("42"),
+        "body explains the conflict: {body}"
+    );
+
+    // The VLAN and its referencing prefix both survive.
+    let page = get(&sim, "/api/ipam/vlans/?vid=42")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["count"], json!(1));
+    let page = get(&sim, "/api/ipam/prefixes/?prefix=10.42.0.0/24")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["results"][0]["vlan"]["vid"], json!(42));
+
+    // Once the referencing prefix is gone, the VLAN deletes cleanly.
+    assert_eq!(
+        delete(&sim, &format!("/api/ipam/prefixes/{prefix_id}/"))
+            .await
+            .status(),
+        204
+    );
+    assert_eq!(
+        delete(&sim, &format!("/api/ipam/vlans/{vlan_id}/"))
+            .await
+            .status(),
+        204
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_device_nulls_the_device_reference_on_vms() {
+    let sim = start().await;
+
+    let device = post(
+        &sim,
+        "/api/dcim/devices/",
+        common::device_body("chv-node-01"),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .expect("device");
+    let device_id = device["id"].as_i64().expect("id");
+    post(
+        &sim,
+        "/api/virtualization/virtual-machines/",
+        json!({
+            "name": "vm-01",
+            "status": "active",
+            "device": { "name": "chv-node-01" }
+        }),
+    )
+    .await;
+
+    // Sanity: the reference is set.
+    let page = get(&sim, "/api/virtualization/virtual-machines/?name=vm-01")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["results"][0]["device"]["name"], json!("chv-node-01"));
+
+    // NetBox's VirtualMachine.device is on_delete=SET_NULL: the VM
+    // survives with a null reference.
+    assert_eq!(
+        delete(&sim, &format!("/api/dcim/devices/{device_id}/"))
+            .await
+            .status(),
+        204
+    );
+    let page = get(&sim, "/api/virtualization/virtual-machines/?name=vm-01")
+        .await
+        .json::<Value>()
+        .await
+        .expect("page is JSON");
+    assert_eq!(page["count"], json!(1), "the VM survives");
+    assert_eq!(page["results"][0]["device"], Value::Null);
+}
+
 // ---------------------------------------------------------------------------
 // 404s outside the surface
 // ---------------------------------------------------------------------------
@@ -532,7 +776,20 @@ async fn auth_rejection_bodies() {
     assert_eq!(response.status(), 401);
     assert_eq!(
         response.json::<Value>().await.expect("error body"),
-        json!({ "detail": "Invalid token" })
+        json!({ "detail": "Invalid token." })
+    );
+
+    // `Token` with no credential (DRF's punctuation included).
+    let response = http()
+        .get(format!("{}/api/dcim/devices/", sim.base_url()))
+        .header("Authorization", "Token ")
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "detail": "Invalid token header. No credentials provided." })
     );
 
     // Wrong scheme.
@@ -543,6 +800,12 @@ async fn auth_rejection_bodies() {
         .await
         .expect("GET");
     assert_eq!(response.status(), 401);
+    // A foreign scheme is simply not authenticated (DRF's
+    // TokenAuthentication falls through).
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "detail": "Authentication credentials were not provided." })
+    );
 
     // Writes are authenticated too.
     let response = http()
@@ -582,7 +845,7 @@ async fn fault_auth_failure_forces_401_even_for_valid_tokens() {
     assert_eq!(response.status(), 401);
     assert_eq!(
         response.json::<Value>().await.expect("error body"),
-        json!({ "detail": "Invalid token" })
+        json!({ "detail": "Invalid token." })
     );
     // The control plane stays reachable (faults never apply to it).
     let dump = state(&sim).await;

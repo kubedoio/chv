@@ -182,26 +182,46 @@ fn unauthorized(detail: &str) -> Response {
 
 /// Validate `Authorization: Token <t>` against the configured tokens
 /// (the only auth scheme the adapter client uses). Returns the 401
-/// response when the request must be rejected.
+/// response when the request must be rejected. Bodies match DRF's
+/// `TokenAuthentication` (which NetBox inherits): missing header or
+/// foreign scheme → "Authentication credentials were not provided.",
+/// `Token` with no credential → "Invalid token header. No credentials
+/// provided.", a wrong token → "Invalid token.".
 fn check_auth(shared: &SimShared, headers: &HeaderMap) -> Option<Response> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let presented = header
-        .and_then(|value| value.strip_prefix("Token "))
-        .map(str::trim);
-    match presented {
-        None if header.is_none() => Some(unauthorized(
-            "Authentication credentials were not provided.",
-        )),
-        None => Some(unauthorized("Invalid token")),
-        Some(token) => {
+    let (scheme, token, extra) = match header.map(str::split_whitespace) {
+        None => {
+            return Some(unauthorized(
+                "Authentication credentials were not provided.",
+            ))
+        }
+        Some(mut parts) => (parts.next(), parts.next(), parts.next()),
+    };
+    match (scheme, token, extra) {
+        // `Token <t>` — the shape the adapter client sends.
+        (Some(scheme), Some(token), None) if scheme.eq_ignore_ascii_case("Token") => {
             if shared.config().tokens.iter().any(|valid| valid == token) {
                 None
             } else {
-                Some(unauthorized("Invalid token"))
+                Some(unauthorized("Invalid token."))
             }
         }
+        // `Token` with no credential at all.
+        (Some(scheme), None, None) if scheme.eq_ignore_ascii_case("Token") => Some(unauthorized(
+            "Invalid token header. No credentials provided.",
+        )),
+        // A token containing spaces.
+        (Some(scheme), _, _) if scheme.eq_ignore_ascii_case("Token") => Some(unauthorized(
+            "Invalid token header. Token string should not contain spaces.",
+        )),
+        // Any other scheme falls through like DRF's
+        // TokenAuthentication: the request is simply not
+        // authenticated.
+        _ => Some(unauthorized(
+            "Authentication credentials were not provided.",
+        )),
     }
 }
 
@@ -221,7 +241,7 @@ async fn apply_faults(shared: &Arc<SimShared>, kind: SimKind) -> Option<Response
         return Some(connection_drop_response());
     }
     if fault.auth_failure {
-        return Some(unauthorized("Invalid token"));
+        return Some(unauthorized("Invalid token."));
     }
     if fault.rate_limit {
         let mut response = (
@@ -262,22 +282,17 @@ fn connection_drop_response() -> Response {
     response
 }
 
-/// Parse an optional `usize` query parameter, failing closed on
-/// garbage (DRF rejects unparseable pagination parameters).
-fn usize_param(
-    params: &[(String, String)],
-    name: &'static str,
-) -> Result<Option<usize>, WireError> {
-    match params.iter().find(|(key, _)| key == name) {
-        None => Ok(None),
-        Some((_, value)) => value
-            .parse::<usize>()
-            .map(Some)
-            .map_err(|_| WireError::Field {
-                field: name,
-                message: "A valid integer is required.",
-            }),
-    }
+/// Parse an optional `usize` query parameter. Unparseable or
+/// negative values are ignored (the caller's default applies):
+/// NetBox's paginator wraps the `limit`/`offset` parse in
+/// try/except (`OptionalLimitOffsetPagination.get_limit`, DRF's
+/// `get_offset`) and falls back to the configured default page
+/// size / offset 0, so the request still succeeds.
+fn usize_param(params: &[(String, String)], name: &'static str) -> Option<usize> {
+    params
+        .iter()
+        .find(|(key, _)| key == name)
+        .and_then(|(_, value)| value.parse::<usize>().ok())
 }
 
 fn bad_json_body() -> Response {
@@ -323,14 +338,10 @@ async fn list(
     if let Some(response) = check_auth(&shared, &headers) {
         return response;
     }
-    let limit = match usize_param(&params, "limit") {
-        Ok(value) => value,
-        Err(error) => return error.into_response(),
-    };
-    let offset = match usize_param(&params, "offset") {
-        Ok(value) => value.unwrap_or(0),
-        Err(error) => return error.into_response(),
-    };
+    // Malformed limit/offset values fall back to the defaults
+    // (the default page size / offset 0), like NetBox's paginator.
+    let limit = usize_param(&params, "limit");
+    let offset = usize_param(&params, "offset").unwrap_or(0);
     let base = request_base(&headers);
     let effective = effective_limit(
         limit,
@@ -349,6 +360,11 @@ async fn list(
             .take(effective)
             .map(|row| state.read_form(kind, row, &base))
             .collect();
+        // DRF's link builder (LimitOffsetPagination) rewrites the
+        // request URL with replace_query_param: the request's own
+        // limit/offset parameters are dropped and the effective
+        // values are appended after the filters — exactly this
+        // ordering.
         let filters: Vec<(String, String)> = params
             .iter()
             .filter(|(key, _)| key != "limit" && key != "offset")
