@@ -153,7 +153,9 @@ conditions (feature name, env var, factory seams) is a high-risk change
   (defaults `18080` / `18081`; the controlplane's gRPC port is `18443`).
 - `--no-seed` — skip the demo architecture / projection-config seeding;
   you land on the UI with the six starters but no NetBox config. (The
-  admin user is always seeded — the UI needs it to log in.)
+  admin user is always seeded — the UI needs it to log in. Note: with a
+  reused `--workspace`, `--no-seed` also skips the config endpoint/token
+  sync — if you changed `--sim-port`, re-point the config in the UI.)
 - `--keep` — keep the workspace on exit; the workspace's `demo.env`
   records the URLs, the simulator token, and the seeded architecture id
   for shell-driven experiments.

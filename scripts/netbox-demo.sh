@@ -570,6 +570,8 @@ fi
 WORKSPACE_NOTE="(removed on exit; --keep to preserve)"
 if [[ "$REUSE" == true ]]; then
     WORKSPACE_NOTE="(reused workspace)"
+elif [[ -n "$WORKSPACE_ARG" ]]; then
+    WORKSPACE_NOTE="(new named workspace — never removed on exit)"
 fi
 if [[ "$KEEP" == true || -n "$WORKSPACE_ARG" ]]; then
     WORKSPACE_NOTE="${WORKSPACE_NOTE} — kept on exit; re-run with: ./scripts/netbox-demo.sh --workspace ${WORKSPACE}"
