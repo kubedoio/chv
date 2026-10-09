@@ -926,3 +926,366 @@ export async function getArchitectureDrift(
 		signal
 	});
 }
+
+// ─── NetBox projection wire types (issue #239) ───────────────────────────
+//
+// Source of truth: docs/specs/architecture-designer/contracts/netbox-api-contract.md
+// and crates/chv-webui-bff/src/handlers/netbox.rs (the DTOs there are the
+// binding implementation of the contract). Field names and nullability
+// below are cross-checked 1:1 against the Rust DTOs:
+//
+//   NetboxConfigResponse      → NetboxConfig
+//   NetboxConfigUpsertRequest → NetboxConfigUpsertRequest (flat, like update)
+//   NetboxProjectionPlan      → NetboxProjectionPlan (dry-run response is
+//                               #[serde(flatten)]ed, so the plan fields ARE
+//                               the response body)
+//   NetboxRunSummaryDto       → NetboxRunSummary
+//   NetboxRunDetailDto        → NetboxRunDetail
+//
+// Secrets: the token is write-only. It appears exactly once below — as an
+// optional field of the upsert request — and is never part of any response
+// type (`token_set: boolean` is the only token signal on the wire).
+
+/** Retention for removed CHV resources (contract: `mark_stale` | `delete`; `delete` requires Admin). */
+export type NetboxRetentionPolicy = 'mark_stale' | 'delete';
+
+/** Plan action discriminants (adapter `NetboxPlanAction`, snake_case on the wire). */
+export type NetboxPlanAction = 'create' | 'update' | 'no_op' | 'conflict' | 'stale';
+
+/** NetBox object kinds the v1 mapping projects (adapter `NetBoxKind`). */
+export type NetboxKind =
+	| 'vlan'
+	| 'prefix'
+	| 'ip_address'
+	| 'interface'
+	| 'virtual_machine'
+	| 'device';
+
+/**
+ * Config summary — the contract's config/get / config/upsert response
+ * (`NetboxConfigResponse`). `token_set` is the ONLY token signal: neither
+ * the token nor its ciphertext is ever returned. `site_name` is nullable.
+ */
+export interface NetboxConfig {
+	architecture_id: string;
+	endpoint: string;
+	token_secret_ref: string;
+	token_set: boolean;
+	retention_policy: NetboxRetentionPolicy;
+	enable_post_apply: boolean;
+	custom_field_prefix: string;
+	site_name: string | null;
+	updated_at: string;
+}
+
+/**
+ * FLAT upsert request — fields live at the top level alongside `id` and
+ * `expected_version` (mirrors {@link UpdateArchitectureRequest}; the BFF's
+ * `NetboxConfigUpsertRequest` is flat too).
+ *
+ * `token` is optional and write-only: omitted/undefined keeps the existing
+ * secret (the store's save path omits the key entirely when the form's
+ * token field is left blank). `custom_field_prefix` is the contract's
+ * additive optional field — omitted keeps the existing prefix.
+ */
+export interface NetboxConfigUpsertRequest {
+	id: string;
+	expected_version: number;
+	endpoint: string;
+	/** Write-only; undefined keeps the existing token. Never logged or stored by the UI. */
+	token?: string;
+	token_secret_ref: string;
+	retention_policy: NetboxRetentionPolicy;
+	enable_post_apply: boolean;
+	site_name?: string | null;
+	custom_field_prefix?: string;
+}
+
+export interface NetboxConfigDeleteResponse {
+	deleted: boolean;
+}
+
+/** Aggregate entry counts by action (adapter `PlanSummary`). */
+export interface NetboxPlanSummary {
+	create: number;
+	update: number;
+	no_op: number;
+	conflict: number;
+	stale: number;
+}
+
+/**
+ * One dry-run plan entry (adapter `NetboxProjectionPlanEntry`). `conflict`
+ * entries always carry a human `reason` (foreign owner / name occupied)
+ * and are never written — the UI renders the ownership-conflict cue.
+ * `changes` is non-empty only for `update` entries.
+ */
+export interface NetboxPlanEntry {
+	action: NetboxPlanAction;
+	kind: NetboxKind;
+	chv_resource_ref: string;
+	netbox_natural_key: Record<string, string>;
+	external_id: string;
+	reason: string;
+	changes: string[];
+}
+
+/**
+ * The deterministic, secret-free projection plan — the dry-run response
+ * body (the BFF flattens the adapter's `NetboxProjectionPlan` verbatim, so
+ * these fields ARE the response). Entries are ordered by
+ * (kind rank, name, action rank) and byte-stable for identical inputs.
+ */
+export interface NetboxProjectionPlan {
+	mapping_version: string;
+	architecture_id: string;
+	architecture_version: number;
+	/** Retention in effect — explains what `stale` entries will do operationally. */
+	retention: NetboxRetentionPolicy;
+	summary: NetboxPlanSummary;
+	entries: NetboxPlanEntry[];
+}
+
+/** Enqueue acknowledgement for export (`NetboxExportResponse`). */
+export interface NetboxExportResponse {
+	run_id: string;
+	architecture_id: string;
+	status: string;
+}
+
+export type NetboxRunTrigger = 'manual' | 'post_apply';
+export type NetboxRunStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+export type NetboxRunMode = 'dry_run' | 'export';
+
+/**
+ * Run summary row (`NetboxRunSummaryDto`). `summary` is the run's parsed
+ * `summary_json` — the plan-action counts ({@link NetboxPlanSummary}) when
+ * the worker wrote them, null while the run has not executed yet.
+ */
+export interface NetboxRunSummary {
+	id: string;
+	architecture_id: string;
+	trigger: NetboxRunTrigger;
+	status: NetboxRunStatus;
+	mode: NetboxRunMode;
+	summary: NetboxPlanSummary | null;
+	error_message: string | null;
+	attempt_count: number;
+	requested_by: string | null;
+	started_at: string | null;
+	finished_at: string | null;
+	created_at: string;
+}
+
+/** Per-entry execution outcome (adapter `NetboxEntryOutcome`). */
+export interface NetboxEntryOutcome {
+	action: NetboxPlanAction;
+	kind: NetboxKind;
+	chv_resource_ref: string;
+	status: 'succeeded' | 'failed' | 'skipped' | 'not_attempted';
+	error: string | null;
+}
+
+export interface NetboxOutcomeSummary {
+	succeeded: number;
+	failed: number;
+	skipped: number;
+	not_attempted: number;
+}
+
+/** Run-level abort error (adapter `NetboxRunnerErrorSummary`). */
+export interface NetboxRunnerErrorSummary {
+	message: string;
+	failed_chv_resource_ref: string | null;
+	retryable: boolean;
+}
+
+/** The worker's persisted `result_json` payload (adapter `NetboxProjectionOutcome`). */
+export interface NetboxRunResult {
+	plan: NetboxProjectionPlan;
+	entries: NetboxEntryOutcome[];
+	summary: NetboxOutcomeSummary;
+	error: NetboxRunnerErrorSummary | null;
+}
+
+/**
+ * Full run for runs/get (`NetboxRunDetailDto`). `plan_json` / `result_json`
+ * are the parsed JSON payloads when the column held parseable JSON and the
+ * raw column string otherwise (the BFF's `parse_json_or_raw` wraps
+ * unparseable payloads as a JSON string rather than dropping data) — hence
+ * the parsed-or-raw-string union.
+ */
+export interface NetboxRunDetail {
+	id: string;
+	architecture_id: string;
+	architecture_version_id: string;
+	trigger: NetboxRunTrigger;
+	status: NetboxRunStatus;
+	mode: NetboxRunMode;
+	plan_json: NetboxProjectionPlan | string | null;
+	result_json: NetboxRunResult | string | null;
+	summary: NetboxPlanSummary | null;
+	error_message: string | null;
+	attempt_count: number;
+	requested_by: string | null;
+	started_at: string | null;
+	finished_at: string | null;
+	next_attempt_at: string | null;
+	created_at: string;
+}
+
+export interface NetboxRunRetryResponse {
+	run_id: string;
+	status: string;
+}
+
+/**
+ * Fetch the projection config summary.
+ *
+ * Returns `null` — not an exception — when the BFF answers
+ * `NETBOX_NOT_CONFIGURED` (404 on this endpoint), so "no config yet" is
+ * distinguishable from a transport failure without callers sniffing
+ * BFFError codes. There is no prior null-on-absent getter in this module
+ * (the other reads throw), so this is a deliberate, documented pattern for
+ * the first genuinely optional resource in the designer surface; every
+ * other error propagates as {@link BFFError}.
+ */
+export async function getNetboxConfig(id: string, token?: string): Promise<NetboxConfig | null> {
+	try {
+		return await bffFetch<NetboxConfig>(BFFEndpoints.netboxConfigGet, {
+			method: 'POST',
+			body: JSON.stringify({ id }),
+			token
+		});
+	} catch (err) {
+		if (err instanceof BFFError && err.code === 'NETBOX_NOT_CONFIGURED') {
+			return null;
+		}
+		throw err;
+	}
+}
+
+/**
+ * Create/update the projection config (and optionally set the token).
+ *
+ * Mirrors {@link updateArchitecture}: a 409 conflict (the contract reuses
+ * `PLAN_EXPIRED` for a stale `expected_version`) is rethrown as
+ * {@link StaleVersionError} with the wire code preserved; everything else
+ * propagates verbatim (400 `NETBOX_HTTPS_REQUIRED`, 403 for the
+ * admin-only `delete` retention policy, …).
+ */
+export async function upsertNetboxConfig(
+	req: NetboxConfigUpsertRequest,
+	token?: string
+): Promise<NetboxConfig> {
+	try {
+		return await bffFetch<NetboxConfig>(BFFEndpoints.netboxConfigUpsert, {
+			method: 'POST',
+			body: JSON.stringify(req),
+			token
+		});
+	} catch (err) {
+		rethrowAsStaleVersion(err, req.id, req.expected_version);
+	}
+}
+
+/**
+ * Remove the projection config (NetBox itself is untouched). An absent
+ * config answers 404 `NETBOX_NOT_CONFIGURED`, which propagates as a
+ * BFFError like every other read of a missing row.
+ */
+export async function deleteNetboxConfig(
+	id: string,
+	token?: string
+): Promise<NetboxConfigDeleteResponse> {
+	return bffFetch<NetboxConfigDeleteResponse>(BFFEndpoints.netboxConfigDelete, {
+		method: 'POST',
+		body: JSON.stringify({ id }),
+		token
+	});
+}
+
+/**
+ * Compute the projection plan synchronously (no writes to NetBox).
+ *
+ * Throws BFFError with the contract's stable codes: 400
+ * `NETBOX_NOT_CONFIGURED` / `NETBOX_TOKEN_MISSING` / `NETBOX_NOT_APPLIED`,
+ * 502 `NETBOX_UNREACHABLE` / `NETBOX_AUTH_FAILED`. The component layer
+ * decides how to render each.
+ */
+export async function netboxDryRun(id: string, token?: string): Promise<NetboxProjectionPlan> {
+	return bffFetch<NetboxProjectionPlan>(BFFEndpoints.netboxExportDryRun, {
+		method: 'POST',
+		body: JSON.stringify({ id }),
+		token
+	});
+}
+
+/**
+ * Enqueue an export run (trigger `manual`). The worker executes it; this
+ * only acknowledges the enqueue. Throws BFFError 409 `NETBOX_RUN_ACTIVE`
+ * when a run is already queued/running and 403
+ * `PRODUCTION_REQUIRES_ADMIN` for non-admins on production topologies.
+ */
+export async function exportNetbox(id: string, token?: string): Promise<NetboxExportResponse> {
+	return bffFetch<NetboxExportResponse>(BFFEndpoints.netboxExport, {
+		method: 'POST',
+		body: JSON.stringify({ id }),
+		token
+	});
+}
+
+/**
+ * List projection runs for an architecture, newest first (store ordering).
+ *
+ * Unwraps the `{ runs: [...] }` envelope to the bare array, mirroring
+ * {@link listApplyRuns} — the documented choice for run-list getters in
+ * this module. `limit` is optional (BFF default 20, clamped to 100).
+ */
+export async function listNetboxRuns(
+	id: string,
+	limit?: number,
+	token?: string
+): Promise<NetboxRunSummary[]> {
+	const body = limit === undefined ? { id } : { id, limit };
+	const res = await bffFetch<{ runs: NetboxRunSummary[] }>(BFFEndpoints.netboxRunsList, {
+		method: 'POST',
+		body: JSON.stringify(body),
+		token
+	});
+	return res.runs ?? [];
+}
+
+/**
+ * Fetch one full run (plan + per-entry results) for the architecture.
+ * A run id belonging to another architecture answers 404, so run ids
+ * cannot be used as cross-architecture probes.
+ */
+export async function getNetboxRun(
+	id: string,
+	run_id: string,
+	token?: string
+): Promise<NetboxRunDetail> {
+	return bffFetch<NetboxRunDetail>(BFFEndpoints.netboxRunsGet, {
+		method: 'POST',
+		body: JSON.stringify({ id, run_id }),
+		token
+	});
+}
+
+/**
+ * Re-enqueue a failed run (failed → queued, keeping the attempt history).
+ * A refused retry (not failed, or attempts exhausted) answers 409
+ * `PROJECTION_RUN_NOT_RETRYABLE`.
+ */
+export async function retryNetboxRun(
+	id: string,
+	run_id: string,
+	token?: string
+): Promise<NetboxRunRetryResponse> {
+	return bffFetch<NetboxRunRetryResponse>(BFFEndpoints.netboxRunsRetry, {
+		method: 'POST',
+		body: JSON.stringify({ id, run_id }),
+		token
+	});
+}

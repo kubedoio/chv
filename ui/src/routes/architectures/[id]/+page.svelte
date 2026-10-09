@@ -10,6 +10,7 @@
 	import PlanReviewPanel from '#lib/components/architectures/dashboard/PlanReviewPanel.svelte';
 	import YamlSidePanel from '#lib/components/architectures/dashboard/YamlSidePanel.svelte';
 	import DriftReportPanel from '#lib/components/architectures/drift/DriftReportPanel.svelte';
+	import NetboxPanel from '#lib/components/architectures/netbox/NetboxPanel.svelte';
 	import Canvas from '#lib/components/architectures/canvas/Canvas.svelte';
 	import Inspector from '#lib/components/architectures/inspector/Inspector.svelte';
 	import { isStarter, buildCloneNames } from '#lib/architectures/starter.ts';
@@ -40,8 +41,10 @@
 
 	// Tab state. The Validation and YAML tabs are Phase 1 additions; the Fleet
 	// tab arrives in Phase 3. Overview remains the default so existing
-	// playwright tests stay green.
-	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet' | 'plan' | 'drift';
+	// playwright tests stay green. The NetBox tab is the issue-239
+	// projection panel (PR 7) — mounted only when active, like every other
+	// branch, so its lazy-load fires on first activation.
+	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet' | 'plan' | 'drift' | 'netbox';
 	let activeTab = $state<Tab>('overview');
 
 	// Validation panel state. Findings are NOT persisted server-side; we keep
@@ -430,6 +433,19 @@
 			>
 				Drift
 			</button>
+			<button
+				type="button"
+				role="tab"
+				id="tab-netbox"
+				aria-selected={activeTab === 'netbox'}
+				aria-controls="tab-panel-netbox"
+				class="tab"
+				class:tab-active={activeTab === 'netbox'}
+				onclick={() => (activeTab = 'netbox')}
+				data-testid="tab-netbox"
+			>
+				NetBox
+			</button>
 		</div>
 
 		{#if activeTab === 'overview'}
@@ -557,9 +573,13 @@
 					onApply={handlePlanApply}
 				/>
 			</div>
-		{:else}
+		{:else if activeTab === 'drift'}
 			<div id="tab-panel-drift" role="tabpanel" aria-labelledby="tab-drift">
 				<DriftReportPanel architectureId={current.id} />
+			</div>
+		{:else if activeTab === 'netbox'}
+			<div id="tab-panel-netbox" role="tabpanel" aria-labelledby="tab-netbox">
+				<NetboxPanel architecture={current} onStaleVersion={handleStaleVersion} />
 			</div>
 		{/if}
 	{/if}
