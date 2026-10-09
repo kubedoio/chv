@@ -1,0 +1,2 @@
+4a0a1e977368f6b15d2198a216bdedf9a350bf5e5ae07e29e695373ec16ad958  /var/lib/chv/qual/hypervisor-fw
+37f7c34075044e8c78f3c9bd8987f4f063bddd91a67b6408ef8daae53dabd22a  /var/lib/chv/qual/images/noble-qual-patched.img

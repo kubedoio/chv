@@ -1,0 +1,14 @@
+Digest verification (run at capture time, 2026-10-09; reproduced below from
+the retained session binary — identical output):
+
+  $ curl -fsSL <github release URL for v53.0>/cloud-hypervisor-static -o cloud-hypervisor
+  $ echo "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc  cloud-hypervisor" | sha256sum -c -
+  cloud-hypervisor: OK
+
+  $ sha256sum cloud-hypervisor
+  448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc  cloud-hypervisor
+
+Pin cross-check: scripts/install.sh:417 chv_version="53.0",
+scripts/install.sh:421 chv_sha256="448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+— MATCH. The binary's runtime self-report (vmm.ping fixtures) is
+"build_version":"v53.0".

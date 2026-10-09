@@ -1,0 +1,18 @@
+Capture timestamps (UTC), reconstructed from fixture file mtimes after the
+session (the captures were taken in one continuous session on 2026-10-09;
+times below are the files' mtime records, accurate to the second for the
+write that produced each fixture):
+
+  vmm.ping.json               2026-10-09T20:05:17Z
+  vm.info.json                2026-10-09T20:05:17Z
+  vm.counters.t0.json         2026-10-09T20:05:17Z
+  vm.counters.t1.json         2026-10-09T20:05:27Z   (t0 + ~10 s)
+  vm.counters.v43.json        2026-10-09T20:06:22Z   (v43 control VM, ~5 s after its boot)
+  vm.counters.fresh-boot.json 2026-10-09T20:07:38Z   (fresh v53.0 process, ~4 s after boot)
+  vmm.ping.fresh.json         2026-10-09T20:07:38Z
+
+Stage timeline: v53.0 VM 1 booted ~20:05:1x (pid 63959); t0/t1 captured;
+broadcast-ping net probe ~20:05:5x (no counter movement); v43.0 control VM
+booted ~20:06:1x, captured 20:06:22, kept running until final teardown; VM 1
+hard-killed ~20:07:2x; fresh v53.0 VM booted (pid 71922); fresh-boot captures;
+teardown (both processes SIGTERM'd, taps deleted).

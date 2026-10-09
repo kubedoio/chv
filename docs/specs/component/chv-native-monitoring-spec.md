@@ -33,7 +33,7 @@ This spec defines a **read-only** `chv-monitoring-core` library and an optional 
 | Node disk space | `statvfs` per configured filesystem | Root is not equivalent to VM storage pool capacity |
 | Node block I/O | `/proc/diskstats` or owned provider counters | Handle stacked devices and double counting |
 | Node network | `/sys/class/net/*/statistics` | Exclude duplicates at bond/bridge/physical levels when aggregating |
-| VM CPU | Pinned VMM `vm.counters` CPU time or verified VM cgroup `cpu.stat` | Name `vm.cpu.cores_used` and normalized utilization separately |
+| VM CPU | Verified VM cgroup `cpu.stat` (primary on the qualified pin — G0b fixtures show v53.0 `vm.counters` exposes no CPU counters; the VMM arm stays available if a future pin adds one) | Name `vm.cpu.cores_used` and normalized utilization separately |
 | VM memory | Owned VMM cgroup `memory.current`, with documented semantics | Host resident accounting, not guest in-use memory |
 | VM network/disk | Pinned VMM counters; mapping of virtio, TAP and provider path | Classify unsupported offloaded/vhost-user paths |
 | VM configured vCPU/RAM | Core VM definition | Label as provisioned, never use as utilization |
