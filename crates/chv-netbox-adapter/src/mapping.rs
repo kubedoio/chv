@@ -1178,6 +1178,51 @@ mod tests {
         }
     }
 
+    /// The provisioning-surface tripwire, derived from the mapping's
+    /// actual output: every custom-field name `build_objects` writes
+    /// (for the maximal fixture — owner set, live snapshot facts, a
+    /// datastore) must be enumerated by
+    /// `CustomFieldNames::ownership_fields` + `enrichment_fields`.
+    /// A new mapping write that is not in those lists would be
+    /// silently unprovisioned against a real NetBox (400 on every
+    /// write carrying it) — this test fails first, in PR CI.
+    #[test]
+    fn mapping_custom_fields_stay_within_the_provisioning_surface() {
+        let mut arch = test_architecture();
+        arch.datastores = vec![Datastore {
+            name: "ds-local".to_string(),
+            datastore_type: chv_architecture_validate::model::DatastoreType::Qcow2Dir,
+            path: Some("/var/lib/chv".to_string()),
+            pool: None,
+            capabilities: None,
+            secret_ref: None,
+        }];
+        let snapshot = test_snapshot();
+        let output = build_objects(&projection_input(&arch, 3, Some(&snapshot))).expect("builds");
+        assert!(output.objects.len() >= 6);
+
+        let mut written: std::collections::BTreeSet<String> = Default::default();
+        for object in &output.objects {
+            written.extend(object.custom_fields().keys().cloned());
+        }
+        assert!(
+            written.contains("chv_datastores"),
+            "fixture must exercise the datastore enrichment field"
+        );
+
+        let names = crate::ownership::CustomFieldNames::default();
+        let surface: std::collections::BTreeSet<String> = names
+            .ownership_fields()
+            .iter()
+            .map(|field| field.to_string())
+            .chain(names.enrichment_fields())
+            .collect();
+        assert_eq!(
+            written, surface,
+            "the mapping's custom-field writes and the provisioning surface diverged"
+        );
+    }
+
     #[test]
     fn external_id_on_device_matches_contract_format() {
         let arch = test_architecture();

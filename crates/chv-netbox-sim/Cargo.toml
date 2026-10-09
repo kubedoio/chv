@@ -16,6 +16,12 @@ tracing = { workspace = true }
 # NetBox `created`/`last_updated` timestamps (microsecond ISO-8601 UTC);
 # same pin style as chv-netbox-adapter's dev-dependency.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Live-capture HTTP client for the qualification lane (`capture`:
+# LiveNetBox talks to a real NetBox REST API; the fixture recorder
+# and the composed suite's real-backend arm both use it). TLS via
+# rustls — the production graph must not grow an openssl dependency
+# through this dev-support crate.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [features]
 # Gates the `netbox-sim` binary target (see [[bin]] below) so
@@ -35,8 +41,4 @@ required-features = ["bin"]
 # This edge is dev-only by construction (the adapter never depends on
 # the simulator); NEVER enable it in a production dependency graph.
 chv-netbox-adapter = { path = "../chv-netbox-adapter", features = ["test-http"] }
-# Raw HTTP access to the `__`-prefixed control plane and to response
-# shapes the adapter client does not expose. Plain HTTP only, so no TLS
-# feature is needed.
-reqwest = { version = "0.12", features = ["json"], default-features = false }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

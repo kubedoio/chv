@@ -62,14 +62,21 @@ async fn list_responses_match_the_golden_fixtures() {
 /// seed-file format (the `netbox-sim` binary's `--seed-file` input).
 #[tokio::test]
 async fn seed_fixture_loads_through_the_seed_file_format() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/netbox4/seed.json"))
+        .expect("seed fixture parses as JSON");
     let payload: chv_netbox_sim::SeedPayload =
-        serde_json::from_str(include_str!("fixtures/netbox4/seed.json"))
-            .expect("seed fixture parses as a SeedPayload");
+        serde_json::from_value(fixture.clone()).expect("seed fixture parses as a SeedPayload");
     let sim = common::start().await;
     let counts = sim.seed(&payload).expect("seed applies");
     assert_eq!(counts[&SimKind::Device], 1);
     assert_eq!(counts[&SimKind::IpAddress], 1);
-    // The dump agrees with the seed.
+    // The dump agrees with the seed — at the seed's own ids (the
+    // assertion must survive a legitimate `--record` refresh, which
+    // renumbers ids, so the expected id is read from the fixture
+    // rather than pinned here).
     let dump = common::state(&sim).await;
-    assert_eq!(dump["objects"]["devices"][0]["id"], serde_json::json!(7));
+    assert_eq!(
+        dump["objects"]["devices"][0]["id"], fixture["devices"][0]["id"],
+        "the dump carries the seeded device at its chosen id"
+    );
 }

@@ -12,7 +12,7 @@
 .PHONY: all build build-debug build-ui build-release release dev-install clean test fmt lint check
 .PHONY: package-deb package-rpm package-local package-smoke package-check bump-version
 .PHONY: integration-kvm integration-kvm-source integration-kvm-packages check-no-println
-.PHONY: netbox-demo
+.PHONY: netbox-demo netbox-qualify netbox-qualify-env
 
 BUMP_TYPE ?= patch
 
@@ -42,6 +42,22 @@ dev-install:
 # docs/dev/netbox-demo.md for the click-path and fault simulation.
 netbox-demo:
 	./scripts/netbox-demo.sh
+
+# Real-NetBox qualification lane (issue #586, ADR-024 decision 4):
+# boots the pinned disposable NetBox compose stack
+# (deploy/netbox-qualification) and runs the composed projection
+# scenarios against the real instance — the drift tripwire for the
+# in-process simulator. Add --record to also refresh the golden
+# netbox4 fixtures from the live instance. Docker required.
+netbox-qualify:
+	./scripts/netbox-qualify.sh
+
+# Boot (or reuse) the qualification stack and print the
+# NETBOX_QUALIFICATION_URL / NETBOX_QUALIFICATION_TOKEN pair for
+# driving the lane from a shell (stack stays up; implies --keep):
+#   eval "$(make netbox-qualify-env)"
+netbox-qualify-env:
+	./scripts/netbox-qualify.sh --print-env
 
 test:
 	cargo test --workspace

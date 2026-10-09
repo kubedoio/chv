@@ -126,11 +126,31 @@ impl SimState {
     // -- relation registry ------------------------------------------------
 
     fn relation_id(&mut self, tag: &'static str, key: String) -> i64 {
+        self.relation_id_with(tag, key, None)
+    }
+
+    /// The registry id for `(tag, key)`, honoring an explicitly
+    /// carried `chosen` id when the key is not yet registered: the
+    /// recorder's seed files re-play captured rows whose nested
+    /// relations carry the ids the capture observed, and re-seeding
+    /// them must reproduce those ids (the counter stays monotonic —
+    /// a carried id never collides with a later allocation). A key
+    /// already in the registry keeps its first-seen id.
+    fn relation_id_with(&mut self, tag: &'static str, key: String, chosen: Option<i64>) -> i64 {
         if let Some(id) = self.relation_ids.get(&(tag, key.clone())) {
             return *id;
         }
-        let id = self.next_relation_id;
-        self.next_relation_id += 1;
+        let id = match chosen {
+            Some(id) => {
+                self.next_relation_id = self.next_relation_id.max(id + 1);
+                id
+            }
+            None => {
+                let id = self.next_relation_id;
+                self.next_relation_id += 1;
+                id
+            }
+        };
         self.relation_ids.insert((tag, key), id);
         id
     }
@@ -177,9 +197,14 @@ impl SimState {
                             field,
                             message: "Must carry a name.",
                         })?;
-                let id = self
-                    .row_id_by_name(kind, name)
-                    .unwrap_or_else(|| self.relation_id(tag, name.to_string()));
+                // An explicitly carried id (recorder seed files) is
+                // honored only when no real row matches: a live row's
+                // id always wins, exactly like a plain name ref.
+                let chosen = relation.get("id").and_then(Value::as_i64);
+                let id = match self.row_id_by_name(kind, name) {
+                    Some(id) => id,
+                    None => self.relation_id_with(tag, name.to_string(), chosen),
+                };
                 Ok(json!({ "id": id, "name": name }))
             }
             Some(_) => Err(WireError::Field {
@@ -234,8 +259,8 @@ impl SimState {
             Some(Value::Array(tags)) => {
                 let mut out = Vec::with_capacity(tags.len());
                 for tag in tags {
-                    let (name, slug) = match tag {
-                        Value::String(slug) => (slug.clone(), slugify(slug)),
+                    let (name, slug, tag_id): (String, String, Option<i64>) = match tag {
+                        Value::String(slug) => (slug.clone(), slugify(slug), None),
                         Value::Object(tag) => {
                             let name = tag
                                 .get("name")
@@ -251,7 +276,11 @@ impl SimState {
                                 .and_then(Value::as_str)
                                 .map(str::to_string)
                                 .unwrap_or_else(|| slugify(&name));
-                            (name, slug)
+                            // An explicitly carried id (recorder seed
+                            // files re-playing captured rows) is
+                            // honored for a first-seen slug.
+                            let tag_id = tag.get("id").and_then(Value::as_i64);
+                            (name, slug, tag_id)
                         }
                         _ => {
                             return Err(WireError::Field {
@@ -260,7 +289,7 @@ impl SimState {
                             })
                         }
                     };
-                    let id = self.relation_id("tag", slug.clone());
+                    let id = self.relation_id_with("tag", slug.clone(), tag_id);
                     out.push(json!({ "id": id, "name": name, "slug": slug }));
                 }
                 Ok(json!(out))
@@ -1155,5 +1184,91 @@ mod tests {
         // First synthetic registry allocation.
         assert_eq!(row["virtual_machine"]["id"], json!(1));
         assert_eq!(row["virtual_machine"]["name"], json!("ghost-vm"));
+    }
+
+    #[test]
+    fn seeded_relation_refs_honor_explicit_ids() {
+        // The fixture recorder's seed files re-play captured rows
+        // whose nested relations carry the ids the capture observed;
+        // when no real row matches (children seed before parents in
+        // `SimKind::ALL` order), the carried id must be reproduced.
+        let mut state = SimState::new();
+        let interface = state
+            .create(
+                SimKind::Interface,
+                &json!({
+                    "name": "backend",
+                    "virtual_machine": { "id": 9, "name": "vm-01" }
+                }),
+            )
+            .expect("interface");
+        let row = state.row(SimKind::Interface, interface).expect("stored");
+        assert_eq!(row["virtual_machine"]["id"], json!(9));
+
+        // A live row still wins over the carried id, and the first
+        // registration wins over a later, different carried id.
+        let vm = state
+            .create(
+                SimKind::VirtualMachine,
+                &json!({ "name": "vm-01", "status": "active" }),
+            )
+            .expect("vm");
+        let other = state
+            .create(
+                SimKind::Interface,
+                &json!({ "name": "eth0", "virtual_machine": { "id": 99, "name": "vm-01" } }),
+            )
+            .expect("interface");
+        let row = state.row(SimKind::Interface, other).expect("stored");
+        // The real vm row id (not 9, not 99) resolves.
+        assert_eq!(row["virtual_machine"]["id"], json!(vm));
+
+        // A name-only ref for a fresh key keeps allocating from the
+        // (now monotonic) relation counter.
+        let third = state
+            .create(
+                SimKind::Interface,
+                &json!({ "name": "eth1", "virtual_machine": { "name": "ghost-vm" } }),
+            )
+            .expect("interface");
+        let row = state.row(SimKind::Interface, third).expect("stored");
+        // The counter moved past the carried id 9.
+        assert_eq!(row["virtual_machine"]["id"], json!(10));
+    }
+
+    #[test]
+    fn seeded_tags_honor_explicit_ids() {
+        let mut state = SimState::new();
+        let device = state
+            .create(
+                SimKind::Device,
+                &json!({
+                    "name": "chv-node-01",
+                    "tags": [{ "id": 7, "name": "chv-team", "slug": "chv-team" }]
+                }),
+            )
+            .expect("device");
+        let row = state.row(SimKind::Device, device).expect("stored");
+        assert_eq!(row["tags"][0]["id"], json!(7));
+
+        // A later, different carried id for the same slug keeps the
+        // first-seen id; a fresh slug allocates from the counter
+        // moved past every carried id.
+        let vm = state
+            .create(
+                SimKind::VirtualMachine,
+                &json!({
+                    "name": "vm-01",
+                    "tags": [
+                        { "id": 99, "name": "chv-team", "slug": "chv-team" },
+                        "fresh-tag"
+                    ]
+                }),
+            )
+            .expect("vm");
+        let row = state.row(SimKind::VirtualMachine, vm).expect("stored");
+        assert_eq!(row["tags"][0]["id"], json!(7));
+        assert_eq!(row["tags"][1]["id"], json!(8));
+        assert_eq!(row["tags"][1]["slug"], json!("fresh-tag"));
     }
 }

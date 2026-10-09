@@ -1,0 +1,118 @@
+name: NetBox Qualification
+
+# Real-NetBox qualification lane (ADR-024 decision 4, lane 3 — issue
+# kubedoio/chv#586): runs the composed NetBox-projection scenarios
+# against a pinned, disposable real NetBox (docker compose stack in
+# deploy/netbox-qualification) via scripts/netbox-qualify.sh.
+#
+# This is the drift tripwire for the in-process simulator: the same
+# scenario code that runs against chv-netbox-sim on every cargo test
+# runs here against the real thing, so wire-shape drift fails loudly
+# instead of silently accumulating.
+#
+# Trigger policy:
+#   - workflow_dispatch: manual trigger, optionally with --record
+#   - schedule: weekly (Mondays 04:00 UTC)
+# No pull_request trigger: the lane needs Docker image pulls and a
+# multi-minute NetBox boot, which is far too heavy for PR validation
+# — PRs are covered by the always-on simulator suite.
+
+on:
+  workflow_dispatch:
+    inputs:
+      record:
+        description: 'Also re-record the golden netbox4 fixtures from the live instance'
+        required: false
+        default: false
+        type: boolean
+
+  schedule:
+    # Mondays 04:00 UTC — low-traffic window, start of the week.
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  netbox-qualification:
+    name: Real-NetBox Qualification Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (pinned 2026-09-30)
+
+      - name: Setup Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 (pinned 2026-09-30)
+
+      - name: Install protoc
+        run: |
+          if ! command -v protoc >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          fi
+
+      # -------------------------------------------------------------------
+      # The whole lane: boot the compose stack, wait for the
+      # qualification environment, run the five qualification_*
+      # scenario wrappers, tear the stack down.
+      # -------------------------------------------------------------------
+      - name: Run the qualification lane
+        run: |
+          RECORD_FLAG=""
+          if [[ "${{ inputs.record }}" == "true" ]]; then
+            RECORD_FLAG="--record"
+          fi
+          ./scripts/netbox-qualify.sh $RECORD_FLAG
+
+      # -------------------------------------------------------------------
+      # Logs on failure (the qualify script writes run.log + compose.log)
+      # -------------------------------------------------------------------
+      - name: Upload qualification logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
+        with:
+          name: netbox-qualification-logs-${{ github.run_id }}
+          path: /tmp/chv-netbox-qualify-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # -------------------------------------------------------------------
+      # With --record: the refreshed golden fixtures (applied to the
+      # repo by a human after review — never auto-committed)
+      # -------------------------------------------------------------------
+      - name: Upload recorded fixtures
+        if: always() && inputs.record == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
+        with:
+          name: netbox-recorded-fixtures-${{ github.run_id }}
+          path: crates/chv-netbox-sim/tests/fixtures/netbox4/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # -------------------------------------------------------------------
+      # Step summary
+      # -------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## CHV NetBox Qualification"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Trigger | ${{ github.event_name }} |"
+            echo "| Record | ${{ inputs.record || 'false' }} |"
+            echo "| Result | ${{ job.status }} |"
+            echo ""
+            echo "Lane: ADR-024 decision 4 (real-NetBox qualification)."
+            echo "Driver: \`scripts/netbox-qualify.sh\` over \`deploy/netbox-qualification\`."
+            if [[ "${{ job.status }}" == "failure" ]]; then
+              echo ""
+              echo "⚠️ Qualification failed — simulator drift or a broken stack."
+              echo "Logs uploaded as artifact: \`netbox-qualification-logs-${{ github.run_id }}\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -442,11 +442,23 @@ async fn setup_config(
     topo_id: &str,
     retention: NetboxRetentionPolicy,
 ) {
+    setup_config_with_token(db, endpoint, topo_id, retention, TOKEN).await;
+}
+
+/// The [`setup_config`] fixture with an explicit API token (see
+/// [`setup_projection_with_token`]).
+async fn setup_config_with_token(
+    db: &TestDb,
+    endpoint: &str,
+    topo_id: &str,
+    retention: NetboxRetentionPolicy,
+    token: &str,
+) {
     NetboxProjectionConfigRepository::new(db.pool.clone())
         .upsert(NetboxProjectionConfigUpsertInput {
             architecture_id: aid(topo_id),
             endpoint: endpoint.to_string(),
-            token: Some(TOKEN.to_string()),
+            token: Some(token.to_string()),
             token_secret_ref: format!("netbox-{topo_id}"),
             retention_policy: retention,
             enable_post_apply: false,
@@ -482,11 +494,23 @@ async fn enqueue_run(
 /// enablement predicate. The endpoint is deliberately dead in most
 /// post-apply suites (see the section doc below).
 pub(crate) async fn setup_post_apply_config(db: &TestDb, endpoint: &str, topo_id: &str) {
+    setup_post_apply_config_with_token(db, endpoint, topo_id, TOKEN).await;
+}
+
+/// The [`setup_post_apply_config`] fixture with an explicit API token
+/// — the real-NetBox qualification lane stores the qualification
+/// instance's token, not the wiremock/sim fixture constant.
+pub(crate) async fn setup_post_apply_config_with_token(
+    db: &TestDb,
+    endpoint: &str,
+    topo_id: &str,
+    token: &str,
+) {
     NetboxProjectionConfigRepository::new(db.pool.clone())
         .upsert(NetboxProjectionConfigUpsertInput {
             architecture_id: aid(topo_id),
             endpoint: endpoint.to_string(),
-            token: Some(TOKEN.to_string()),
+            token: Some(token.to_string()),
             token_secret_ref: format!("netbox-{topo_id}"),
             retention_policy: NetboxRetentionPolicy::MarkStale,
             enable_post_apply: true,
@@ -540,10 +564,32 @@ pub(crate) async fn setup_projection(
     run_id: &str,
     retention: NetboxRetentionPolicy,
 ) {
+    setup_projection_with_token(
+        db, endpoint, topo_id, version_id, apply_id, run_id, retention, TOKEN,
+    )
+    .await;
+}
+
+/// The [`setup_projection`] fixture with an explicit API token — the
+/// real-NetBox qualification lane stores the qualification instance's
+/// token, not the wiremock/sim fixture constant.
+// Mirrors setup_projection's 7 parameters plus the token; a test
+// fixture's argument list is not design surface worth restructuring.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn setup_projection_with_token(
+    db: &TestDb,
+    endpoint: &str,
+    topo_id: &str,
+    version_id: &str,
+    apply_id: &str,
+    run_id: &str,
+    retention: NetboxRetentionPolicy,
+    token: &str,
+) {
     let model = model_json();
     setup_topology_and_version(db, topo_id, version_id, &model, 1).await;
     add_succeeded_apply_run(db, apply_id, topo_id, version_id).await;
-    setup_config(db, endpoint, topo_id, retention).await;
+    setup_config_with_token(db, endpoint, topo_id, retention, token).await;
     enqueue_run(
         db,
         run_id,
