@@ -384,12 +384,16 @@ async fn enqueue_manual_export(db: &TestDb, run_id: &str, topo_id: &str, version
 /// the adapter client POSTs (mirrors the client's private body builder
 /// for the one kind this suite seeds), so a seeded row is exactly the
 /// row a partially-executed attempt's create would have written.
+/// Tags use the client's write form (`[{"name": ...}]` dicts, the form
+/// NetBox's NestedTagSerializer accepts) rather than the bare label.
 fn vlan_seed_body(object: &NetBoxObject) -> Value {
     match object {
         NetBoxObject::Vlan(v) => json!({
             "vid": v.vid,
             "name": v.name,
-            "tags": v.tags,
+            "tags": v.tags.iter()
+                .map(|tag| json!({ "name": tag }))
+                .collect::<Vec<_>>(),
             "custom_fields": v.custom_fields,
         }),
         other => panic!("vlan seed body expects a vlan, got {:?}", other.kind()),

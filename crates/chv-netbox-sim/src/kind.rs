@@ -8,18 +8,20 @@ use serde::{Deserialize, Serialize};
 /// (mapping contract "NetBox REST surface used (v1)").
 ///
 /// Declaration order is the contract's kind rank
-/// (`vlan → prefix → ip → interface → vm → device`), so
+/// (`vlan → prefix → device → vm → interface → ip`), so
 /// [`SimKind::ALL`] iterates parents before children — the natural
-/// order for seeding.
+/// order for seeding (and the FK-dependency order the client's
+/// create path needs against a real NetBox, which resolves nested
+/// references by existence).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SimKind {
     Vlan,
     Prefix,
-    IpAddress,
-    Interface,
-    VirtualMachine,
     Device,
+    VirtualMachine,
+    Interface,
+    IpAddress,
 }
 
 impl SimKind {
@@ -27,10 +29,10 @@ impl SimKind {
     pub const ALL: [SimKind; 6] = [
         SimKind::Vlan,
         SimKind::Prefix,
-        SimKind::IpAddress,
-        SimKind::Interface,
-        SimKind::VirtualMachine,
         SimKind::Device,
+        SimKind::VirtualMachine,
+        SimKind::Interface,
+        SimKind::IpAddress,
     ];
 
     /// The contract's kind string (also the `/__faults` scope key and

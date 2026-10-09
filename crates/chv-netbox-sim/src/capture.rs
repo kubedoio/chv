@@ -535,7 +535,9 @@ mod tests {
             .create(
                 SimKind::Device,
                 &json!({ "name": "chv-node-01", "status": "active",
-                         "site": { "name": "dc1" }, "tags": ["chv-team"] }),
+                         "site": { "name": "dc1" }, "tags": ["chv-team"],
+                         "device_type": { "slug": chv_netbox_adapter::CHV_NETBOX_DEVICE_TYPE },
+                         "role": { "slug": chv_netbox_adapter::CHV_NETBOX_DEVICE_ROLE } }),
             )
             .expect("device");
         let vm = state

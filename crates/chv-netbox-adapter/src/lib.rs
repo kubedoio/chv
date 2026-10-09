@@ -61,7 +61,8 @@ pub use mapping::{
     build_objects, validate_netbox_name, validate_netbox_slug, DeviceStatus, MappingError,
     MappingIssue, MappingOutput, NetBoxDevice, NetBoxInterface, NetBoxIpAddress, NetBoxKind,
     NetBoxObject, NetBoxPrefix, NetBoxVirtualMachine, NetBoxVlan, ProjectionConfigView,
-    ProjectionInput, VmStatus, NETBOX_NAME_MAX_LEN,
+    ProjectionInput, VmStatus, CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE,
+    CHV_NETBOX_MANUFACTURER, NETBOX_NAME_MAX_LEN,
 };
 pub use ownership::{
     external_id, validate_custom_field_prefix, CustomFieldNames, ManagedMarker, ManagedState,

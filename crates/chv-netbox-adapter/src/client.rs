@@ -616,17 +616,19 @@ impl NetBoxClient {
     /// Build the write body for one object. Nullable facts stay unset
     /// (`null`/omitted) — contract rule 2. IP-address assignment is
     /// resolved through an interface lookup: NetBox assigns IPs to
-    /// interfaces by id, and the contract's kind order creates IP
-    /// addresses *before* their interfaces, so the lookup may
-    /// legitimately miss (the runner performs an assignment fix-up pass
-    /// after the main loop).
+    /// interfaces by id, and the contract's kind order creates
+    /// interfaces *before* their IP addresses, so the lookup normally
+    /// resolves in-loop (the runner's post-loop assignment fix-up
+    /// remains as the safety net for resume and ambiguous cases).
     async fn build_body(&self, object: &NetBoxObject) -> Result<Value, ClientError> {
         match object {
             NetBoxObject::Device(d) => Ok(json!({
                 "name": d.name,
                 "site": d.site.as_ref().map(|s| json!({ "name": s })),
                 "status": d.status.as_str(),
-                "tags": d.tags,
+                "device_type": device_type_write_ref(),
+                "role": role_write_ref(),
+                "tags": tags_write_form(&d.tags),
                 "custom_fields": d.custom_fields,
             })),
             NetBoxObject::VirtualMachine(v) => Ok(json!({
@@ -636,7 +638,7 @@ impl NetBoxClient {
                 "device": v.device.as_ref().map(|d| json!({ "name": d })),
                 "vcpus": v.cpu,
                 "memory": v.memory_mb,
-                "tags": v.tags,
+                "tags": tags_write_form(&v.tags),
                 "custom_fields": v.custom_fields,
             })),
             NetBoxObject::Interface(i) => Ok(json!({
@@ -644,26 +646,26 @@ impl NetBoxClient {
                 "virtual_machine": { "name": i.virtual_machine },
                 "description": i.description,
                 "type": "virtual",
-                "tags": i.tags,
+                "tags": tags_write_form(&i.tags),
                 "custom_fields": i.custom_fields,
             })),
             NetBoxObject::Prefix(p) => Ok(json!({
                 "prefix": p.prefix,
                 "vlan": p.vlan.map(|vid| json!({ "vid": vid })),
                 "description": p.description,
-                "tags": p.tags,
+                "tags": tags_write_form(&p.tags),
                 "custom_fields": p.custom_fields,
             })),
             NetBoxObject::Vlan(v) => Ok(json!({
                 "vid": v.vid,
                 "name": v.name,
-                "tags": v.tags,
+                "tags": tags_write_form(&v.tags),
                 "custom_fields": v.custom_fields,
             })),
             NetBoxObject::IpAddress(a) => {
                 let mut body = json!({
                     "address": a.address,
-                    "tags": a.tags,
+                    "tags": tags_write_form(&a.tags),
                     "custom_fields": a.custom_fields,
                 });
                 if let Some(assigned) = &a.assigned_to_interface {
@@ -695,6 +697,79 @@ impl NetBoxClient {
 /// The NetBox custom-field filter form: `?cf_<field>=`.
 fn arch_custom_field_cf(field: &str) -> String {
     format!("cf_{field}")
+}
+
+// ---------------------------------------------------------------------------
+// Write-reference forms (verified against NetBox v4.7.2 sources)
+// ---------------------------------------------------------------------------
+
+/// Tags in NetBox 4.7's write form: name-dicts, `[{"name": …}, …]`.
+///
+/// Verified against NetBox v4.7.2: every taggable serializer declares
+/// `tags = NestedTagSerializer(many=True, required=False)`
+/// (`netbox/netbox/api/serializers/features.py`,
+/// `TaggableModelSerializer`), and `NestedTagSerializer` extends
+/// `WritableNestedSerializer` (`netbox/netbox/api/serializers/nested.py`)
+/// whose `to_internal_value` routes through
+/// `utilities/api.py`'s `get_related_object_by_attrs` — which accepts
+/// ONLY a numeric PK or a dict of identifying attributes. A plain
+/// string tag (`"chv-team"`) is neither and fails with 400
+/// ("Related objects must be referenced by numeric ID or by dictionary
+/// of attributes"). The name-dict form resolves
+/// `Tag.objects.get(name=…)`; NetBox tag names are unique.
+fn tags_write_form(tags: &[String]) -> Value {
+    Value::Array(
+        tags.iter()
+            .map(|tag| json!({ "name": tag }))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The `device_type` write reference the projection's device creates
+/// carry: `{"manufacturer": {"slug": "chv"}, "slug": "chv-host"}`.
+///
+/// Verified against NetBox v4.7.2:
+/// - `netbox/dcim/api/serializers_/devices.py`, `DeviceSerializer`:
+///   `device_type = DeviceTypeSerializer(nested=True)` — nested and
+///   required (no `required=False`), like the model FK
+///   (`netbox/dcim/models/devices.py`, `Device.device_type` is
+///   non-nullable). Omitting it is a 400.
+/// - Nested writes resolve through
+///   `netbox/netbox/api/serializers/base.py`'s
+///   `BaseModelSerializer.to_internal_value` →
+///   `utilities/api.py`'s `get_related_object_by_attrs`, which turns
+///   the attrs dict into queryset filters via `dict_to_filter_params`
+///   (`netbox/utilities/query.py`) — nested dicts flatten to
+///   double-underscore lookups, so this form resolves
+///   `DeviceType.objects.get(manufacturer__slug="chv",
+///   slug="chv-host")`.
+/// - `DeviceType.Meta.constraints` (`netbox/dcim/models/devices.py`)
+///   make `(manufacturer, model)` and `(manufacturer, slug)` unique —
+///   a slug alone is NOT globally unique, so the manufacturer must
+///   ride along for the reference to resolve unambiguously.
+///
+/// Provisioning prerequisite: the manufacturer and device type must
+/// exist before the first device write (mapping contract,
+/// "Provisioning prerequisites"). The projection never creates them.
+fn device_type_write_ref() -> Value {
+    json!({
+        "manufacturer": { "slug": crate::mapping::CHV_NETBOX_MANUFACTURER },
+        "slug": crate::mapping::CHV_NETBOX_DEVICE_TYPE,
+    })
+}
+
+/// The `role` write reference device creates carry:
+/// `{"slug": "chv-node"}`.
+///
+/// Verified against NetBox v4.7.2: `DeviceSerializer.role =
+/// DeviceRoleSerializer(nested=True)` (`netbox/dcim/api/serializers_/
+/// devices.py`) — no `required=False`/`allow_null`, and the model FK
+/// (`netbox/dcim/models/devices.py`, `Device.role`) is non-nullable,
+/// so a device create without a role is a 400. Device roles are
+/// unique per (parent, slug) at the tree root, so the bare slug
+/// resolves the root-level role the provisioning creates.
+fn role_write_ref() -> Value {
+    json!({ "slug": crate::mapping::CHV_NETBOX_DEVICE_ROLE })
 }
 
 /// Normalize an endpoint: parse it, enforce the scheme, strip a trailing

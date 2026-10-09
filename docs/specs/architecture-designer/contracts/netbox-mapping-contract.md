@@ -50,8 +50,13 @@ the field names themselves are stable contract surface.
    rename.
 2. **Nullable facts stay unset** — no placeholder values.
 3. **Determinism** — the plan is ordered by (kind rank, name):
-   `network/vlan → prefix → ip → interface → vm → device`, then
-   alphabetically by name within a rank. Dry-run output is byte-stable for
+   `vlan → prefix → device → vm → interface → ip`, then
+   alphabetically by name within a rank. The rank is the
+   FK-dependency order NetBox's nested writes require: parents
+   (VLAN, device) are created before the children that reference
+   them by existence (prefix → VLAN, VM → device, interface → VM),
+   and the IP address lands last, after the interface its
+   assignment references. Dry-run output is byte-stable for
    identical inputs.
 4. **Enrichment precedence** — live `InventorySnapshot` facts override
    declared `servers[].resources` when both exist and differ (live wins for
@@ -142,6 +147,42 @@ Bounded to a pinned NetBox 4.x REST contract:
 - Custom-field filtering on list endpoints (`?cf_chv_external_id=…`).
 - The client treats any object shape outside the contract as an error (fail
   closed), not a best-effort parse.
+
+### Write reference forms (v1)
+
+Writes reference related objects in the nested forms NetBox 4.x's
+`WritableNestedSerializer` accepts — never bare strings, which real
+NetBox rejects:
+
+- **Tags** are written as name dicts: `[{"name": "chv-team"}, …]`
+  (NetBox's `NestedTagSerializer`). The read side returns nested
+  `{id, name, slug}` objects.
+- **Device references** carry the full nested form:
+  `device_type: {"manufacturer": {"slug": "chv"}, "slug": "chv-host"}`
+  (a device-type slug is only unique per manufacturer) and
+  `role: {"slug": "chv-node"}`. Both fields are **required** on every
+  device write by NetBox 4.7's `DeviceSerializer`.
+- **Other relations** (`site`, `device` on a VM, `virtual_machine` on an
+  interface, `vlan` on a prefix) are written as name/vid dicts.
+
+These are client write-form conformance fixes: the v1 read surface and
+the `chv_` custom-field surface are unchanged, so `MAPPING_VERSION`
+stays `v1` (no v1 object needs reconciling).
+
+### Provisioning prerequisites
+
+The projection **never creates** the objects its device writes
+reference; they must exist before the first device write or NetBox
+answers 400:
+
+- manufacturer `chv`,
+- device type `chv-host` (under that manufacturer),
+- device role `chv-node`.
+
+The qualification lane (`deploy/netbox-qualification/docker-compose.yml`)
+and the fixture recorder (`crates/chv-netbox-sim/tests/record_fixtures.rs`)
+provision exactly these slugs; the constants live in
+`chv-netbox-adapter`'s `mapping` module.
 
 ## Simulator conformance (ADR-024)
 

@@ -6,6 +6,7 @@ mod common;
 
 use std::time::Instant;
 
+use chv_netbox_adapter::{CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER};
 use chv_netbox_sim::NetboxSim;
 use common::{delete, get, http, patch, post, seed, set_fault, start, start_with, state, TOKEN};
 use serde_json::{json, Value};
@@ -434,7 +435,26 @@ async fn duplicate_natural_key_is_a_400_with_netbox_error_shape() {
 async fn missing_required_fields_are_400s() {
     let sim = start().await;
 
+    // Device creates require `device_type` and `role` (NetBox 4.7's
+    // DeviceSerializer); the first missing one is reported.
     let response = post(&sim, "/api/dcim/devices/", json!({ "status": "active" })).await;
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "device_type": ["This field is required."] })
+    );
+
+    // With those supplied, a missing natural key is still a 400.
+    let response = post(
+        &sim,
+        "/api/dcim/devices/",
+        json!({
+            "status": "active",
+            "device_type": { "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE },
+            "role": { "slug": CHV_NETBOX_DEVICE_ROLE },
+        }),
+    )
+    .await;
     assert_eq!(response.status(), 400);
     assert_eq!(
         response.json::<Value>().await.expect("error body"),

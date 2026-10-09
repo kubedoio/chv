@@ -37,6 +37,26 @@ use crate::ownership::{
 /// Maximum length of a NetBox object name / slug.
 pub const NETBOX_NAME_MAX_LEN: usize = 100;
 
+/// Manufacturer slug the projection's device writes reference
+/// (`device_type.manufacturer.slug`). A **provisioning prerequisite**:
+/// the manufacturer must exist before the first device write or
+/// NetBox answers 400 — the projection never creates it. The
+/// qualification lane and the fixture recorder provision exactly this
+/// slug; see the mapping contract's "Provisioning prerequisites".
+pub const CHV_NETBOX_MANUFACTURER: &str = "chv";
+
+/// Device-type slug the projection's device writes reference
+/// (`device_type.slug`). Same provisioning prerequisite as the
+/// manufacturer; NetBox 4.7's `DeviceSerializer` requires `device_type`
+/// on every device write.
+pub const CHV_NETBOX_DEVICE_TYPE: &str = "chv-host";
+
+/// Device-role slug the projection's device writes reference
+/// (`role.slug`). NetBox 4.7's `DeviceSerializer` also requires `role`
+/// on every device write (the model FK is non-nullable). Matches the
+/// mapping contract's object table ("role `chv-node`").
+pub const CHV_NETBOX_DEVICE_ROLE: &str = "chv-node";
+
 /// Placeholder used when diffing a field that is unset on one side.
 /// Never written to NetBox — only used inside `changes` strings.
 const UNSET: &str = "(unset)";
@@ -48,17 +68,22 @@ const UNSET: &str = "(unset)";
 /// NetBox object kinds the v1 mapping projects, in plan order.
 ///
 /// Declaration order **is** the contract's kind rank (mapping contract
-/// rule 3): `vlan → prefix → ip_address → interface → virtual_machine →
-/// device`, so parents are planned before children.
+/// rule 3): `vlan → prefix → device → virtual_machine → interface →
+/// ip_address`. The order is FK-dependency-safe for execution: real
+/// NetBox resolves nested-FK writes by **existence** (a dict or PK
+/// reference must match an existing row), so parents must be created
+/// before the children that reference them — prefix→vlan, VM→device,
+/// interface→VM — and the IP address lands last, after the interface
+/// its assignment references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetBoxKind {
     Vlan,
     Prefix,
-    IpAddress,
-    Interface,
-    VirtualMachine,
     Device,
+    VirtualMachine,
+    Interface,
+    IpAddress,
 }
 
 impl NetBoxKind {

@@ -251,8 +251,10 @@ impl SimState {
         }
     }
 
-    /// Normalize a tags list (write form: slugs; merge form: nested
-    /// objects) to NetBox's nested read form.
+    /// Normalize a tags list (accepts bare slugs — legacy/lenient
+    /// posture, used by seed files — or the client's nested
+    /// `{name}`/`{name,slug,id}` write objects) to NetBox's nested
+    /// read form.
     fn normalize_tags(&mut self, object: &Map<String, Value>) -> Result<Value, WireError> {
         match object.get("tags") {
             None | Some(Value::Null) => Ok(json!([])),
@@ -454,6 +456,26 @@ impl SimState {
     /// `POST`: normalize, enforce natural-key uniqueness, assign
     /// `id`/`url`/timestamps, store. Returns the new id.
     pub fn create(&mut self, kind: SimKind, body: &Value) -> Result<i64, WireError> {
+        // NetBox 4.7's `DeviceSerializer` (`dcim/api/serializers_/
+        // devices.py`) declares both `device_type` and `role` as
+        // required nested fields (no `required=False`; the model FKs
+        // are non-nullable), so a device create missing either is a
+        // 400. The simulator mirrors the required-field semantics —
+        // this is the tripwire that catches an adapter write path
+        // dropping them — but stays lenient about the referenced
+        // objects' EXISTENCE (no FK validation, the simulator's
+        // documented posture): any non-null reference form is
+        // accepted and not stored (the read surface never exposed
+        // these fields; the seed path is also exempt, mirroring its
+        // broader relaxed rules).
+        for field in ["device_type", "role"] {
+            if kind == SimKind::Device && body.get(field).is_none_or(Value::is_null) {
+                return Err(WireError::Field {
+                    field,
+                    message: "This field is required.",
+                });
+            }
+        }
         let mut stored = self.normalize_write(kind, body)?;
         let key = natural_key(kind, &Value::Object(stored.clone()));
         if self.natural_key_taken(kind, &key, None) {
@@ -878,6 +900,9 @@ impl SimShared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chv_netbox_adapter::{
+        CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER,
+    };
     use serde_json::json;
 
     fn device_body(name: &str) -> Value {
@@ -885,6 +910,11 @@ mod tests {
             "name": name,
             "status": "active",
             "site": { "name": "dc1" },
+            // NetBox 4.7 requires both on every device create; the
+            // simulator enforces their presence (see `create`). Built
+            // from the adapter's consts so a rename cannot drift.
+            "device_type": { "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE },
+            "role": { "slug": CHV_NETBOX_DEVICE_ROLE },
             "tags": ["chv-team"],
             "custom_fields": { "chv_managed_by": "chv" },
         })
@@ -921,6 +951,47 @@ mod tests {
             err.body(),
             json!({ "name": ["This field must be unique."] })
         );
+    }
+
+    /// NetBox 4.7's `DeviceSerializer` requires `device_type` and
+    /// `role` on every device create (both nested, no
+    /// `required=False`; the model FKs are non-nullable) — the
+    /// simulator mirrors the 400 so an adapter write path dropping
+    /// them fails in PR CI instead of against a real NetBox. The
+    /// reference's existence is NOT validated (documented lenience).
+    #[test]
+    fn device_creates_require_device_type_and_role() {
+        let mut state = SimState::new();
+        let mut missing_type = device_body("chv-node-01");
+        assert!(missing_type
+            .as_object_mut()
+            .unwrap()
+            .remove("device_type")
+            .is_some());
+        let err = state
+            .create(SimKind::Device, &missing_type)
+            .expect_err("device_type is required");
+        assert_eq!(err.status(), 400);
+        assert_eq!(
+            err.body(),
+            json!({ "device_type": ["This field is required."] })
+        );
+
+        let mut nulled_role = device_body("chv-node-01");
+        nulled_role["role"] = Value::Null;
+        let err = state
+            .create(SimKind::Device, &nulled_role)
+            .expect_err("role is required");
+        assert_eq!(err.body(), json!({ "role": ["This field is required."] }));
+
+        // Any non-null reference form is accepted (no FK validation),
+        // and other kinds are untouched by the requirement.
+        state
+            .create(SimKind::Device, &device_body("chv-node-01"))
+            .expect("complete body creates");
+        state
+            .create(SimKind::Vlan, &json!({ "vid": 42, "name": "backend" }))
+            .expect("vlan needs neither field");
     }
 
     #[test]
@@ -1190,8 +1261,8 @@ mod tests {
     fn seeded_relation_refs_honor_explicit_ids() {
         // The fixture recorder's seed files re-play captured rows
         // whose nested relations carry the ids the capture observed;
-        // when no real row matches (children seed before parents in
-        // `SimKind::ALL` order), the carried id must be reproduced.
+        // when no real row matches (the referenced parent was not
+        // seeded), the carried id must be reproduced.
         let mut state = SimState::new();
         let interface = state
             .create(
@@ -1244,6 +1315,8 @@ mod tests {
                 SimKind::Device,
                 &json!({
                     "name": "chv-node-01",
+                    "device_type": { "slug": "chv-host" },
+                    "role": { "slug": "chv-node" },
                     "tags": [{ "id": 7, "name": "chv-team", "slug": "chv-team" }]
                 }),
             )

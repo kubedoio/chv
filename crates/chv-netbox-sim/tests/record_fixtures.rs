@@ -4,8 +4,8 @@
 //!
 //! One `#[ignore]`d test, run only by `scripts/netbox-qualify.sh
 //! --record`: it empties the qualification instance, provisions the
-//! prerequisites a real NetBox needs (site, device type, tag, the
-//! `chv_` custom fields), seeds the canonical one-object-per-family
+//! prerequisites a real NetBox needs (site, device type, device
+//! role, tag, the `chv_` custom fields), seeds the canonical one-object-per-family
 //! set, captures the six list responses, and rewrites
 //! `tests/fixtures/netbox4/` — the golden fixtures the simulator's
 //! fidelity suite pins. Refreshing the fixtures through this recorder
@@ -49,6 +49,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chv_netbox_adapter::ownership::CustomFieldNames;
+use chv_netbox_adapter::{CHV_NETBOX_DEVICE_ROLE, CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER};
 use chv_netbox_sim::capture::{
     normalize_object, CaptureError, LiveNetBox, QUALIFICATION_TOKEN_ENV, QUALIFICATION_URL_ENV,
 };
@@ -234,12 +235,15 @@ async fn record_netbox4_fixtures() {
 // ---------------------------------------------------------------------------
 
 /// Prerequisite objects a real NetBox needs before the canonical set
-/// can be created (the simulator needs none — its wire layer accepts
-/// name references and has no required device type).
+/// can be created (the simulator needs none of them to EXIST — its
+/// wire layer accepts name references — but it does require
+/// `device_type` and `role` to be present on device creates, matching
+/// NetBox 4.7's `DeviceSerializer`).
 #[derive(Default)]
 struct Provisions {
     site_id: i64,
     device_type_id: i64,
+    role_id: i64,
 }
 
 /// Look `path?query` up; create `body` when nothing exists. Returns
@@ -279,7 +283,10 @@ async fn ensure(
 
 /// Provision the real-NetBox prerequisites: the `dc1` site, a
 /// manufacturer + device type (NetBox requires one on every device),
-/// the `chv-team` tag, and the `chv_` custom fields as text fields on
+/// the `chv-node` device role (required on device creates by NetBox
+/// 4.7's `DeviceSerializer`, whose `role` field has no
+/// `required=False` and whose model FK is non-nullable), the
+/// `chv-team` tag, and the `chv_` custom fields as text fields on
 /// the six content types.
 ///
 /// DUPLICATION NOTE: the qualification compose stack's
@@ -332,6 +339,13 @@ async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
         }),
     )
     .await?;
+    let role = ensure(
+        live,
+        "/api/dcim/device-roles/",
+        "slug=chv-node",
+        &json!({ "name": "chv-node", "slug": "chv-node" }),
+    )
+    .await?;
     for name in qualification_custom_fields() {
         ensure(
             live,
@@ -349,6 +363,7 @@ async fn provision(live: &LiveNetBox) -> Result<Provisions, CaptureError> {
     Ok(Provisions {
         site_id: site["id"].as_i64().unwrap_or_default(),
         device_type_id: device_type["id"].as_i64().unwrap_or_default(),
+        role_id: role["id"].as_i64().unwrap_or_default(),
     })
 }
 
@@ -385,7 +400,11 @@ async fn seed_canonical_set(
     real: bool,
     provisions: &Provisions,
 ) -> Result<(), CaptureError> {
-    let tags = json!(["chv-team"]);
+    // Tags go out in the client's write form — name dicts, the form
+    // NetBox's NestedTagSerializer accepts (attrs-dict or PK) and the
+    // one the adapter's build_body now sends — instead of the legacy
+    // bare-slug strings.
+    let tags = json!([ { "name": "chv-team" } ]);
     let vlan = live
         .create(
             SimKind::Vlan,
@@ -413,13 +432,24 @@ async fn seed_canonical_set(
         }),
     )
     .await?;
-    let (site_ref, device_type_field) = if real {
+    // Device references: a real NetBox resolves PKs (and the nested
+    // attrs-dicts) for `site`, `device_type`, and `role`; the
+    // simulator accepts the attrs-dict forms too — and requires
+    // `device_type` and `role` to be present on every device create,
+    // mirroring NetBox 4.7's `DeviceSerializer`. Both dialects get
+    // the write forms the adapter's client sends.
+    let (site_ref, device_type_field, role_field) = if real {
         (
             json!(provisions.site_id),
-            Some(json!(provisions.device_type_id)),
+            json!(provisions.device_type_id),
+            json!(provisions.role_id),
         )
     } else {
-        (json!({ "name": "dc1" }), None)
+        (
+            json!({ "name": "dc1" }),
+            json!({ "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER }, "slug": CHV_NETBOX_DEVICE_TYPE }),
+            json!({ "slug": CHV_NETBOX_DEVICE_ROLE }),
+        )
     };
     // The device's marker set extends the shared ownership surface
     // with the three device-enrichment facts the adapter's mapping
@@ -436,16 +466,15 @@ async fn seed_canonical_set(
     device_fields.insert(names.cpu_cores(), json!("8"));
     device_fields.insert(names.memory_gb(), json!("16"));
     device_fields.insert(names.datastores(), json!("ds-local:local,ds-nfs:nfs"));
-    let mut device_body = json!({
+    let device_body = json!({
         "name": "chv-node-01",
         "status": "active",
         "site": site_ref,
+        "device_type": device_type_field,
+        "role": role_field,
         "tags": tags,
         "custom_fields": Value::Object(device_fields),
     });
-    if let Some(device_type) = device_type_field {
-        device_body["device_type"] = device_type;
-    }
     let device = live.create(SimKind::Device, &device_body).await?;
     let device_ref = if real {
         json!(device["id"])
