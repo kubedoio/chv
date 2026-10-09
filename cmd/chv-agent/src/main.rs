@@ -508,25 +508,6 @@ async fn enqueue_pending_message(
     }
 }
 
-async fn flush_pending_messages(
-    cache: &Arc<tokio::sync::Mutex<NodeCache>>,
-    cache_path: &Path,
-    client: &mut ControlPlaneClient,
-) -> Result<(), ChvError> {
-    let had_pending = {
-        let cache = cache.lock().await;
-        !cache.pending_control_plane_messages().is_empty()
-    };
-    if !had_pending {
-        return Ok(());
-    }
-
-    let mut cache = cache.lock().await;
-    client.flush_pending_messages(&mut cache).await?;
-    cache.save(cache_path).await?;
-    Ok(())
-}
-
 async fn send_or_defer_control_plane_message(
     cache: &Arc<tokio::sync::Mutex<NodeCache>>,
     cache_path: &Path,
@@ -538,17 +519,31 @@ async fn send_or_defer_control_plane_message(
     let now = now_unix_ms();
     if telemetry.is_none() {
         match connect_control_plane(cache, config).await {
-            Ok(mut client) => {
+            Ok(client) => {
                 info!("connected to control plane");
-                if let Err(e) = flush_pending_messages(cache, cache_path, &mut client).await {
-                    warn!(error = %e, "failed to flush deferred control-plane messages");
-                    *telemetry = None;
-                    connectivity.record_failure(now);
-                    enqueue_pending_message(cache, cache_path, message, connectivity).await;
-                    return;
+                // Flush the deferred backlog through the shared drain
+                // (#582): snapshot-dispatch-commit, outside the cache
+                // lock, deadline-bounded per dispatch. On failure the
+                // drain has already recorded the connectivity failure
+                // and dropped the client; the in-flight message then
+                // defers like any other.
+                let client = chv_agent_core::control_plane::drain_pending_control_plane_queue(
+                    cache,
+                    cache_path,
+                    Some(client),
+                    connectivity,
+                )
+                .await;
+                match client {
+                    Some(client) => {
+                        connectivity.record_success(now);
+                        *telemetry = Some(client);
+                    }
+                    None => {
+                        enqueue_pending_message(cache, cache_path, message, connectivity).await;
+                        return;
+                    }
                 }
-                connectivity.record_success(now);
-                *telemetry = Some(client);
             }
             Err(e) => {
                 warn!(error = %e, "control plane unavailable; deferring report");
@@ -1108,20 +1103,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warn!(error = %e, "supervisor restart failed");
         }
 
-        // Detect connectivity transition: Disconnected/Reconnecting -> Connected
-        // and flush pending messages immediately on reconnect.
+        // Detect connectivity transition: Disconnected/Reconnecting ->
+        // Connected. The pending queue is flushed by the per-tick drain
+        // below on this very tick — outside the cache lock and with a
+        // per-dispatch deadline — so the transition itself only needs
+        // the log line (the pre-#582 dedicated reconnect flush held the
+        // cache lock across unbounded dispatch and is subsumed).
         let current_connectivity = connectivity.state();
         if current_connectivity == ConnectivityState::Connected
             && prev_connectivity != ConnectivityState::Connected
         {
-            info!("connectivity restored, flushing pending messages");
-            if let Some(client) = telemetry.as_mut() {
-                if let Err(e) = flush_pending_messages(&cache, &config.cache_path, client).await {
-                    warn!(error = %e, "failed to flush pending messages on reconnect");
-                }
-            }
+            info!("connectivity restored; pending control-plane messages drain on this tick");
         }
         prev_connectivity = current_connectivity;
+
+        // #582: drain the pending control-plane queue on every tick
+        // while connected — migration progress reports (and other
+        // unconditional enqueues) would otherwise sit queued until the
+        // next reconnect, which never comes during a stable
+        // connection. See drain_pending_control_plane_queue for the
+        // full rationale and failure handling.
+        telemetry = chv_agent_core::control_plane::drain_pending_control_plane_queue(
+            &cache,
+            &config.cache_path,
+            telemetry,
+            &mut connectivity,
+        )
+        .await;
 
         let now = now_unix_ms();
         let rotate_due = {

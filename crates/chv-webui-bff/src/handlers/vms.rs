@@ -1300,9 +1300,9 @@ pub async fn mutate_vm(
         // value is rejected rather than coerced: `"pause_first":
         // "true"` silently downgrading to quiescent-assumed would be
         // exactly the "operator asked for the pause, didn't get it"
-        // failure the mode exists to prevent. Deliberately not exposed
-        // in the WebUI yet — operator surface today is the API/chvctl;
-        // the UI toggle is a recorded follow-up.
+        // failure the mode exists to prevent. Exposed in the WebUI's
+        // migrate modal (checkbox with a downtime warning, #582) and
+        // via chvctl/API.
         let pause_first = match payload.get("pause_first") {
             None => false,
             Some(v) => v.as_bool().ok_or_else(|| {
