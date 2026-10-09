@@ -150,6 +150,11 @@ pub struct DiskPrecopyConfig {
     pub dest_stord_endpoint: String,
     /// Volumes to migrate.
     pub volumes: Vec<MigrationVolume>,
+    /// Issue #394 Option C: opt-in stop-the-world mode — the VM is paused
+    /// before stord's bulk copy begins (the PAUSED_PRE_COPY handshake)
+    /// instead of only at final sync. Downtime equals the full transfer;
+    /// correctness by construction.
+    pub pause_first: bool,
 }
 
 /// A callback type for reporting migration progress to the control plane.
@@ -279,6 +284,7 @@ async fn run_disk_precopy_poll(
     client: &mut impl DiskMigrationControl,
     volume_migrations: &[(String, String)],
     poll_interval: std::time::Duration,
+    pause_first: bool,
     cancel_token: &CancellationToken,
     pause_guard: &mut PausedVmGuard,
     progress_reporter: Option<&ProgressReporter>,
@@ -351,6 +357,15 @@ async fn run_disk_precopy_poll(
                 StordPhase::Pending | StordPhase::BulkCopy | StordPhase::DirtySync => {
                     all_completed = false;
                 }
+                StordPhase::PausedPreCopy => {
+                    // Issue #394 Option C: the volume is waiting for the
+                    // VM pause BEFORE bulk copy. Same handshake as the
+                    // final-sync pause: pause the VM, then resume the
+                    // migration (which arms the canary and starts the
+                    // transfer against the quiesced source).
+                    all_completed = false;
+                    needs_vm_pause = true;
+                }
                 StordPhase::PausedFinalSync => {
                     all_completed = false;
                     needs_vm_pause = true;
@@ -378,8 +393,16 @@ async fn run_disk_precopy_poll(
 
         // Report progress to control plane
         if let Some(reporter) = progress_reporter {
-            let proto_phase = if needs_vm_pause || all_completed {
+            let proto_phase = if all_completed {
                 proto::MigrationPhase::MemoryMigration
+            } else if needs_vm_pause && !pause_first {
+                // Final-sync pause in the default mode: disk work is done,
+                // memory migration is next.
+                proto::MigrationPhase::MemoryMigration
+            } else if needs_vm_pause && pause_first {
+                // Pause-first mode: the pause is part of the disk phase
+                // (before bulk copy or at final sync) — still disk work.
+                proto::MigrationPhase::PrecopyDisk
             } else if max_round > 0 {
                 proto::MigrationPhase::ConvergingDisk
             } else {
@@ -438,14 +461,15 @@ async fn run_disk_precopy_poll(
             info!(
                 vm_id = %vm_id,
                 operation_id = %operation_id,
-                "source agent: pausing VM for final disk sync"
+                pause_reason = if pause_first { "pre-copy" } else { "final-sync" },
+                "source agent: pausing VM for disk migration pause handshake"
             );
             if let Err(e) = pause_guard.pause_vm().await {
                 error!(
                     vm_id = %vm_id,
                     operation_id = %operation_id,
                     error = %e,
-                    "source agent: failed to pause VM for final disk sync"
+                    "source agent: failed to pause VM for disk migration pause handshake"
                 );
                 return Err(e);
             }
@@ -467,7 +491,7 @@ async fn run_disk_precopy_poll(
             info!(
                 vm_id = %vm_id,
                 operation_id = %operation_id,
-                "source agent: VM paused, resumed all disk migrations for final sync"
+                "source agent: VM paused, resumed all disk migrations"
             );
         }
     }
@@ -568,6 +592,7 @@ pub async fn source_migration_with_disk_precopy(
                     &volume.volume_id,
                     &volume.attachment_handle,
                     &disk_config.dest_stord_endpoint,
+                    disk_config.pause_first,
                     Some(&operation_id),
                 )
                 .await
@@ -606,6 +631,7 @@ pub async fn source_migration_with_disk_precopy(
             &mut stord_client,
             &volume_migrations,
             std::time::Duration::from_secs(5),
+            disk_config.pause_first,
             &cancel_token,
             &mut pause_guard,
             progress_reporter.as_ref(),
@@ -814,6 +840,7 @@ mod tests {
         let config = DiskPrecopyConfig {
             stord_socket: std::path::PathBuf::from("/run/chv/stord.sock"),
             dest_stord_endpoint: "http://10.0.0.5:50052".to_string(),
+            pause_first: false,
             volumes: vec![
                 MigrationVolume {
                     volume_id: "vol-1".to_string(),
@@ -838,6 +865,7 @@ mod tests {
         let config = DiskPrecopyConfig {
             stord_socket: std::path::PathBuf::from("/run/chv/stord.sock"),
             dest_stord_endpoint: "http://10.0.0.5:50052".to_string(),
+            pause_first: false,
             volumes: vec![],
         };
         assert!(config.volumes.is_empty());
@@ -991,7 +1019,8 @@ mod tests {
             dirty_blocks_remaining: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            needs_vm_pause: phase == StordPhase::PausedFinalSync,
+            needs_vm_pause: phase == StordPhase::PausedFinalSync
+                || phase == StordPhase::PausedPreCopy,
             error_message: String::new(),
         }
     }
@@ -1041,6 +1070,7 @@ mod tests {
             &mut stub,
             &[("vol-1".to_string(), "dm-test-1".to_string())],
             std::time::Duration::from_millis(10),
+            false,
             &cancel,
             &mut guard,
             None,
@@ -1087,6 +1117,7 @@ mod tests {
             &mut stub,
             &[("vol-1".to_string(), "dm-test-1".to_string())],
             std::time::Duration::from_millis(10),
+            false,
             &cancel,
             &mut guard,
             None,
@@ -1102,6 +1133,90 @@ mod tests {
             rt.get("vm-1").await.unwrap().runtime_status,
             "Running",
             "VM must be resumed after the post-pause failure"
+        );
+    }
+
+    /// Pause-first mode (issue #394, Option C): a `PausedPreCopy` status
+    /// (stord waiting for the VM pause BEFORE bulk copy) drives the same
+    /// pause-and-resume handshake as the final-sync pause, and the
+    /// progress reported during that window must stay in the disk phase —
+    /// reporting `MemoryMigration` there (the default-mode mapping for
+    /// `needs_vm_pause`) would claim disk work is done when not one byte
+    /// has transferred.
+    #[tokio::test]
+    async fn paused_pre_copy_drives_pause_handshake_and_reports_disk_phase() {
+        let (rt, _mock) = test_runtime();
+        create_vm_record(&rt).await;
+
+        // The pre-copy pause, one productive bulk-copy poll, then done —
+        // the shape a real pause-first migration presents to the poller.
+        let mut stub = StubDiskMigration {
+            statuses: VecDeque::from([
+                stub_status(StordPhase::PausedPreCopy),
+                stub_status(StordPhase::BulkCopy),
+                stub_status(StordPhase::Completed),
+            ]),
+            resume_result: Ok(()),
+            resume_calls: 0,
+        };
+        let mut guard = new_guard(&rt);
+        let cancel = CancellationToken::new();
+
+        let observed_phases: Arc<std::sync::Mutex<Vec<proto::MigrationPhase>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = observed_phases.clone();
+        let reporter: ProgressReporter = make_progress_reporter(move |progress| {
+            if let Ok(phase) = proto::MigrationPhase::try_from(progress.phase) {
+                recorder.lock().unwrap().push(phase);
+            }
+        });
+
+        run_disk_precopy_poll(
+            &mut stub,
+            &[("vol-1".to_string(), "dm-test-1".to_string())],
+            std::time::Duration::from_millis(1),
+            true, // pause_first — the mode that produces PausedPreCopy
+            &cancel,
+            &mut guard,
+            Some(&reporter),
+            "vm-1",
+            "op-1",
+        )
+        .await
+        .expect("pause-first disk pre-copy poll must succeed");
+
+        assert_eq!(
+            stub.resume_calls, 1,
+            "PausedPreCopy must trigger exactly one resume after the pause"
+        );
+        assert!(
+            guard.is_paused(),
+            "the VM stays paused through the disk phase (stop-the-world)"
+        );
+        let phases = observed_phases.lock().unwrap().clone();
+        // [PausedPreCopy, BulkCopy, Completed] polls map to disk-phase
+        // progress for the first two; only the Completed poll reports
+        // MemoryMigration (disk done, memory migration next) — the
+        // default-mode mapping for needs_vm_pause would have claimed it
+        // on the very first poll.
+        assert_eq!(
+            phases.first(),
+            Some(&proto::MigrationPhase::PrecopyDisk),
+            "progress during PausedPreCopy must stay in the disk phase, got {:?}",
+            phases
+        );
+        assert!(
+            phases[..phases.len() - 1]
+                .iter()
+                .all(|p| *p == proto::MigrationPhase::PrecopyDisk),
+            "every pre-completion poll must stay in the disk phase, got {:?}",
+            phases
+        );
+        assert_eq!(
+            phases.last(),
+            Some(&proto::MigrationPhase::MemoryMigration),
+            "the Completed poll hands off to the memory phase, got {:?}",
+            phases
         );
     }
 

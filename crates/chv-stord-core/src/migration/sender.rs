@@ -80,6 +80,13 @@ pub struct MigrationSender<B: StorageBackend> {
     /// remains the only (late) correctness gate — the pre-canary
     /// behavior.
     canary_baseline: Option<WriteCanaryFingerprint>,
+    /// Pause-first mode (issue #394, Option C): request the VM pause
+    /// BEFORE any source byte is read, so the entire transfer runs
+    /// against a quiescent source — correct by construction for any
+    /// write pattern, at the cost of downtime equal to the transfer
+    /// time. Opt-in; the default (false) keeps the quiescent-assumed
+    /// contract: write canary + finalize digest.
+    pause_first: bool,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -95,6 +102,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             backpressure_factor: 1.0,
             task: None,
             canary_baseline: None,
+            pause_first: false,
         }
     }
 
@@ -106,6 +114,15 @@ impl<B: StorageBackend> MigrationSender<B> {
 
     pub fn with_block_size(mut self, block_size: u64) -> Self {
         self.block_size = block_size;
+        self
+    }
+
+    /// Opt into pause-first mode (issue #394, Option C): the VM pause is
+    /// requested before any source byte is read, making the transfer
+    /// correct by construction. Requires a task to be attached (the pause
+    /// coordination channel); `start_migration` fails closed otherwise.
+    pub fn with_pause_first(mut self) -> Self {
+        self.pause_first = true;
         self
     }
 
@@ -128,6 +145,19 @@ impl<B: StorageBackend> MigrationSender<B> {
     /// This opens a bidirectional stream, sends InitMigration, waits for
     /// MigrationReady, then performs bulk copy followed by dirty sync rounds.
     pub async fn start_migration(mut self, endpoint: String) -> Result<(), tonic::Status> {
+        // Pause-first fail-closed check (issue #394, Option C): the mode
+        // requires the task's pause coordination channel. Without a task
+        // it cannot be honored — fail BEFORE connecting rather than
+        // silently degrading to quiescent-assumed semantics (an operator
+        // asked for the pause; pretending it happened would reintroduce
+        // the #394 failure mode this mode exists to close).
+        if self.pause_first && self.task.is_none() {
+            return Err(tonic::Status::failed_precondition(
+                "pause-first migration requires VM-pause coordination, but no migration \
+                 task is attached",
+            ));
+        }
+
         let channel = if let Some(ref tls) = self.tls_config {
             let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
             let ca = Certificate::from_pem(&tls.ca_pem);
@@ -269,10 +299,57 @@ impl<B: StorageBackend> MigrationSender<B> {
             }
         }
 
+        // Pause-first gate (issue #394, Option C): the opt-in
+        // stop-the-world mode. The VM is paused BEFORE any source byte
+        // is read, so the transfer is correct by construction — no
+        // concurrent write can occur. The canary armed below (after this
+        // gate) therefore covers the whole transfer window and becomes a
+        // tripwire for non-VM writers (a stray host process); the dirty
+        // rounds converge trivially on the quiesced source; the finalize
+        // digest verifies instead of catching loss. The no-task case was
+        // already rejected before connecting (see start_migration's
+        // head).
+        if self.pause_first {
+            let Some(ref task) = self.task else {
+                // Belt-and-braces: the head-of-function guard already
+                // rejected this. Fail closed here too rather than panic
+                // (the no-panics-in-service-code rule) — same error,
+                // same semantics.
+                return Err(tonic::Status::failed_precondition(
+                    "pause-first migration requires VM-pause coordination, but no migration \
+                     task is attached",
+                ));
+            };
+            {
+                let mut state = task.state.write().await;
+                state.phase = MigrationPhase::PausedPreCopy;
+                state.needs_vm_pause = true;
+            }
+            info!(
+                volume_id = %self.volume_id,
+                "pause-first: requesting VM pause before any source read"
+            );
+            let mut pause_rx = task.pause_tx.subscribe();
+            while !*pause_rx.borrow() {
+                if pause_rx.changed().await.is_err() {
+                    let mut state = task.state.write().await;
+                    state.phase = MigrationPhase::Failed;
+                    state.error_message = "pause channel closed".to_string();
+                    return Err(tonic::Status::cancelled("pause channel closed"));
+                }
+            }
+            info!(
+                volume_id = %self.volume_id,
+                "pause-first: VM paused, source quiescent for the whole transfer"
+            );
+        }
+
         // Write canary baseline (issue #394, Option A): sample the
         // source's backing-store stat immediately before any bytes are
-        // read. Every later re-check (dirty-round boundaries, the
-        // pre-pause gate) compares against this sample; a change means
+        // read (in pause-first mode, after the VM pause has completed,
+        // so the covered window is exactly the quiesced transfer).
+        // Every later re-check (dirty-round boundaries, the pre-pause
+        // gate) compares against this sample; a change means
         // the source was written during the migration — writes the
         // dirty bitmap provably cannot account for (#394 R1) — and the
         // migration fails *here*, not after a full wasted transfer.
@@ -352,32 +429,43 @@ impl<B: StorageBackend> MigrationSender<B> {
         self.verify_source_canary().await?;
 
         // If a task is attached, we coordinate with the agent: wait for VM pause
-        // before sending FinalSync.
+        // before sending FinalSync. In pause-first mode the VM has been paused
+        // since before bulk copy (the handshake already completed) — only the
+        // phase transition runs; the wait would be an immediate no-op.
         if let Some(ref task) = self.task {
-            let mut state = task.state.write().await;
-            state.phase = MigrationPhase::PausedFinalSync;
-            state.needs_vm_pause = true;
-            drop(state);
-
-            info!(
-                volume_id = %self.volume_id,
-                "waiting for VM pause before final sync"
-            );
-
-            let mut pause_rx = task.pause_tx.subscribe();
-            while !*pause_rx.borrow() {
-                if pause_rx.changed().await.is_err() {
-                    let mut state = task.state.write().await;
-                    state.phase = MigrationPhase::Failed;
-                    state.error_message = "pause channel closed".to_string();
-                    return Err(tonic::Status::cancelled("pause channel closed"));
-                }
+            {
+                let mut state = task.state.write().await;
+                state.phase = MigrationPhase::PausedFinalSync;
+                state.needs_vm_pause = true;
             }
 
-            info!(
-                volume_id = %self.volume_id,
-                "VM pause signaled, proceeding with final sync"
-            );
+            if self.pause_first {
+                info!(
+                    volume_id = %self.volume_id,
+                    "pause-first: VM already paused since before bulk copy, proceeding with \
+                     final sync"
+                );
+            } else {
+                info!(
+                    volume_id = %self.volume_id,
+                    "waiting for VM pause before final sync"
+                );
+
+                let mut pause_rx = task.pause_tx.subscribe();
+                while !*pause_rx.borrow() {
+                    if pause_rx.changed().await.is_err() {
+                        let mut state = task.state.write().await;
+                        state.phase = MigrationPhase::Failed;
+                        state.error_message = "pause channel closed".to_string();
+                        return Err(tonic::Status::cancelled("pause channel closed"));
+                    }
+                }
+
+                info!(
+                    volume_id = %self.volume_id,
+                    "VM pause signaled, proceeding with final sync"
+                );
+            }
         }
 
         // Send FinalSync (VM is paused at this point)
@@ -938,7 +1026,10 @@ impl<B: StorageBackend> MigrationSender<B> {
 /// It creates a MigrationSender and drives the full migration lifecycle.
 ///
 /// When `tls_config` is `Some`, the connection uses mTLS as required by
-/// the disk migration protocol spec.
+/// the disk migration protocol spec. When `pause_first` is true (issue
+/// #394, Option C), the sender requests the VM pause before any source
+/// read and the transfer runs quiesced (stop-the-world, correct by
+/// construction).
 pub async fn start_migration_to_peer<B: StorageBackend>(
     endpoint: String,
     volume_id: String,
@@ -946,6 +1037,7 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
     backend: Arc<B>,
     tls_config: Option<MigrationTlsConfig>,
     task: Option<Arc<MigrationTask>>,
+    pause_first: bool,
 ) -> Result<(), tonic::Status> {
     let mut sender = MigrationSender::new(backend, volume_id, handle);
     if let Some(tls) = tls_config {
@@ -953,6 +1045,9 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
     }
     if let Some(t) = task {
         sender = sender.with_task(t);
+    }
+    if pause_first {
+        sender = sender.with_pause_first();
     }
     sender.start_migration(endpoint).await
 }
@@ -1396,6 +1491,34 @@ mod tests {
         assert!(
             sender.verify_source_canary().await.is_err(),
             "a size change must trip the canary"
+        );
+    }
+
+    /// Pause-first (issue #394, Option C) fails closed without a task:
+    /// the mode requires the pause coordination channel, and an operator
+    /// who asked for the pause must never get a silent degradation to
+    /// quiescent-assumed semantics. The rejection happens before the
+    /// connection attempt, so an unroutable endpoint proves ordering: no
+    /// connect timeout, an immediate `failed_precondition`.
+    #[tokio::test]
+    async fn pause_first_without_task_fails_closed_before_connecting() {
+        let backend = Arc::new(MockBackend::new());
+        let sender = MigrationSender::new(backend, "vol-pf".to_string(), "handle-pf".to_string())
+            .with_pause_first();
+        let err = sender
+            .start_migration("https://127.0.0.1:1".to_string())
+            .await
+            .expect_err("pause-first without a task must fail closed");
+        assert_eq!(
+            err.code(),
+            tonic::Code::FailedPrecondition,
+            "expected failed_precondition, got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("pause-first"),
+            "error must name the mode: {}",
+            err.message()
         );
     }
 }
