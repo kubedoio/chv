@@ -1,8 +1,9 @@
 use axum::{extract::State, response::IntoResponse, routing::get, Router};
 use std::sync::Arc;
 use std::time::Instant;
-use sysinfo::{Disks, System};
 use tokio::sync::Mutex;
+
+use chv_monitoring_core::node_os::NodeOsCollector;
 
 use crate::connectivity::ConnectivityState;
 
@@ -75,6 +76,9 @@ pub struct MetricsState {
     pub memory_pressure: bool,
     // Core journal (core-managed mode only)
     pub core_journal: Option<CoreJournalMetrics>,
+    // Native monitoring sampler health (G1): present once the sampler
+    // task is spawned. Counters/gauges only — no VM identifiers.
+    pub sampler_health: Option<Arc<chv_monitoring_core::sampler::SamplerHealth>>,
 }
 
 impl MetricsState {
@@ -97,38 +101,48 @@ impl MetricsState {
             disk_pressure: false,
             memory_pressure: false,
             core_journal: None,
+            sampler_health: None,
         }
     }
 }
 
-/// Collect current host resource metrics using sysinfo.
+/// Collect current host resource metrics.
+///
+/// CPU usage comes from a **process-global retained collector**
+/// (`chv-monitoring-core`'s `NodeOsCollector`): sysinfo needs two
+/// refreshes separated by its minimum interval to measure an interval,
+/// so a fresh `System` per scrape would report the **since-boot
+/// average** — a constant-ish number that is not the current load (the
+/// G1 sampler repair, prompt 01 task 2). The first scrape after agent
+/// start has no valid interval yet and reports 0 until the second; a
+/// scrape inside the minimum interval retains the last valid reading.
 fn collect_host_resources() -> HostResources {
-    let mut sys = System::new();
-    sys.refresh_cpu_usage();
-    sys.refresh_memory();
-    // sysinfo >= 0.31: `global_cpu_info()` was removed in favor of
-    // `global_cpu_usage()`. Same semantics for this call site: a fresh
-    // `System` with a single refresh yields the since-boot CPU average
-    // (verified identical under 0.30.13 and 0.39.6); a *second* refresh
-    // on the same `System` is what `MINIMUM_CPU_UPDATE_INTERVAL` bounds,
-    // and this per-scrape collector never performs one.
-    let cpu_usage = sys.global_cpu_usage();
-    let memory_total = sys.total_memory();
-    let memory_used = sys.used_memory();
+    static NODE_COLLECTOR: std::sync::OnceLock<std::sync::Mutex<NodeOsCollector>> =
+        std::sync::OnceLock::new();
+    let collector = NODE_COLLECTOR.get_or_init(|| std::sync::Mutex::new(NodeOsCollector::new()));
 
-    let disks = Disks::new_with_refreshed_list();
-    let (disk_total, disk_available) = disks
-        .iter()
-        .find(|d| d.mount_point() == std::path::Path::new("/"))
-        .map(|d| (d.total_space(), d.available_space()))
-        .unwrap_or((0, 0));
+    // The lock is held only for the refresh (milliseconds, the same
+    // work the previous per-scrape collector did); concurrent scrapes
+    // serialize on it, which is the documented per-scrape precedent.
+    let snapshot = match collector.lock() {
+        Ok(mut c) => c.snapshot(),
+        Err(poisoned) => poisoned.into_inner().snapshot(),
+    };
 
     HostResources {
-        cpu_usage_percent: cpu_usage,
-        memory_total_bytes: memory_total,
-        memory_used_bytes: memory_used,
-        disk_total_bytes: disk_total,
-        disk_available_bytes: disk_available,
+        // The Prometheus surface has no quality markers: no valid
+        // interval yet flattens to 0 here (the v1 sample path carries
+        // the quality instead).
+        cpu_usage_percent: snapshot.cpu_capacity_ratio.unwrap_or(0.0) as f32 * 100.0,
+        memory_total_bytes: snapshot.memory_total_bytes,
+        // sysinfo's used_memory ≈ total − available − reclaimable; the
+        // collector exposes the kernel's MemAvailable directly, which
+        // is the pressure-check semantic, so used = total − available.
+        memory_used_bytes: snapshot
+            .memory_total_bytes
+            .saturating_sub(snapshot.memory_available_bytes),
+        disk_total_bytes: snapshot.root_fs_total_bytes.unwrap_or(0),
+        disk_available_bytes: snapshot.root_fs_available_bytes.unwrap_or(0),
     }
 }
 
@@ -141,8 +155,7 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
     // Core journal metrics exist only in core-managed mode: absent in
     // legacy mode rather than zeroed (a zero gauge would read as
     // "journal healthy" where no journal poller runs).
-    let core_journal_segment = match s.core_journal {
-        Some(core) => format!(
+    let core_journal_segment = match s.core_journal {        Some(core) => format!(
             "# HELP chv_agent_journal_scan_failures_total Total failed core journal scans\n\
              # TYPE chv_agent_journal_scan_failures_total counter\n\
              chv_agent_journal_scan_failures_total{{node_id=\"{node_id}\"}} {scan_failures}\n\
@@ -157,6 +170,46 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
             healthy = if core.healthy { 1 } else { 0 },
             inspect_required = core.inspect_required,
         ),
+        None => String::new(),
+    };
+    // Native monitoring sampler health (G1): global counters/gauges
+    // only — no VM identifiers on Prometheus labels. Absent before the
+    // sampler is spawned rather than zeroed.
+    let sampler_segment = match &s.sampler_health {
+        Some(health) => {
+            let h = health.snapshot();
+            format!(
+                "# HELP chv_agent_monitoring_sampling_cycles_total Completed monitoring sampling cycles\n\
+                 # TYPE chv_agent_monitoring_sampling_cycles_total counter\n\
+                 chv_agent_monitoring_sampling_cycles_total{{node_id=\"{node_id}\"}} {cycles}\n\
+                 # HELP chv_agent_monitoring_sampling_cycle_failures_total Monitoring sampling cycles with any failure\n\
+                 # TYPE chv_agent_monitoring_sampling_cycle_failures_total counter\n\
+                 chv_agent_monitoring_sampling_cycle_failures_total{{node_id=\"{node_id}\"}} {failures}\n\
+                 # HELP chv_agent_monitoring_sampling_source_timeouts_total Monitoring source calls that timed out\n\
+                 # TYPE chv_agent_monitoring_sampling_source_timeouts_total counter\n\
+                 chv_agent_monitoring_sampling_source_timeouts_total{{node_id=\"{node_id}\"}} {timeouts}\n\
+                 # HELP chv_agent_monitoring_sampling_vm_collection_failures_total Failed VM sample collections\n\
+                 # TYPE chv_agent_monitoring_sampling_vm_collection_failures_total counter\n\
+                 chv_agent_monitoring_sampling_vm_collection_failures_total{{node_id=\"{node_id}\"}} {vm_failures}\n\
+                 # HELP chv_agent_monitoring_sampling_dropped_samples_total Samples dropped because the bounded sink was full\n\
+                 # TYPE chv_agent_monitoring_sampling_dropped_samples_total counter\n\
+                 chv_agent_monitoring_sampling_dropped_samples_total{{node_id=\"{node_id}\"}} {dropped}\n\
+                 # HELP chv_agent_monitoring_sampling_last_cycle_duration_ms Duration of the last monitoring sampling cycle\n\
+                 # TYPE chv_agent_monitoring_sampling_last_cycle_duration_ms gauge\n\
+                 chv_agent_monitoring_sampling_last_cycle_duration_ms{{node_id=\"{node_id}\"}} {duration_ms}\n\
+                 # HELP chv_agent_monitoring_sampling_last_success_unix_ms Unix ms of the last fully successful monitoring sampling cycle\n\
+                 # TYPE chv_agent_monitoring_sampling_last_success_unix_ms gauge\n\
+                 chv_agent_monitoring_sampling_last_success_unix_ms{{node_id=\"{node_id}\"}} {last_success}\n",
+                node_id = s.node_id,
+                cycles = h.cycles_completed,
+                failures = h.cycle_failures,
+                timeouts = h.source_timeouts,
+                vm_failures = h.vm_collection_failures,
+                dropped = h.dropped_samples,
+                duration_ms = h.last_cycle_duration_ms,
+                last_success = h.last_success_unix_ms,
+            )
+        }
         None => String::new(),
     };
     let body = format!(
@@ -216,7 +269,7 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
          chv_agent_disk_pressure{{node_id=\"{node_id}\"}} {disk_pressure}\n\
          # HELP chv_agent_memory_pressure Whether memory is under pressure (1=yes, 0=no)\n\
          # TYPE chv_agent_memory_pressure gauge\n\
-         chv_agent_memory_pressure{{node_id=\"{node_id}\"}} {mem_pressure}\n{core_journal_segment}",
+         chv_agent_memory_pressure{{node_id=\"{node_id}\"}} {mem_pressure}\n{core_journal_segment}{sampler_segment}",
         node_id = s.node_id,
         state = s.node_state,
         vms = s.vm_count,

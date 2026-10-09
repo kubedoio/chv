@@ -933,6 +933,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(
         cache.lock().await.node_id.clone(),
     )));
+    // Native monitoring sampler (G1, #602): one bounded task,
+    // independent of reconciliation and state reports, collecting node
+    // contract samples through chv-monitoring-core. Health counters are
+    // exported on /metrics without VM identifiers; the latest samples
+    // feed PR-2's ingest.
+    let (sampler_health, _latest_node_samples) = monitoring::spawn_monitoring_sampler(
+        cache.lock().await.node_id.clone(),
+        chv_monitoring_core::sampler::SamplerConfig::default(),
+    );
+    metrics_state.lock().await.sampler_health = Some(sampler_health);
     let metrics_state_clone = metrics_state.clone();
     tokio::spawn(async move {
         let app = metrics_router(metrics_state_clone);
@@ -1619,6 +1629,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// Native monitoring sampler wiring (gate G1, #602).
+mod monitoring;
 
 #[cfg(test)]
 mod tests {

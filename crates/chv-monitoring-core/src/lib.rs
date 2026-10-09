@@ -18,7 +18,9 @@
 //!   sentinels on latency fields — verified against real-host fixtures
 //!   (`docs/evidence/native-monitoring/g0b/`). Missing fields are
 //!   unavailable, never zero.
-//! - [`node_os`] — the retained-snapshot Linux node collector. CPU usage
+//! - [`node_os`] — the retained-snapshot Linux node collector.
+//! - [`proc_net`] — per-interface (`/proc/net/dev`) and per-block-device
+//!   (`/proc/diskstats`) node counters, labeled — never blindly summed. CPU usage
 //!   requires two refreshes separated by sysinfo's minimum interval; a
 //!   fresh `System` per scrape yields the since-boot average, which is
 //!   wrong, so the collector is long-lived and reports
@@ -50,6 +52,7 @@ pub mod cgroup;
 pub mod delta;
 pub mod model;
 pub mod node_os;
+pub mod proc_net;
 pub mod process_probe;
 pub mod registry;
 pub mod sampler;
