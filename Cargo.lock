@@ -1009,6 +1009,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chv-monitoring-store"
+version = "0.3.0"
+dependencies = [
+ "chv-monitoring-core",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "chv-netbox-adapter"
 version = "0.3.0"
 dependencies = [
