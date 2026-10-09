@@ -14,7 +14,7 @@ The current `POST /v1/metrics` inventory summary remains compatible. These are *
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/monitoring/catalog` | GET | Metric registry, capabilities, units, sources, quality |
+| `/v1/monitoring/catalog` | GET | Metric registry, capabilities, units, sources, per-metric source preference, quality |
 | `/v1/monitoring/overview` | POST | Fleet/node/VM health and measured resource summaries |
 | `/v1/monitoring/current` | POST | Latest authorized resource samples |
 | `/v1/monitoring/history` | POST | Time-range samples with bounded resolution |
@@ -61,7 +61,27 @@ Response:
 }
 ```
 
-A missing series returns an empty `points` array and a reason such as `unsupported`, `not_collected`, `no_history`, or `stale`. It MUST NOT synthesize zero-valued points. Counter responses carry decimal-string integer values, not imprecise JavaScript numbers.
+A series may be **partially missing**: valid and non-valid points interleaved. A non-valid point carries `timestamp_ms` and `quality` with `value` absent — never a zero, NaN, or interpolated filler:
+
+```json
+{"timestamp_ms": 1791575980000, "quality": "unsupported"}
+```
+
+Downsampling MUST exclude non-valid points from both numerator and denominator; `coverage_ratio` counts valid points only. Counter responses carry decimal-string integer values, not imprecise JavaScript numbers.
+
+A **missing series** returns an empty `points` array and a reason. Absence classification is one mapping, not three vocabularies — the ADR prose terms, the sample `quality` enum ([metric contract v1](chv-monitoring-metrics-v1.md)), and the wire series reasons correspond as follows:
+
+| ADR prose | Point `quality` | Series reason (wire) |
+|---|---|---|
+| unsupported | `unsupported` | `unsupported` |
+| missing (source down or never collected) | `unavailable`, `insufficient_samples` | `not_collected` |
+| missing (nothing stored in the requested range) | — no points exist | `no_history` |
+| stale | `stale` | `stale` |
+| — (point-level only) | `invalid` | a series containing only invalid points reports `not_collected` |
+
+It MUST NOT synthesize zero-valued points for any absence class.
+
+Multi-source metrics (for example `vm.cpu.cores_used` from `vmm` and `vm_cgroup`, or `vm.block.*` from `vmm` and `storage_provider`) return **one series per source that has stored data**, labeled by `source`. A request may narrow sources with an optional `sources` filter. When a consumer wants a single series, the server selects the most authoritative available source as declared by the per-metric source-preference order in the metric registry (exposed through `/v1/monitoring/catalog`); the source label is always returned so the UI can display it.
 
 ## Query limits and constraints
 
@@ -81,7 +101,7 @@ Defaults: at most 8 metric IDs, one target for detailed history, 1000 points/ser
 | `/v1/monitoring/alerts/silence` | POST | Time-bound silence | Authorized operator |
 | `/v1/monitoring/notifications/test` | POST | Authorized delivery test | Administrator |
 
-These are proposed paths. They do not supersede existing `alerts` tables/routes until a compatible migration and route review succeeds.
+These are proposed paths. They do not supersede the existing `alerts` table and the node/overview alert-count read surfaces until a compatible migration and route review succeeds.
 
 Typed rule example:
 

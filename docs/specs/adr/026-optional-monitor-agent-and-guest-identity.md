@@ -36,7 +36,7 @@ not_enrolled -> claim_issued -> enrolled -> active
                                                 +-> revoked
 ```
 
-An enrollment claim is single-use and expires after at most 10 minutes by default. Credentials rotate independently of VM lifecycles. The server deduplicates batches by `(agent_id, boot_id, sequence)` and checks authenticated identity. Registry metadata may use the main control-plane database; time-series samples must not.
+An enrollment claim is single-use and expires after at most 10 minutes by default. Credentials rotate independently of VM lifecycles. The server deduplicates batches by `(agent_id, boot_id, sequence)` and checks authenticated identity. Registry metadata may use the main control-plane database; time-series samples must not. The [security contract](../contracts/chv-monitor-agent-security-plugins-v1.md) defines the single wire/API state vocabulary: this diagram's `stale` is `offline` on the wire, `enrolled` is observed as `enrolling` → `active` on the first accepted batch, and implementations must use the wire vocabulary in APIs.
 
 ## Transport policy
 
@@ -58,5 +58,19 @@ An enrollment claim is single-use and expires after at most 10 minutes by defaul
 ## Acceptance
 
 A malicious test guest must not impersonate a second VM, exfiltrate enrollment secrets, issue a VM lifecycle RPC, or create unbounded series. Uninstall and certificate revocation must work. Offline guests must report `stale`, not `healthy`. Host-only monitoring must work unchanged without the optional agent.
+
+## Rationale
+
+- Guest-originated data is untrusted by definition: a VM identifier or vsock CID in a payload is a claim, not identity, so identity must come from a manager-issued scoped credential bound at enrollment.
+- Outbound HTTPS as the v1 transport: no guest inbound port, no new host-side attack surface, and it works on every qualified guest OS today; vsock is deferred until device lifecycle, CID reuse, and migration handling are qualified.
+- Agent-generated keys with manager-issued certificates: the manager never generates, transmits, or holds a guest private key, removing an entire class of at-rest secret inventory on the manager.
+- Plugins disabled by default behind local-administrator allowlists: remote execution of monitoring code is the classic monitoring-agent compromise path; this design refuses it.
+
+## Consequences
+
+- Enrollment is an operator action with a short-lived single-use claim — deliberate friction; bulk image deployment needs an explicit provisioning path, never a shared baked-in credential.
+- The manager must maintain credential lifecycle (rotation, revocation, epochs, dedup windows) and treat cloned images as a detected-and-reset condition rather than a silent failure.
+- Guest-derived metrics remain permanently second-class in trust: validated, bounded, and never authoritative for VM state.
+- The vsock transport, when it lands, adds host-side ownership/CID mapping qualification obligations before it can be default-enabled.
 
 See [agent spec](../component/chv-monitor-agent-spec.md), [agent security contract](../contracts/chv-monitor-agent-security-plugins-v1.md), and [ingestion contract](../contracts/chv-monitoring-ingestion-v1.md).

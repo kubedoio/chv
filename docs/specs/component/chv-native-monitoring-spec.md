@@ -93,4 +93,4 @@ A collection failure must never change VM state, desired state, readiness, or pl
 - Negative tests: VM ID spoof, lost connectivity, stale VM generation, PID reuse, unknown tenant, deleted VM, permission denial.
 - Store exact binary hashes, VMM version, topology, commands, expected/observed metrics, and error evidence in acceptance output.
 
-A completed UI without real measurements does not pass N1.
+A completed UI without real measurements does not pass the G2 history-and-UI gate.

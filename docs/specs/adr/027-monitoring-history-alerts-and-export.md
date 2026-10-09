@@ -16,7 +16,7 @@ The existing control-plane database is an operational authority and must not bec
 4. For the first release, sample every 5–15 seconds locally, batch at 15 seconds where cost permits, retain raw points for 48 hours, five-minute rollups for 30 days, and one-hour rollups for 180 days. Defaults are adjustable only within enforced storage and query budgets.
 5. Store absolute counters and calculate rates from monotonic deltas. Record source and measurement quality. Do not turn process restarts, counter wrap, missing periods, migration, or reboot into giant rate spikes.
 6. The alert evaluator is native and small. Supported rule types: absolute threshold, sustained threshold, missing/stale target, change rate, service/check status, and simple composite AND/OR on bounded expressions. No PromQL reimplementation in v1.
-7. Persist alert state as `pending -> firing -> resolved`, plus acknowledgment and silence metadata. Deduplicate by rule and authorized target identity. Acknowledgment does not clear the underlying problem.
+7. Persist alert state as `pending -> firing -> resolved`, plus acknowledgment and silence metadata. Deduplicate by rule and authorized target identity. Acknowledgment does not clear the underlying problem. Incident state lives in the **existing control-plane `alerts` table** — never in monitoring.db — so incidents survive monitoring-store eviction and evaluator restarts while monitoring.db remains disposable telemetry.
 8. Native channels: UI alert center and signed, outbound HTTPS webhook. Slack may use a configured webhook adapter. Email and ticket-system adapters are later extensions. Never retry notifications without idempotency, backoff, bounded queues, and audit.
 9. Export is optional. Existing Prometheus instrumentation continues. An authenticated, scoped scrape surface and optional remote-write-compatible exporter may be introduced separately. Do not expose tenant-specific series on unauthenticated `/metrics`.
 10. The BFF provides paged, bounded history APIs and aggregates. No arbitrary SQL, arbitrary PromQL, or arbitrary time-series selector crosses the public API.
@@ -31,7 +31,7 @@ The existing control-plane database is an operational authority and must not bec
 | Agent credentials and policy | Control plane | Claim hashes, target binding, rules | Until deleted/revoked plus audit policy |
 | Recent raw time series | Monitoring store | CPU ratio, bytes and counters | 48 hours target |
 | Downsampled time series | Monitoring store | 5-minute and hourly summaries | 30/180 days targets |
-| Alert incidents | Durable alert store | Pending, firing, ack, resolved | Configurable incident policy |
+| Alert incidents | Control plane — existing durable `alerts` table | Pending, firing, ack, resolved | Configurable incident policy |
 | External export | External operator | Metrics written to existing monitoring | External retention policy |
 
 ## Explicit non-goals
@@ -45,5 +45,19 @@ The existing control-plane database is an operational authority and must not bec
 ## Qualification
 
 Validate 1/10/100/500 VM scenarios with realistic labels and enabled guest agents; measure memory, CPU, storage growth, query latency, and churn. Treat all targets as acceptance candidates, not achieved benchmarks. Prove monitoring-db unavailable, disk-full, interrupted rollup, evaluator restart, webhook timeout/retry, and manager/agent network partition while VM lifecycle still works.
+
+## Rationale
+
+- A bounded SQLite file with enforced budgets and eviction is the smallest store that satisfies "native dashboards without a bundled monitoring stack"; it is disposable telemetry by design, so VM lifecycle never depends on it.
+- Alert incident state stays in the existing control-plane `alerts` table so incidents survive monitoring-store eviction and evaluator restarts — history is disposable, alert workflow is not.
+- Rollups use UTC-aligned windows and quality-aware aggregation: naive averaging fabricates numbers during gaps; coverage must be carried honestly.
+- Export is optional and additive: operators with existing Prometheus/VictoriaMetrics stacks keep them; the platform must not require any external stack for its built-in graphs.
+
+## Consequences
+
+- The manager owns retention, disk-budget enforcement, degraded-mode signaling, and compaction correctness — as tested failure modes (disk-full, interrupted rollup, replayed samples), not best-effort claims.
+- Webhook notifications add an outbound, SSRF-sensitive surface: strict destination allowlists, request signing, idempotency, and a durable outbox become permanent obligations.
+- Performance and scale numbers are published from measurement only; the targets in this ADR are hypotheses to test.
+- External export must never become load-bearing for the native UI — a permanent compatibility constraint.
 
 See [history and alerts spec](../component/chv-monitoring-history-alerts-spec.md) and [query/alert contract](../contracts/chv-monitoring-query-alerts-v1.md).

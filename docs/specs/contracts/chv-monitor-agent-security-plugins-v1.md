@@ -22,7 +22,23 @@ A claim is a bearer secret until consumed. This protocol prevents arbitrary self
 
 Use bound TLS client credentials (mTLS certificate or equivalent cryptographic proof). Require server trust validation and short-lived credentials with rotation and revocation. If a signed-token transport is used for MVP, justify it in a separate security review and protect replay; there must be no permanent shared key.
 
-Proposed client states: `unenrolled`, `enrolling`, `active`, `renewal_due`, `expired`, `revoked`, `offline`. Stored private keys never appear in API responses after initial provisioning. Guest image clones must not retain active credentials; installers must detect copied machine identity or require an explicit reset.
+**Key provisioning (decision):** the agent generates its keypair locally during claim redemption and presents the public key with the claim; the manager issues a certificate bound to that enrollment. The manager never generates, transmits, or holds an agent private key, so there is no minted private-key inventory at rest on the manager to protect, rotate, or purge. During issuance the manager stores only public material and credential metadata.
+
+**Cloned-image handling (decision):** the installer records a per-install machine identity — a random install ID generated at install time and stored beside the credential with restricted permissions. The manager flags duplicate identity when one enrolled credential is presented with a different install ID or from two simultaneously live connections, marks the agent for operator review, and requires an explicit authorized reset to recover. This detection is a best-effort signal, not attestation; the security boundary remains the credential, its scope, and its revocation.
+
+Client states use one wire vocabulary (below); the [ADR-026 identity state machine](../adr/026-optional-monitor-agent-and-guest-identity.md) is the conceptual model and maps to it normatively:
+
+| ADR-026 (conceptual) | Wire/API state |
+|---|---|
+| `not_enrolled` | `unenrolled` |
+| `claim_issued` | `enrolling` |
+| `enrolled`, first accepted batch not yet seen | `active` (within enrollment grace) |
+| valid credential, rotation window open | `renewal_due` (sub-state of `active`) |
+| `stale` (valid credential, no recent contact) | `offline` |
+| `expired` | `expired` |
+| `revoked` | `revoked` |
+
+Stored private keys never appear in API responses after initial provisioning. Guest image clones must not retain active credentials; installers must detect copied machine identity or require an explicit reset.
 
 ## Privileges and packaging
 

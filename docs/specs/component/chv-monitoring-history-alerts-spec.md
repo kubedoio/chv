@@ -9,7 +9,7 @@ The control plane provides a small native history and alerting capability. It do
 
 ## Persistence separation
 
-Use `/var/lib/chv/monitoring/monitoring.db` for bounded samples and rollups. Control-plane state, user accounts, enrolled agent credentials, policy, and alert acknowledgments stay in the existing durable control-plane store. Separate connections and workers. Never hold operational DB locks during a monitoring query.
+Use `/var/lib/chv/monitoring/monitoring.db` for bounded samples and rollups. Control-plane state, user accounts, enrolled agent credentials, policy, and alert incidents (pending, firing, acknowledged, resolved) stay in the existing durable control-plane store — specifically the existing `alerts` table, not a new alert database. Separate connections and workers. Never hold operational DB locks during a monitoring query.
 
 Proposed tables in **monitoring.db**:
 
@@ -24,10 +24,10 @@ CREATE TABLE monitoring_samples_v1 (
   received_at_ms INTEGER NOT NULL,
   value REAL NOT NULL,
   quality TEXT NOT NULL,
-  boot_id TEXT,
+  boot_id TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (
     target_kind, target_id, metric_id,
-    dimensions_hash, source, observed_at_ms
+    dimensions_hash, source, observed_at_ms, boot_id
   )
 );
 CREATE INDEX monitoring_samples_lookup_v1
@@ -36,7 +36,7 @@ CREATE INDEX monitoring_samples_lookup_v1
   );
 ```
 
-This is a **design outline**, not a production migration. Actual schema must include bounded dimension dictionaries, monotonic counter reset markers, integer-safe handling of byte counters, authenticated tenant/project mapping, retention indexes, and migration versioning. Do not store large `u64` counter values in IEEE-754 floats. Prefer a typed sample value in implementation and integer columns where appropriate.
+This is a **design outline**, not a production migration. Actual schema must include bounded dimension dictionaries, monotonic counter reset markers, integer-safe handling of byte counters, authenticated tenant/project mapping, retention indexes, and migration versioning. Do not store large `u64` counter values in IEEE-754 floats. Prefer a typed sample value in implementation and integer columns where appropriate. `boot_id` participates in the primary key so a source restart cannot collide two samples at the same `observed_at_ms`; series without a boot identity (no restartable counter source) use the empty-string default, and implementations may substitute a cleaner sentinel (for example a generated `identity_epoch` column) as long as restart-distinct samples cannot collide.
 
 Rollups use counters (last-first/reset-safe delta), gauges (min/max/avg/count and last), and quality coverage. The schema must preserve unit and metric kind. Rollup windows use UTC-aligned boundaries and are idempotent. Do not average CPU percentages without a valid time weighting policy.
 

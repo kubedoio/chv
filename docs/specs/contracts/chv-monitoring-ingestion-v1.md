@@ -15,6 +15,15 @@ The node message requires a new source-controlled `.proto` contract in `proto/co
 
 The guest route is a dedicated agent-auth endpoint in `chv-controlplane`, isolated from browser BFF routes. It cannot use JWT browser sessions as agent identity. It must require TLS. Reverse proxies must preserve the authenticated connection metadata and must not permit user-supplied identity headers to bypass verification.
 
+## Deployment exposure (default shape)
+
+The manager's default deployment binds loopback (`127.0.0.1`) and TLS is terminated by an optional edge reverse proxy. Guest ingestion changes that exposure requirement and must be an explicit deployment decision, not a side effect:
+
+- Enabling guest ingestion requires the manager HTTPS listener — or its TLS-terminating edge — to be reachable from the VM network on a documented address and port. The listener must not derive any trust from network position: TLS plus the enrolled agent credential is the only authentication.
+- When TLS is terminated by a reverse proxy, the proxy either forwards agent mTLS credentials unchanged to the manager, or terminates mTLS itself and forwards the verified identity over a private loopback/Unix-socket connection via a trusted header. A user-supplied identity header arriving on a public listener must be ignored.
+- Deployments that do not expose the manager to VM networks keep guest ingestion disabled; node-native metrics and history are unaffected (ADR-026 keeps the agent optional).
+- The G3 guest-agent qualification must verify the exact listener, interface, and proxy trust chain of the default single-node install, not only a lab topology.
+
 ## Batch envelope
 
 ```json

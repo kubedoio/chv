@@ -27,7 +27,7 @@ This contract defines typed measurements from `chv-agent`, provider daemons, and
 | `boot_id` | string | Required for counter series from a restartable source |
 | `identity_epoch` | string | Stable incarnation/version for ownership and migration fencing |
 
-For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or NaN. `received_at_ms` is stamped by the manager, never trusted from the sender. `source` and `quality` are immutable for a stored sample. Unknown field/version handling is described by [ingestion v1](chv-monitoring-ingestion-v1.md).
+For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or NaN. "Flagging" an invalid or anomalous sample therefore means recording the `quality` marker (and, where defined, a bounded reason dimension) — never carrying a numeric placeholder that a consumer could mistake for a real measurement. `received_at_ms` is stamped by the manager, never trusted from the sender. `source` and `quality` are immutable for a stored sample. Unknown field/version handling is described by [ingestion v1](chv-monitoring-ingestion-v1.md). The mapping from these quality values to query-side series reasons is defined in [query and alert API contract v1](chv-monitoring-query-alerts-v1.md).
 
 ## Registry of initial metrics
 

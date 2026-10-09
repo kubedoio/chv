@@ -62,6 +62,20 @@ Core-native mode MUST receive its own monitoring read adapter. Implementers must
 
 This ADR is a proposal. It does not assert that native monitoring is implemented. The qualified Cloud Hypervisor pin is v53.0. The implementation must verify each counter against that pinned API and real KVM.
 
-Milestone N1 requires real Linux node and VM CPU, memory, network, and disk observations; a restart; an induced monitoring-db outage; and an unchanged lifecycle test. Mark unavailable metrics unavailable, not zero. The first qualified topology remains the repository's currently qualified topology. Multi-node support requires a separate gate.
+Milestone **G1+G2** — the first qualified product milestone: native sampling (G1) plus real history and UI (G2) — requires real Linux node and VM CPU, memory, network, and disk observations; a restart; an induced monitoring-db outage; and an unchanged lifecycle test. Mark unavailable metrics unavailable, not zero. The first qualified topology remains the repository's currently qualified topology. Multi-node support requires a separate gate.
+
+## Rationale
+
+- Sampling inside the existing `chv-agent` (read-only) is the only design that adds no new runtime authority, daemon, or node failure path; a separate collector daemon was rejected for exactly that reason.
+- Source and quality on every sample: without them, "no data" and "zero" are indistinguishable, and every downstream graph, alert, and export silently fabricates.
+- A separate bounded monitoring store: high-frequency telemetry in the control-plane SQLite threatens the lifecycle database the platform must keep healthy; full external stacks (Prometheus/Grafana) violate the lightweight-install goal.
+- Absolute counters with boot-epoch semantics: rates from raw deltas fabricate spikes on restart and migration; the design refuses to average that away.
+
+## Consequences
+
+- The platform owns a metric registry, ingestion, retention, rollup, and query surface — a real ongoing maintenance and qualification cost (G0–G5), not a bundled third-party stack's.
+- Every new metric must declare source, kind, unit, and quality handling up front; the registry is a reviewed contract, not an open label space.
+- The UI must render absence honestly (no-data, unsupported, and stale as distinct states), which is more work than drawing lines.
+- The first qualified topology is the repository's current one; multi-node and vsock support require their own gates before any claim.
 
 See [native monitoring spec](../component/chv-native-monitoring-spec.md), [metric contract](../contracts/chv-monitoring-metrics-v1.md), and [implementation plan](../../plans/2026-10-09-native-monitoring-implementation.md).

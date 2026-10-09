@@ -29,7 +29,7 @@ Success means: accurate native metrics without guest agent; accurate guest-enhan
 
 ## Mandatory acceptance gates
 
-**G0 (design):** Validate pinned VMM counter schemas with fixtures and actual v53.0 responses. Verify product authority, security, storage, and API contracts against current code. Resolve any contradictions by a reviewed design amendment before implementation.
+**G0 (design baseline, two halves):** **G0a (ratification):** Verify product authority, security, storage, and API contracts against current code; resolve any contradictions by a reviewed design amendment before implementation. Merging the design document package satisfies only the documentary half of G0. **G0b (empirical):** Validate pinned VMM counter schemas with fixtures captured from actual v53.0 responses on a real host (prompt 00's baseline report). Both halves must pass before G1 implementation starts.
 
 **G1 (native sampler):** Host and VM CPU, memory, disk and network samples measure real loads. Source and no-data are truthful. CPU baseline/reset and migration do not produce spikes. Existing VM start/stop/restart passes under sampler pressure. Core-native does not start the legacy authority.
 
@@ -45,7 +45,7 @@ Success means: accurate native metrics without guest agent; accurate guest-enhan
 
 | PR | Task | Gate | Likely files |
 |---|---|---|---|
-| PR-0 | Ratify ADR/contracts and reconcile inventory | G0 | `docs/specs/*`, `docs/prompts/native-monitoring/*` |
+| PR-0 | First execution PR **after the design package merges**: reconcile the design against latest main and capture the G0b fixture baseline | G0a, G0b | `docs/specs/*`, `docs/prompts/native-monitoring/*`, `docs/evidence/*` |
 | PR-1 | Implement source adapters and native sampler | G1 | `crates/chv-agent-{runtime-ch,core}`, `crates/chv-hypervisor-api`, `cmd/chv-agent` |
 | PR-2 | Versioned node ingest, isolated monitoring DB, robust backlog/retention | G2 | `proto/controlplane`, `crates/chv-controlplane-*`, `cmd/chv-controlplane/migrations` |
 | PR-3 | Authenticated query API and real Svelte graphs | G2 | `crates/chv-webui-bff`, `ui/src` |
