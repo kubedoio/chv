@@ -3,7 +3,7 @@
 **Campaign:** native monitoring implementation (#602, plan
 `docs/plans/2026-10-09-native-monitoring-implementation.md`)
 **Gate:** G0b (empirical half of G0; G0a satisfied by the design merge, #599 → `13c00553`)
-**Base/head:** main `13c00553` / this PR's branch (single commit)
+**Base/head:** main `13c00553` / branch head `9a8170cb` (see the PR for the final head)
 **Verdict:** **PASS** — with two design-relevant empirical facts folded into the
 proposed documents (see §5) and one pre-existing production defect recorded as
 the PR-1 baseline (see §4). No contract contradiction found; no design
@@ -161,7 +161,7 @@ the contract's typed, quality-carrying sources.
 | `fixtures/vm.counters.t0.json` / `t1.json` | v53.0 counters ~10 s apart — monotonic device deltas |
 | `fixtures/vm.counters.fresh-boot.json` | v53.0 counters ~4 s after a fresh process boot — per-process reset base |
 | `fixtures/vm.counters.v43.json` | v43.0 counters, same shape — schema-history control |
-| `fixtures/openapi-vmcounters-v53.yaml` | verbatim `/vm.counters` path + `VmCounters` schema from the pinned OpenAPI |
+| `fixtures/openapi-vmcounters-v53.yaml` | content-exact `/vm.counters` path + `VmCounters` schema from the pinned OpenAPI (schema block lifted from its components/schemas nesting, disclosed in-file) |
 | `fixtures/artifact-digests.txt`, `fixtures/digest-verification.txt`, `fixtures/capture-timestamps.txt` | binary/firmware/image digests, the pin cross-check record, and per-fixture capture times |
 
 Fixtures are captured artifacts — never hand-edited; refresh only by re-running

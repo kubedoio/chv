@@ -12,5 +12,7 @@ write that produced each fixture):
   vmm.ping.fresh.json         2026-10-09T20:07:38Z
 
 Stage timeline: v53.0 VM 1 booted ~20:05:1x (pid 63959); t0/t1 captured;
-broadcast-ping net probe ~20:05:5x (no counter movement); VM 1 hard-killed
-~20:07:2x; fresh v53.0 VM booted (pid 71922); fresh-boot captures; teardown.
+broadcast-ping net probe ~20:05:5x (no counter movement); v43.0 control VM
+booted ~20:06:1x, captured 20:06:22, kept running until final teardown; VM 1
+hard-killed ~20:07:2x; fresh v53.0 VM booted (pid 71922); fresh-boot captures;
+teardown (both processes SIGTERM'd, taps deleted).
