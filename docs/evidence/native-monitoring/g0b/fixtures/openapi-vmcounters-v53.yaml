@@ -1,7 +1,10 @@
 # Excerpt: vmm/src/api/openapi/cloud-hypervisor.yaml @ v53.0 (pinned OpenAPI)
 # Fetched 2026-10-09 from
 #   https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/v53.0/vmm/src/api/openapi/cloud-hypervisor.yaml
-# Only the /vm.counters path and the VmCounters schema are retained verbatim.
+# Only the /vm.counters path and the VmCounters schema are retained,
+# content-exact. The VmCounters block is lifted out of its
+# components/schemas nesting (top-level here); its internal indentation
+# and every key/value are unchanged from the source.
 
   /vm.counters:
     get:

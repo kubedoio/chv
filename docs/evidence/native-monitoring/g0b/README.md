@@ -3,6 +3,7 @@
 **Campaign:** native monitoring implementation (#602, plan
 `docs/plans/2026-10-09-native-monitoring-implementation.md`)
 **Gate:** G0b (empirical half of G0; G0a satisfied by the design merge, #599 → `13c00553`)
+**Base/head:** main `13c00553` / this PR's branch (single commit)
 **Verdict:** **PASS** — with two design-relevant empirical facts folded into the
 proposed documents (see §5) and one pre-existing production defect recorded as
 the PR-1 baseline (see §4). No contract contradiction found; no design
@@ -22,12 +23,16 @@ amendment beyond the one-line source clarification in the native spec.
 | VM shape | 2 vCPU, 512 MiB, single disk, one tap NIC, `--serial null`, per-run api-socket paths (matches the m2.5 e-series / requalification leg-02 shape, with a NIC added for net-counter capture) |
 | Transport | HTTP over per-VM unix domain socket (`curl --unix-socket`), same transport the agent uses (`ch_api.rs`) |
 
-Full digests in `fixtures/artifact-digests.txt`.
+Full digests in `fixtures/artifact-digests.txt`; the binary's pin
+cross-check record is `fixtures/digest-verification.txt`.
 
 ## 2. Method
 
-1. Digest-verify the v53.0 static binary against the install-script pin; boot
-   one VM per version in the qualification shape.
+1. Digest-verify the v53.0 static binary against the install-script pin
+   (verification record in `fixtures/digest-verification.txt`); boot one VM
+   per version in the qualification shape. The v43.0 control was captured
+   ~5 s after its boot (its fresh-boot base is compared against the v53.0
+   fresh-boot capture taken ~4 s after boot — same early-boot window).
 2. Capture `GET /api/v1/vmm.ping`, `GET /api/v1/vm.info`,
    `GET /api/v1/vm.counters` (t0), wait ~10 s, capture `vm.counters` (t1).
 3. Hard-kill the v53.0 VM (SIGTERM; the test firmware ignores ACPI shutdown),
@@ -83,7 +88,8 @@ absence, not data.
 
 ### 3.4 Counters reset to a new per-process base on restart
 
-VM 1 t1: `read_ops = 65367`. After a hard kill and fresh boot, ~4 s in:
+VM 1 (pid 63959, `vmm.ping.json`) t1: `read_ops = 65367`. After a hard kill
+and fresh boot (pid 71922, `vmm.ping.fresh.json`), ~4 s in:
 `read_ops = 61646`, `read_bytes = 31562752` — the same base the v43.0 run
 showed at the same point (the firmware's early reads are deterministic).
 Counters do not continue across processes and do not start at zero; they start
@@ -124,9 +130,10 @@ metrics have been zero end-to-end:
 - `cmd/chv-agent/src/main.rs` fills `VmStateReport` with those zeros (and
   pre-zeroes them for non-running VMs);
 - `crates/chv-controlplane-service/src/telemetry.rs` suppresses the insert
-  entirely when all values are zero ("Store runtime counters if any are
-  present (non-zero)") — so the `vm_metrics` table receives no rows at all
-  from this path today;
+  when the report carries no non-zero counter (the guard tests
+  `memory_bytes_total`/disk/net only — a nonzero `cpu_percent` with all
+  others zero would also be skipped) — so the `vm_metrics` table receives no
+  rows at all from this path today;
 - the BFF `POST /v1/metrics` "top consumers" query and the UI render the
   resulting zeros/absence, and `NodeHealthDashboard.svelte` fabricates graph
   history with `Math.random()` (lines 56–61).
@@ -155,7 +162,7 @@ the contract's typed, quality-carrying sources.
 | `fixtures/vm.counters.fresh-boot.json` | v53.0 counters ~4 s after a fresh process boot — per-process reset base |
 | `fixtures/vm.counters.v43.json` | v43.0 counters, same shape — schema-history control |
 | `fixtures/openapi-vmcounters-v53.yaml` | verbatim `/vm.counters` path + `VmCounters` schema from the pinned OpenAPI |
-| `fixtures/artifact-digests.txt`, `fixtures/capture-timestamps.txt` | binary/firmware/image digests and capture time |
+| `fixtures/artifact-digests.txt`, `fixtures/digest-verification.txt`, `fixtures/capture-timestamps.txt` | binary/firmware/image digests, the pin cross-check record, and per-fixture capture times |
 
 Fixtures are captured artifacts — never hand-edited; refresh only by re-running
 the capture on a real host against the pinned binary (digest-verified).
