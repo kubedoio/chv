@@ -146,6 +146,11 @@ impl serde::Serialize for SampleValue {
 }
 
 impl<'de> serde::Deserialize<'de> for SampleValue {
+    // Wire tolerance: a JSON number deserializes as Integer when it is a
+    // non-negative integer and as Float otherwise — including negative
+    // integers, which have no u64 representation and land in Float with
+    // their value preserved (construction-side validation still rejects
+    // negative counters before a sample can be built).
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = serde_json::Value::deserialize(deserializer)?;
         match raw {
@@ -658,6 +663,12 @@ mod tests {
             serde_json::to_value(SampleValue::Float(1.25)).unwrap(),
             serde_json::json!(1.25)
         );
+        // Negative integers have no u64 form: they deserialize as
+        // Float with the value preserved (SampleBuilder rejects them
+        // for counters before any sample exists).
+        let neg: SampleValue = serde_json::from_value(serde_json::json!(-5)).unwrap();
+        assert_eq!(neg, SampleValue::Float(-5.0));
+        assert_eq!(neg.as_u64(), None);
     }
 
     #[test]

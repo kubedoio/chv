@@ -4301,12 +4301,17 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid).unwrap_or(0);
 
                 let mut map = self.vms.write().await;
+                let mut identity_confirmed = false;
                 if let Some(proc) = map.get_mut(vm_id) {
                     // Identity re-check: the entry must still hold the
                     // pid whose /proc was read. A concurrent replace
-                    // (restart, removal) fails this and the values
-                    // above are simply not applied.
+                    // (restart, removal) fails this and NEITHER the CPU
+                    // reading nor the RSS reading is applied — the RSS
+                    // has no epoch fence of its own, so reporting it for
+                    // a replaced entry would attribute the old
+                    // incarnation's memory to the VM.
                     if proc.child.vmm_pid() == Some(pid) {
+                        identity_confirmed = true;
                         if let chv_monitoring_core::DeltaOutcome::Delta(delta_ticks) =
                             proc.cpu_ticks.observe(epoch, ticks)
                         {
@@ -4328,6 +4333,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         // never a fabricated spike.
                         proc.last_cpu_at = Some(now);
                     }
+                }
+                if !identity_confirmed {
+                    // The entry was replaced or removed while /proc was
+                    // being read: the reading belongs to the old
+                    // incarnation and must not be reported.
+                    memory_used = 0;
                 }
             }
             // A missing stat (process gone between the map lookup
@@ -10309,7 +10320,7 @@ mod tests {
         assert!(after_restart.disk_bytes_read > 0);
 
         drop(fresh.kill().await);
-        let _ = vmm.wait().await;
+        // vmm was already reaped above; only fresh remains to reap.
         let _ = fresh.wait().await;
     }
 }

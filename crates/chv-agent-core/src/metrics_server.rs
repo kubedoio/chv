@@ -157,7 +157,8 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
     // Core journal metrics exist only in core-managed mode: absent in
     // legacy mode rather than zeroed (a zero gauge would read as
     // "journal healthy" where no journal poller runs).
-    let core_journal_segment = match s.core_journal {        Some(core) => format!(
+    let core_journal_segment = match s.core_journal {
+        Some(core) => format!(
             "# HELP chv_agent_journal_scan_failures_total Total failed core journal scans\n\
              # TYPE chv_agent_journal_scan_failures_total counter\n\
              chv_agent_journal_scan_failures_total{{node_id=\"{node_id}\"}} {scan_failures}\n\

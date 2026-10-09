@@ -25,7 +25,7 @@
 //!   fresh `System` per scrape yields the since-boot average, which is
 //!   wrong, so the collector is long-lived and reports
 //!   `insufficient_samples` until a valid interval exists.
-//! - [`process_probe`] — read-only `/proc/<pid>/stat` and `statm` probes
+//! - [`process_probe`] — read-only `/proc/<pid>/stat` and `/proc/<pid>/status` (`VmRSS`) probes
 //!   with a configurable proc root (test isolation) and start-ticks fencing
 //!   helpers.
 //! - [`cgroup`] — read-only cgroup v2 probes (`cpu.stat`, `memory.current`)
