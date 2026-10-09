@@ -197,18 +197,31 @@ async fn create_bodies_carry_netbox_write_reference_forms() {
     // The IP create with an assigned interface first resolves the
     // interface's NetBox id by natural key (the inline half of the
     // assignment path; the runner's post-loop fix-up is the other).
+    // The probe filters by `name` only — `virtual_machine` must NOT
+    // be a query param (real NetBox types it as a choice filter that
+    // 400s on values that do not exist yet; see
+    // `get_interfaces_by_name`) — and the VM half of the key is
+    // applied client-side, so a same-named interface on another VM
+    // must not be picked (id 99 is the decoy; id 45 must win).
     Mock::given(method("GET"))
         .and(path("/api/virtualization/interfaces/"))
         .and(query_param("name", "net-backend"))
-        .and(query_param("virtual_machine", "chv-vm-01"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "count": 1,
-            "results": [{
-                "id": 45,
-                "name": "net-backend",
-                "virtual_machine": { "id": 44, "name": "chv-vm-01" },
-                "tags": []
-            }]
+            "count": 2,
+            "results": [
+                {
+                    "id": 99,
+                    "name": "net-backend",
+                    "virtual_machine": { "id": 98, "name": "other-vm" },
+                    "tags": []
+                },
+                {
+                    "id": 45,
+                    "name": "net-backend",
+                    "virtual_machine": { "id": 44, "name": "chv-vm-01" },
+                    "tags": []
+                }
+            ]
         })))
         .mount(&server)
         .await;
@@ -352,4 +365,20 @@ async fn create_bodies_carry_netbox_write_reference_forms() {
         json!({ "slug": CHV_NETBOX_DEVICE_ROLE }),
         "NetBox 4.7 requires a role on device creates"
     );
+    // Wire form of the natural-key probe: name only. `virtual_machine`
+    // as a query param is forbidden — real NetBox's choice filter
+    // 400s on values that do not exist yet (see
+    // `get_interfaces_by_name`), and the VM half of the key is
+    // applied client-side on the parsed rows.
+    for request in &requests {
+        if request.method.as_str() == "GET" {
+            let query = request.url.query().unwrap_or_default();
+            assert!(
+                !query
+                    .split('&')
+                    .any(|pair| pair.starts_with("virtual_machine=")),
+                "interface probes must filter by name only, never a virtual_machine param: {query}"
+            );
+        }
+    }
 }

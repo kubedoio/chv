@@ -80,10 +80,14 @@ async fn list_with_filters_round_trips_through_the_fail_closed_parser() {
             ],
             "virtual_machines": [
                 { "id": 9, "name": "vm-01", "status": "active",
-                  "device": { "name": "chv-node-01" }, "vcpus": 2, "memory": 2048 }
+                  "device": { "name": "chv-node-01" }, "vcpus": 2, "memory": 2048 },
+                { "id": 10, "name": "vm-02", "status": "active",
+                  "device": { "name": "chv-node-01" }, "vcpus": 1, "memory": 1024 }
             ],
             "interfaces": [
                 { "id": 11, "name": "backend", "virtual_machine": { "name": "vm-01" },
+                  "description": "backend", "type": "virtual" },
+                { "id": 12, "name": "backend", "virtual_machine": { "name": "vm-02" },
                   "description": "backend", "type": "virtual" }
             ],
             "prefixes": [ { "id": 3, "prefix": "10.42.0.0/24", "vlan": { "vid": 42 } } ],
@@ -139,6 +143,17 @@ async fn list_with_filters_round_trips_through_the_fail_closed_parser() {
         .expect("probe");
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].object.natural_key["virtual_machine"], "vm-01");
+    assert_eq!(interfaces[0].netbox_id, 11);
+    // The VM half of the natural key is applied client-side (a
+    // `virtual_machine` query param is forbidden — real NetBox's
+    // choice filter 400s on not-yet-existing values): a same-named
+    // interface on another VM is never a match, in either direction.
+    let foreign = client
+        .get_interfaces_by_name("backend", "vm-02")
+        .await
+        .expect("probe");
+    assert_eq!(foreign.len(), 1);
+    assert_eq!(foreign[0].netbox_id, 12);
 
     let prefixes = client
         .get_prefixes_by_cidr("10.42.0.0/24")
