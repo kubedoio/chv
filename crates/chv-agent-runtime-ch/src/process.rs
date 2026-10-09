@@ -10125,4 +10125,165 @@ mod tests {
         let err = adapter.vm_counters("vm-1").await.unwrap_err();
         assert!(err.to_string().contains("failed to parse vm.counters"));
     }
+
+    /// Real-pinned-VMM integration evidence for gate G1 (prompt 01:
+    /// "launch real pinned VMM on KVM, read actual counters"). Gated on
+    /// environment variables so CI (no KVM) skips it; run on a qualified
+    /// real host:
+    ///
+    /// ```sh
+    /// CHV_G1_VMM_BINARY=/path/to/cloud-hypervisor-v53.0 \
+    /// CHV_G1_FIRMWARE=/var/lib/chv/qual/hypervisor-fw \
+    /// CHV_G1_IMAGE=/var/lib/chv/qual/images/noble-qual-patched.img \
+    /// cargo test -p chv-agent-runtime-ch --lib g1_real_vmm -- --nocapture
+    /// ```
+    ///
+    /// The binary must be the digest-verified qualified pin (see
+    /// docs/evidence/native-monitoring/g0b/ for the capture conventions;
+    /// the image must be attached read-only and is never written).
+    #[tokio::test]
+    async fn g1_real_vmm_counters_measure_real_load() {
+        let Ok(vmm_binary) = std::env::var("CHV_G1_VMM_BINARY") else {
+            eprintln!("skipping: CHV_G1_VMM_BINARY not set (real-KVM evidence test)");
+            return;
+        };
+        let firmware =
+            std::env::var("CHV_G1_FIRMWARE").expect("CHV_G1_FIRMWARE with CHV_G1_VMM_BINARY");
+        let image = std::env::var("CHV_G1_IMAGE").expect("CHV_G1_IMAGE with CHV_G1_VMM_BINARY");
+
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let api_socket = dir.path().join("g1-api.sock");
+        let mut vmm = tokio::process::Command::new(&vmm_binary)
+            .arg("--api-socket")
+            .arg(&api_socket)
+            .arg("--cpus")
+            .arg("boot=2")
+            .arg("--memory")
+            .arg("size=512M")
+            .arg("--firmware")
+            .arg(&firmware)
+            .arg("--disk")
+            .arg(format!("path={image},readonly=on"))
+            .arg("--serial")
+            .arg("null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn pinned VMM");
+        let vmm_pid = vmm.id().expect("vmm pid");
+
+        // Wait for the API socket to accept (boot of the VMM thread).
+        let mut api_up = false;
+        for _ in 0..100 {
+            if std::os::unix::net::UnixStream::connect(&api_socket).is_ok() {
+                api_up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(api_up, "VMM API socket never came up");
+
+        let adapter = ProcessCloudHypervisorAdapter::new(PathBuf::from(&vmm_binary));
+        insert_vm_process(
+            &adapter,
+            "g1-vm",
+            api_socket.clone(),
+            VmmChild::Adopted(vmm_pid),
+        )
+        .await;
+
+        // Let the firmware's early disk reads accumulate (G0b: ~31 MB
+        // within the first seconds — deterministic).
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        // First observation: establishes the CPU baseline (no rate yet)
+        // and reads real device counters + RSS.
+        let first = adapter.vm_counters("g1-vm").await.expect("first counters");
+        println!("g1 first: {first:?}");
+        assert!(
+            first.disk_bytes_read > 10_000_000,
+            "real VMM must report the firmware's disk reads, got {}",
+            first.disk_bytes_read
+        );
+        assert_eq!(
+            first.cpu_percent, 0.0,
+            "no CPU interval on first observation"
+        );
+        assert!(
+            first.memory_bytes_used > 10_000_000,
+            "real VMM RSS for a 512M VM must be well above 10 MB, got {}",
+            first.memory_bytes_used
+        );
+
+        // Second observation: a real CPU interval over the VMM process
+        // and monotonic-or-equal disk counters.
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        let second = adapter.vm_counters("g1-vm").await.expect("second counters");
+        println!("g1 second: {second:?}");
+        assert!(
+            second.disk_bytes_read >= first.disk_bytes_read,
+            "device counters are monotonic within one VMM epoch"
+        );
+        assert!(second.cpu_percent.is_finite() && second.cpu_percent >= 0.0);
+        assert!(second.memory_bytes_used > 0);
+
+        // VMM restart = counter-epoch reset: kill this VMM, boot a fresh
+        // one for the same VM entry; the first observation after the
+        // restart must NOT emit a CPU rate (InsufficientSamples on the
+        // new epoch), and the disk counters restart at the new
+        // per-process base (G0b reset semantics).
+        drop(vmm.kill().await);
+        let _ = vmm.wait().await;
+        // Remove the dead socket file so the fresh VMM can bind the path
+        // (CH probes the old listener first; it is gone, so this is just
+        // hygiene for the bind).
+        let _ = std::fs::remove_file(&api_socket);
+        let mut fresh = tokio::process::Command::new(&vmm_binary)
+            .arg("--api-socket")
+            .arg(&api_socket)
+            .arg("--cpus")
+            .arg("boot=2")
+            .arg("--memory")
+            .arg("size=512M")
+            .arg("--firmware")
+            .arg(&firmware)
+            .arg("--disk")
+            .arg(format!("path={image},readonly=on"))
+            .arg("--serial")
+            .arg("null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn fresh VMM");
+        let fresh_pid = fresh.id().expect("fresh vmm pid");
+        for _ in 0..100 {
+            if std::os::unix::net::UnixStream::connect(&api_socket).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        {
+            let mut map = adapter.vms.write().await;
+            let proc = map.get_mut("g1-vm").unwrap();
+            proc.child = VmmChild::Adopted(fresh_pid);
+            // The entry's retained CPU state still belongs to the OLD
+            // epoch; the next observation must classify the crossing as
+            // a reset, not a rate.
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let after_restart = adapter
+            .vm_counters("g1-vm")
+            .await
+            .expect("counters after restart");
+        println!("g1 after restart: {after_restart:?}");
+        assert_eq!(
+            after_restart.cpu_percent, 0.0,
+            "epoch crossing must emit no CPU rate"
+        );
+        assert!(after_restart.disk_bytes_read > 0);
+
+        drop(fresh.kill().await);
+        let _ = vmm.wait().await;
+        let _ = fresh.wait().await;
+    }
 }
