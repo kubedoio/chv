@@ -162,9 +162,9 @@ During control-plane outages, nodes preserve runtime state and allow limited loc
 
 ### Partition Reconnect Flush
 
-When an agent detects that it has reconnected to the control plane after a partition (state transitions from `Disconnected` to `Connected`), it flushes all pending messages queued during the outage. The flush is ordered and atomic per message. A failed dispatch leaves the remaining messages queued for the next attempt.
+When an agent detects that it has reconnected to the control plane after a partition (state transitions from `Disconnected` to `Connected`), it flushes all pending messages queued during the outage. The flush is ordered and atomic per message. A failed dispatch leaves the remaining messages queued for the next attempt. The queue is also drained on every agent tick (~5 s) while connected, so messages queued by always-on reporters (e.g. migration progress) are delivered during stable connections without waiting for a reconnect; each dispatch is bounded by a 10 s deadline.
 
-Implementation: `ControlPlaneClient::flush_pending_messages()` in `crates/chv-agent-core/src/control_plane.rs`. Pending messages are stored in `NodeCache::pending_control_plane_messages`.
+Implementation: `drain_pending_control_plane_queue` in `crates/chv-agent-core/src/control_plane.rs`. Pending messages are stored in `NodeCache::pending_control_plane_messages`.
 
 See ADR-006: [Partition and Autonomy Policy](./specs/adr/006-partition-policy.md)
 
