@@ -19,6 +19,8 @@ Read a pack's `README.md` before executing any prompt in it.
 3. [`adr-022/`](adr-022/README.md) — implementation of ADR-022, the dual VM
    boot model (`firmware` / `direct_kernel`) and the CHV VM boot contract v1.
 
+4. [`native-monitoring/`](native-monitoring/README.md) — proposed ADR-025/026/027 native node/VM metrics, optional secure Linux guest agent, storage, dashboards, checks, alerts, and separate qualification gates.
+
 ## Standing rules across packs
 
 - Prompts are executed as narrow, independently reviewed PRs.

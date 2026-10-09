@@ -288,3 +288,9 @@ rule_files:
 - ADR-014 API evolution: [docs/specs/adr/014-api-evolution.md](specs/adr/014-api-evolution.md)
 - Prometheus rule files: [monitoring/rules/](../monitoring/rules/)
 - Prometheus naming conventions: https://prometheus.io/docs/practices/naming/
+
+## Proposed native monitoring design (not yet implemented)
+
+The [native monitoring implementation plan](plans/2026-10-09-native-monitoring-implementation.md) defines a Proxmox-style embedded monitoring experience. The [prompt campaign](prompts/native-monitoring/README.md) describes the staged implementation and qualification.
+
+The proposed designs are [ADR-025](specs/adr/025-native-monitoring-architecture.md), [ADR-026](specs/adr/026-optional-monitor-agent-and-guest-identity.md), and [ADR-027](specs/adr/027-monitoring-history-alerts-and-export.md). They add truthful node and VM measurements, bounded history, optional guest operating-system checks, native alerts, and optional external export. This section does not claim these features already work.
