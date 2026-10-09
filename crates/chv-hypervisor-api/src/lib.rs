@@ -12,6 +12,27 @@ pub struct VmInfo {
     pub memory_bytes: u64,
 }
 
+/// Point-in-time runtime counters for one VM (legacy VmStateReport
+/// transport shape).
+///
+/// Field semantics after the G1 sampler repair (native monitoring
+/// campaign, #602; measured on the qualified v53.0 pin — see
+/// `docs/evidence/native-monitoring/g0b/`):
+///
+/// - `cpu_percent` — percent of one core across all vCPUs, from
+///   identity-fenced VMM-process CPU time deltas (the pinned
+///   `vm.counters` API exposes no CPU counter). `0` also covers
+///   "no valid interval yet" and "counter epoch reset" — the legacy
+///   transport has no quality field; the v1 sample path replaces this
+///   with quality-carrying samples.
+/// - `memory_bytes_used` — **host-accounted** VMM-process RSS, not the
+///   guest working set. `memory_bytes_total` is the configured guest
+///   memory; the two are not comparable (the native spec's host/guest
+///   memory split).
+/// - `disk_*`/`net_*` — cumulative device counters summed from the
+///   pinned `vm.counters` flat device map. A field whose sum is
+///   unavailable (a device missing it) is reported as `0` here — again
+///   a legacy-transport flattening the sample path replaces.
 #[derive(Debug, Clone, Default)]
 pub struct VmCounters {
     pub cpu_percent: f64,

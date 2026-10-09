@@ -1415,7 +1415,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reported_unix_ms: now_unix_ms(),
                 cpu_percent: 0.0,
                 memory_bytes_used: 0,
-                memory_bytes_total: 0,
+                // Configured guest memory is configuration, not a
+                // measurement — the spec (VmRecord) is authoritative
+                // here; the sampler's measured host-accounted used
+                // bytes fill the field below.
+                memory_bytes_total: vm.memory_bytes as i64,
                 disk_bytes_read: 0,
                 disk_bytes_written: 0,
                 net_bytes_rx: 0,

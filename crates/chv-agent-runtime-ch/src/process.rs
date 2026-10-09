@@ -484,7 +484,12 @@ struct VmProcess {
     /// create (fresh log), adoption and readopt (a live VMM's whole
     /// capture is its own history).
     boot_watermark: AtomicU64,
-    last_cpu_seconds: f64,
+    /// CPU-time delta state for the G1 sampler repair: retained
+    /// previous (utime+stime) ticks of the identity-fenced VMM process,
+    /// scoped to the process's own start-ticks epoch so a pid recycle
+    /// or VMM restart emits no rate for the crossing interval (see
+    /// [`chv_monitoring_core::delta`]).
+    cpu_ticks: chv_monitoring_core::CounterState,
     last_cpu_at: Option<std::time::Instant>,
 }
 
@@ -3005,7 +3010,7 @@ impl ProcessCloudHypervisorAdapter {
                 serial_transport: serial_transport.clone(),
                 console_fanout: fanout.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
-                last_cpu_seconds: 0.0,
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
                 last_cpu_at: None,
                 boot_watermark: AtomicU64::new(boot_watermark),
             },
@@ -3633,7 +3638,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 serial_transport: serial_transport.clone(),
                 console_fanout: fanout.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
-                last_cpu_seconds: 0.0,
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
                 last_cpu_at: None,
                 boot_watermark: AtomicU64::new(0),
             },
@@ -4237,71 +4242,93 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
-        let response_json: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| ChvError::Internal {
-                reason: format!("failed to parse vm.counters response: {}", e),
+        // G1 sampler repair (#602): the pinned v53.0 (and v43.0)
+        // `vm.counters` is a FLAT device-keyed map (`_disk0`, `_net1` →
+        // int64 counters) — G0b fixture-verified against the pinned
+        // OpenAPI. The previous parser read `/cpus/usage/cpu_seconds`
+        // and top-level `net`/`block` objects, a schema that matches
+        // neither pin, so every lookup missed and every field was
+        // silently zero.
+        let counters =
+            chv_monitoring_core::vmm_counters::VmmCountersMap::parse(&body).map_err(|e| {
+                ChvError::Internal {
+                    reason: format!("failed to parse vm.counters response: {e}"),
+                }
             })?;
+        let block = counters.block_sums();
+        let net = counters.net_sums();
+        // Unavailable sums flatten to 0 for the legacy transport (the
+        // proto has no quality field); the v1 sample path carries the
+        // quality markers instead. See VmCounters' field docs.
+        let disk_read = block.read_bytes.unwrap_or(0);
+        let disk_written = block.write_bytes.unwrap_or(0);
+        let net_rx = net.rx_bytes.unwrap_or(0);
+        let net_tx = net.tx_bytes.unwrap_or(0);
 
-        // CPU usage is reported in seconds; compute percentage from delta across ticks.
-        let cpu_seconds = response_json
-            .pointer("/cpus/usage/cpu_seconds")
-            .and_then(|c| c.as_f64())
-            .unwrap_or(0.0);
-
-        let mut cpu_percent = 0.0;
+        // CPU: the pinned API exposes NO CPU-usage counter (G0b), so
+        // VM host CPU is measured on the identity-fenced VMM process
+        // itself — /proc/<pid>/stat utime+stime deltas, epoch-scoped to
+        // the process's own start ticks (a recycled pid or a re-spawned
+        // VMM changes the epoch and emits no rate for the crossing
+        // interval). Host-accounted memory is the VMM process RSS.
+        let mut cpu_percent = 0.0f64;
+        let mut memory_used = 0u64;
         {
             let mut map = self.vms.write().await;
             if let Some(proc) = map.get_mut(vm_id) {
-                if let Some(last_at) = proc.last_cpu_at {
-                    let delta_secs = cpu_seconds - proc.last_cpu_seconds;
-                    let elapsed = last_at.elapsed().as_secs_f64();
-                    if elapsed > 0.0 && delta_secs >= 0.0 {
-                        // CH reports CPU time across all vCPUs.
-                        // Normalize to a percentage of wall-clock time.
-                        cpu_percent = (delta_secs / elapsed) * 100.0;
-                        // Clamp to a sane max (e.g. 100% per vCPU is unrealistic for long
-                        // intervals, but possible for short ones). Let downstream clamp if
-                        // they want per-vCPU percentages.
+                if let Some(pid) = proc.child.vmm_pid() {
+                    let proc_root = std::path::Path::new("/proc");
+                    if let Ok(stat) =
+                        chv_monitoring_core::process_probe::read_proc_stat(proc_root, pid)
+                    {
+                        let now = std::time::Instant::now();
+                        // The boot component of the epoch comes from the
+                        // host; an unreadable boot id still fences via
+                        // the start-ticks identity (the agent does not
+                        // survive a host reboot).
+                        let boot_id = chv_monitoring_core::process_probe::read_boot_id(proc_root)
+                            .unwrap_or_default();
+                        let epoch = chv_monitoring_core::Epoch::new(boot_id, stat.identity_epoch());
+                        let ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
+                        if let chv_monitoring_core::DeltaOutcome::Delta(delta_ticks) =
+                            proc.cpu_ticks.observe(epoch, ticks)
+                        {
+                            if let Some(last_at) = proc.last_cpu_at {
+                                let elapsed = last_at.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    // Percent of one core across all
+                                    // vCPUs (multi-vCPU VMs can
+                                    // exceed 100).
+                                    let delta_secs = delta_ticks as f64
+                                        / chv_monitoring_core::process_probe::CLOCK_TICKS_HZ as f64;
+                                    cpu_percent = (delta_secs / elapsed) * 100.0;
+                                }
+                            }
+                        }
+                        // InsufficientSamples (first interval) or Reset
+                        // (VMM restart / pid recycle / counter
+                        // regression): no rate for this interval —
+                        // never a fabricated spike.
+                        proc.last_cpu_at = Some(now);
+                        memory_used =
+                            chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid)
+                                .unwrap_or(0);
                     }
-                }
-                proc.last_cpu_seconds = cpu_seconds;
-                proc.last_cpu_at = Some(std::time::Instant::now());
-            }
-        }
-
-        let mut net_rx = 0u64;
-        let mut net_tx = 0u64;
-        if let Some(net) = response_json.get("net").and_then(|n| n.as_object()) {
-            for (_iface, counters) in net {
-                if let Some(obj) = counters.as_object() {
-                    net_rx += obj.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-                    net_tx += obj.get("tx_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+                    // A missing stat (process gone between the map
+                    // lookup and the read) reports zeros this cycle; the
+                    // reaper/watchdog owns exit detection.
                 }
             }
         }
 
-        let mut disk_read = 0u64;
-        let mut disk_written = 0u64;
-        if let Some(block) = response_json.get("block").and_then(|b| b.as_object()) {
-            for (_dev, counters) in block {
-                if let Some(obj) = counters.as_object() {
-                    disk_read += obj.get("read_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-                    disk_written += obj.get("write_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-                }
-            }
-        }
-
-        // Memory counters are not exposed by vm.counters; use vm.info config as total
-        // and report 0 for used (CH does not expose guest memory usage).
-        let memory_total = response_json
-            .pointer("/memory/available")
-            .and_then(|m| m.as_u64())
-            .unwrap_or(0);
-
+        // memory_bytes_total stays 0 here: it is configuration, not a
+        // measurement — the state-report caller fills it from the VM
+        // spec (VmRecord.memory_bytes). vm.counters carries no memory
+        // fields at all on the pinned API (G0b).
         Ok(VmCounters {
             cpu_percent,
-            memory_bytes_used: 0,
-            memory_bytes_total: memory_total,
+            memory_bytes_used: memory_used,
+            memory_bytes_total: 0,
             disk_bytes_read: disk_read,
             disk_bytes_written: disk_written,
             net_bytes_rx: net_rx,
@@ -5003,7 +5030,7 @@ impl ProcessCloudHypervisorAdapter {
                     serial_transport: serial_transport.clone(),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -5296,7 +5323,7 @@ impl ProcessCloudHypervisorAdapter {
                         serial_transport: serial_transport.clone(),
                         console_fanout: fanout.clone(),
                         broadcaster_alive: broadcaster_alive.clone(),
-                        last_cpu_seconds: 0.0,
+                        cpu_ticks: chv_monitoring_core::CounterState::new(),
                         last_cpu_at: None,
                         boot_watermark: AtomicU64::new(0),
                     },
@@ -5614,7 +5641,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -5690,7 +5717,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -5789,7 +5816,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -5931,7 +5958,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6068,7 +6095,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6329,7 +6356,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6403,7 +6430,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6542,7 +6569,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6646,7 +6673,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6841,7 +6868,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(sock_path.clone()),
                     console_fanout: fanout.clone(),
                     broadcaster_alive: broadcaster_alive.clone(),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6969,7 +6996,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(vm_live_dir.join("serial.sock")),
                     console_fanout: live_fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -6983,7 +7010,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(vm_owned_dir.join("serial.sock")),
                     console_fanout: owned_fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(true)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -7327,7 +7354,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -7773,7 +7800,7 @@ mod tests {
                 console_fanout: fanout,
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(watermark),
-                last_cpu_seconds: 0.0,
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
                 last_cpu_at: None,
             },
             console_peer,
@@ -8628,7 +8655,7 @@ mod tests {
                 console_fanout: fanout,
                 broadcaster_alive: Arc::new(AtomicBool::new(true)),
                 boot_watermark: AtomicU64::new(0),
-                last_cpu_seconds: 0.0,
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
                 last_cpu_at: None,
             },
         );
@@ -8889,7 +8916,7 @@ mod tests {
                     serial_transport: SerialTransport::Socket(vm_dir.join("serial.sock")),
                     console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9141,7 +9168,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9211,7 +9238,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9280,7 +9307,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9356,7 +9383,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9447,7 +9474,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9546,7 +9573,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9644,7 +9671,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9690,7 +9717,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout,
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9760,7 +9787,7 @@ mod tests {
                     serial_transport: SerialTransport::Pty,
                     console_fanout: fanout.clone(),
                     broadcaster_alive: Arc::new(AtomicBool::new(false)),
-                    last_cpu_seconds: 0.0,
+                    cpu_ticks: chv_monitoring_core::CounterState::new(),
                     last_cpu_at: None,
                     boot_watermark: AtomicU64::new(0),
                 },
@@ -9965,5 +9992,137 @@ mod tests {
         // Clean up and reap this test's child so it does not linger on the host.
         child.start_kill().unwrap();
         child.wait().await.unwrap();
+    }
+
+    // ---- G1 sampler repair: vm_counters against the pinned v53.0
+    // fixture shape (G0b, docs/evidence/native-monitoring/g0b/) ----
+
+    /// A fake cloud-hypervisor API socket answering every request with
+    /// `status` + `body`. Returns the socket path; the server thread
+    /// lives for the caller's scope.
+    fn fake_ch_api(body: &'static str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let sock = dir.path().join("vm.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut conn) = stream else { break };
+                let mut request = [0u8; 1024];
+                let _ = std::io::Read::read(&mut conn, &mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = std::io::Write::write_all(&mut conn, response.as_bytes());
+            }
+        });
+        (dir, sock)
+    }
+
+    async fn insert_vm_process(
+        adapter: &ProcessCloudHypervisorAdapter,
+        vm_id: &str,
+        api_socket: PathBuf,
+        child: VmmChild,
+    ) {
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
+        let console_io: OwnedFd = std::os::unix::net::UnixStream::pair().unwrap().1.into();
+        let mut map = adapter.vms.write().await;
+        map.insert(
+            vm_id.to_string(),
+            VmProcess {
+                api_socket,
+                child,
+                console_io,
+                serial_transport: SerialTransport::Socket(PathBuf::from("/dev/null")),
+                console_fanout: fanout,
+                broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
+                last_cpu_at: None,
+                boot_watermark: AtomicU64::new(0),
+            },
+        );
+    }
+
+    /// G0b fixture body: v53.0 vm.counters.t0.json (verbatim shape).
+    const V53_COUNTERS_T0: &str = r#"{"_disk0":{"read_bytes":147753984,"read_ops":64306,"write_bytes":0,"write_ops":0,"read_latency_min":3,"read_latency_max":65932,"read_latency_avg":19,"write_latency_min":18446744073709551615,"write_latency_max":18446744073709551615,"write_latency_avg":1844674407370955},"_net1":{"rx_bytes":0,"rx_frames":0,"tx_bytes":0,"tx_frames":0}}"#;
+
+    #[tokio::test]
+    async fn vm_counters_parses_the_pinned_flat_device_map() {
+        let (dir, sock) = fake_ch_api(V53_COUNTERS_T0);
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        // A reaped child has no pid: no CPU/memory measurement is
+        // attempted (zeros), the device counters still parse.
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        insert_vm_process(&adapter, "vm-1", sock, VmmChild::Owned(child)).await;
+
+        let c = adapter.vm_counters("vm-1").await.unwrap();
+        // The previous parser read a nested schema that matches neither
+        // pin and returned zeros for everything; the flat map now
+        // yields the fixture's real sums.
+        assert_eq!(c.disk_bytes_read, 147_753_984);
+        assert_eq!(c.disk_bytes_written, 0);
+        assert_eq!(c.net_bytes_rx, 0);
+        assert_eq!(c.net_bytes_tx, 0);
+        // No live process: no CPU interval, no RSS reading.
+        assert_eq!(c.cpu_percent, 0.0);
+        assert_eq!(c.memory_bytes_used, 0);
+        assert_eq!(c.memory_bytes_total, 0);
+    }
+
+    #[tokio::test]
+    async fn vm_counters_measures_identity_fenced_process_cpu_and_rss() {
+        let (dir, sock) = fake_ch_api(V53_COUNTERS_T0);
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        // A live busy-loop process stands in for the VMM: real
+        // /proc/<pid>/stat utime+stime deltas and a real VmRSS reading.
+        let child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("while :; do :; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        insert_vm_process(&adapter, "vm-1", sock.clone(), VmmChild::Owned(child)).await;
+
+        // First call: establishes the CPU baseline (insufficient
+        // samples — no rate yet) and reads RSS.
+        let first = adapter.vm_counters("vm-1").await.unwrap();
+        assert_eq!(first.cpu_percent, 0.0, "no interval on first observation");
+        assert!(first.memory_bytes_used > 0, "live process has RSS");
+
+        // Burn CPU for a measurable interval, then observe again.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let second = adapter.vm_counters("vm-1").await.unwrap();
+        assert!(
+            second.cpu_percent > 0.0,
+            "busy loop must produce a real CPU rate, got {}",
+            second.cpu_percent
+        );
+        assert!(second.memory_bytes_used > 0);
+
+        // The measured CPU must be plausible: a single-core busy loop
+        // over ~0.4 s cannot exceed, say, 400% of one core.
+        assert!(second.cpu_percent < 400.0);
+
+        // Cleanup: kill the stand-in process.
+        let mut map = adapter.vms.write().await;
+        if let Some(proc) = map.get_mut("vm-1") {
+            let _ = proc.child.kill(std::path::Path::new("/dev/null"), None);
+        }
+        drop(map);
+    }
+
+    #[tokio::test]
+    async fn vm_counters_rejects_malformed_bodies() {
+        let (dir, sock) = fake_ch_api("not json at all");
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait().await;
+        insert_vm_process(&adapter, "vm-1", sock, VmmChild::Owned(child)).await;
+        let err = adapter.vm_counters("vm-1").await.unwrap_err();
+        assert!(err.to_string().contains("failed to parse vm.counters"));
     }
 }
