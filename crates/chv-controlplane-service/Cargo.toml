@@ -58,6 +58,11 @@ chv-architecture-validate = { path = "../chv-architecture-validate" }
 # wiremock suites can exercise the real request path. Never enabled by
 # the production dependency graph.
 chv-netbox-adapter = { path = "../chv-netbox-adapter", features = ["test-http"] }
+# In-process stateful NetBox simulator (ADR-024, lane 2) for the
+# composed projection suite — dev-only exactly like the wiremock entry
+# above; the simulator must never appear in a production dependency
+# graph.
+chv-netbox-sim = { path = "../chv-netbox-sim" }
 wiremock = "0.6"
 async-trait = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }

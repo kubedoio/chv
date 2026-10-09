@@ -155,8 +155,8 @@ mod log_capture {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-// The fixtures below this point are `pub(crate)` so the PR-8 composed
-// e2e suite (`netbox_projection_e2e_tests.rs`, a sibling `#[cfg(test)]`
+// The fixtures below this point are `pub(crate)` so the composed sim
+// suite (`netbox_projection_sim_tests.rs`, a sibling `#[cfg(test)]`
 // module) can import them instead of duplicating the scaffolding. The
 // test functions themselves stay private.
 

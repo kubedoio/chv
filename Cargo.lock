@@ -906,6 +906,7 @@ dependencies = [
  "chv-errors",
  "chv-hypervisor-api",
  "chv-netbox-adapter",
+ "chv-netbox-sim",
  "chv-observability",
  "chv-webui-bff",
  "chv-webui-bff-api",
