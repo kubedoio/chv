@@ -434,7 +434,26 @@ async fn duplicate_natural_key_is_a_400_with_netbox_error_shape() {
 async fn missing_required_fields_are_400s() {
     let sim = start().await;
 
+    // Device creates require `device_type` and `role` (NetBox 4.7's
+    // DeviceSerializer); the first missing one is reported.
     let response = post(&sim, "/api/dcim/devices/", json!({ "status": "active" })).await;
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "device_type": ["This field is required."] })
+    );
+
+    // With those supplied, a missing natural key is still a 400.
+    let response = post(
+        &sim,
+        "/api/dcim/devices/",
+        json!({
+            "status": "active",
+            "device_type": { "manufacturer": { "slug": "chv" }, "slug": "chv-host" },
+            "role": { "slug": "chv-node" },
+        }),
+    )
+    .await;
     assert_eq!(response.status(), 400);
     assert_eq!(
         response.json::<Value>().await.expect("error body"),

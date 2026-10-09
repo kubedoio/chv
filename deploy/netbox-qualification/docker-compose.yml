@@ -19,9 +19,10 @@
 # The `qualification-init` one-shot service waits for NetBox to be
 # healthy (migrations applied, superuser created by the netbox
 # service), then creates the fixed v1 API token, provisions the
-# prerequisite objects (site, manufacturer + device type, tags) and
-# the `chv_` custom fields, and publishes the qualification
-# environment (URL + token) to the shared `qualification-env` volume,
+# prerequisite objects (site, manufacturer + device type, device
+# role, tags) and the `chv_` custom fields, and publishes the
+# qualification environment (URL + token) to the shared
+# `qualification-env` volume,
 # which the host-side script reads with:
 #
 #   docker compose exec -T netbox cat /run/qualification/netbox.env
@@ -127,21 +128,24 @@ services:
         PY
         # Provision the prerequisite objects a plain (no --record)
         # qualification run needs: the `dc1` site, the `chv`
-        # manufacturer + `chv-host` device type (NetBox requires a
-        # device type on every device), and the tags the adapter
-        # derives from the fixture architecture's metadata (`chv-team`
-        # from the `team` label, `chv-env-production` from the
-        # environment). Without these the suite's device and tag
-        # writes 400 for a second, undocumented reason — the
-        # prerequisites must exist before the first scenario runs,
-        # not only when the recorder's provision() happens to run.
+        # manufacturer + `chv-host` device type, the `chv-node` device
+        # role (both `device_type` and `role` are required on device
+        # creates by NetBox 4.7's `DeviceSerializer` — `role` has no
+        # `required=False` and the model FK is non-nullable), and the
+        # tags the adapter derives from the fixture architecture's
+        # metadata (`chv-team` from the `team` label,
+        # `chv-env-production` from the environment). Without these
+        # the suite's device and tag writes 400 for a second,
+        # undocumented reason — the prerequisites must exist before
+        # the first scenario runs, not only when the recorder's
+        # provision() happens to run.
         # DUPLICATION NOTE: the fixture recorder's `provision()`
         # (crates/chv-netbox-sim/tests/record_fixtures.rs) creates the
         # same objects over the REST API because it must work against
         # any NetBox instance, not just this compose stack — keep the
         # two sides in sync.
         ./manage.py shell --no-startup --no-imports --interface python <<'PY'
-        from dcim.models import DeviceType, Manufacturer, Site
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
         from extras.models import Tag
 
         site, _ = Site.objects.get_or_create(
@@ -159,6 +163,14 @@ services:
             defaults={"model": "chv-host"},
         )
         print(f"device type {device_type.slug} ready")
+        # DeviceRole is a NestedLtreeGroupModel; get_or_create at the
+        # root of the slug tree is all the adapter's {"slug":
+        # "chv-node"} write reference resolves to.
+        role, _ = DeviceRole.objects.get_or_create(
+            slug="chv-node",
+            defaults={"name": "chv-node"},
+        )
+        print(f"device role {role.slug} ready")
         for slug in ("chv-team", "chv-env-production"):
             Tag.objects.get_or_create(slug=slug, defaults={"name": slug})
             print(f"tag {slug} ready")

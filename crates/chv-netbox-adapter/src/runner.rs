@@ -227,9 +227,12 @@ impl NetboxProjectionRunner {
         let mut outcomes: Vec<NetboxEntryOutcome> = Vec::with_capacity(plan.entries.len());
         let mut summary = NetboxOutcomeSummary::default();
         let mut error: Option<NetboxRunnerErrorSummary> = None;
-        // IP-address entries needing the post-loop assignment fix-up
-        // (the contract's kind order creates IP addresses before their
-        // interfaces): (outcome index, NetBox id, desired object).
+        // IP-address entries queued for the post-loop assignment fix-up
+        // (a safety net: the contract's kind order creates interfaces
+        // before their IP addresses, so the create-time interface
+        // lookup normally resolves — the fix-up covers the cases it
+        // cannot, e.g. an ambiguous match or a resumed run):
+        // (outcome index, NetBox id, desired object).
         let mut ip_fixups: Vec<(usize, i64, &NetBoxObject)> = Vec::new();
 
         for entry in &plan.entries {
@@ -424,11 +427,13 @@ impl NetboxProjectionRunner {
             outcomes.push(outcome);
         }
 
-        // Post-loop assignment fix-up: IP addresses are planned before
-        // their interfaces (contract kind order), so an IP created in
-        // this run could not be assigned at create time. Now that all
-        // entries have executed, re-apply the write — the body builder
-        // resolves the interface id. Only runs when nothing aborted.
+        // Post-loop assignment fix-up: the contract's kind order
+        // creates interfaces before their IP addresses, so the
+        // create-time body builder normally resolves the interface id
+        // in-loop. The fix-up re-applies the write for the cases it
+        // cannot — an interface that did not exist or matched
+        // ambiguously at create time (e.g. a resumed run). Only runs
+        // when nothing aborted.
         if error.is_none() {
             for (outcome_index, netbox_id, object) in ip_fixups {
                 if let Err(err) = self.client.update_object(netbox_id, object).await {

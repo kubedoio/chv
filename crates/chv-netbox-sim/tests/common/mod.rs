@@ -115,6 +115,10 @@ pub fn device_body(name: &str) -> Value {
         "name": name,
         "status": "active",
         "site": { "name": "dc1" },
+        // Required by the simulator (mirroring NetBox 4.7's
+        // DeviceSerializer); existence is not validated.
+        "device_type": { "manufacturer": { "slug": "chv" }, "slug": "chv-host" },
+        "role": { "slug": "chv-node" },
         "tags": ["chv-team"],
         "custom_fields": { "chv_architecture_id": "arch-1", "chv_managed_by": "chv" },
     })

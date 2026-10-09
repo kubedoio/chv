@@ -12,6 +12,10 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::client::{ClientError, NetBoxClient, NetBoxToken};
+use crate::mapping::{
+    DeviceStatus, NetBoxDevice, NetBoxObject, NetBoxVlan, CHV_NETBOX_DEVICE_ROLE,
+    CHV_NETBOX_DEVICE_TYPE, CHV_NETBOX_MANUFACTURER,
+};
 
 const TOKEN: &str = "wire-test-token";
 
@@ -142,5 +146,96 @@ async fn pagination_next_link_same_origin_is_followed() {
         server.received_requests().await.expect("recording").len(),
         2,
         "both pages were fetched"
+    );
+}
+
+/// The write bodies carry NetBox 4.7's accepted reference forms, pinned
+/// by inspecting the recorded requests (real-NetBox write-path
+/// conformance, issue #586 PR 6):
+///
+/// - **tags** are name-dicts, `[{"name": …}]` — plain strings are a
+///   400 on a real NetBox (`NestedTagSerializer` →
+///   `get_related_object_by_attrs` accepts only a numeric PK or a
+///   dict of attrs);
+/// - **device creates** carry the required `device_type`
+///   (manufacturer-scoped — a DeviceType slug alone is not globally
+///   unique) and `role` references.
+#[tokio::test]
+async fn create_bodies_carry_netbox_write_reference_forms() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/dcim/devices/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 7 })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/ipam/vlans/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 42 })))
+        .mount(&server)
+        .await;
+
+    let client =
+        NetBoxClient::new_unchecked_for_tests(&server.uri(), NetBoxToken::new(TOKEN.into()))
+            .expect("test client");
+    client
+        .create_object(&NetBoxObject::Vlan(NetBoxVlan {
+            vid: 42,
+            name: "backend".to_string(),
+            tags: vec!["chv-team".to_string(), "chv-env-production".to_string()],
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("vlan create");
+    client
+        .create_object(&NetBoxObject::Device(NetBoxDevice {
+            name: "chv-node-01".to_string(),
+            site: Some("dc1".to_string()),
+            status: DeviceStatus::Active,
+            tags: vec!["chv-team".to_string()],
+            custom_fields: Default::default(),
+        }))
+        .await
+        .expect("device create");
+
+    let requests = server.received_requests().await.expect("recording");
+    let posts: Vec<&wiremock::Request> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .collect();
+    assert_eq!(posts.len(), 2, "exactly the two creates");
+    let mut bodies: Vec<serde_json::Value> = Vec::with_capacity(2);
+    for request in posts {
+        bodies.push(serde_json::from_slice(&request.body).expect("create body is JSON"));
+    }
+    let vlan_body = bodies
+        .iter()
+        .find(|body| body.get("vid").is_some())
+        .expect("vlan body");
+    assert_eq!(
+        vlan_body["tags"],
+        json!([{ "name": "chv-team" }, { "name": "chv-env-production" }]),
+        "tags serialize as name-dicts, never plain strings"
+    );
+    let device_body = bodies
+        .iter()
+        .find(|body| body.get("device_type").is_some())
+        .expect("device body");
+    assert_eq!(
+        device_body["device_type"],
+        json!({
+            "manufacturer": { "slug": CHV_NETBOX_MANUFACTURER },
+            "slug": CHV_NETBOX_DEVICE_TYPE,
+        }),
+        "device_type is referenced manufacturer-scoped (slug alone is not unique)"
+    );
+    assert_eq!(
+        device_body["role"],
+        json!({ "slug": CHV_NETBOX_DEVICE_ROLE }),
+        "NetBox 4.7 requires a role on device creates"
+    );
+    assert_eq!(
+        device_body["tags"],
+        json!([{ "name": "chv-team" }]),
+        "device tags use the same name-dict form"
     );
 }

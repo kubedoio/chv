@@ -29,7 +29,7 @@
             },
             "url": "http://netbox.example.com/api/virtualization/interfaces/11/",
             "virtual_machine": {
-                "id": 2,
+                "id": 9,
                 "name": "vm-01"
             }
         }

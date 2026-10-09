@@ -261,6 +261,59 @@ simulator is kept honest.
 
 ---
 
+## PR 6 — Client write-path conformance (added during execution)
+
+**Why:** the PR-5 review pass over the qualification lane found the
+adapter's write path would fail against real NetBox even with the
+prerequisites provisioned. Verified against NetBox v4.7.2 source, the
+gaps were:
+
+1. **Tags** were written as bare strings (`["chv-team"]`). NetBox's
+   `NestedTagSerializer` (`netbox/netbox/api/serializers/features.py`)
+   resolves nested references only as a numeric PK or an attrs dict
+   (`WritableNestedSerializer.to_internal_value` →
+   `get_related_object_by_attrs`) — plain strings are a 400.
+2. **Create order** was children-before-parents (`ip → interface → vm
+   → device` after vlan/prefix). Real NetBox resolves nested-FK writes
+   by existence, so a VM referencing a not-yet-created device fails.
+3. **Device creates** omitted `device_type` (required — no
+   `required=False` on `DeviceSerializer.device_type`) and `role`
+   (likewise required; the `Device.role` model FK is non-nullable).
+
+**Scope:**
+
+- `chv-netbox-adapter` (`client.rs`, `mapping.rs`): all six write
+  bodies send tags as name dicts; device bodies carry
+  `device_type: {"manufacturer": {"slug": "chv"}, "slug": "chv-host"}`
+  (a device-type slug is only unique per manufacturer — NetBox's
+  `DeviceType.Meta.constraints`) and `role: {"slug": "chv-node"}`;
+  `NetBoxKind` is reordered to the FK-dependency rank
+  `vlan → prefix → device → vm → interface → ip` (declaration order is
+  the rank). New consts `CHV_NETBOX_MANUFACTURER`/`CHV_NETBOX_DEVICE_TYPE`/
+  `CHV_NETBOX_DEVICE_ROLE` pin the prerequisite slugs.
+- `chv-netbox-sim`: mirrors the required-field semantics (device
+  creates missing `device_type`/`role` are 400s, existence still not
+  validated — the sim's documented posture), and `SimKind::ALL` is
+  reordered to match the rank. The golden fixtures' relation ids
+  shift where the new order makes a name-reference resolve to a real
+  row instead of a synthetic one (an authored-fixture refresh, still
+  pre-capture).
+- Recorder + compose init: provision the `chv-node` device role; the
+  recorder's seed bodies use the client's write forms in both
+  dialects.
+- Controlplane sim tests: `vlan_seed_body` mirrors the client's
+  name-dict tag form.
+
+Read surface and custom-field surface unchanged — `MAPPING_VERSION`
+stays `v1`; the contract's rule 3, write-reference forms, and
+provisioning prerequisites are documented in the mapping contract.
+
+**Proves:** a qualification dispatch fails only on NetBox-side
+environment, never on client write-form drift; the sim's 400s are the
+PR-local tripwire for any future write-path regression.
+
+---
+
 ## Extension recipe for the future integrations
 
 Every new NetBox integration follows the same three-touch pattern — no new

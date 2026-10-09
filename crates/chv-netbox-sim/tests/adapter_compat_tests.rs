@@ -175,6 +175,10 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
     let sim = common::start().await;
     let client = client_for(&sim, TOKEN);
 
+    // Contract kind order (FK-dependency order): VLAN → prefix →
+    // device → VM → interface — parents before children, so every
+    // nested reference the client's write form carries resolves
+    // against a real row, exactly as it must against a real NetBox.
     let objects = vec![
         vlan_object(42),
         NetBoxObject::Prefix(NetBoxPrefix {
@@ -185,6 +189,19 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
             tags: vec!["chv-team".to_string()],
             custom_fields: ownership_custom_fields("arch:arch-1:network/backend:1"),
         }),
+        device_object("chv-node-01", Some("dc1")),
+        NetBoxObject::VirtualMachine(NetBoxVirtualMachine {
+            name: "vm-01".to_string(),
+            status: VmStatus::Active,
+            cluster: None,
+            // The device was created before the VM (contract kind
+            // order), so the reference resolves to the real row.
+            device: Some("chv-node-01".to_string()),
+            cpu: Some(2),
+            memory_mb: Some(2048),
+            tags: vec![],
+            custom_fields: ownership_custom_fields("arch:arch-1:instance/vm-01:1"),
+        }),
         NetBoxObject::Interface(NetBoxInterface {
             name: "backend".to_string(),
             virtual_machine: "vm-01".to_string(),
@@ -192,19 +209,6 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
             tags: vec![],
             custom_fields: ownership_custom_fields("arch:arch-1:instance/vm-01/backend:1"),
         }),
-        NetBoxObject::VirtualMachine(NetBoxVirtualMachine {
-            name: "vm-01".to_string(),
-            status: VmStatus::Active,
-            cluster: None,
-            // The device is created after the VM (contract kind
-            // order) — the sim must accept the forward reference.
-            device: Some("chv-node-01".to_string()),
-            cpu: Some(2),
-            memory_mb: Some(2048),
-            tags: vec![],
-            custom_fields: ownership_custom_fields("arch:arch-1:instance/vm-01:1"),
-        }),
-        device_object("chv-node-01", Some("dc1")),
     ];
     let mut ids = Vec::new();
     for object in &objects {
@@ -223,14 +227,14 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
     ids.push(ip_id);
 
     // Every created object is visible through the by-architecture
-    // lists (which parse every row fail-closed).
+    // lists (which parse every row fail-closed), in contract order.
     let kinds = [
         (NetBoxKind::Vlan, SimKind::Vlan),
         (NetBoxKind::Prefix, SimKind::Prefix),
-        (NetBoxKind::IpAddress, SimKind::IpAddress),
-        (NetBoxKind::Interface, SimKind::Interface),
-        (NetBoxKind::VirtualMachine, SimKind::VirtualMachine),
         (NetBoxKind::Device, SimKind::Device),
+        (NetBoxKind::VirtualMachine, SimKind::VirtualMachine),
+        (NetBoxKind::Interface, SimKind::Interface),
+        (NetBoxKind::IpAddress, SimKind::IpAddress),
     ];
     for (kind, _) in kinds {
         let listed = match kind {
@@ -284,7 +288,7 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
     assert_eq!(ips[0].object.natural_key["address"], "10.42.0.5");
 
     // Update: change the device's site, re-probe.
-    let device_id = ids[4];
+    let device_id = ids[2];
     client
         .update_object(device_id, &device_object("chv-node-01", Some("dc2")))
         .await
@@ -313,17 +317,18 @@ async fn create_list_update_delete_round_trip_across_all_kinds() {
     );
 
     // Delete everything; the by-architecture lists empty out.
-    // (id, kind) pairs in creation order: vlan, prefix, interface,
-    // vm, device, ip — but the PREFIX is deleted before the VLAN
-    // it references: NetBox's Prefix.vlan is on_delete=PROTECT, so
-    // the sim refuses a VLAN delete while a prefix still
-    // references it.
+    // (id, kind) pairs: prefix before the VLAN it references
+    // (NetBox's Prefix.vlan is on_delete=PROTECT, so the sim refuses
+    // a VLAN delete while a prefix still references it) and interface
+    // before the VM that owns it (deleting a VM cascades its
+    // interfaces — children first, the same order the sim's own
+    // capture lane deletes in).
     let deletions = [
         (ids[1], NetBoxKind::Prefix),
         (ids[0], NetBoxKind::Vlan),
-        (ids[2], NetBoxKind::Interface),
+        (ids[2], NetBoxKind::Device),
+        (ids[4], NetBoxKind::Interface),
         (ids[3], NetBoxKind::VirtualMachine),
-        (ids[4], NetBoxKind::Device),
         (ip_id, NetBoxKind::IpAddress),
     ];
     for (id, kind) in deletions {

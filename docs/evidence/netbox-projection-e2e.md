@@ -91,15 +91,19 @@ results will be recorded at the placeholder below. The review pass
 over the lane already surfaced the expected findings. The client
 write-path conformance gaps — tags sent as plain strings instead of
 NetBox's nested tag objects, create ordering versus foreign-key
-existence, and the missing `device_type` on device creates — are
-tracked for the follow-up PR; the mechanical provisioning gaps they
-sat on top of (the `chv_owner`/`chv_memory_gb`/`chv_datastores`
-custom fields and the site/manufacturer/device-type/tag prerequisites
-missing from the compose init) are fixed in this PR. Until the
-follow-up lands, the first dispatch is expected to fail on those
-client-side gaps, not on the simulator's fidelity. The apply-side leg
-is seeded via the existing test fixtures rather than driving the
-apply state machine itself.
+existence, and the missing `device_type`/`role` on device creates —
+are **fixed** by the write-path conformance PR (issue #586, PR 6):
+writes now use NetBox's nested reference forms (`tags` as name
+dicts, `device_type` as `{"manufacturer": {"slug": "chv"}, "slug":
+"chv-host"}`, `role` as `{"slug": "chv-node"}`), the kind rank is the
+FK-dependency order (`vlan → prefix → device → vm → interface → ip`),
+the simulator rejects device creates missing `device_type`/`role`
+(mirroring NetBox 4.7's `DeviceSerializer`), and the compose init and
+fixture recorder provision the `chv-node` device role alongside the
+site/manufacturer/device-type/tag prerequisites. The read surface and
+the `chv_` custom-field surface are unchanged, so `MAPPING_VERSION`
+stays `v1`. The apply-side leg is seeded via the existing test
+fixtures rather than driving the apply state machine itself.
 
 <!-- first-run -->
 

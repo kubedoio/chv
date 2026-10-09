@@ -19,7 +19,7 @@
             "last_updated": "2026-10-09T12:00:00.000000Z",
             "name": "chv-node-01",
             "site": {
-                "id": 4,
+                "id": 2,
                 "name": "dc1"
             },
             "status": {
