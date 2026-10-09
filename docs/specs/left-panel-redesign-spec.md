@@ -63,7 +63,7 @@ GLOBAL
 **Global navigation entries** (flat links under GLOBAL):
 - Images → `/images`
 - Networks → `/networks`
-- Storage Pools → `/storage`
+- Storage Pools → `/volumes` [Corrected 2026-10-08, #514: was `/storage`; the nav was repointed when the phantom storage-pools catalog was removed — the `/storage` route now 307-redirects to `/volumes`]
 - Tasks → `/tasks`
 - Events → `/events`
 - Backups → `/backup-jobs`
@@ -79,7 +79,7 @@ GLOBAL
 | Instance console | `/vms/{instanceId}?tab=console` |
 | Global Images | `/images` |
 | Global Networks | `/networks` |
-| Global Storage Pools | `/storage` |
+| Global Storage Pools | `/volumes` [Corrected 2026-10-08, #514: was `/storage`, now a 307 redirect] |
 | Global Tasks | `/tasks` |
 | Global Events | `/events` |
 | Global Backups | `/backup-jobs` |

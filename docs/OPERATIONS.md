@@ -145,12 +145,15 @@ journalctl -u chv-nwd -f
 
 > **Removed groups:** the `chvctl storage` and `chvctl backup` command
 > groups were removed (#372) — every subcommand 404'd against routes
-> that never existed (the `storage_pools` catalog question is tracked in
-> #514; backup execution is a guaranteed-fail no-op, "Backup is not DR").
-> Invoking them now fails at argument parsing with "unrecognized
-> subcommand". The BFF's `/v1/storage-pools` and `/v1/backups/*` routes,
-> the UI's storage/backup pages, and the backup worker are unchanged —
-> the removal is CLI-surface only.
+> that never existed. The `storage_pools` catalog itself was later
+> removed wholesale (#514): the BFF `/v1/storage-pools` routes, the CP
+> stub routes, the UI page, and the table are gone (old clients calling
+> those routes get 404; the storage inventory lives at `/volumes` and
+> `chvctl volume list`). The `backup` group's removal remains
+> CLI-surface only (backup execution is a guaranteed-fail no-op, "Backup
+> is not DR"; the BFF's `/v1/backups/*` routes, the UI's backup pages,
+> and the backup worker are unchanged). Invoking either removed group
+> now fails at argument parsing with "unrecognized subcommand".
 
 ### Examples
 

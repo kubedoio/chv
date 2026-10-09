@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::mpsc;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
@@ -131,7 +133,7 @@ impl<B: StorageBackend> StorageServer<B> {
 
         let uds_stream = UnixListenerStream::new(uds);
 
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_serving::<StorageServiceServer<StorageServiceImpl<B>>>()
             .await;
@@ -380,8 +382,10 @@ pub async fn serve_migration_tls_with_handshake_timeout<B: StorageBackend>(
 /// (fail-closed); no PEM/key material is included in errors.
 fn migration_server_rustls_config(tls: &MigrationServerTls) -> Result<ServerConfig, ChvError> {
     let mut roots = RootCertStore::empty();
-    let mut ca_pem = std::io::Cursor::new(tls.client_ca_pem.clone());
-    for cert in rustls_pemfile::certs(&mut ca_pem) {
+    // rustls-pki-types' folded-in PEM parser (the rustls-pemfile
+    // successor, >= 1.9): slice iterators over the in-memory PEM,
+    // no io::Cursor dance needed.
+    for cert in CertificateDer::pem_slice_iter(&tls.client_ca_pem) {
         let cert = cert.map_err(|e| ChvError::Internal {
             reason: format!("migration TLS client CA parse error: {e}"),
         })?;
@@ -395,20 +399,16 @@ fn migration_server_rustls_config(tls: &MigrationServerTls) -> Result<ServerConf
             reason: format!("migration TLS client verifier error: {e}"),
         })?;
 
-    let mut cert_pem = std::io::Cursor::new(tls.cert_pem.clone());
-    let certs = rustls_pemfile::certs(&mut cert_pem)
+    let certs = CertificateDer::pem_slice_iter(&tls.cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ChvError::Internal {
             reason: format!("migration TLS server certificate parse error: {e}"),
         })?;
-    let mut key_pem = std::io::Cursor::new(tls.key_pem.clone());
-    let key = rustls_pemfile::private_key(&mut key_pem)
-        .map_err(|e| ChvError::Internal {
-            reason: format!("migration TLS server key parse error: {e}"),
-        })?
-        .ok_or_else(|| ChvError::Internal {
-            reason: "migration TLS server key PEM contains no private key".to_string(),
-        })?;
+    // `from_pem_slice` reports a missing key as `Error::NoItemsFound`
+    // (the old rustls-pemfile API returned `Ok(None)` for that case).
+    let key = PrivateKeyDer::from_pem_slice(&tls.key_pem).map_err(|e| ChvError::Internal {
+        reason: format!("migration TLS server key parse error: {e}"),
+    })?;
 
     let mut config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)

@@ -10,7 +10,6 @@ import Button from '#lib/components/primitives/Button.svelte';
     loadNetworksFromBff,
     loadVmsFromBff
   } from '#lib/webui/bff-resources.ts';
-  import { loadStoragePoolsFromBff } from '#lib/webui/storage-pools.ts';
   import { mutateWithRefresh } from '#lib/stores/mutation.svelte.ts';
   import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
   import PageHeaderWithAction from '#lib/components/shell/PageHeaderWithAction.svelte';
@@ -18,7 +17,7 @@ import Button from '#lib/components/primitives/Button.svelte';
   import CloudInitModalViewer from '#lib/components/shell/CloudInitModalViewer.svelte';
   import CloudInitModalEditor from '#lib/components/shell/CloudInitModalEditor.svelte';
   import { getPageDefinition } from '#lib/shell/app-shell.ts';
-  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '#lib/api/types.ts';
+  import type { VMTemplate, CloudInitTemplate, Image, Network, VM } from '#lib/api/types.ts';
   import ConfirmDialog from '#lib/components/shared/ConfirmDialog.svelte';
   import TemplatesTable from '#lib/components/templates/TemplatesTable.svelte';
   import TemplatesSidebar from '#lib/components/templates/TemplatesSidebar.svelte';
@@ -31,7 +30,6 @@ import Button from '#lib/components/primitives/Button.svelte';
   let cloudInitTemplates = $state<CloudInitTemplate[]>([]);
   let images = $state<Image[]>([]);
   let networks = $state<Network[]>([]);
-  let pools = $state<StoragePool[]>([]);
   let vms = $state<VM[]>([]);
   let loading = $state(true);
   let error = $state('');
@@ -101,19 +99,17 @@ import Button from '#lib/components/primitives/Button.svelte';
   async function loadData() {
     loading = true;
     try {
-      const [vmTemps, cloudTemps, imgs, nets, ps, vmList] = await Promise.all([
+      const [vmTemps, cloudTemps, imgs, nets, vmList] = await Promise.all([
         client.listVMTemplates(),
         client.listCloudInitTemplates(),
         loadImagesFromBff(getStoredToken() ?? undefined),
         loadNetworksFromBff(getStoredToken() ?? undefined),
-        loadStoragePoolsFromBff(getStoredToken() ?? undefined),
         loadVmsFromBff(getStoredToken() ?? undefined)
       ]);
       vmTemplates = vmTemps ?? [];
       cloudInitTemplates = cloudTemps ?? [];
       images = imgs ?? [];
       networks = nets ?? [];
-      pools = ps ?? [];
       vms = vmList ?? [];
     } catch (err: any) {
       error = err.message || 'Blueprint registry unavailable';
@@ -211,7 +207,6 @@ import Button from '#lib/components/primitives/Button.svelte';
     template={selectedTemplate}
     {images}
     {networks}
-    {pools}
     onSuccess={refreshTemplates}
   />
 {/if}
@@ -224,7 +219,6 @@ import Button from '#lib/components/primitives/Button.svelte';
   template={selectedTemplate}
   {images}
   {networks}
-  {pools}
   onSuccess={refreshTemplates}
 />
 

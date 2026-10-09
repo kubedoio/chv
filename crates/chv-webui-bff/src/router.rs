@@ -165,10 +165,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::volumes::get_volume),
         )
         .route(
-            "/v1/storage-pools",
-            post(crate::handlers::storage::list_storage_pools),
-        )
-        .route(
             "/v1/vm-templates",
             get(crate::handlers::templates::list_vm_templates),
         )
@@ -326,10 +322,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/volumes/clone",
             post(crate::handlers::volumes::clone_volume),
-        )
-        .route(
-            "/v1/storage-pools/create",
-            post(crate::handlers::storage::create_storage_pool),
         )
         .route(
             "/v1/vm-templates",

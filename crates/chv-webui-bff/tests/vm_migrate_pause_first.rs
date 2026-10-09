@@ -1,25 +1,23 @@
-//! Integration tests for the single-task get route `POST /v1/tasks/get`
-//! (#372 DP6 — the route `chvctl task watch` polls).
+//! BFF route tests for the vm-mutate migrate action's `pause_first`
+//! field (issue #394, Option C) — the API-boundary discipline of the
+//! stop-the-world opt-in.
 //!
-//! The CLI's watch command used to poll the LIST route `POST /v1/tasks`
-//! with a `task_id` key the handler silently ignored; the response has
-//! no top-level `status`, so the loop printed `Status: unknown` forever
-//! (issue #372 §2.5). The fix adds this route following the house `/get`
-//! convention (`vms/get`, `nodes/get`, `volumes/get`, `networks/get`):
-//! 400 on a missing `task_id`, 404 on an unknown one, and the payload
-//! nested under a single top-level `detail` key whose item shape is
-//! byte-identical to `list_tasks`' items. These tests boot the real
-//! `bff_router` and pin that contract:
+//! The chvctl contract row (`vm_migrate_pause_first_row`) pins the
+//! CLI→body→handler→mutation-service thread with a well-typed bool;
+//! these tests pin the boundary itself, through the real `bff_router`:
 //!
-//! - authentication is required (anonymous request -> 401);
-//! - a seeded operation returns its single row under `detail`, with the
-//!   list-view field names (`task_id`, `status`, `operation`,
-//!   `resource_kind`, `resource_id`, `actor`, `started_unix_ms`,
-//!   `finished_unix_ms`);
-//! - a missing `task_id` is a 400;
-//! - an unknown `task_id` is a 404.
+//! 1. **A present non-bool `pause_first` is rejected, not coerced** —
+//!    `"pause_first": "true"` (quoted) or any other non-boolean JSON
+//!    value must fail 400 before the mutation service runs. Silently
+//!    coercing to false would downgrade an operator's stop-the-world
+//!    request to quiescent-assumed — the exact "asked for the pause,
+//!    didn't get it" failure the mode exists to prevent (direct API
+//!    callers are exposed; chvctl always sends a proper bool).
+//! 2. **A well-typed `pause_first: true` forwards with the flag set.**
+//! 3. **An absent `pause_first` forwards with the flag clear** (the
+//!    default quiescent-assumed mode).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -35,10 +33,15 @@ use chv_webui_bff::{AppState, BffError};
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
 
-struct NoopMutations;
+/// Records every `migrate_vm` call as `(vm_id, target_node_id,
+/// pause_first)`; every other mutation is unreachable in these tests.
+#[derive(Default)]
+struct RecordingMutations {
+    migrate_calls: Mutex<Vec<(String, String, bool)>>,
+}
 
 #[async_trait]
-impl MutationService for NoopMutations {
+impl MutationService for RecordingMutations {
     async fn mutate_vm(
         &self,
         _vm_id: String,
@@ -50,12 +53,21 @@ impl MutationService for NoopMutations {
     }
     async fn migrate_vm(
         &self,
-        _vm_id: String,
-        _target_node_id: String,
-        _pause_first: bool,
+        vm_id: String,
+        target_node_id: String,
+        pause_first: bool,
         _requested_by: String,
     ) -> Result<chv_webui_bff_api::chv_webui_bff_v1::MutateVmResponse, BffError> {
-        unreachable!()
+        self.migrate_calls
+            .lock()
+            .unwrap()
+            .push((vm_id.clone(), target_node_id, pause_first));
+        Ok(chv_webui_bff_api::chv_webui_bff_v1::MutateVmResponse {
+            accepted: true,
+            task_id: format!("op-{vm_id}"),
+            vm_id,
+            summary: "recorded".to_string(),
+        })
     }
     async fn snapshot_vm(
         &self,
@@ -135,7 +147,7 @@ impl MutationService for NoopMutations {
     }
 }
 
-async fn build_state() -> AppState {
+async fn build_state(mutations: Arc<RecordingMutations>) -> AppState {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -159,23 +171,28 @@ async fn build_state() -> AppState {
         image_repo: ImageRepository::new(pool.clone()),
         apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
         drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
-        mutations: Arc::new(NoopMutations),
+        mutations,
         jwt_secret: "test-secret".to_string(),
-        agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
+        agent_runtime_dir: std::env::temp_dir(),
         cache: chv_webui_bff::BffCache::new(5),
         clock: Arc::new(SystemClock),
     }
 }
 
-/// Seed an operator and return a usable JWT bearer token.
-async fn seed_jwt(state: &AppState) -> String {
+/// Seed an operator user + JWT and a VM the operator owns (the mutate
+/// route's authz tier — `require_vm_owner`).
+async fn seed_operator_and_vm(state: &AppState) -> String {
     sqlx::query(
         "INSERT INTO users (user_id, username, password_hash, role, must_change_password) \
-         VALUES ('u-ops', 'ops', 'x', 'operator', 0)",
+         VALUES ('u-op', 'op', 'x', 'operator', 0)",
     )
     .execute(&state.pool)
     .await
     .expect("seed user");
+    sqlx::query("INSERT INTO vms (vm_id, display_name, owner_id) VALUES ('vm-1', 'VM 1', 'u-op')")
+        .execute(&state.pool)
+        .await
+        .expect("seed vm");
 
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -183,8 +200,8 @@ async fn seed_jwt(state: &AppState) -> String {
         .as_secs()
         + 3600;
     let claims = chv_webui_bff::auth::Claims {
-        sub: "u-ops".to_string(),
-        username: "ops".to_string(),
+        sub: "u-op".to_string(),
+        username: "op".to_string(),
         role: "operator".to_string(),
         exp,
         must_change_password: false,
@@ -198,102 +215,118 @@ async fn seed_jwt(state: &AppState) -> String {
     .expect("encode test token")
 }
 
-/// Seed one operation row (the `list_tasks` seeding shape) — the row
-/// `task watch` polls for.
-async fn seed_operation(state: &AppState, operation_id: &str, status: &str) {
-    sqlx::query(
-        "INSERT INTO operations \
-         (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, requested_at, created_at, updated_at) \
-         VALUES (?, ?, 'vm', 'vm-1', 'CreateVm', ?, 'u-ops', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-    )
-    .bind(operation_id)
-    .bind(format!("tasks-get-{operation_id}"))
-    .bind(status)
-    .execute(&state.pool)
-    .await
-    .expect("seed operation");
-}
-
-async fn post_json(
+async fn send_migrate(
     state: AppState,
-    path: &str,
-    token: Option<&str>,
-    body: &str,
+    token: &str,
+    body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let app = chv_webui_bff::bff_router(state.clone()).with_state(state);
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/json");
-    if let Some(t) = token {
-        builder = builder.header("authorization", format!("Bearer {t}"));
-    }
-    let req = builder.body(Body::from(body.to_string())).unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/vms/mutate")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
         .await
-        .unwrap();
-    let body = if bytes.is_empty() {
+        .expect("request must be served");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("read body");
+    let json = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
-    (status, body)
+    (status, json)
 }
 
 #[tokio::test]
-async fn tasks_get_requires_authentication() {
-    let state = build_state().await;
-    let (status, _) = post_json(state, "/v1/tasks/get", None, r#"{"task_id":"op-1"}"#).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+async fn non_bool_pause_first_is_rejected_not_coerced() {
+    let mutations = Arc::new(RecordingMutations::default());
+    let state = build_state(mutations.clone()).await;
+    let token = seed_operator_and_vm(&state).await;
+
+    // A quoted "true" — the classic client bug a coercion would swallow.
+    let (status, body) = send_migrate(
+        state.clone(),
+        &token,
+        serde_json::json!({
+            "vm_id": "vm-1",
+            "action": "migrate",
+            "target_node_id": "n-2",
+            "pause_first": "true",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-bool pause_first must be a 400, got {status}: {body}"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|e| e.contains("pause_first")),
+        "the rejection must name the field: {body}"
+    );
+    assert!(
+        mutations.migrate_calls.lock().unwrap().is_empty(),
+        "the mutation service must not run on a rejected payload"
+    );
 }
 
 #[tokio::test]
-async fn tasks_get_returns_the_single_row() {
-    let state = build_state().await;
-    let token = seed_jwt(&state).await;
-    seed_operation(&state, "op-1", "Succeeded").await;
+async fn bool_pause_first_forwards_with_the_flag_set() {
+    let mutations = Arc::new(RecordingMutations::default());
+    let state = build_state(mutations.clone()).await;
+    let token = seed_operator_and_vm(&state).await;
 
-    let (status, body) = post_json(
-        state,
-        "/v1/tasks/get",
-        Some(&token),
-        r#"{"task_id":"op-1"}"#,
+    let (status, _body) = send_migrate(
+        state.clone(),
+        &token,
+        serde_json::json!({
+            "vm_id": "vm-1",
+            "action": "migrate",
+            "target_node_id": "n-2",
+            "pause_first": true,
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let detail = &body["detail"];
-    assert_eq!(detail["task_id"], "op-1");
-    // The REAL status vocabulary (`OperationStatus`, capitalized) — the
-    // exact string `chvctl task watch` matches against.
-    assert_eq!(detail["status"], "Succeeded");
-    assert_eq!(detail["operation"], "CreateVm");
-    assert_eq!(detail["resource_kind"], "vm");
-    assert_eq!(detail["resource_id"], "vm-1");
-    assert_eq!(detail["actor"], "u-ops");
-    assert!(detail["started_unix_ms"].is_i64());
-    assert!(detail.get("finished_unix_ms").is_some());
+    let calls = mutations.migrate_calls.lock().unwrap();
+    assert_eq!(
+        calls.as_slice(),
+        [("vm-1".to_string(), "n-2".to_string(), true)],
+        "the stop-the-world opt-in must forward to the mutation service"
+    );
 }
 
 #[tokio::test]
-async fn tasks_get_missing_task_id_is_a_400() {
-    let state = build_state().await;
-    let token = seed_jwt(&state).await;
-    let (status, _) = post_json(state, "/v1/tasks/get", Some(&token), "{}").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
+async fn absent_pause_first_forwards_as_default_mode() {
+    let mutations = Arc::new(RecordingMutations::default());
+    let state = build_state(mutations.clone()).await;
+    let token = seed_operator_and_vm(&state).await;
 
-#[tokio::test]
-async fn tasks_get_unknown_task_id_is_a_404() {
-    let state = build_state().await;
-    let token = seed_jwt(&state).await;
-    let (status, _) = post_json(
-        state,
-        "/v1/tasks/get",
-        Some(&token),
-        r#"{"task_id":"op-none"}"#,
+    let (status, _body) = send_migrate(
+        state.clone(),
+        &token,
+        serde_json::json!({
+            "vm_id": "vm-1",
+            "action": "migrate",
+            "target_node_id": "n-2",
+        }),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK);
+    let calls = mutations.migrate_calls.lock().unwrap();
+    assert_eq!(
+        calls.as_slice(),
+        [("vm-1".to_string(), "n-2".to_string(), false)],
+        "an absent pause_first must forward as the default mode"
+    );
 }

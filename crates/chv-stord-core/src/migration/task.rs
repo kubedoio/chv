@@ -8,6 +8,9 @@ pub enum MigrationPhase {
     Pending,
     BulkCopy,
     DirtySync,
+    /// Pause-first mode (issue #394, Option C): waiting for the VM pause
+    /// BEFORE bulk copy — no source byte has been read yet.
+    PausedPreCopy,
     PausedFinalSync,
     Completed,
     Failed,

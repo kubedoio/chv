@@ -18,7 +18,7 @@
 	const links = [
 		{ href: '/images', icon: Image, label: 'Images' },
 		{ href: '/networks', icon: Network, label: 'Networks' },
-		{ href: '/storage', icon: HardDrive, label: 'Storage Pools' },
+		{ href: '/volumes', icon: HardDrive, label: 'Storage Pools' },
 		{ href: '/tasks', icon: Activity, label: 'Tasks' },
 		{ href: '/events', icon: AlertCircle, label: 'Events' },
 		{ href: '/backup-jobs', icon: ShieldCheck, label: 'Backups' },

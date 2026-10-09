@@ -3205,6 +3205,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     stord_socket: self.stord_socket.clone(),
                     dest_stord_endpoint,
                     volumes,
+                    // Issue #394 Option C: the operator's opt-in
+                    // stop-the-world mode. The config message's tuning
+                    // fields remain defaults-only (0 = "use stord's
+                    // defaults"); pause_first is the first field the
+                    // agent actually reads.
+                    pause_first: inner.config.as_ref().is_some_and(|c| c.pause_first),
                 };
 
                 // Build a progress reporter that enqueues migration progress to the

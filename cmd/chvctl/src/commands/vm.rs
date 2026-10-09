@@ -70,6 +70,11 @@ pub enum VmCommands {
         /// Target node ID
         #[arg(long)]
         to: String,
+        /// Pause the VM before disk transfer (stop-the-world, issue #394
+        /// Option C): correct by construction, downtime equals the full
+        /// transfer. Omit for the default quiescent-assumed mode.
+        #[arg(long)]
+        pause_first: bool,
     },
     /// Resize a VM's resources
     Resize {
@@ -210,11 +215,16 @@ pub async fn execute(
             client.post("/v1/vms/delete", &body).await?;
             println!("VM {vm_id} deleted.");
         }
-        VmCommands::Migrate { vm_id, to } => {
+        VmCommands::Migrate {
+            vm_id,
+            to,
+            pause_first,
+        } => {
             let body = json!({
                 "vm_id": vm_id,
                 "action": "migrate",
                 "target_node_id": to,
+                "pause_first": pause_first,
             });
             client.post("/v1/vms/mutate", &body).await?;
             println!("VM {vm_id} migrating to node {to}.");
