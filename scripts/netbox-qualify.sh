@@ -115,8 +115,15 @@ mkdir -p "$LOG_DIR"
 STACK_UP=false
 
 cleanup() {
-    trap - EXIT INT TERM
+    # Capture the exit status FIRST: the `trap -` below succeeds and
+    # resets `$?` to 0, so capturing after it would turn EVERY failure
+    # path into a green exit — exactly the fail-open observed in the
+    # first qualification dispatch (2026-10-09): the stack failed to
+    # boot, the script printed its diagnostics, and the workflow still
+    # reported success, which also skipped the failure-only log
+    # upload.
     local status=$?
+    trap - EXIT INT TERM
     if [[ "$STACK_UP" == true ]]; then
         "${COMPOSE[@]}" logs --no-color > "$COMPOSE_LOG" 2>/dev/null || true
         if [[ "$KEEP" == true ]]; then
@@ -138,8 +145,15 @@ trap 'exit 143' TERM
 # Boot the stack and wait for the qualification environment
 # ---------------------------------------------------------------------------
 info "booting the NetBox qualification stack (${COMPOSE_FILE})..."
-"${COMPOSE[@]}" up -d > /dev/null
+# STACK_UP is set BEFORE `up -d`, not after: a boot that fails halfway
+# still leaves containers behind, and those containers' logs are the
+# only diagnostics a boot failure has — the cleanup path must capture
+# and tear them down, not skip them (observed in the first
+# qualification dispatch: the netbox container went unhealthy, `up -d`
+# aborted, and with STACK_UP still false the compose log was never
+# written).
 STACK_UP=true
+"${COMPOSE[@]}" up -d > /dev/null
 
 # The one-shot qualification-init service publishes netbox.env onto
 # the shared volume once NetBox is healthy and the token is minted;
