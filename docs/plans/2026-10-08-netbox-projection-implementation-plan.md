@@ -19,7 +19,7 @@ References:
 | Surface | Convention to follow | Concrete touchpoints |
 |---|---|---|
 | New crate | workspace member under `crates/` | `crates/chv-netbox-adapter/` — pure core (mapping/ownership/plan) + client + runner |
-| Migrations | numbered SQL in `cmd/chv-controlplane/migrations/` (next free: `0058_` — note `docs/design/issue-384-physical-table-generation-guard.md` also references `0058` as its candidate; whichever campaign lands second takes the next free number) | `0058_netbox_projection.sql` (config + runs tables) |
+| Migrations | numbered SQL in `cmd/chv-controlplane/migrations/` (main's `0058_drop_storage_pools.sql` (#568) landed first; this campaign landed second and takes `0059`) | `0059_netbox_projection.sql` (config + runs tables) |
 | Store repos | `chv-controlplane-store/src/architectures/<entity>.rs` (model: `drift.rs`) | `netbox_config.rs`, `netbox_run.rs`, re-export in `architectures/mod.rs` + crate root |
 | Token encryption | `credential_crypto.rs` (`CredentialEncryption::encrypt/decrypt`) | reuse as-is; no new crypto |
 | BFF wiring | `AppState` fields as `Arc<Repo>` (`router.rs:22-56`), POST-only routes | `handlers/netbox.rs` + route block after the architecture routes |
@@ -83,7 +83,7 @@ update.
 
 **Scope:**
 
-- `cmd/chv-controlplane/migrations/0058_netbox_projection.sql`
+- `cmd/chv-controlplane/migrations/0059_netbox_projection.sql`
   (next free number at plan time — see the surface-analysis note above):
   `netbox_projection_config` (PK `architecture_id`, FK to topologies) and
   `netbox_projection_runs` (PK `id`, FKs to topology + version, status,
