@@ -71,8 +71,8 @@ export const NETBOX_PLAN_SUMMARY_CHIPS: ReadonlyArray<{
  * Narrow a run detail's `plan_json` union (parsed plan | raw string |
  * null) into the executed plan's summary counts — or null when the
  * column held anything other than a parsed plan (raw string, null, or
- * an unexpected JSON shape), in which case the executed-plan row is
- * skipped entirely.
+ * an unexpected JSON shape). Kept as the defensive fallback path of
+ * {@link viewNetboxExecutedPlanSummary}.
  */
 export function viewNetboxPlanSummary(
 	plan: NetboxProjectionPlan | string | null
@@ -82,6 +82,28 @@ export function viewNetboxPlanSummary(
 	// payload without the plan's summary counts is not a plan shape.
 	if (typeof plan.summary !== 'object' || plan.summary === null) return null;
 	return plan.summary;
+}
+
+/**
+ * The executed plan's summary counts for a run detail, derived from the
+ * REAL data flow: the adapter outcome inside `result_json` carries the
+ * executed `plan`, so `result_json.plan.summary` is the primary source
+ * (both enqueue sites write `plan_json: None` and nothing populates
+ * that column later — the top-level `plan_json` path is a defensive
+ * fallback for any future writer). Null when neither source parses —
+ * the executed-plan row is skipped entirely in that case.
+ */
+export function viewNetboxExecutedPlanSummary(
+	result: NetboxRunResultView,
+	plan: NetboxProjectionPlan | string | null
+): NetboxPlanSummary | null {
+	if (result !== null && !('raw' in result)) {
+		// Defensive: the BFF parses the column to arbitrary JSON, so
+		// the outcome's plan/summary must be shape-checked, not trusted.
+		const summary = result.plan?.summary;
+		if (typeof summary === 'object' && summary !== null) return summary;
+	}
+	return viewNetboxPlanSummary(plan);
 }
 
 /**

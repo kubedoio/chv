@@ -25,6 +25,7 @@ const RUN_DETAIL: NetboxRunDetail = {
 	id: 'netrun-1',
 	architecture_id: 'arch-1',
 	architecture_version_id: 'ver-3',
+	resolved_architecture_version_id: 'ver-3',
 	trigger: 'manual',
 	status: 'succeeded',
 	mode: 'export',
@@ -148,7 +149,25 @@ describe('NetboxRunHistory', () => {
 		expect(getByTestId('netbox-run-detail-raw').textContent).toContain('not-json-but-a-raw-column-string');
 	});
 
-	it('renders the executed plan summary chips when plan_json is the parsed plan shape', () => {
+	it('renders the executed plan summary chips from result_json.plan.summary (the real worker flow)', () => {
+		// RUN_DETAIL carries plan_json: null — the counts must come from
+		// the outcome's executed plan inside result_json.
+		const { getByTestId, getAllByTestId } = renderHistory({ currentRun: RUN_DETAIL });
+
+		const section = getByTestId('netbox-executed-plan');
+		expect(section.textContent).toContain('Executed plan');
+		const chips = getAllByTestId('netbox-executed-plan-chip');
+		expect(chips).toHaveLength(5);
+		const counts = Object.fromEntries(
+			chips.map((chip) => [
+				chip.getAttribute('data-netbox-action'),
+				chip.querySelector('.chip-count')?.textContent
+			])
+		);
+		expect(counts).toEqual({ create: '1', update: '0', no_op: '0', conflict: '0', stale: '0' });
+	});
+
+	it('falls back to plan_json for the executed plan chips when the outcome carries no plan', () => {
 		const plan = {
 			mapping_version: 'v1',
 			architecture_id: 'arch-1',
@@ -159,7 +178,7 @@ describe('NetboxRunHistory', () => {
 		};
 
 		const { getByTestId, getAllByTestId } = renderHistory({
-			currentRun: { ...RUN_DETAIL, plan_json: plan }
+			currentRun: { ...RUN_DETAIL, plan_json: plan, result_json: null }
 		});
 
 		const section = getByTestId('netbox-executed-plan');
@@ -175,14 +194,19 @@ describe('NetboxRunHistory', () => {
 		expect(counts).toEqual({ create: '2', update: '1', no_op: '0', conflict: '1', stale: '0' });
 	});
 
-	it('skips the executed plan section when plan_json is a raw string or null', () => {
+	it('skips the executed plan section when neither result_json nor plan_json parses', () => {
+		// A raw result column AND a raw plan column — no parseable source.
 		const raw = renderHistory({
-			currentRun: { ...RUN_DETAIL, plan_json: 'raw-plan-column-string' }
+			currentRun: {
+				...RUN_DETAIL,
+				plan_json: 'raw-plan-column-string',
+				result_json: 'not-json-but-a-raw-column-string'
+			}
 		});
 		expect(raw.queryByTestId('netbox-executed-plan')).toBeNull();
 
-		// RUN_DETAIL carries plan_json: null.
-		const none = renderHistory({ currentRun: RUN_DETAIL });
+		// Neither column populated.
+		const none = renderHistory({ currentRun: { ...RUN_DETAIL, result_json: null } });
 		expect(none.queryByTestId('netbox-executed-plan')).toBeNull();
 	});
 

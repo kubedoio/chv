@@ -1100,7 +1100,11 @@ export interface NetboxRunnerErrorSummary {
 	retryable: boolean;
 }
 
-/** The worker's persisted `result_json` payload (adapter `NetboxProjectionOutcome`). */
+/**
+ * The run's `result_json` payload (adapter `NetboxProjectionOutcome`):
+ * the flat outcome the BFF serves after unwrapping the worker's
+ * provenance envelope around the persisted column.
+ */
 export interface NetboxRunResult {
 	plan: NetboxProjectionPlan;
 	entries: NetboxEntryOutcome[];
@@ -1113,7 +1117,11 @@ export interface NetboxRunResult {
  * are the parsed JSON payloads when the column held parseable JSON and the
  * raw column string otherwise (the BFF's `parse_json_or_raw` wraps
  * unparseable payloads as a JSON string rather than dropping data) — hence
- * the parsed-or-raw-string union.
+ * the parsed-or-raw-string union. `result_json` is genuinely the FLAT
+ * adapter outcome: the BFF unwraps the worker's
+ * `{ resolved_architecture_version_id, result }` provenance envelope
+ * server-side and serves the inner `result`, lifting the version id onto
+ * {@link NetboxRunDetail.resolved_architecture_version_id}.
  */
 export interface NetboxRunDetail {
 	id: string;
@@ -1124,6 +1132,14 @@ export interface NetboxRunDetail {
 	mode: NetboxRunMode;
 	plan_json: NetboxProjectionPlan | string | null;
 	result_json: NetboxRunResult | string | null;
+	/**
+	 * The architecture version the worker actually projected (the most
+	 * recent succeeded apply run's version at execution time) — lifted
+	 * out of the result envelope by the BFF. Null for legacy rows,
+	 * raw-string columns, and runs that failed before producing a
+	 * result.
+	 */
+	resolved_architecture_version_id: string | null;
 	summary: NetboxPlanSummary | null;
 	error_message: string | null;
 	attempt_count: number;

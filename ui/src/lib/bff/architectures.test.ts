@@ -802,6 +802,7 @@ describe('architectures BFF wrapper — NetBox projection', () => {
 				id: 'netrun-1',
 				architecture_id: 'arch-1',
 				architecture_version_id: 'ver-3',
+				resolved_architecture_version_id: 'ver-3',
 				trigger: 'manual' as const,
 				status: 'succeeded' as const,
 				mode: 'export' as const,

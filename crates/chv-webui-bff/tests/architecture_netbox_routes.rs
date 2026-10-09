@@ -31,7 +31,12 @@
 //!   route: a 401 → 502 `NETBOX_AUTH_FAILED`, and an all-empty remote
 //!   → 200 with the contract's plan shape asserted field-by-field;
 //! - **run payload degradation** — an unparseable `plan_json` column
-//!   comes back as the raw string, not null and not an error.
+//!   comes back as the raw string, not null and not an error;
+//! - **result-envelope unwrap** — the worker's
+//!   `{ resolved_architecture_version_id, result }` provenance envelope
+//!   is unwrapped on runs/get (the inner outcome is served, the version
+//!   id surfaces as `resolved_architecture_version_id`), while
+//!   non-envelope objects and raw strings pass through unchanged.
 //!
 //! ## Plain-HTTP test seam
 //!
@@ -1246,7 +1251,9 @@ async fn dry_run_against_empty_netbox_returns_contract_plan_shape() {
 
 /// An unparseable `plan_json` column degrades to the raw string on
 /// runs/get (the contract: parsed JSON when parseable, raw otherwise) —
-/// never null, never a 500.
+/// never null, never a 500. An unparseable `result_json` degrades the
+/// same way, and (no envelope to lift) leaves
+/// `resolved_architecture_version_id` null.
 #[tokio::test]
 async fn runs_get_unparseable_plan_json_returns_raw_string() {
     let state = build_state().await;
@@ -1275,6 +1282,12 @@ async fn runs_get_unparseable_plan_json_returns_raw_string() {
         .execute(&state.pool)
         .await
         .expect("corrupt plan_json");
+    // … and a result payload that is not JSON either.
+    sqlx::query("UPDATE netbox_projection_runs SET result_json = 'also-not-json{' WHERE id = ?")
+        .bind(run_id.as_str())
+        .execute(&state.pool)
+        .await
+        .expect("corrupt result_json");
 
     let operator = token_for(&state, "u-alice", "operator");
     let (status, body) = post_json(
@@ -1289,6 +1302,197 @@ async fn runs_get_unparseable_plan_json_returns_raw_string() {
         body["plan_json"],
         serde_json::json!("not-json{"),
         "the raw string comes back verbatim — not null, not an error: {body}"
+    );
+    assert_eq!(
+        body["result_json"],
+        serde_json::json!("also-not-json{"),
+        "the raw result string comes back verbatim: {body}"
+    );
+    assert_eq!(
+        body["resolved_architecture_version_id"],
+        serde_json::Value::Null,
+        "no envelope to lift on a raw-string column: {body}"
+    );
+}
+
+/// runs/get unwraps the worker's provenance envelope: the worker
+/// persists `result_json` as `{ resolved_architecture_version_id,
+/// result }` (see `NetboxProjectionWorker::result_envelope` in
+/// `chv-controlplane-service`), and the contract's runs/get serves the
+/// per-entry outcome — so the response's `result_json` is the UNWRAPPED
+/// outcome and `resolved_architecture_version_id` surfaces the
+/// envelope's value as a first-class field.
+#[tokio::test]
+async fn runs_get_unwraps_worker_result_envelope() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "envelope", "u-alice", None).await;
+    let version_id = seed_applied_version(&state, &arch).await;
+    seed_config(&state, &arch, "https://netbox.example.internal").await;
+
+    // The run row exactly as the worker leaves it after a successful
+    // export: created → claimed → `mark_succeeded` with the envelope
+    // (same repository calls the worker makes — no BFF shortcut).
+    let run_repo = NetboxProjectionRunRepository::new(state.pool.clone());
+    let run_id = chv_controlplane_types::architecture::NetboxProjectionRunId::new("netrun-env-1")
+        .expect("valid id");
+    run_repo
+        .create(chv_controlplane_store::NetboxProjectionRunCreateInput {
+            id: run_id.clone(),
+            architecture_id: ArchitectureId::new(&arch).expect("valid id"),
+            architecture_version_id: ArchitectureVersionId::new(&version_id).expect("valid id"),
+            trigger_kind: chv_controlplane_types::architecture::NetboxProjectionTrigger::Manual,
+            mode: chv_controlplane_types::architecture::NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: Some("u-alice".into()),
+        })
+        .await
+        .expect("create run");
+    let claimed = run_repo
+        .claim_next_queued(&ArchitectureId::new(&arch).unwrap())
+        .await
+        .expect("claim")
+        .expect("queued run");
+    assert_eq!(claimed.id, run_id);
+
+    // The adapter outcome (flat: plan + entries + summary + error)
+    // inside the worker's provenance envelope — mirroring what
+    // `result_envelope` serializes.
+    let outcome = serde_json::json!({
+        "plan": {
+            "mapping_version": "v1",
+            "architecture_id": arch,
+            "architecture_version": 1,
+            "retention": "mark_stale",
+            "summary": { "create": 6, "update": 0, "no_op": 0, "conflict": 0, "stale": 0 },
+            "entries": [],
+        },
+        "entries": [
+            {
+                "action": "create",
+                "kind": "vlan",
+                "chv_resource_ref": "networks/backend",
+                "status": "succeeded",
+                "error": null,
+            }
+        ],
+        "summary": { "succeeded": 1, "failed": 0, "skipped": 0, "not_attempted": 0 },
+        "error": null,
+    });
+    let envelope = serde_json::json!({
+        "resolved_architecture_version_id": version_id,
+        "result": outcome,
+    });
+    run_repo
+        .mark_succeeded(
+            &run_id,
+            Some(envelope.to_string()),
+            Some(r#"{"create":6,"update":0,"no_op":0,"conflict":0,"stale":0}"#.to_string()),
+        )
+        .await
+        .expect("mark succeeded");
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, body) = post_json(
+        &state,
+        "/v1/architectures/netbox/runs/get",
+        &operator,
+        &format!(r#"{{"id":"{arch}","run_id":"{run_id}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "runs/get with enveloped result: {body}"
+    );
+    // THE unwrap: the served result_json is the inner outcome, not the
+    // envelope — the UI's flat `NetboxRunResult` shape.
+    assert_eq!(
+        body["result_json"], outcome,
+        "result_json is the unwrapped outcome: {body}"
+    );
+    assert_eq!(
+        body["resolved_architecture_version_id"],
+        serde_json::json!(version_id),
+        "the envelope's version id surfaces as a first-class field: {body}"
+    );
+    // The envelope's own keys never leak into the served outcome.
+    assert!(
+        body["result_json"]
+            .get("resolved_architecture_version_id")
+            .is_none()
+            && body["result_json"].get("result").is_none(),
+        "no envelope keys inside the served result_json: {body}"
+    );
+}
+
+/// Forward compatibility: a parsed `result_json` object WITHOUT the
+/// envelope's key pair passes through unchanged and
+/// `resolved_architecture_version_id` stays null — the unwrap never
+/// guesses at unknown shapes (a pre-envelope worker's flat outcome, or
+/// a future envelope revision, is served verbatim).
+#[tokio::test]
+async fn runs_get_non_envelope_result_json_passes_through() {
+    let state = build_state().await;
+    let arch = seed_topology(&state, "flatres", "u-alice", None).await;
+    let version_id = seed_applied_version(&state, &arch).await;
+
+    let run_repo = NetboxProjectionRunRepository::new(state.pool.clone());
+    let run_id = chv_controlplane_types::architecture::NetboxProjectionRunId::new("netrun-flat-1")
+        .expect("valid id");
+    run_repo
+        .create(chv_controlplane_store::NetboxProjectionRunCreateInput {
+            id: run_id.clone(),
+            architecture_id: ArchitectureId::new(&arch).expect("valid id"),
+            architecture_version_id: ArchitectureVersionId::new(&version_id).expect("valid id"),
+            trigger_kind: chv_controlplane_types::architecture::NetboxProjectionTrigger::Manual,
+            mode: chv_controlplane_types::architecture::NetboxProjectionMode::Export,
+            plan_json: None,
+            requested_by: None,
+        })
+        .await
+        .expect("create run");
+    run_repo
+        .claim_next_queued(&ArchitectureId::new(&arch).unwrap())
+        .await
+        .expect("claim")
+        .expect("queued run");
+
+    // A flat outcome (no envelope keys) — what a pre-envelope writer
+    // would have left in the column.
+    let flat = serde_json::json!({
+        "entries": [
+            {
+                "action": "create",
+                "kind": "vlan",
+                "chv_resource_ref": "networks/backend",
+                "status": "succeeded",
+                "error": null,
+            }
+        ],
+        "summary": { "succeeded": 1, "failed": 0, "skipped": 0, "not_attempted": 0 },
+    });
+    run_repo
+        .mark_succeeded(&run_id, Some(flat.to_string()), None)
+        .await
+        .expect("mark succeeded");
+
+    let operator = token_for(&state, "u-alice", "operator");
+    let (status, body) = post_json(
+        &state,
+        "/v1/architectures/netbox/runs/get",
+        &operator,
+        &format!(r#"{{"id":"{arch}","run_id":"{run_id}"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "runs/get with flat result: {body}");
+    assert_eq!(
+        body["result_json"], flat,
+        "a non-envelope object passes through unchanged: {body}"
+    );
+    assert_eq!(
+        body["resolved_architecture_version_id"],
+        serde_json::Value::Null,
+        "no envelope → no resolved version id: {body}"
     );
 }
 
@@ -1350,6 +1554,12 @@ async fn runs_list_and_get_after_export_enqueue() {
     );
     assert_eq!(body["plan_json"], serde_json::Value::Null);
     assert_eq!(body["requested_by"], serde_json::json!("u-alice"));
+    // No result yet → no envelope → the resolved-version field is null.
+    assert_eq!(body["result_json"], serde_json::Value::Null);
+    assert_eq!(
+        body["resolved_architecture_version_id"],
+        serde_json::Value::Null
+    );
 
     // A run id under a DIFFERENT architecture answers 404 — run ids
     // must not become cross-architecture probes.
