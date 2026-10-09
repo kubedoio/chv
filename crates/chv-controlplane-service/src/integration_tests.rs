@@ -2069,4 +2069,478 @@ mod fabric_dispatch {
             .expect_err("dispatch without overlay manager must fail");
         assert!(err.to_string().contains("overlay manager"), "got: {err}");
     }
+
+    /// #582 regression (default mode): `wait_for_convergence` used to
+    /// declare convergence on the first status poll of *any*
+    /// migration — `dirty_blocks_remaining` is 0 until stord's first
+    /// dirty-sync round snapshots the bitmap (and the row is created
+    /// with 0), so `dirty <= threshold` was vacuously true while
+    /// bulk copy was still running. The memory phase then ran under
+    /// its own timeout budget with the VM paused for the remainder of
+    /// the disk transfer.
+    ///
+    /// This pins the guard's round signal with TRUTHFUL row values
+    /// (stord's `bytes_transferred` only accumulates dirty re-send
+    /// bytes — it stays 0 through bulk copy, and remains far below
+    /// `total_bytes` at clean convergence): a pre-telemetry row and a
+    /// bulk-copy row (both round 0, dirty 0) must NOT converge; a
+    /// dirty-sync row (round 1, dirty below threshold) must.
+    #[tokio::test]
+    async fn test_wait_for_convergence_does_not_declare_convergence_during_bulk_copy() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-bulk",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:41",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-bulk").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-bulk".to_string(),
+            operation_id: "op-conv-bulk".to_string(),
+            vm_id: "vm-conv-bulk".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let pool_for_loop = cluster.pool.clone();
+        let local_state = state.clone();
+        tokio::spawn(async move {
+            let result = crate::migration::wait_for_convergence(&pool_for_loop, &local_state).await;
+            let _ = tx.send(result).await;
+        });
+
+        // Window 1 — pre-telemetry: the loop polls every 5s and the
+        // row still holds its creation values (round 0, dirty 0,
+        // bytes 0, total 0). The pre-fix loop declared convergence
+        // HERE — the "first 5s status poll of any migration" from the
+        // issue.
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "convergence must NOT be declared before the agent has reported \
+             any progress (round 0, dirty 0, total 0) — the recorded #582 looseness"
+        );
+
+        // Window 2 — bulk copy underway: the agent reports every ~5s
+        // (phase PreCopyDisk) but stord exposes no bulk progress —
+        // `bytes_transferred` stays 0 and no dirty-sync round has run
+        // (round 0, dirty 0). This is the truthful mid-bulk shape.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-bulk",
+            "op-conv-bulk",
+            proto::MigrationPhase::PrecopyDisk as i32,
+            0,              // bytes_transferred — stays 0 through bulk copy
+            10_737_418_240, // total_bytes
+            0,              // convergence_round — no dirty round yet
+            0,              // dirty_blocks_remaining — vacuously 0
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "convergence must NOT be declared while bulk copy is still running \
+             (round 0, dirty 0, bytes 0 — bulk progress is invisible in the row)"
+        );
+
+        // The disk transfer finishes bulk copy and enters dirty sync:
+        // round 1 (stord sets it at the top of round 1), dirty below
+        // the default threshold of 1024 blocks. TRUTHFUL bytes: only
+        // the dirty re-sends count (500 blocks x 4MB) — far below
+        // total_bytes, which is exactly what a cleanly converged
+        // migration reports.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-bulk",
+            "op-conv-bulk",
+            proto::MigrationPhase::ConvergingDisk as i32,
+            500 * 4_194_304, // bytes_transferred — dirty re-sends only
+            10_737_418_240,  // total_bytes
+            1,               // convergence_round — dirty sync reached
+            500,             // dirty_blocks_remaining — below threshold
+        )
+        .await
+        .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+            .await
+            .expect("convergence loop must terminate within 20s of the converged row")
+            .expect("sender must not be dropped");
+        result.expect("convergence must be declared once dirty sync reports below threshold");
+    }
+
+    /// #582 boundary pin (multi-volume skew, DISCLOSED RESIDUAL): the
+    /// agent reports the max round and max dirty across volumes, so
+    /// an early volume can be converged (round >= 1, dirty 0) while a
+    /// later volume is still in bulk copy — and the row cannot
+    /// express that state today (stord's `bytes_transferred` excludes
+    /// bulk bytes; the agent's phase vocabulary has no "all volumes
+    /// finished bulk" value). The guarded check therefore converges
+    /// in that window. This test PINS the residual so it cannot drift
+    /// silently: the migration still completes correctly (the final
+    /// sync waits for every volume), the cost being that the memory
+    /// phase's timeout budget starts early. Closing it needs a
+    /// telemetry contract change — see the adoption record
+    /// (`docs/design/issue-394-write-canary.md`).
+    #[tokio::test]
+    async fn test_wait_for_convergence_multi_volume_skew_residual_is_pinned() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-skew",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:42",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-skew").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-skew".to_string(),
+            operation_id: "op-conv-skew".to_string(),
+            vm_id: "vm-conv-skew".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        // Multi-volume skew shape, TRUTHFUL values: volume A has
+        // finished bulk copy and converged (its round pushes the max
+        // to 1, its dirty is 0 — and volume B, still in bulk copy,
+        // reports dirty 0 too, so the max is 0). Volume B's bytes are
+        // invisible: stord's bytes_transferred stays 0 during its
+        // bulk copy, so the row shows only A's re-sends.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-skew",
+            "op-conv-skew",
+            proto::MigrationPhase::ConvergingDisk as i32,
+            2_097_152,      // bytes_transferred — volume A's re-sends only
+            10_737_418_240, // total_bytes — both volumes
+            1,              // convergence_round — early volume in dirty sync
+            0,              // dirty_blocks_remaining — early volume converged
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let pool_for_loop = cluster.pool.clone();
+        let local_state = state.clone();
+        tokio::spawn(async move {
+            let result = crate::migration::wait_for_convergence(&pool_for_loop, &local_state).await;
+            let _ = tx.send(result).await;
+        });
+
+        // The residual boundary: convergence IS declared here (round
+        // 1, dirty 0) while volume B's bulk copy is still running. In
+        // the real flow the agent reports MemoryMigration during the
+        // same window (needs_vm_pause from volume A's final sync), so
+        // the phase-based signal converges it too — the same
+        // boundary, two triggers. If this assert ever fails, the
+        // boundary moved — either the telemetry contract gained an
+        // all-volumes signal (good: delete this pin and guard against
+        // the skew) or the guard regressed (bad: see the adoption
+        // record).
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv())
+            .await
+            .expect("the pinned residual converges within one poll cycle")
+            .expect("sender must not be dropped");
+        result.expect("the pinned multi-volume-skew residual converges (see comment)");
+    }
+
+    /// #582 liveness pin: the stall detector is keyed on row
+    /// freshness, not byte movement — stord's `bytes_transferred`
+    /// freezes at 0 through bulk copy, so a byte-based detector would
+    /// false-fire ~65s into any legitimate bulk copy. A row that
+    /// stops being updated for over 90s (the agent reports every
+    /// ~5s) means the agent stopped reporting: the migration must be
+    /// rolled back, not waited on.
+    #[tokio::test]
+    async fn test_wait_for_convergence_fails_when_agent_stops_reporting() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-stale",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:43",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-stale").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-stale".to_string(),
+            operation_id: "op-conv-stale".to_string(),
+            vm_id: "vm-conv-stale".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        // Simulate a dead agent: the row exists but its last update
+        // is far older than the 90s freshness threshold.
+        sqlx::query("UPDATE migrations SET updated_at = '2020-01-01T00:00:00Z' WHERE migration_id = 'mig-conv-stale'")
+            .execute(&cluster.pool)
+            .await
+            .unwrap();
+
+        let pool_for_loop = cluster.pool.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), {
+            crate::migration::wait_for_convergence(&pool_for_loop, &state)
+        })
+        .await
+        .expect("a stale row must terminate the loop on the first poll");
+        let err = result.expect_err("a stale row must fail the convergence wait");
+        assert!(
+            err.to_string().contains("stalled"),
+            "stall error must name the stall, got: {err}"
+        );
+    }
+
+    /// #582 cap pin: once dirty sync has begun (round >= 1), hitting
+    /// the round cap PROCEEDS to the memory phase instead of failing
+    /// — matching stord's own forced cutover at MAX_DIRTY_ROUNDS
+    /// (the sender moves to final sync there, it does not fail) and
+    /// the branch's original stated intent. The pre-fix loop never
+    /// reached this code (it exited at the first poll), and erroring
+    /// here would roll back migrations that stord is actively
+    /// completing via forced cutover.
+    #[tokio::test]
+    async fn test_wait_for_convergence_proceeds_at_round_cap() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-cap",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:44",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-cap").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-cap".to_string(),
+            operation_id: "op-conv-cap".to_string(),
+            vm_id: "vm-conv-cap".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        // Heavy-writer shape: dirty sync has run the full round
+        // budget (10 rounds, the default max_convergence_rounds) and
+        // the dirty count is still far above threshold — stord's
+        // forced cutover territory.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-cap",
+            "op-conv-cap",
+            proto::MigrationPhase::ConvergingDisk as i32,
+            50_000 * 4_194_304, // bytes_transferred — heavy re-send history
+            10_737_418_240,     // total_bytes
+            10,                 // convergence_round — at the cap
+            50_000,             // dirty_blocks_remaining — far above threshold
+        )
+        .await
+        .unwrap();
+
+        let pool_for_loop = cluster.pool.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), {
+            crate::migration::wait_for_convergence(&pool_for_loop, &state)
+        })
+        .await
+        .expect("the round cap must terminate the loop on the first poll");
+        result.expect("the round cap must proceed to the memory phase, not fail");
+    }
+
+    /// #582 liveness pin, isolated: the round guard and the freshness
+    /// check are separate nets — the other stale-row test uses a
+    /// round-0 row, where the round guard blocks convergence first
+    /// and the two pins are coupled. This variant isolates the
+    /// freshness branch: the row IS in dirty sync (round 1) with dirty
+    /// above threshold, so the primary check cannot fire — only the
+    /// stale `updated_at` can terminate the loop.
+    #[tokio::test]
+    async fn test_wait_for_convergence_fails_on_stale_row_in_dirty_sync() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-stale2",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:46",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-stale2").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-stale2".to_string(),
+            operation_id: "op-conv-stale2".to_string(),
+            vm_id: "vm-conv-stale2".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        // Dirty-sync shape (round 1, dirty far above threshold — the
+        // primary check cannot converge this) with a stale timestamp:
+        // the agent stopped reporting mid-dirty-sync.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-stale2",
+            "op-conv-stale2",
+            proto::MigrationPhase::ConvergingDisk as i32,
+            2_097_152,      // bytes_transferred — dirty re-sends
+            10_737_418_240, // total_bytes
+            1,              // convergence_round — dirty sync reached
+            50_000,         // dirty_blocks_remaining — far above threshold
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE migrations SET updated_at = '2020-01-01T00:00:00Z' WHERE migration_id = 'mig-conv-stale2'")
+            .execute(&cluster.pool)
+            .await
+            .unwrap();
+
+        let pool_for_loop = cluster.pool.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), {
+            crate::migration::wait_for_convergence(&pool_for_loop, &state)
+        })
+        .await
+        .expect("a stale dirty-sync row must terminate the loop on the first poll");
+        let err = result.expect_err("a stale dirty-sync row must fail the convergence wait");
+        assert!(
+            err.to_string().contains("stalled"),
+            "stall error must name the stall, got: {err}"
+        );
+    }
+
+    /// #582 diskless pin: a VM with no volumes skips the disk loop
+    /// entirely — the agent goes straight to memory migration and no
+    /// dirty round ever runs, so `convergence_round` stays 0 and the
+    /// round signal can never fire. The agent-reported
+    /// `MemoryMigration` phase is the convergence signal for that
+    /// path (and for "all volumes completed" generally). Pre-fix,
+    /// diskless VMs converged only via the vacuous first-poll check.
+    #[tokio::test]
+    async fn test_wait_for_convergence_converges_for_diskless_vms() {
+        let cluster = TestCluster::new().await;
+        cluster.setup_two_nodes().await;
+        cluster
+            .create_vm_on_node(
+                "vm-conv-diskless",
+                "node-a",
+                "net-overlay",
+                "aa:bb:cc:dd:ee:45",
+                4_294_967_296,
+            )
+            .await;
+        cluster.create_operation("op-conv-diskless").await;
+
+        let state = MigrationState {
+            migration_id: "mig-conv-diskless".to_string(),
+            operation_id: "op-conv-diskless".to_string(),
+            vm_id: "vm-conv-diskless".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 0,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+        };
+        create_migration_record(&cluster.pool, &state)
+            .await
+            .expect("failed to create migration record");
+
+        // Diskless shape, TRUTHFUL values: the agent skipped the disk
+        // loop (no volumes) and reported MemoryMigration directly —
+        // round 0, dirty 0, no bytes.
+        update_migration_progress(
+            &cluster.pool,
+            "vm-conv-diskless",
+            "op-conv-diskless",
+            proto::MigrationPhase::MemoryMigration as i32,
+            0, // bytes_transferred
+            0, // total_bytes
+            0, // convergence_round — no dirty round ever runs
+            0, // dirty_blocks_remaining
+        )
+        .await
+        .unwrap();
+
+        let pool_for_loop = cluster.pool.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), {
+            crate::migration::wait_for_convergence(&pool_for_loop, &state)
+        })
+        .await
+        .expect("a diskless migration must converge on the first poll");
+        result
+            .expect("the agent-reported MemoryMigration phase must converge a diskless migration");
+    }
 }
