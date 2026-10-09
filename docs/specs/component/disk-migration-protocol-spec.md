@@ -71,8 +71,15 @@ alternative to #394's "retry with the source quiesced" answer. The
 sender fails closed (`failed_precondition`, before connecting) if the
 mode is requested without a task attached: an operator who asked for
 the pause must never get a silent degradation to quiescent-assumed
-semantics. The WebUI does not expose the toggle yet (API/chvctl
-only); the UI surface is recorded follow-up work.
+semantics. **T=0 skew guard (#582)**: stord echoes the requested mode
+in `TriggerDiskMigrationResponse.pause_first`, and the agent fails
+the migration at trigger time when a pause-first request comes back
+without the echo — a stord that predates the field drops the unknown
+request field (proto3) and would silently run the default path. The
+guard is one-directional: default-mode requests never require an
+echo, so a skewed stord still serves them. The WebUI does not expose
+the toggle yet (API/chvctl only); the UI surface is recorded
+follow-up work.
 
 ## Transport
 - gRPC bidirectional streaming: `StorageMigrationService.StreamBlocks` over a single `MigrationMessage` stream (`proto/node/chv-stord-migration.proto`)

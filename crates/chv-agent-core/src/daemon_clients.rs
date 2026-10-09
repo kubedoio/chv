@@ -530,6 +530,24 @@ impl StordClient {
                 });
             }
         }
+        // Issue #582 (T=0 skew guard): an older stord predating the
+        // `pause_first` request field drops it (proto3 unknown fields)
+        // and silently runs the DEFAULT mode — the stop-the-world
+        // mode the operator opted into is ignored, and the migration
+        // proceeds live against a running VM. The response echoes the
+        // mode the stord will actually run; a missing echo on a
+        // pause-first request means version skew. Fail closed rather
+        // than run a different mode than the one that was requested.
+        if pause_first && !resp.pause_first {
+            return Err(ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: "pause_first migration requested but stord did not \
+                         echo the mode back — stord version skew (stord \
+                         predates the pause-first contract); refusing to \
+                         migrate without VM-pause coordination"
+                    .to_string(),
+            });
+        }
         Ok(resp.migration_id)
     }
 
@@ -1485,6 +1503,10 @@ mod tests {
                 std::sync::Mutex<Option<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>>,
             >,
         >,
+        /// When true, the mock plays a pre-#582 (version-skewed) stord:
+        /// it answers OK but never echoes `pause_first` back (proto3
+        /// default false) — the shape the T=0 skew guard must catch.
+        skew_no_echo: bool,
     }
 
     #[tonic::async_trait]
@@ -1580,7 +1602,16 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
         {
             if let Some(capture) = &self.capture_trigger {
-                *capture.lock().unwrap() = Some(req.into_inner());
+                let inner = req.into_inner();
+                // Mirror the real stord's echo (#582): the response
+                // carries the mode that will actually run — unless the
+                // mock plays a skewed stord that predates the field.
+                let echo = if self.skew_no_echo {
+                    false
+                } else {
+                    inner.pause_first
+                };
+                *capture.lock().unwrap() = Some(inner);
                 return Ok(Response::new(
                     chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse {
                         result: Some(chv_stord_api::chv_stord_api::Result {
@@ -1589,6 +1620,7 @@ mod tests {
                             human_summary: String::new(),
                         }),
                         migration_id: "dm-mock-1".to_string(),
+                        pause_first: echo,
                     },
                 ));
             }
@@ -1829,6 +1861,7 @@ mod tests {
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mock = MockStord {
             capture_trigger: Some(captured.clone()),
+            skew_no_echo: false,
         };
 
         let uds = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -1870,6 +1903,93 @@ mod tests {
             "op-pf",
             "the operation id must thread for tracing"
         );
+    }
+
+    /// Issue #582 (T=0 skew guard): a stord that predates the
+    /// `pause_first` field drops the unknown request field (proto3)
+    /// and would silently run the migration in DEFAULT mode — the
+    /// operator's stop-the-world opt-in ignored. The guard: the
+    /// response must echo the mode; a missing echo on a pause-first
+    /// request fails closed at trigger time. The mock plays the
+    /// skewed stord (OK result, no echo).
+    ///
+    /// Also pins the guard's one-directionality: a default-mode
+    /// request (pause_first=false) against the SAME skewed stord must
+    /// still succeed — the guard must not false-positive on the mode
+    /// nobody asked to coordinate.
+    #[tokio::test]
+    async fn stord_trigger_disk_migration_fails_closed_on_missing_pause_first_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+
+        let captured: std::sync::Arc<
+            std::sync::Mutex<Option<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mock = MockStord {
+            capture_trigger: Some(captured.clone()),
+            skew_no_echo: true,
+        };
+
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                        mock,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+
+        let mut client = StordClient::connect(&socket).await.unwrap();
+
+        // The discriminating call: pause-first requested, no echo back.
+        let err = client
+            .trigger_disk_migration(
+                "vol-pf",
+                "handle-pf",
+                "https://10.0.0.5:50052",
+                true,
+                Some("op-pf"),
+            )
+            .await
+            .expect_err("a missing pause_first echo must fail closed");
+        match err {
+            ChvError::BackendUnavailable { reason, .. } => {
+                assert!(
+                    reason.contains("version skew"),
+                    "the error must name the skew: {reason}"
+                );
+                assert!(
+                    reason.contains("pause_first") || reason.contains("pause-first"),
+                    "the error must name the mode: {reason}"
+                );
+            }
+            other => panic!("expected BackendUnavailable, got: {other:?}"),
+        }
+
+        // The request DID carry the flag — proving the guard fired on
+        // the response echo, not on a dropped request field.
+        let req = captured.lock().unwrap().take().expect("request captured");
+        assert!(
+            req.pause_first,
+            "the guard must discriminate on the echo, not the request"
+        );
+
+        // One-directionality: default mode needs no echo and must
+        // succeed against the same skewed stord.
+        client
+            .trigger_disk_migration(
+                "vol-def",
+                "handle-def",
+                "https://10.0.0.5:50052",
+                false,
+                Some("op-def"),
+            )
+            .await
+            .expect("default-mode trigger must not require the echo");
     }
 
     #[tokio::test]

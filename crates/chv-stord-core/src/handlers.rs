@@ -1153,6 +1153,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                     .to_proto_result(),
                 ),
                 migration_id: String::new(),
+                // No migration started — no mode to echo.
+                pause_first: false,
             }));
         }
 
@@ -1160,6 +1162,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             return Ok(Response::new(proto::TriggerDiskMigrationResponse {
                 result: Some(e.to_proto_result()),
                 migration_id: String::new(),
+                // No migration started — no mode to echo.
+                pause_first: false,
             }));
         }
 
@@ -1175,6 +1179,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                     .to_proto_result(),
                 ),
                 migration_id: String::new(),
+                // No migration started — no mode to echo.
+                pause_first: false,
             }));
         };
 
@@ -1197,12 +1203,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                         .to_proto_result(),
                     ),
                     migration_id: String::new(),
+                    // No migration started — no mode to echo.
+                    pause_first: false,
                 }));
             }
             Err(e) => {
                 return Ok(Response::new(proto::TriggerDiskMigrationResponse {
                     result: Some(e.to_proto_result()),
                     migration_id: String::new(),
+                    // No migration started — no mode to echo.
+                    pause_first: false,
                 }));
             }
             _ => {}
@@ -1254,6 +1264,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 return Ok(Response::new(proto::TriggerDiskMigrationResponse {
                     result: Some(e.to_proto_result()),
                     migration_id: String::new(),
+                    // No migration started — no mode to echo.
+                    pause_first: false,
                 }));
             }
         };
@@ -1343,6 +1355,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         Ok(Response::new(proto::TriggerDiskMigrationResponse {
             result: Some(Self::ok_result()),
             migration_id,
+            // Issue #582 (T=0 skew guard): echo the requested mode so
+            // the agent can detect a version-skewed stord that would
+            // otherwise silently ignore `pause_first` (proto3 drops
+            // unknown request fields).
+            pause_first: req_pause_first,
         }))
     }
 

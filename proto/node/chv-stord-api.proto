@@ -177,6 +177,13 @@ message TriggerDiskMigrationRequest {
 message TriggerDiskMigrationResponse {
   Result result = 1;
   string migration_id = 2;
+  // Issue #582 (T=0 skew guard): stord echoes back the `pause_first`
+  // mode it will actually run. An older stord that predates the field
+  // drops the unknown request field (proto3) and leaves this at false
+  // — so a requester that asked for pause-first can fail closed at
+  // trigger time instead of silently migrating against an unpaused
+  // VM. Echoes the request value verbatim; not a status report.
+  bool pause_first = 3;
 }
 
 message GetDiskMigrationStatusRequest {
