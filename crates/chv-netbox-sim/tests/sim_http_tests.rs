@@ -807,6 +807,19 @@ async fn auth_rejection_bodies() {
         json!({ "detail": "Authentication credentials were not provided." })
     );
 
+    // Token string with spaces (DRF: more than two whitespace parts).
+    let response = http()
+        .get(format!("{}/api/dcim/devices/", sim.base_url()))
+        .header("Authorization", "Token a b".to_string())
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.json::<Value>().await.expect("error body"),
+        json!({ "detail": "Invalid token header. Token string should not contain spaces." })
+    );
+
     // Writes are authenticated too.
     let response = http()
         .post(format!("{}/api/dcim/devices/", sim.base_url()))

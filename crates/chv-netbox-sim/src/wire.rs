@@ -475,10 +475,14 @@ fn link(
 ///   the request URL with
 ///   `replace_query_param(url, "limit", self.limit)`: the request's
 ///   own `limit`/`offset` parameters are dropped and the effective
-///   (defaulted or clamped) page size is appended after the
-///   filters, exactly as [`link`] builds them. A request without a
-///   `limit` therefore gets the default page size in its links,
-///   and an oversized `limit` is echoed as the clamped value.
+///   (defaulted or clamped) page size is written into the link,
+///   as [`link`] builds them. (DRF rewrites the params in place at
+///   their original query positions; [`link`] appends them after the
+///   filters — semantically identical, but not byte-identical, so a
+///   future `--record` byte-comparison of link URLs must normalize
+///   parameter order first.) A request without a `limit` therefore
+///   gets the default page size in its links, and an oversized
+///   `limit` is echoed as the clamped value.
 pub(crate) fn page_links(
     base: &str,
     path: &str,
