@@ -116,12 +116,7 @@ pub(crate) fn probe_vmm_ping_connected(
     let mut response = Vec::new();
     let mut chunk = [0_u8; 4096];
     let (header_end, body_len) = loop {
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(|e| io_label("Cloud Hypervisor API stream", e))?;
-        let count = stream
-            .read(&mut chunk)
-            .map_err(|e| io_label("Cloud Hypervisor API stream", e))?;
+        let count = read_chunk(stream, &mut chunk, deadline)?;
         if count == 0 {
             return Err(invalid_label(
                 "Cloud Hypervisor API stream",
@@ -154,12 +149,7 @@ pub(crate) fn probe_vmm_ping_connected(
     };
     let required = header_end + 4 + body_len;
     while response.len() < required {
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(|e| io_label("Cloud Hypervisor API stream", e))?;
-        let count = stream
-            .read(&mut chunk)
-            .map_err(|e| io_label("Cloud Hypervisor API stream", e))?;
+        let count = read_chunk(stream, &mut chunk, deadline)?;
         if count == 0 {
             return Err(invalid_label(
                 "Cloud Hypervisor API stream",
@@ -203,6 +193,31 @@ fn remaining(deadline: Instant) -> Result<Duration, ChvError> {
         ));
     }
     Ok(remaining)
+}
+
+/// Read once into `chunk`, retrying EINTR. #573: a signal (e.g.
+/// SIGCHLD from a concurrent child exiting elsewhere in the process)
+/// can interrupt the blocking read at any point — including the
+/// deadline boundary, where it surfaced as a spurious `Interrupted`
+/// error instead of the timeout (reproduced under full-suite load at
+/// ~10-17% of runs). Each retry re-ratchets the read timeout to the
+/// remaining budget, so the next attempt either delivers bytes or
+/// times out; the retry cannot extend the total deadline.
+fn read_chunk(
+    stream: &mut std::os::unix::net::UnixStream,
+    chunk: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, ChvError> {
+    loop {
+        stream
+            .set_read_timeout(Some(remaining(deadline)?))
+            .map_err(|e| io_label("Cloud Hypervisor API stream", e))?;
+        match stream.read(chunk) {
+            Ok(count) => return Ok(count),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(io_label("Cloud Hypervisor API stream", e)),
+        }
+    }
 }
 
 fn format_request(method: &str, path: &str, body: Option<&str>) -> String {
@@ -618,13 +633,34 @@ mod tests {
     #[test]
     fn connected_probe_enforces_total_deadline_against_trickle_peer() {
         let (mut client, mut server) = StdUnixStream::pair().unwrap();
+        // #573: the peer trickles a header stream that can NEVER
+        // complete — "HTTP/1.1 200 OK\r\n" repeated contains no
+        // "\r\n\r\n" — so the probe cannot succeed; its only timely
+        // exit is enforcing its TOTAL deadline. (The pre-#573 peer
+        // sent one finite complete response and the test asserted
+        // wall-clock tightness — elapsed < 250 ms — which flaked
+        // under full-suite parallelism: the deadline fired on time
+        // but the thread was descheduled before the assert could
+        // measure it.) With the endless trickle the discrimination
+        // no longer needs any tight timing: a missing or
+        // per-read-fresh deadline keeps the probe reading (every
+        // byte arrives within any per-read budget) until the
+        // 256-byte response cap rejects the stream with a
+        // non-timeout error at ~3.8 s of trickle — failing the
+        // error-kind assert below — while a working total-deadline
+        // ratchet returns TimedOut/WouldBlock at the 60 ms budget
+        // regardless of scheduling noise. The elapsed check below
+        // is only a hang backstop, not part of the discrimination.
         let peer = thread::spawn(move || {
             let mut request = [0_u8; 128];
             let _ = server.read(&mut request);
-            for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" {
-                thread::sleep(Duration::from_millis(15));
-                if server.write_all(&[*byte]).is_err() {
-                    break;
+            loop {
+                for byte in b"HTTP/1.1 200 OK\r\n" {
+                    thread::sleep(Duration::from_millis(15));
+                    if server.write_all(&[*byte]).is_err() {
+                        // The test dropped its end; exit cleanly.
+                        return;
+                    }
                 }
             }
         });
@@ -637,7 +673,15 @@ mod tests {
             ChvError::Io { ref source, .. }
                 if matches!(source.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
         ));
-        assert!(started.elapsed() < Duration::from_millis(250));
+        // Hang backstop only: the budget is 60 ms and this allows
+        // ~83x slack, so ordinary scheduler noise cannot trip it —
+        // in principle an extreme descheduling of this thread after
+        // the probe returned could, but only as a loud false
+        // failure, never a false pass.
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Drop our end so the peer's next write fails and it exits
+        // instead of trickling forever.
+        drop(client);
         peer.join().unwrap();
     }
 }

@@ -48,6 +48,11 @@ tmp/
 temp/
 *.tmp
 *.bak
+# Hidden .tmp* directories: the chv-agent-runtime-ch linux_observation
+# suite creates per-test runtime dirs (`.tmpXXXXXX`) inside the crate
+# root via `TempDir::new_in(current_dir())` — a stray `git add -A` must
+# never swallow them.
+.tmp*/
 
 # Rust
 # `target/` plus ad-hoc alternate target dirs (e.g. `cargo build --target-dir

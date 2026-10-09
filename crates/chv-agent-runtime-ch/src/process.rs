@@ -5954,8 +5954,16 @@ mod tests {
         );
 
         // The whole backlog must land in the scrollback, byte-exact, well
-        // inside the deadline — the E3f one-pass behavior.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // inside the deadline — the E3f one-pass behavior. (#573: the
+        // bound is 30 s against the ~0.54 s healthy signature for a
+        // 96 KiB backlog — ~56x slack. The original 10 s bound flaked
+        // under full-workspace parallelism on a loaded host, where the
+        // reader task can be starved for several seconds; a parked
+        // reader still cannot make it — at one ~278 B socket-fill per
+        // 100 ms re-trigger round the ~350 rounds it needs take ~35 s
+        // — but the decisive parked-reader discrimination is the
+        // breaks bound below, not this one.)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let received = fanout.scrollback_snapshot();
             if received == backlog {
@@ -5986,10 +5994,20 @@ mod tests {
         // flush sessions truncated by a full socket: a continuously
         // draining reader needs ~zero re-trigger rounds, while a reader
         // that parks between reads needs one round per ~278 B socket-fill
-        // (96 KiB would need ~350). The bound leaves generous scheduling
-        // slack while still discriminating decisively.
+        // (96 KiB would need ~350 rounds, ~35 s — the 30 s deadline above
+        // is the primary parked-reader discriminator; this bound is the
+        // secondary one). (#573: the original bound of 16 flaked under
+        // full-workspace parallelism — reader starvation produces ~one
+        // break per 100 ms re-trigger round. The worst observed
+        // starvation is ~16.5 s (165 breaks, captured under a
+        // deliberately harsher-than-real triple-cargo load; the original
+        // #573 failures imply ~10-15 s on a real loaded host), so the
+        // budget must clear that with margin: 240 tolerates ~24 s of
+        // cumulative starvation while an extreme-burst reader parking
+        // more than ~24 s of a sub-deadline test still fails it — a
+        // parked reader exceeds ~300 breaks within the deadline).
         assert!(
-            breaks.load(Ordering::SeqCst) <= 16,
+            breaks.load(Ordering::SeqCst) <= 240,
             "flush sessions kept breaking on backpressure ({} breaks) — \
              the reader is not draining continuously",
             breaks.load(Ordering::SeqCst)
