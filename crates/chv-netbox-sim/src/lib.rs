@@ -93,7 +93,9 @@
 //!
 //! # Conventions
 //!
-//! `tracing`-only logging (never `println!`), no panics in request
+//! `tracing`-only logging (the library never writes to stdout
+//! directly — only the `netbox-sim` CLI bin under `src/bin/` prints),
+//! no panics in request
 //! handlers (malformed input is a 400, unknown ids a 404), and
 //! serde output uses sorted maps so responses are byte-stable.
 
