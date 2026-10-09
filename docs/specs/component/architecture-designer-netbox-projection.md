@@ -2,6 +2,8 @@
 
 > **Status:** Proposed with `docs/design/issue-239-netbox-projection.md` and
 > [ADR-023](../adr/023-netbox-projection.md). Issue: kubedoio/chv#239.
+> Test doubles: [ADR-024](../adr/024-netbox-test-doubles-and-demo-gate.md)
+> (issue kubedoio/chv#586).
 > Contracts: [`contracts/netbox-mapping-contract.md`](../architecture-designer/contracts/netbox-mapping-contract.md),
 > [`contracts/netbox-api-contract.md`](../architecture-designer/contracts/netbox-api-contract.md).
 
@@ -168,6 +170,46 @@ run; enqueue failure is logged and swallowed.
   terminal status (the issue's headline AC).
 - BFF: permission-matrix and ownership tests mirroring the existing
   architecture handler suites.
+
+## Test doubles, demo harness, and qualification (ADR-024)
+
+The projection's test infrastructure has three lanes; each answers a
+different question and no lane substitutes for another:
+
+| Lane | Double | Question answered |
+|---|---|---|
+| PR CI (fast) | adapter unit tests + protocol-level wiremock tests | does the client parse/classify wire shapes correctly? |
+| PR CI (composed) | **`chv-netbox-sim`** — first-party stateful simulator | does the projection behave against NetBox-shaped state and semantics? |
+| On-demand + weekly | **real NetBox** via docker compose | does it still work against today's NetBox release? |
+
+- **`chv-netbox-sim`** (`crates/chv-netbox-sim`, dev-only): an in-process
+  axum server emulating exactly the REST surface defined by the mapping
+  contract — pagination envelopes, server-side natural-key and custom-field
+  filtering, id/url assignment, Token auth, NetBox-shaped 400/401/404. Test
+  control endpoints are `__`-prefixed and obviously not NetBox:
+  `POST /__seed`, `GET /__state`, `POST /__reset`, `POST /__faults`
+  (forced 401/429/5xx/latency/connection-drop). The bin target is behind
+  `required-features = ["bin"]` so release builds never produce it.
+- **Responsibility rules**: the simulator implements only the surface the
+  client uses (anything else 404s like real NetBox); every behavior traces
+  to the mapping contract or a golden fixture; it never appears in a
+  production dependency graph and is never the source of truth for the wire
+  format.
+- **Demo harness** (`make netbox-demo`): boots the simulator plus a
+  controlplane (sqlite, converged UI+BFF serving) for interactive use. The
+  plain-HTTP client escape hatch is double-gated — the default-off
+  `netbox-demo` cargo feature **and** `CHV_NETBOX_ALLOW_HTTP=1` at runtime —
+  and cannot reach a shipped binary. Default-feature builds keep the
+  fail-closed HTTPS-only client untouched.
+- **Qualification** (`deploy/netbox-qualification/`): a pinned docker
+  compose runs the **same** composed scenarios against real NetBox
+  (`#[ignore]`d tests + env-provided URL/token). Identical scenarios on both
+  backends make this run the simulator-drift tripwire; divergences are fixed
+  by re-recording fixtures and reconciling the simulator, never by weakening
+  a scenario.
+- Future NetBox integrations (hosts, disks, autodiscovery) extend these
+  lanes (contract kinds → adapter units → simulator endpoints → one composed
+  scenario → qualification step) instead of adding new infrastructure.
 
 ## Non-goals
 
