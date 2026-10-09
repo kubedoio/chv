@@ -106,7 +106,17 @@ services:
       # The netbox service owns superuser creation; the init only
       # mints the token for the user that already exists.
       SKIP_SUPERUSER: "true"
-    user: "netbox:root"
+    # Runs as root, unlike the netbox service: the init must create
+    # netbox.env in the fresh `qualification-env` volume, whose root
+    # directory docker creates root:root 0755 — the `netbox` user
+    # cannot create the first file there (observed in the second
+    # qualification dispatch: everything provisioned, then "cannot
+    # create /run/qualification/netbox.env: Permission denied"). The
+    # image's entrypoint execs the command as-is (no privilege drop),
+    # and a throwaway CI container tolerates root-owned artifacts;
+    # the published file is world-readable, so the netbox service's
+    # read-only mount and `compose exec netbox cat` still read it.
+    user: "0:0"
     command:
       - /opt/netbox/docker-entrypoint.sh
       - /bin/sh
