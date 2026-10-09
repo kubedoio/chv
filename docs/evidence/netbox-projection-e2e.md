@@ -105,15 +105,91 @@ the `chv_` custom-field surface are unchanged, so `MAPPING_VERSION`
 stays `v1`. The apply-side leg is seeded via the existing test
 fixtures rather than driving the apply state machine itself.
 
-<!-- first-run -->
+## First real-NetBox qualification run (2026-10-09)
 
-Focused verification (all run, all green; the counts below are the
-simulator-backend and unit-level results — no real-NetBox dispatch
-has run yet):
+The qualification lane (`scripts/netbox-qualify.sh`, workflow
+`netbox-qualification.yml`) ran against real NetBox 4.7.2
+(netbox-docker 5.1.1) seven times before going green — every dispatch
+left a merge record, and the sequence is the honest story of what the
+drift tripwire is for:
+
+1. **Run 37965573579 — false green.** The lane reported success while
+   the suite had never really asserted: the `EXIT` trap reset `$?`
+   (bash: `trap -` clears it), so a failed suite exited 0, and the
+   NetBox healthcheck gave up long before the container was ready,
+   masking boot failures. Fixed in #596 (capture `$?` before `trap -`;
+   healthcheck `start_period: 300s` / `retries: 20`).
+2. **Run 37967815173 — loud failure, lane bug.** The suite now failed
+   loudly with logs uploaded, but before any test ran:
+   `cannot create /run/qualification/netbox.env: Permission denied` —
+   docker creates fresh named volumes root-owned, and the netbox user
+   could not write the first file into one. Fixed in #597
+   (qualification-init runs as `user: "0:0"`; a throwaway CI container
+   tolerates root-owned artifacts).
+3. **Run 37971829693 — the tripwire fires for real.** The lane worked
+   end to end and the suite ran for true: 2 of 5 scenarios passed, 3
+   failed — every failing run aborted on
+   `GET /api/virtualization/interfaces/` answering 400. Root cause
+   (verified against NetBox 4.7.2 sources): the interface natural-key
+   probe sent `?name=…&virtual_machine=…`, and NetBox types
+   `virtual_machine` as a `ModelMultipleChoiceFilter` whose form field
+   validates the value **exists** — 400, not an empty page — while the
+   runner probes natural keys *before* the plan creates anything, so
+   the VM never exists yet. Fixed in #598 (name-only probe, VM half of
+   the key applied client-side), which also added the
+   `assert_run_status` diagnostics this debugging needed.
+4. **Run 37976865324 — drift two.** Every projection run succeeded
+   (the write path was clean), 4 of 5 scenarios green; the
+   full-lifecycle state assert compared `vm["vcpus"]` against `2` and
+   got `Number(2.0)` — NetBox 4.7 types `VirtualMachine.vcpus` as a
+   `DecimalField`, so live rows answer `2.0` where the simulator's
+   shape carries `2`. Fixed in #600 (`normalize_object` canonicalizes
+   integral floats).
+5. **Runs 37980195431 / 37983487636 — drift three, the deep one.**
+   The re-export leg's remote-state fetch found only the IP of the six
+   converged objects, planned five duplicate creates, and the
+   duplicate vlan tripped NetBox's ambiguity guard on the prefix
+   create (`Multiple objects match {'vid': 42}`). Dispatch 5 localized
+   it with the new `assert_run_status` outcome diagnostics; #601 added
+   the `probes_find_converged_state` lane test and raw-instance
+   evidence capture; dispatch 6's contrast (identical queries pass in
+   isolation) pinned it: **NetBox ids are unique per content type, not
+   globally** — the six converged objects shared id 2, and
+   `fetch_remote_state`'s `by_id` map keyed by id alone collapsed them
+   into one entry, the last insert (the IP, the final probe in kind
+   rank order) winning. The simulator assigns ids from one global
+   counter and the wiremock mirror assigns `400 + i`, so only the real
+   lane could see it. Fixed in #604 (the map and the delete-side
+   ownership re-verification key by `(kind, id)`), with a wiremock
+   regression test whose mirror shares one id across all six kinds —
+   verified to fail against the old code with this exact symptom.
+6. **Run 37987686434 — green.** All six qualification scenarios pass
+   against the real instance:
+
+   ```text
+   test netbox_projection_sim_tests::qualification_foreign_object_at_natural_key_is_never_written ... ok
+   test netbox_projection_sim_tests::qualification_full_lifecycle_apply_to_projection_to_reapply ... ok
+   test netbox_projection_sim_tests::qualification_manual_double_enqueue_coalesces_to_one_active_run ... ok
+   test netbox_projection_sim_tests::qualification_netbox_outage_never_changes_the_apply_result ... ok
+   test netbox_projection_sim_tests::qualification_partial_failure_requeues_and_retry_resumes_without_duplicate_create ... ok
+   test netbox_projection_sim_tests::qualification_probes_find_converged_state ... ok
+   test result: ok. 6 passed; 0 failed; 0 ignored; 273 filtered out
+   ```
+
+The three genuine drifts the lane caught — the choice-filter probe
+semantics, the DecimalField serialization shape, and the per-kind id
+space — were all invisible to the simulator and the wiremock doubles
+by construction. That is the campaign's thesis proven in production
+conditions: the simulator keeps the always-on lane fast and the
+qualification lane keeps the simulator honest.
+
+Focused verification (all run, all green — the counts below are the
+simulator-backend and unit-level results; the real-NetBox results are
+the qualification run above):
 
 ```text
-cargo test -p chv-controlplane-service netbox_projection_sim   # 5 passed (simulator backend)
-cargo test -p chv-controlplane-service                          # 275 passed, 0 failed (simulator backend)
+cargo test -p chv-controlplane-service netbox_projection_sim   # 6 passed (simulator backend)
+cargo test -p chv-controlplane-service                          # 273 passed, 0 failed (simulator backend)
 cargo test -p chv-webui-bff --test architecture_netbox_routes   # 21 passed, 0 failed
 cargo clippy -p chv-controlplane-service -p chv-webui-bff --all-targets -- -D warnings  # clean
 cargo fmt --all                                                 # applied
