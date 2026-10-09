@@ -49,7 +49,7 @@ docs/
 - [`component/architecture-designer-ui.md`](../component/architecture-designer-ui.md)
 - [`component/architecture-designer-validation.md`](../component/architecture-designer-validation.md)
 - [`component/architecture-designer-security.md`](../component/architecture-designer-security.md)
-- [`component/architecture-designer-netbox-projection.md`](../component/architecture-designer-netbox-projection.md) — **Proposed** (#239, ADR-023)
+- [`component/architecture-designer-netbox-projection.md`](../component/architecture-designer-netbox-projection.md) — **Proposed** (#239, ADR-023; test doubles per ADR-024/#586)
 
 ## Contracts
 

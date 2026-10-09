@@ -4,6 +4,7 @@
 > custom field `chv_mapping_version`. Additive-only evolution; a v2 may remap
 > but must first reconcile v1 objects by external id.
 > Design: `docs/design/issue-239-netbox-projection.md` · ADR-023.
+> Simulator conformance: ADR-024 (issue kubedoio/chv#586).
 
 ## Source of truth
 
@@ -141,3 +142,25 @@ Bounded to a pinned NetBox 4.x REST contract:
 - Custom-field filtering on list endpoints (`?cf_chv_external_id=…`).
 - The client treats any object shape outside the contract as an error (fail
   closed), not a best-effort parse.
+
+## Simulator conformance (ADR-024)
+
+The dev-only simulator `crates/chv-netbox-sim` emulates **exactly the REST
+surface defined by this section** — the six endpoint families, their
+natural-key and custom-field query parameters, pagination semantics, and
+error-body shapes. Its rules:
+
+- Every simulator behavior must trace to this contract or to a golden
+  fixture under `crates/chv-netbox-sim/tests/fixtures/`; anything the client
+  does not use returns 404, as real NetBox would.
+- Golden fixtures are the captured wire truth. They carry a provenance
+  header and are **never hand-edited after a real capture**; they are
+  refreshed only by the qualification `--record` mode against a live NetBox
+  instance.
+- The mapping contract is the requirements document for the simulator: when
+  this contract changes, the simulator and its fixtures change in the same
+  PR; when real NetBox changes, the qualification tripwire catches the
+  divergence and the fixtures are re-recorded.
+- The simulator's `__`-prefixed control endpoints (`__seed`, `__state`,
+  `__reset`, `__faults`) are test-harness surface, not part of the NetBox
+  contract, and must never be referenced by production code.
