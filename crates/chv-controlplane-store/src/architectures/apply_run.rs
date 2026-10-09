@@ -149,7 +149,7 @@ impl ApplyRunRepository {
                     r#"
                     SELECT * FROM architecture_apply_runs
                     WHERE architecture_id = $1
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, id ASC
                     "#,
                 )
                 .bind(architecture_id.as_str())

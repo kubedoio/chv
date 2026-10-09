@@ -151,6 +151,10 @@ pub struct NetboxProjectionRun {
     pub requested_by: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Earliest time an auto-retried (requeued) run may be claimed
+    /// again; `None` for fresh runs and terminal states. Set by the
+    /// store's `requeue` to `now + backoff`.
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -271,6 +275,7 @@ mod tests {
             requested_by: Some("senol".to_string()),
             started_at: Some(sample_ts()),
             finished_at: Some(sample_ts()),
+            next_attempt_at: Some(sample_ts()),
             created_at: sample_ts(),
         };
 

@@ -17,6 +17,8 @@ control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 chv-common = { path = "../chv-common" }
 chv-config = { path = "../chv-config" }
 chv-observability = { path = "../chv-observability" }
+chv-architecture-validate = { path = "../chv-architecture-validate" }
+chv-netbox-adapter = { path = "../chv-netbox-adapter" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -51,6 +53,12 @@ tempfile = "3"
 chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
+chv-architecture-validate = { path = "../chv-architecture-validate" }
+# Enables the adapter's test-only plain-HTTP client constructor so the
+# wiremock suites can exercise the real request path. Never enabled by
+# the production dependency graph.
+chv-netbox-adapter = { path = "../chv-netbox-adapter", features = ["test-http"] }
+wiremock = "0.6"
 async-trait = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

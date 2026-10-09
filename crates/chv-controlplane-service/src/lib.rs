@@ -13,6 +13,7 @@ mod inventory;
 mod lifecycle;
 pub mod migration;
 mod migration_reaper;
+mod netbox_projection_worker;
 mod node_client;
 mod node_client_pool;
 mod orchestrator;
@@ -36,6 +37,7 @@ pub use fabric_planner::{CompiledFabricPlan, FabricPlanner};
 pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
 pub use migration_reaper::MigrationReaper;
+pub use netbox_projection_worker::NetboxProjectionWorker;
 pub use node_client::NodeClient;
 pub use node_client_pool::NodeClientPool;
 pub use orchestrator::Orchestrator;
@@ -55,3 +57,6 @@ mod tests;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod netbox_projection_worker_tests;
