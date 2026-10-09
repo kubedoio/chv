@@ -48,7 +48,11 @@
 			typedName = '';
 			confirmOpen = true;
 		} else {
-			void onExport();
+			// Swallow rejections: the store has captured the error code
+			// for the panel's inline banner and mutateWithRefresh has
+			// toasted it — an unhandled rejection here would only noise
+			// up the console.
+			void Promise.resolve(onExport()).catch(() => {});
 		}
 	}
 
@@ -65,8 +69,9 @@
 			close();
 		} catch {
 			// NETBOX_RUN_ACTIVE / PRODUCTION_REQUIRES_ADMIN / … — the
-			// store has toasted it; keep the dialog open so the operator
-			// sees the context and can retry without re-typing.
+			// store has toasted it and captured the code for the panel's
+			// inline banner; keep the dialog open so the operator sees
+			// the context and can retry without re-typing.
 		}
 	}
 </script>

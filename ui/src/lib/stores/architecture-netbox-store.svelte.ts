@@ -14,6 +14,7 @@ import {
 	type NetboxRunDetail,
 	type NetboxRunSummary
 } from '#lib/bff/architectures.ts';
+import { BFFError } from '#lib/bff/client.ts';
 import { mutateWithRefresh } from './mutation.svelte';
 
 /**
@@ -53,6 +54,28 @@ import { mutateWithRefresh } from './mutation.svelte';
 const REFRESH_PATTERNS = ['architectures:'];
 
 /**
+ * A BFF error's code+message pair, captured in store state so the panel
+ * can branch its inline banners on the contract's stable codes (the
+ * original error is still rethrown after `mutateWithRefresh` has
+ * toasted it — the banner is the persistent, code-specific surface).
+ */
+export interface NetboxActionError {
+	code: string;
+	message: string;
+}
+
+/** Normalize a caught error into a {@link NetboxActionError}. */
+function toActionError(err: unknown, fallback: string): NetboxActionError {
+	if (err instanceof BFFError) {
+		return { code: err.code, message: err.message };
+	}
+	if (err instanceof Error) {
+		return { code: 'UNKNOWN', message: err.message };
+	}
+	return { code: 'UNKNOWN', message: fallback };
+}
+
+/**
  * The form-side half of {@link NetboxConfigUpsertRequest} — everything
  * except `id` / `expected_version`, which the panel supplies from the
  * loaded architecture row.
@@ -65,10 +88,14 @@ interface NetboxState {
 	configError: string | null;
 	dryRunPlan: NetboxProjectionPlan | null;
 	dryRunLoading: boolean;
-	dryRunError: string | null;
+	dryRunError: NetboxActionError | null;
 	runs: NetboxRunSummary[];
 	runsLoading: boolean;
 	runsError: string | null;
+	/** Code+message of the last failed export attempt (banner source). */
+	exportError: NetboxActionError | null;
+	/** Code+message of the last failed retry attempt (banner source). */
+	retryError: NetboxActionError | null;
 	currentRun: NetboxRunDetail | null;
 	runLoading: boolean;
 	runError: string | null;
@@ -88,6 +115,8 @@ class ArchitectureNetboxStore {
 		runs: [],
 		runsLoading: false,
 		runsError: null,
+		exportError: null,
+		retryError: null,
 		currentRun: null,
 		runLoading: false,
 		runError: null,
@@ -116,7 +145,7 @@ class ArchitectureNetboxStore {
 		return this.state.dryRunLoading;
 	}
 
-	get dryRunError(): string | null {
+	get dryRunError(): NetboxActionError | null {
 		return this.state.dryRunError;
 	}
 
@@ -148,8 +177,16 @@ class ArchitectureNetboxStore {
 		return this.state.exporting;
 	}
 
+	get exportError(): NetboxActionError | null {
+		return this.state.exportError;
+	}
+
 	get retrying(): boolean {
 		return this.state.retrying;
+	}
+
+	get retryError(): NetboxActionError | null {
+		return this.state.retryError;
 	}
 
 	/**
@@ -246,8 +283,10 @@ class ArchitectureNetboxStore {
 	 * routed through `mutateWithRefresh`: the contract pins dry-run as
 	 * write-free, so there is no dashboard state to invalidate. Errors
 	 * (NETBOX_NOT_CONFIGURED / NETBOX_NOT_APPLIED / NETBOX_UNREACHABLE / …)
-	 * land in `dryRunError` for the panel to banner; the previous plan is
-	 * kept so the operator does not lose context.
+	 * land in `dryRunError` as a code+message pair so the panel can
+	 * branch its banner on the code (unreachable vs auth vs server
+	 * message); the previous plan is kept so the operator does not lose
+	 * context.
 	 */
 	async runDryRun(id: string): Promise<NetboxProjectionPlan | null> {
 		this.state.lastArchitectureId = id;
@@ -260,7 +299,7 @@ class ArchitectureNetboxStore {
 			return plan;
 		} catch (err) {
 			if (!this.isCurrent(id)) return null;
-			this.state.dryRunError = err instanceof Error ? err.message : 'NetBox dry-run failed';
+			this.state.dryRunError = toActionError(err, 'NetBox dry-run failed');
 			return null;
 		} finally {
 			if (this.isCurrent(id)) {
@@ -273,12 +312,17 @@ class ArchitectureNetboxStore {
 	 * Enqueue an export run. Rethrows the BFFError (409
 	 * `NETBOX_RUN_ACTIVE`, 403 `PRODUCTION_REQUIRES_ADMIN`, …) after
 	 * `mutateWithRefresh` has toasted it, so the panel can branch on the
-	 * code. On success the runs list is refreshed so the new queued run
-	 * is visible immediately.
+	 * code — the code+message pair is also captured in `state.exportError`
+	 * first (cleared at the start of every attempt and on success) so
+	 * the panel's inline banner survives beyond the toast. On success
+	 * the runs list is refreshed so the new queued run is visible
+	 * immediately — via {@link refreshRunsIfCurrent}, which never
+	 * re-pins the architecture id.
 	 */
 	async exportNow(id: string): Promise<void> {
 		this.state.lastArchitectureId = id;
 		this.state.exporting = true;
+		this.state.exportError = null;
 		try {
 			const token = getStoredToken() ?? undefined;
 			await mutateWithRefresh(
@@ -290,10 +334,43 @@ class ArchitectureNetboxStore {
 					errorMessage: 'Failed to queue NetBox export'
 				}
 			);
-			await this.loadRuns(id);
+			await this.refreshRunsIfCurrent(id);
+		} catch (err) {
+			if (this.isCurrent(id)) {
+				this.state.exportError = toActionError(err, 'Failed to queue NetBox export');
+			}
+			throw err;
 		} finally {
 			if (this.isCurrent(id)) {
 				this.state.exporting = false;
+			}
+		}
+	}
+
+	/**
+	 * Post-mutation runs refresh that deliberately does NOT re-pin
+	 * `lastArchitectureId`. Unlike {@link loadRuns} (a user-initiated
+	 * read of the architecture currently on screen), this refresh runs
+	 * right after a mutation that was started for `id` — if the
+	 * operator has since switched architectures, the fetch is skipped
+	 * and any in-flight result is dropped, so architecture A's runs can
+	 * never overwrite architecture B's panel state (the mutation-driven
+	 * twin of the late-fetch guard).
+	 */
+	private async refreshRunsIfCurrent(id: string): Promise<void> {
+		if (!this.isCurrent(id)) return;
+		this.state.runsLoading = true;
+		this.state.runsError = null;
+		try {
+			const runs = await listNetboxRuns(id, undefined, getStoredToken() ?? undefined);
+			if (!this.isCurrent(id)) return;
+			this.state.runs = runs;
+		} catch (err) {
+			if (!this.isCurrent(id)) return;
+			this.state.runsError = err instanceof Error ? err.message : 'Failed to load NetBox runs';
+		} finally {
+			if (this.isCurrent(id)) {
+				this.state.runsLoading = false;
 			}
 		}
 	}
@@ -342,13 +419,17 @@ class ArchitectureNetboxStore {
 
 	/**
 	 * Re-enqueue a failed run. On success the runs list is refreshed so
-	 * the row flips back to `queued`; a 409
-	 * `PROJECTION_RUN_NOT_RETRYABLE` propagates (after being toasted) so
-	 * the history can surface it inline.
+	 * the row flips back to `queued` (via {@link refreshRunsIfCurrent}
+	 * — no re-pin, same late-switch guard as `exportNow`). A 409
+	 * `PROJECTION_RUN_NOT_RETRYABLE` / `NETBOX_RUN_ACTIVE` propagates
+	 * (after being toasted) with its code+message captured in
+	 * `state.retryError` (cleared at the start of every attempt and on
+	 * success) so the history section can surface it inline.
 	 */
 	async retryRun(id: string, runId: string): Promise<void> {
 		this.state.lastArchitectureId = id;
 		this.state.retrying = true;
+		this.state.retryError = null;
 		try {
 			const token = getStoredToken() ?? undefined;
 			await mutateWithRefresh(
@@ -360,7 +441,12 @@ class ArchitectureNetboxStore {
 					errorMessage: 'Failed to retry NetBox run'
 				}
 			);
-			await this.loadRuns(id);
+			await this.refreshRunsIfCurrent(id);
+		} catch (err) {
+			if (this.isCurrent(id)) {
+				this.state.retryError = toActionError(err, 'Failed to retry NetBox run');
+			}
+			throw err;
 		} finally {
 			if (this.isCurrent(id)) {
 				this.state.retrying = false;
@@ -383,6 +469,8 @@ class ArchitectureNetboxStore {
 		this.state.runs = [];
 		this.state.runsLoading = false;
 		this.state.runsError = null;
+		this.state.exportError = null;
+		this.state.retryError = null;
 		this.state.currentRun = null;
 		this.state.runLoading = false;
 		this.state.runError = null;

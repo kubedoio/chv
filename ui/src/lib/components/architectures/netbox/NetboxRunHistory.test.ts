@@ -148,6 +148,44 @@ describe('NetboxRunHistory', () => {
 		expect(getByTestId('netbox-run-detail-raw').textContent).toContain('not-json-but-a-raw-column-string');
 	});
 
+	it('renders the executed plan summary chips when plan_json is the parsed plan shape', () => {
+		const plan = {
+			mapping_version: 'v1',
+			architecture_id: 'arch-1',
+			architecture_version: 3,
+			retention: 'mark_stale' as const,
+			summary: { create: 2, update: 1, no_op: 0, conflict: 1, stale: 0 },
+			entries: []
+		};
+
+		const { getByTestId, getAllByTestId } = renderHistory({
+			currentRun: { ...RUN_DETAIL, plan_json: plan }
+		});
+
+		const section = getByTestId('netbox-executed-plan');
+		expect(section.textContent).toContain('Executed plan');
+		const chips = getAllByTestId('netbox-executed-plan-chip');
+		expect(chips).toHaveLength(5);
+		const counts = Object.fromEntries(
+			chips.map((chip) => [
+				chip.getAttribute('data-netbox-action'),
+				chip.querySelector('.chip-count')?.textContent
+			])
+		);
+		expect(counts).toEqual({ create: '2', update: '1', no_op: '0', conflict: '1', stale: '0' });
+	});
+
+	it('skips the executed plan section when plan_json is a raw string or null', () => {
+		const raw = renderHistory({
+			currentRun: { ...RUN_DETAIL, plan_json: 'raw-plan-column-string' }
+		});
+		expect(raw.queryByTestId('netbox-executed-plan')).toBeNull();
+
+		// RUN_DETAIL carries plan_json: null.
+		const none = renderHistory({ currentRun: RUN_DETAIL });
+		expect(none.queryByTestId('netbox-executed-plan')).toBeNull();
+	});
+
 	it('renders the abort error with the failed resource ref', () => {
 		const { getByTestId } = renderHistory({
 			currentRun: {

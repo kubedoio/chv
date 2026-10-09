@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { NetboxPlanSummary, NetboxProjectionPlan } from '#lib/bff/architectures.ts';
-	import { NETBOX_ACTION_LABELS, NETBOX_KIND_LABELS } from './types.ts';
+	import type { NetboxProjectionPlan } from '#lib/bff/architectures.ts';
+	import { NETBOX_ACTION_LABELS, NETBOX_KIND_LABELS, NETBOX_PLAN_SUMMARY_CHIPS } from './types.ts';
 
 	/**
 	 * Deterministic render of the dry-run projection plan.
@@ -10,11 +10,13 @@
 	 * of the same state paint identically (the contract's determinism
 	 * requirement, made visible).
 	 *
-	 * Conflict rows carry the ownership cue: per the mapping contract no
-	 * request is ever sent that would modify an object whose
-	 * `chv_managed_by` is not `chv` — a conflict means CHV does not own
-	 * the object (foreign owner or occupied natural key) and it is never
-	 * written.
+	 * Conflict rows carry the non-write cue: per the mapping contract a
+	 * conflicting entry is never written (CHV never modifies objects it
+	 * does not own) and the export proceeds with the remaining entries.
+	 * The specific cause — foreign owner, occupied natural key, foreign
+	 * mapping version, charset conflict, … — varies per entry and is
+	 * carried by the entry's `reason`, which is why the cue points at
+	 * it instead of claiming one cause for all rows.
 	 */
 
 	interface Props {
@@ -22,17 +24,6 @@
 	}
 
 	let { plan }: Props = $props();
-
-	// Chip strip over the summary counts, in the contract's fixed order.
-	// Zero counts render dimmed rather than disappearing so the strip is
-	// a stable five-slot readout (mirrors DriftSummaryChips).
-	const CHIPS: ReadonlyArray<{ key: keyof NetboxPlanSummary; label: string }> = [
-		{ key: 'create', label: 'Creates' },
-		{ key: 'update', label: 'Updates' },
-		{ key: 'no_op', label: 'Unchanged' },
-		{ key: 'conflict', label: 'Conflicts' },
-		{ key: 'stale', label: 'Stale' }
-	];
 
 	function naturalKeyText(entry: NetboxProjectionPlan['entries'][number]): string {
 		// BTreeMap-ordered on the server; Object.entries preserves
@@ -47,7 +38,7 @@
 
 <div class="table" data-testid="netbox-dry-run-table">
 	<div class="chips" aria-label="Dry-run summary by action">
-		{#each CHIPS as chip (chip.key)}
+		{#each NETBOX_PLAN_SUMMARY_CHIPS as chip (chip.key)}
 			<span
 				class="chip"
 				class:chip-zero={plan.summary[chip.key] === 0}
@@ -73,10 +64,11 @@
 			role="alert"
 			data-testid="netbox-conflict-banner"
 		>
-			<strong>{plan.summary.conflict} object{plan.summary.conflict === 1 ? '' : 's'} CHV does not own.</strong>
+			<strong>{plan.summary.conflict} conflicting object{plan.summary.conflict === 1 ? '' : 's'}.</strong>
 			<span>
-				Conflicting objects exist in NetBox but carry no CHV ownership marker — they are never
-				written, and the export proceeds with the remaining entries.
+				Conflicting entries are never written — the export proceeds with the remaining entries.
+				CHV never modifies objects it does not own; each entry's reason below explains the
+				specific conflict.
 			</span>
 		</div>
 	{/if}
@@ -117,7 +109,8 @@
 					<div class="entry-reason" data-testid="netbox-entry-reason">{entry.reason}</div>
 					{#if entry.action === 'conflict'}
 						<div class="ownership-cue" data-testid="netbox-conflict-cue">
-							CHV does not own this object — it will not be written.
+							Conflict — not written. CHV never modifies objects it does not own; see the
+							reason above for the specific cause.
 						</div>
 					{/if}
 					{#if entry.changes.length > 0}

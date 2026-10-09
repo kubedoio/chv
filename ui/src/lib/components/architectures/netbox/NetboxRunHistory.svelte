@@ -8,9 +8,10 @@
 	 * mode, summary counts, error, timestamps). Selecting a row renders
 	 * the full run view (per-entry outcomes) via NetboxRunDetail. Failed
 	 * rows expose a retry button; the 409
-	 * `PROJECTION_RUN_NOT_RETRYABLE` refusal is surfaced by the parent
-	 * panel via the shared error banner (the store rethrows it after
-	 * toasting).
+	 * `PROJECTION_RUN_NOT_RETRYABLE` / `NETBOX_RUN_ACTIVE` refusals are
+	 * surfaced by the parent panel's inline retry banner (the store
+	 * rethrows them after toasting, capturing code+message in
+	 * `retryError`).
 	 */
 
 	interface Props {

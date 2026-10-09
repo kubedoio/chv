@@ -250,7 +250,7 @@ describe('architectureNetboxStore', () => {
 			expect(architectureNetboxStore.dryRunError).toBeNull();
 		});
 
-		it('keeps the previous plan and surfaces the message on failure', async () => {
+		it('keeps the previous plan and surfaces the code+message on failure', async () => {
 			architectureNetboxStore.state.dryRunPlan = PLAN;
 			vi.mocked(netboxDryRun).mockRejectedValue(
 				new BFFError('Architecture has no succeeded apply run', 400, 'NETBOX_NOT_APPLIED')
@@ -259,7 +259,12 @@ describe('architectureNetboxStore', () => {
 			const result = await architectureNetboxStore.runDryRun('arch-1');
 
 			expect(result).toBeNull();
-			expect(architectureNetboxStore.dryRunError).toContain('no succeeded apply run');
+			// Code + message pair so the panel can branch its banner on
+			// the contract's stable code.
+			expect(architectureNetboxStore.dryRunError).toEqual({
+				code: 'NETBOX_NOT_APPLIED',
+				message: 'Architecture has no succeeded apply run'
+			});
 			expect(architectureNetboxStore.dryRunPlan).toEqual(PLAN);
 			expect(architectureNetboxStore.dryRunLoading).toBe(false);
 		});
@@ -282,13 +287,61 @@ describe('architectureNetboxStore', () => {
 			expect(architectureNetboxStore.exporting).toBe(false);
 		});
 
-		it('rethrows the BFFError (NETBOX_RUN_ACTIVE) after toasting and clears exporting', async () => {
+		it('captures the BFFError code+message in exportError before rethrowing (NETBOX_RUN_ACTIVE)', async () => {
 			vi.mocked(exportNetbox).mockRejectedValue(
 				new BFFError('A projection run is already queued or running', 409, 'NETBOX_RUN_ACTIVE')
 			);
 
 			await expect(architectureNetboxStore.exportNow('arch-1')).rejects.toBeInstanceOf(BFFError);
+
+			expect(architectureNetboxStore.exportError).toEqual({
+				code: 'NETBOX_RUN_ACTIVE',
+				message: 'A projection run is already queued or running'
+			});
 			expect(architectureNetboxStore.exporting).toBe(false);
+		});
+
+		it('clears exportError at the start of each attempt and on success', async () => {
+			architectureNetboxStore.state.exportError = { code: 'NETBOX_RUN_ACTIVE', message: 'busy' };
+			vi.mocked(exportNetbox).mockResolvedValue({
+				run_id: 'netrun-2',
+				architecture_id: 'arch-1',
+				status: 'queued'
+			});
+			vi.mocked(listNetboxRuns).mockResolvedValue([RUN]);
+
+			await architectureNetboxStore.exportNow('arch-1');
+
+			expect(architectureNetboxStore.exportError).toBeNull();
+		});
+
+		it('drops the post-export runs refresh when the architecture switched mid-export (late-fetch guard)', async () => {
+			// The export mutation stays pending until the test resolves
+			// it, simulating the operator navigating away mid-await.
+			let resolveExport!: (value: { run_id: string; architecture_id: string; status: string }) => void;
+			vi.mocked(exportNetbox).mockImplementation(
+				() => new Promise((resolve) => (resolveExport = resolve))
+			);
+			const RUN_A: NetboxRunSummary = { ...RUN, id: 'netrun-a', architecture_id: 'arch-a' };
+			const RUN_B: NetboxRunSummary = { ...RUN, id: 'netrun-b', architecture_id: 'arch-b' };
+			vi.mocked(listNetboxRuns).mockImplementation(async (id: string) =>
+				id === 'arch-b' ? [RUN_B] : [RUN_A]
+			);
+
+			const pending = architectureNetboxStore.exportNow('arch-a');
+			// Switch to architecture B while arch A's export is in flight.
+			architectureNetboxStore.reset();
+			await architectureNetboxStore.loadRuns('arch-b');
+			expect(architectureNetboxStore.runs).toEqual([RUN_B]);
+
+			resolveExport({ run_id: 'netrun-a', architecture_id: 'arch-a', status: 'queued' });
+			await pending;
+
+			// Arch A's post-mutation refresh must not re-pin the id nor
+			// overwrite arch B's runs.
+			expect(architectureNetboxStore.state.lastArchitectureId).toBe('arch-b');
+			expect(architectureNetboxStore.runs).toEqual([RUN_B]);
+			expect(listNetboxRuns).not.toHaveBeenCalledWith('arch-a', undefined, 'test-token');
 		});
 	});
 
@@ -331,7 +384,7 @@ describe('architectureNetboxStore', () => {
 			expect(architectureNetboxStore.retrying).toBe(false);
 		});
 
-		it('rethrows PROJECTION_RUN_NOT_RETRYABLE so the history can surface it inline', async () => {
+		it('captures PROJECTION_RUN_NOT_RETRYABLE in retryError before rethrowing (409 → banner path)', async () => {
 			vi.mocked(retryNetboxRun).mockRejectedValue(
 				new BFFError('Run is not retryable', 409, 'PROJECTION_RUN_NOT_RETRYABLE')
 			);
@@ -339,7 +392,49 @@ describe('architectureNetboxStore', () => {
 			await expect(architectureNetboxStore.retryRun('arch-1', 'netrun-1')).rejects.toBeInstanceOf(
 				BFFError
 			);
+
+			expect(architectureNetboxStore.retryError).toEqual({
+				code: 'PROJECTION_RUN_NOT_RETRYABLE',
+				message: 'Run is not retryable'
+			});
 			expect(architectureNetboxStore.retrying).toBe(false);
+		});
+
+		it('clears retryError at the start of each attempt and on success', async () => {
+			architectureNetboxStore.state.retryError = {
+				code: 'PROJECTION_RUN_NOT_RETRYABLE',
+				message: 'not retryable'
+			};
+			vi.mocked(retryNetboxRun).mockResolvedValue({ run_id: 'netrun-1', status: 'queued' });
+			vi.mocked(listNetboxRuns).mockResolvedValue([{ ...RUN, status: 'queued' }]);
+
+			await architectureNetboxStore.retryRun('arch-1', 'netrun-1');
+
+			expect(architectureNetboxStore.retryError).toBeNull();
+		});
+
+		it('drops the post-retry runs refresh when the architecture switched mid-retry (late-fetch guard)', async () => {
+			let resolveRetry!: (value: { run_id: string; status: string }) => void;
+			vi.mocked(retryNetboxRun).mockImplementation(
+				() => new Promise((resolve) => (resolveRetry = resolve))
+			);
+			const RUN_A: NetboxRunSummary = { ...RUN, id: 'netrun-a', architecture_id: 'arch-a' };
+			const RUN_B: NetboxRunSummary = { ...RUN, id: 'netrun-b', architecture_id: 'arch-b' };
+			vi.mocked(listNetboxRuns).mockImplementation(async (id: string) =>
+				id === 'arch-b' ? [RUN_B] : [RUN_A]
+			);
+
+			const pending = architectureNetboxStore.retryRun('arch-a', 'netrun-a');
+			architectureNetboxStore.reset();
+			await architectureNetboxStore.loadRuns('arch-b');
+			expect(architectureNetboxStore.runs).toEqual([RUN_B]);
+
+			resolveRetry({ run_id: 'netrun-a', status: 'queued' });
+			await pending;
+
+			expect(architectureNetboxStore.state.lastArchitectureId).toBe('arch-b');
+			expect(architectureNetboxStore.runs).toEqual([RUN_B]);
+			expect(listNetboxRuns).not.toHaveBeenCalledWith('arch-a', undefined, 'test-token');
 		});
 	});
 
@@ -349,6 +444,11 @@ describe('architectureNetboxStore', () => {
 			vi.mocked(listNetboxRuns).mockResolvedValue([RUN]);
 			await architectureNetboxStore.loadConfig('arch-1');
 			await architectureNetboxStore.loadRuns('arch-1');
+			architectureNetboxStore.state.exportError = { code: 'NETBOX_RUN_ACTIVE', message: 'busy' };
+			architectureNetboxStore.state.retryError = {
+				code: 'PROJECTION_RUN_NOT_RETRYABLE',
+				message: 'nope'
+			};
 
 			architectureNetboxStore.reset();
 
@@ -357,6 +457,8 @@ describe('architectureNetboxStore', () => {
 			expect(architectureNetboxStore.currentRun).toBeNull();
 			expect(architectureNetboxStore.configLoading).toBe(false);
 			expect(architectureNetboxStore.runsLoading).toBe(false);
+			expect(architectureNetboxStore.exportError).toBeNull();
+			expect(architectureNetboxStore.retryError).toBeNull();
 		});
 	});
 });

@@ -4,6 +4,8 @@
 	import NetboxDryRunTable from './NetboxDryRunTable.svelte';
 	import NetboxRunHistory from './NetboxRunHistory.svelte';
 	import NetboxExportButton from './NetboxExportButton.svelte';
+	import NetboxErrorBanner from './NetboxErrorBanner.svelte';
+	import { netboxDryRunErrorText, netboxExportErrorText, netboxRetryErrorText } from './types.ts';
 	import {
 		architectureNetboxStore,
 		type NetboxConfigDraft
@@ -61,7 +63,9 @@
 	const currentRun = $derived(architectureNetboxStore.currentRun);
 	const runLoading = $derived(architectureNetboxStore.runLoading);
 	const exporting = $derived(architectureNetboxStore.exporting);
+	const exportError = $derived(architectureNetboxStore.exportError);
 	const retrying = $derived(architectureNetboxStore.retrying);
+	const retryError = $derived(architectureNetboxStore.retryError);
 
 	// The store exposes no config-saving flag (its mutation path is
 	// fire-and-forget for the flags); the panel owns the button state.
@@ -113,8 +117,10 @@
 		try {
 			await architectureNetboxStore.retryRun(architecture.id, runId);
 		} catch {
-			// PROJECTION_RUN_NOT_RETRYABLE (or transport) — toasted by
-			// mutateWithRefresh; the history keeps the failed row.
+			// PROJECTION_RUN_NOT_RETRYABLE / NETBOX_RUN_ACTIVE (or
+			// transport) — toasted by mutateWithRefresh and surfaced
+			// inline by the retry banner below; the history keeps the
+			// failed row.
 		}
 	}
 </script>
@@ -139,16 +145,26 @@
 		</div>
 	</header>
 
+	{#if exportError}
+		<NetboxErrorBanner
+			heading="Export failed."
+			message={netboxExportErrorText(exportError)}
+			testId="netbox-export-error"
+			code={exportError.code}
+		/>
+	{/if}
+
 	<section class="section" aria-labelledby="netbox-config-heading">
 		<h3 id="netbox-config-heading" class="section-title">Configuration</h3>
 		{#if configLoading && !config}
 			<div class="hint" role="status" data-testid="netbox-config-loading">Loading NetBox config…</div>
 		{:else}
 			{#if configError}
-				<div class="banner banner-error" role="alert" data-testid="netbox-config-error-banner">
-					<strong>Could not load NetBox config.</strong>
-					<span>{configError}</span>
-				</div>
+				<NetboxErrorBanner
+					heading="Could not load NetBox config."
+					message={configError}
+					testId="netbox-config-error-banner"
+				/>
 			{/if}
 			<NetboxConfigForm
 				architectureId={architecture.id}
@@ -182,10 +198,12 @@
 				Save a NetBox config above before running a dry-run.
 			</p>
 		{:else if dryRunError}
-			<div class="banner banner-error" role="alert" data-testid="netbox-dry-run-error-banner">
-				<strong>Dry-run failed.</strong>
-				<span>{dryRunError}</span>
-			</div>
+			<NetboxErrorBanner
+				heading="Dry-run failed."
+				message={netboxDryRunErrorText(dryRunError)}
+				testId="netbox-dry-run-error-banner"
+				code={dryRunError.code}
+			/>
 		{:else if dryRunPlan}
 			<NetboxDryRunTable plan={dryRunPlan} />
 		{:else}
@@ -199,10 +217,19 @@
 	<section class="section" aria-labelledby="netbox-runs-heading">
 		<h3 id="netbox-runs-heading" class="section-title">Run history</h3>
 		{#if runsError}
-			<div class="banner banner-error" role="alert" data-testid="netbox-runs-error-banner">
-				<strong>Could not load run history.</strong>
-				<span>{runsError}</span>
-			</div>
+			<NetboxErrorBanner
+				heading="Could not load run history."
+				message={runsError}
+				testId="netbox-runs-error-banner"
+			/>
+		{/if}
+		{#if retryError}
+			<NetboxErrorBanner
+				heading="Retry failed."
+				message={netboxRetryErrorText(retryError)}
+				testId="netbox-retry-error"
+				code={retryError.code}
+			/>
 		{/if}
 		<NetboxRunHistory
 			{runs}
@@ -265,17 +292,4 @@
 		color: var(--color-neutral-700);
 	}
 	.hint { margin: 0; font-size: 12px; color: var(--color-neutral-500); }
-	.banner {
-		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
-		padding: 0.6rem 0.85rem;
-		border-radius: var(--radius-xs);
-		font-size: var(--text-sm);
-	}
-	.banner-error {
-		background: rgba(220, 38, 38, 0.08);
-		border: 1px solid rgba(220, 38, 38, 0.4);
-		color: rgb(153, 27, 27);
-	}
 </style>

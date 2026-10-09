@@ -436,6 +436,7 @@
 			<button
 				type="button"
 				role="tab"
+				id="tab-netbox"
 				aria-selected={activeTab === 'netbox'}
 				aria-controls="tab-panel-netbox"
 				class="tab"

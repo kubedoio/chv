@@ -132,4 +132,54 @@ describe('NetboxConfigForm', () => {
 		const help = document.getElementById('netbox-retention-help');
 		expect(help?.textContent).toContain('requires an Admin');
 	});
+
+	it('shows the loaded custom_field_prefix as read-only API-managed state (kept on save)', async () => {
+		const { getByTestId, onSave } = renderForm({ config: CONFIG });
+
+		const prefix = getByTestId('netbox-custom-field-prefix');
+		expect(prefix.textContent).toContain('chv_');
+		expect(prefix.textContent).toContain('managed via the API');
+
+		// The form's drafts never carry the prefix — an omitted field is
+		// the "keep" semantics on the wire.
+		await submitForm(getByTestId);
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect('custom_field_prefix' in onSave.mock.calls[0][0]).toBe(false);
+	});
+
+	it('hides the custom field prefix line when no config exists yet', () => {
+		const { queryByTestId } = renderForm();
+		expect(queryByTestId('netbox-custom-field-prefix')).toBeNull();
+	});
+
+	it('keeps the draft fields populated (token excepted) when onSave rejects — the conflict UX contract', async () => {
+		// e.g. a StaleVersionError from a 409 PLAN_EXPIRED conflict: the
+		// form must not eat the operator's typing.
+		const onSave = vi.fn().mockRejectedValue(new Error('stale version'));
+		const { getByTestId } = renderForm({ config: CONFIG, onSave });
+
+		await fireEvent.input(getByTestId('netbox-endpoint-input'), {
+			target: { value: 'https://netbox-2.example.internal' }
+		});
+		await fireEvent.input(getByTestId('netbox-token-input'), {
+			target: { value: 'PAbCd123' }
+		});
+		await fireEvent.input(getByTestId('netbox-site-input'), { target: { value: 'dc2' } });
+		await fireEvent.change(getByTestId('netbox-retention-input'), { target: { value: 'delete' } });
+		await fireEvent.input(getByTestId('netbox-secret-ref-input'), {
+			target: { value: 'netbox-arch-2' }
+		});
+		await submitForm(getByTestId);
+
+		expect(onSave).toHaveBeenCalledTimes(1);
+		// Drafts survive the rejection…
+		expect((getByTestId('netbox-endpoint-input') as HTMLInputElement).value).toBe(
+			'https://netbox-2.example.internal'
+		);
+		expect((getByTestId('netbox-secret-ref-input') as HTMLInputElement).value).toBe('netbox-arch-2');
+		expect((getByTestId('netbox-retention-input') as HTMLSelectElement).value).toBe('delete');
+		expect((getByTestId('netbox-site-input') as HTMLInputElement).value).toBe('dc2');
+		// …except the write-once token, which was cleared on dispatch.
+		expect((getByTestId('netbox-token-input') as HTMLInputElement).value).toBe('');
+	});
 });

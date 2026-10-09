@@ -31,7 +31,7 @@ function makePlan(overrides: Partial<NetboxProjectionPlan> = {}): NetboxProjecti
 describe('NetboxDryRunTable', () => {
 	afterEach(() => cleanup());
 
-	it('renders the conflict cue on a conflict entry (the mapping contract: CHV does not own the object, never written)', () => {
+	it('renders the conflict cue on a conflict entry (the mapping contract: never written, CHV modifies only what it owns)', () => {
 		const plan = makePlan({
 			summary: { create: 0, update: 0, no_op: 0, conflict: 1, stale: 0 },
 			entries: [
@@ -47,8 +47,14 @@ describe('NetboxDryRunTable', () => {
 		const { getByTestId, queryAllByTestId } = render(NetboxDryRunTable, { props: { plan } });
 
 		const cue = getByTestId('netbox-conflict-cue');
-		expect(cue.textContent?.toLowerCase()).toContain('chv does not own this object');
-		expect(cue.textContent?.toLowerCase()).toContain('not be written');
+		// Contract-accurate cue: unconditional non-write guarantee, no
+		// blanket ownership-marker claim (conflicts also arise on
+		// CHV-owned objects — foreign mapping version, charset, …), and
+		// the reason field is the authoritative per-entry explanation.
+		expect(cue.textContent?.toLowerCase()).toContain('conflict');
+		expect(cue.textContent?.toLowerCase()).toContain('not written');
+		expect(cue.textContent?.toLowerCase()).toContain('chv never modifies objects it does not own');
+		expect(cue.textContent?.toLowerCase()).toContain('reason');
 		// Exactly one cue, on the one conflict row.
 		expect(queryAllByTestId('netbox-conflict-cue')).toHaveLength(1);
 	});
@@ -86,7 +92,11 @@ describe('NetboxDryRunTable', () => {
 
 		const banner = getByTestId('netbox-conflict-banner');
 		expect(banner.getAttribute('role')).toBe('alert');
-		expect(banner.textContent).toContain('2 objects CHV does not own');
+		expect(banner.textContent).toContain('2 conflicting objects');
+		// The non-write guarantee is unconditional; the cause lives in
+		// the per-entry reasons, not a blanket ownership-marker claim.
+		expect(banner.textContent).toContain('never written');
+		expect(banner.textContent).toContain('export proceeds with the remaining entries');
 	});
 
 	it('maps action badges to human labels and keeps the server order deterministic', () => {

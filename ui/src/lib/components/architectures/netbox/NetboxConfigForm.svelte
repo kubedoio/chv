@@ -11,11 +11,10 @@
 	 * a StaleVersionError conflict leaves the operator's typing intact
 	 * (same contract ArchitectureMetaPanel documents).
 	 *
-	 * Token write-only semantics: the token field is type=password and
-	 * starts empty on every load. An empty field means "keep the existing
-	 * secret" — the token key is OMITTED from the submitted draft, and the
-	 * draft value is cleared immediately after dispatch (never rendered,
-	 * logged, or persisted).
+	 * Token write-only semantics: the token field is type=password,
+	 * starts empty on every load, and an empty field means "keep the
+	 * existing secret" — the token key is OMITTED from the submitted
+	 * draft, and the value is cleared immediately after dispatch.
 	 */
 
 	interface Props {
@@ -45,10 +44,7 @@
 	let draftPostApply = $state(false);
 	let draftSiteName = $state('');
 	// `draftsDirty` flips true on first input and stays true until a
-	// successful save, so a fresh server config (initial load finishing,
-	// Reload after a stale-version conflict) does not silently overwrite
-	// in-flight typing. The token is deliberately NEVER seeded — the
-	// field is write-only.
+	// successful save, so a fresh config never overwrites in-flight typing.
 	let draftsDirty = $state(false);
 	let seededId = $state<string | null>(null);
 
@@ -126,13 +122,9 @@
 	<div class="form-heading">
 		<h3 class="form-title">NetBox connection</h3>
 		{#if config}
-			<span class="form-hint" data-testid="netbox-config-updated">
-				Updated {new Date(config.updated_at).toLocaleString()}
-			</span>
+			<span class="form-hint" data-testid="netbox-config-updated">Updated {new Date(config.updated_at).toLocaleString()}</span>
 		{:else}
-			<span class="form-hint" data-testid="netbox-config-absent">
-				No projection config yet — saving creates one.
-			</span>
+			<span class="form-hint" data-testid="netbox-config-absent">No projection config yet — saving creates one.</span>
 		{/if}
 	</div>
 
@@ -215,9 +207,7 @@
 		/>
 		<span class="field-label">Export after every successful apply</span>
 	</label>
-	<span id="netbox-post-apply-help" class="field-help">
-		Enqueues a projection run whenever an apply run succeeds (best-effort — a NetBox outage never changes the apply result).
-	</span>
+	<span id="netbox-post-apply-help" class="field-help">Enqueues a projection run after every successful apply (best-effort — a NetBox outage never changes the apply result).</span>
 
 	<label class="field">
 		<span class="field-label">NetBox site (optional)</span>
@@ -232,6 +222,13 @@
 		/>
 		<span class="field-help">Site label assigned to projected devices; defaults to the environment label.</span>
 	</label>
+
+	{#if config}
+		<p class="field-help" data-testid="netbox-custom-field-prefix" title="Managed via the API — this form always omits the field; an omitted field keeps the stored prefix.">
+			Custom field prefix <code>{config.custom_field_prefix}</code> — managed via the API; this
+			form's saves keep the stored prefix.
+		</p>
+	{/if}
 
 	<div class="form-actions">
 		<Button

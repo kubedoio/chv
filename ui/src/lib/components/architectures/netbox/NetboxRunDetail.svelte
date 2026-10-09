@@ -1,13 +1,20 @@
 <script lang="ts">
 	import type { NetboxRunDetail } from '#lib/bff/architectures.ts';
-	import { NETBOX_ACTION_LABELS, viewNetboxRunResult } from './types.ts';
+	import {
+		NETBOX_ACTION_LABELS,
+		NETBOX_PLAN_SUMMARY_CHIPS,
+		viewNetboxPlanSummary,
+		viewNetboxRunResult
+	} from './types.ts';
 
 	/**
 	 * Full view of one selected projection run: the run facts, the abort
-	 * error when one occurred, and the per-entry outcomes from
-	 * `result_json` (parsed payload, or the raw column string for rows
-	 * outside the adapter's outcome contract). Extracted from
-	 * NetboxRunHistory to keep both under the 300-line component cap.
+	 * error when one occurred, the executed plan's summary counts (from
+	 * `plan_json`, when the column holds the parsed plan shape), and the
+	 * per-entry outcomes from `result_json` (parsed payload, or the raw
+	 * column string for rows outside the adapter's outcome contract).
+	 * Extracted from NetboxRunHistory to keep both under the 300-line
+	 * component cap.
 	 */
 
 	interface Props {
@@ -35,6 +42,9 @@
 	}
 
 	const resultView = $derived(viewNetboxRunResult(run.result_json));
+	// Null when plan_json is a raw string / null / unexpected shape —
+	// the executed-plan row is skipped entirely in that case.
+	const planSummary = $derived(viewNetboxPlanSummary(run.plan_json));
 </script>
 
 <section class="detail" aria-label={`NetBox run ${run.id} details`} data-testid="netbox-run-detail">
@@ -63,6 +73,25 @@
 	{#if run.error_message}
 		<div class="detail-error" role="alert" data-testid="netbox-run-detail-error">
 			{run.error_message}
+		</div>
+	{/if}
+
+	{#if planSummary}
+		<div class="plan-summary" data-testid="netbox-executed-plan">
+			<span class="plan-summary-label">Executed plan</span>
+			<div class="plan-chips" aria-label="Executed plan summary by action">
+				{#each NETBOX_PLAN_SUMMARY_CHIPS as chip (chip.key)}
+					<span
+						class="plan-chip"
+						class:plan-chip-zero={planSummary[chip.key] === 0}
+						data-testid="netbox-executed-plan-chip"
+						data-netbox-action={chip.key}
+					>
+						<span class="chip-label">{chip.label}</span>
+						<span class="chip-count">{planSummary[chip.key]}</span>
+					</span>
+				{/each}
+			</div>
 		</div>
 	{/if}
 
@@ -134,6 +163,29 @@
 		font-size: 12px;
 	}
 	.hint { margin: 0; font-size: 12px; color: var(--color-neutral-500); }
+	.plan-summary { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+	.plan-summary-label {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--color-neutral-500);
+	}
+	.plan-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+	.plan-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		padding: 0.1rem 0.45rem;
+		font-size: 11px;
+		font-weight: 600;
+		border-radius: var(--radius-xs);
+		background: var(--bg-surface);
+		border: 1px solid var(--color-neutral-200);
+		color: var(--color-neutral-600);
+	}
+	.plan-chip-zero { opacity: 0.7; }
+	.chip-count { font-variant-numeric: tabular-nums; font-weight: 700; }
 	.raw {
 		margin: 0;
 		padding: 0.5rem 0.75rem;
