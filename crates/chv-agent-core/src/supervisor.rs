@@ -332,10 +332,54 @@ async fn start_daemon(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     info!(bin = %bin.display(), config = %config_path.display(), "starting {}", name);
-    let c = cmd.spawn().map_err(|e| ChvError::Io {
-        path: bin.to_string_lossy().to_string(),
-        source: e,
-    })?;
+    // #573: execve returns ETXTBSY when the executable is open for
+    // writing — observed as a flake when the test fake-daemon script's
+    // publish raced the exec, and the same window exists in production
+    // (a package manager mid-write on a daemon binary while the
+    // supervisor respawns it). The writer's window is milliseconds;
+    // retry briefly (5 attempts with <=50 ms backoff between them —
+    // <=200 ms of backoff, plus the spawn syscalls) rather than
+    // surfacing a transient as a failed daemon start (same posture
+    // as systemd tolerating a mid-upgrade respawn). A
+    // permanently-broken binary never yields ETXTBSY (that is
+    // ENOENT/EACCES/ENOEXEC territory), so the retry cannot mask a
+    // real failure.
+    let mut c = None;
+    for attempt in 0..5 {
+        match cmd.spawn() {
+            Ok(child) => {
+                c = Some(child);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 4 => {
+                warn!(
+                    bin = %bin.display(),
+                    attempt = attempt + 1,
+                    "executable busy (mid-replace?); retrying daemon spawn"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy {
+                    // The retry budget is exhausted — surface the error,
+                    // but leave an explicit trace that this was a
+                    // persistent mid-replace, not a first-attempt
+                    // failure (the per-attempt warns above only cover
+                    // the first four).
+                    warn!(
+                        bin = %bin.display(),
+                        attempt = 5,
+                        "executable still busy after retry budget; reporting spawn failure"
+                    );
+                }
+                return Err(ChvError::Io {
+                    path: bin.to_string_lossy().to_string(),
+                    source: e,
+                });
+            }
+        }
+    }
+    let c = c.expect("spawn succeeded or returned Err above");
     *child = Some(c);
     *last_restart = Some(Instant::now());
     Ok(())
@@ -420,10 +464,22 @@ mod tests {
 
     async fn fake_daemon_script(path: &std::path::Path, behaviour: &str) {
         let script = format!("#!/bin/sh\n{}\n", behaviour);
-        tokio::fs::write(path, script).await.unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        // #573: write via a sibling temp file + rename, never
+        // open(O_TRUNC) on the target. Executing a #! script keeps a
+        // deny-write hold on its inode for the interpreter's lifetime,
+        // so rewriting a path whose daemon is still running returns
+        // ETXTBSY — observed as a full-suite-only flake. Rename never
+        // opens the live inode: a running interpreter keeps executing
+        // the old content, and the next exec sees the new one. (The
+        // staging name is deterministic per path; uniqueness rests on
+        // the per-test tempdir and each path being written once —
+        // both hold at every call site.)
+        let staging = path.with_extension("staging");
+        tokio::fs::write(&staging, script).await.unwrap();
+        let mut perms = std::fs::metadata(&staging).unwrap().permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
+        std::fs::set_permissions(&staging, perms).unwrap();
+        tokio::fs::rename(&staging, path).await.unwrap();
     }
 
     /// Per-test directory for fake daemon scripts and the supervisor runtime
@@ -487,6 +543,64 @@ mod tests {
         let (s, n) = supervisor.health_check().await;
         assert!(s);
         assert!(n);
+        supervisor.shutdown().await;
+    }
+
+    // #573: the ETXTBSY spawn retry in start_daemon is production
+    // behavior (a package manager mid-write on a daemon binary during
+    // a respawn) — pin it deterministically: hold the script open for
+    // writing inside the retry window so the first spawn attempt hits
+    // ETXTBSY (execve of a write-held file), release, and a later
+    // attempt must succeed with the retry warn recorded.
+    #[tokio::test]
+    async fn supervisor_start_retries_spawn_through_executable_file_busy() {
+        let dir = fake_daemon_dir();
+        fake_daemon_script(&dir.stord_bin, "sleep 10").await;
+        let logs = warn_capture::WarnCollector::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let mut supervisor = DaemonSupervisor::new(
+            dir.stord_bin.clone(),
+            dir.nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            dir.runtime_dir.clone(),
+            vec![],
+            None,
+            None,
+        );
+        // Hold the script open for writing (no truncate) for ~90 ms —
+        // past the first two spawn attempts, well inside the 5-attempt
+        // / <=200 ms retry window (attempt 5 fires at ~200 ms, so the
+        // release always lands ~110 ms before exhaustion). The
+        // releaser task runs on the same current-thread runtime and
+        // is polled during the retry's 50 ms sleeps. The 90 ms hold
+        // also cushions the warn assert's only false-red window: if
+        // the pre-first-attempt work (config write + spawn) ever
+        // exceeded the hold, attempt 1 would succeed without ETXTBSY
+        // and the test would fail loudly — never green a broken retry.
+        let hold = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&dir.stord_bin)
+            .unwrap();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            drop(hold);
+        });
+        supervisor
+            .start_stord()
+            .await
+            .expect("spawn must retry through ETXTBSY and succeed once the writer releases");
+        releaser.await.unwrap();
+        // The retry actually happened — the test is not vacuously
+        // passing: attempt 1 hit ETXTBSY and warned before the release.
+        assert!(
+            logs.warnings()
+                .iter()
+                .any(|w| w.message().contains("executable busy")),
+            "the first spawn attempt must have hit ETXTBSY and warned"
+        );
+        let (stord_ok, _) = supervisor.health_check().await;
+        assert!(stord_ok);
         supervisor.shutdown().await;
     }
 
@@ -767,7 +881,15 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(contents) = std::fs::read_to_string(marker) {
-                return contents.trim().to_string();
+                // #573: the daemon records its argv with a shell
+                // redirect (`echo "$1" > marker`), which creates and
+                // truncates the file BEFORE writing — an empty read is
+                // "not ready yet", not "recorded an empty argv".
+                // Returning it raced the write under load and failed
+                // the caller's assert with left: "".
+                if !contents.trim().is_empty() {
+                    return contents.trim().to_string();
+                }
             }
             assert!(
                 Instant::now() < deadline,
@@ -1085,11 +1207,22 @@ mod tests {
             "a startup-failure crash-loop must never write a generated stord config"
         );
         // ...and the health check still functions across the retries.
-        let (stord_ok, nwd_ok) = supervisor.health_check().await;
-        assert!(
-            !stord_ok,
-            "the crashed pass-through stord must stay unhealthy"
-        );
+        // #573: poll rather than assert once — the last retry exec'd
+        // the crash script microseconds earlier, and under load the
+        // fork/exec/exit cycle is slow enough that a one-shot
+        // try_wait can observe it momentarily alive ("healthy").
+        let unhealthy_deadline = Instant::now() + Duration::from_secs(10);
+        let nwd_ok = loop {
+            let (stord_ok, healthy_nwd) = supervisor.health_check().await;
+            if !stord_ok {
+                break healthy_nwd;
+            }
+            assert!(
+                Instant::now() < unhealthy_deadline,
+                "the crashed pass-through stord must stay unhealthy"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert!(nwd_ok, "nwd must be unaffected by the stord crash-loop");
         // No fallback warn fired: the config validates on every retry —
         // the fallback is validation-scoped, and a startup failure
@@ -1486,8 +1619,24 @@ mod tests {
             "a startup-failure crash-loop must never write a generated nwd config"
         );
         // ...and the health check still functions across the retries.
-        let (stord_ok, nwd_ok) = supervisor.health_check().await;
-        assert!(!nwd_ok, "the crashed pass-through nwd must stay unhealthy");
+        // #573: poll rather than assert once — the last retry exec'd
+        // the crash script microseconds earlier, and under load the
+        // fork/exec/exit cycle is slow enough that a one-shot try_wait
+        // can observe it momentarily alive ("healthy"). (stord here is
+        // a plain sleeper, checked once as before.)
+        let (stord_ok, _) = supervisor.health_check().await;
+        let unhealthy_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, nwd_ok) = supervisor.health_check().await;
+            if !nwd_ok {
+                break;
+            }
+            assert!(
+                Instant::now() < unhealthy_deadline,
+                "the crashed pass-through nwd must stay unhealthy"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(stord_ok, "stord must be unaffected by the nwd crash-loop");
         // No fallback warn fired: the config validates on every retry —
         // the fallback is validation-scoped, and a startup failure
