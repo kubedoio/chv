@@ -36,7 +36,7 @@ not_enrolled -> claim_issued -> enrolled -> active
                                                 +-> revoked
 ```
 
-An enrollment claim is single-use and expires after at most 10 minutes by default. Credentials rotate independently of VM lifecycles. The server deduplicates batches by `(agent_id, boot_id, sequence)` and checks authenticated identity. Registry metadata may use the main control-plane database; time-series samples must not. The [security contract](../contracts/chv-monitor-agent-security-plugins-v1.md) defines the single wire/API state vocabulary: this diagram's `stale` is `offline` on the wire, `enrolled` is observed as `enrolling` → `active` on the first accepted batch, and implementations must use the wire vocabulary in APIs.
+An enrollment claim is single-use and expires after at most 10 minutes by default. Credentials rotate independently of VM lifecycles. The server deduplicates batches by `(agent_id, boot_id, sequence)` and checks authenticated identity (for node batches the first element is the authenticated node identity). Registry metadata may use the main control-plane database; time-series samples must not. The [security contract](../contracts/chv-monitor-agent-security-plugins-v1.md) defines the single wire/API state vocabulary: this diagram's `stale` is `offline` on the wire, `enrolled` is observed as `enrolling` → `active` on the first accepted batch, and implementations must use the wire vocabulary in APIs.
 
 ## Transport policy
 

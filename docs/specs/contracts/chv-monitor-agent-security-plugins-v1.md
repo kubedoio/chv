@@ -11,8 +11,8 @@
 
 1. An authorized project operator requests a claim for exactly one existing VM identity. The manager stores a hashed one-time claim and an expiry no longer than 10 minutes.
 2. The operator transfers the claim to that VM by an explicit user-approved path. Avoid shell arguments, cleartext terminal logs, shared image snapshots, and cloud-init outputs with world-readable secrets.
-3. The guest agent validates the manager TLS trust and submits a claim over HTTPS. Enrollment is rate limited.
-4. The manager atomically consumes the claim, binds `agent_id` to `project_id` + `target_kind=vm` + `target_id` + `credential_epoch`, and issues scoped credentials.
+3. The guest agent validates the manager TLS trust and submits a claim over HTTPS, presenting its per-install machine identity (`install_id`). Enrollment is rate limited.
+4. The manager atomically consumes the claim, binds `agent_id` to `project_id` + `target_kind=vm` + `target_id` + `credential_epoch` + the presented `install_id`, and issues scoped credentials.
 5. The agent writes credentials to restricted storage, erases its plaintext claim, and begins reporting.
 6. The manager checks revocation/expiry/tenant binding on each batch. Re-enrollment and replacement require an authorized operation and revoke the previous credential according to policy.
 

@@ -73,7 +73,7 @@ inactive -> pending -> firing -> resolved -> inactive
                            +-> silenced (notification overlay only)
 ```
 
-Acknowledged/silenced do not mean cleared. Persist incidents and transitions. Evaluator restarts restore state and avoid duplicate notifications. Every event includes reason, measured value, evidence window and link to scoped resource detail.
+Acknowledged/silenced do not mean cleared. `inactive` is the resting no-incident state, not a stored incident row — only `pending`, `firing`, and `resolved` incidents (plus their transition history) are persisted. Persist incidents and transitions. Evaluator restarts restore state and avoid duplicate notifications. Every event includes reason, measured value, evidence window and link to scoped resource detail.
 
 No unbounded alert expressions, arbitrary code, or public PromQL editor in v1.
 

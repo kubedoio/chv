@@ -31,6 +31,8 @@ For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or 
 
 ## Registry of initial metrics
 
+`derived` metrics are computed server-side at query time from stored samples and configuration, not materialized at ingestion; they follow the same quality and absence rules as their inputs (a derived value is `valid` only when every input is `valid`).
+
 | Metric ID | Kind and unit | Allowed source | Semantics |
 |---|---|---|---|
 | `node.cpu.capacity_ratio` | gauge ratio | node_os | CPU time busy divided by total CPU time over sample interval |
