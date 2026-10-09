@@ -33,7 +33,8 @@ autodiscovery, …) extends instead of reinvents.
 
 ## Why a third test double (strategy)
 
-The merged campaign has two lanes already:
+The merged campaign has two lanes already (their composed half is
+superseded by the simulator below — lane 2):
 
 1. **Adapter unit tests** (pure mapping/plan/ownership) — fast, exhaustive.
 2. **wiremock composed e2e** (`netbox_projection_e2e_tests.rs`, 5 scenarios) —
@@ -56,7 +57,7 @@ the simulator itself (same scenarios, two backends).
 |---|---|
 | Does the projection logic behave (idempotent, safe, isolated)? | unit + wiremock (exists) — lane 1 |
 | Does the client speak real NetBox wire format & semantics? | **simulator** (new) — lane 2 |
-| Can a human use it end-to-end (config → export → runs)? | **`make netbox-demo`** — built on the simulator, not a separate lane |
+| Can a human use it end-to-end (config → export → runs)? | **`make netbox-demo`** (new, PR 4) — built on the simulator, not a separate lane |
 | Does it work against today's real NetBox? | **qualification compose** (new, on-demand + weekly) — lane 3 |
 
 ## Implementation-surface analysis (where the code goes)
@@ -102,7 +103,8 @@ aside, none expected) would run `cd ui && npm run build`.
   the demo gate, the qualification lane. No new spec file: `chv-netbox-sim`
   is a dev tool, not a deployed component.
 - **Mapping-contract clause**: a short "Simulator conformance" section in
-  `netbox-mapping-contract.md` — the simulator implements exactly the surface
+  `docs/specs/architecture-designer/contracts/netbox-mapping-contract.md` —
+  the simulator implements exactly the surface
   this contract defines; golden fixtures under
   `crates/chv-netbox-sim/tests/fixtures/` are the captured wire truth;
   fixtures are never hand-edited after a real capture (refresh via
