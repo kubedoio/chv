@@ -410,9 +410,29 @@ pub fn normalize_object(kind: SimKind, row: &Value, base: &str) -> Value {
     Value::Object(out)
 }
 
-/// A field copied verbatim (`null` when absent).
+/// A field copied verbatim (`null` when absent), except that integral
+/// float numbers are canonicalized to integers: NetBox 4.7 types
+/// `VirtualMachine.vcpus` as a `DecimalField`
+/// (netbox/virtualization/models/virtualmachines.py), so a live row
+/// answers `2.0` where the simulator's shape — and every scenario
+/// assertion — carries `2`, and `serde_json` treats the two as
+/// unequal numbers. Fractional values pass through untouched (a real
+/// deployment may carry fractional vCPUs).
 fn scalar(row: &Value, field: &str) -> Value {
-    row.get(field).cloned().unwrap_or(Value::Null)
+    match row.get(field) {
+        Some(Value::Number(number)) => canonical_number(number),
+        other => other.cloned().unwrap_or(Value::Null),
+    }
+}
+
+/// `2.0` → `2`; any non-integral number is returned unchanged.
+fn canonical_number(number: &serde_json::Number) -> Value {
+    if let Some(float) = number.as_f64() {
+        if float.is_finite() && float.fract() == 0.0 && float.abs() < 9.0e18 {
+            return Value::from(float as i64);
+        }
+    }
+    Value::Number(number.clone())
 }
 
 /// A choice field in NetBox's `{value, label}` read form.
@@ -636,6 +656,51 @@ mod tests {
                 "last_updated": "2026-10-09T12:00:00.000000Z"
             })
         );
+    }
+
+    /// A real-shaped VM row: NetBox 4.7 types `vcpus` as a
+    /// `DecimalField` (netbox/virtualization/models/virtualmachines.py),
+    /// so live rows answer `2.0` where the simulator's shape carries
+    /// `2` — integral floats canonicalize to integers, fractional
+    /// vCPUs pass through untouched.
+    #[test]
+    fn real_shaped_vm_decimal_scalars_canonicalize_to_integers() {
+        let integral = json!({
+            "id": 9,
+            "name": "vm-01",
+            "status": { "value": "active", "label": "Active" },
+            "cluster": null,
+            "device": { "id": 7, "name": "chv-node-01" },
+            "vcpus": 2.0,
+            "memory": 2048,
+            "tags": [],
+            "custom_fields": {}
+        });
+        let normalized = normalize_object(
+            SimKind::VirtualMachine,
+            &integral,
+            "http://netbox.example.com",
+        );
+        assert_eq!(normalized["vcpus"], json!(2), "DecimalField 2.0 -> 2");
+        assert_eq!(normalized["memory"], json!(2048));
+
+        let fractional = json!({
+            "id": 10,
+            "name": "vm-02",
+            "status": { "value": "active", "label": "Active" },
+            "cluster": null,
+            "device": null,
+            "vcpus": 0.5,
+            "memory": null,
+            "tags": [],
+            "custom_fields": {}
+        });
+        let normalized = normalize_object(
+            SimKind::VirtualMachine,
+            &fractional,
+            "http://netbox.example.com",
+        );
+        assert_eq!(normalized["vcpus"], json!(0.5), "fractional vCPUs survive");
     }
 
     /// A real-shaped IP address row: the `assigned_object` serializer
