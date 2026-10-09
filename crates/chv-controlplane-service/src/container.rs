@@ -2,6 +2,7 @@ use crate::enrollment::EnrollmentServiceImplementation;
 use crate::error::ControlPlaneServiceError;
 use crate::inventory::InventoryServiceImplementation;
 use crate::lifecycle::LifecycleServiceImplementation;
+use crate::monitoring_ingest::MonitoringIngestImplementation;
 use crate::peer_identity::PeerIdentityInterceptor;
 use crate::reconcile::ReconcileServiceImplementation;
 use crate::telemetry::TelemetryServiceImplementation;
@@ -72,6 +73,7 @@ pub struct ControlPlaneComponents {
     telemetry_service: TelemetryServiceImplementation,
     reconcile_service: ReconcileServiceImplementation,
     lifecycle_service: LifecycleServiceImplementation,
+    monitoring_ingest_service: MonitoringIngestImplementation,
 }
 
 impl ControlPlaneComponents {
@@ -82,6 +84,7 @@ impl ControlPlaneComponents {
         telemetry_service: TelemetryServiceImplementation,
         reconcile_service: ReconcileServiceImplementation,
         lifecycle_service: LifecycleServiceImplementation,
+        monitoring_ingest_service: MonitoringIngestImplementation,
     ) -> Self {
         Self {
             store_pool,
@@ -90,6 +93,7 @@ impl ControlPlaneComponents {
             telemetry_service,
             reconcile_service,
             lifecycle_service,
+            monitoring_ingest_service,
         }
     }
 
@@ -115,6 +119,10 @@ impl ControlPlaneComponents {
 
     pub fn lifecycle_service(&self) -> &LifecycleServiceImplementation {
         &self.lifecycle_service
+    }
+
+    pub fn monitoring_ingest_service(&self) -> &MonitoringIngestImplementation {
+        &self.monitoring_ingest_service
     }
 }
 
@@ -237,6 +245,14 @@ impl ControlPlaneService {
                 make_intercept(),
             );
 
+        let monitoring_server =
+            proto::monitoring_service_server::MonitoringServiceServer::with_interceptor(
+                crate::server::MonitoringServer::new(Arc::new(
+                    self.components.monitoring_ingest_service.clone(),
+                )),
+                make_intercept(),
+            );
+
         if self.runtime.tls_config().is_some() {
             info!(?addr, "starting gRPC server with TLS");
         } else {
@@ -271,6 +287,7 @@ impl ControlPlaneService {
             .add_service(telemetry_server)
             .add_service(reconcile_server)
             .add_service(lifecycle_server)
+            .add_service(monitoring_server)
             .serve_with_shutdown(addr, async move {
                 let _ = shutdown_rx.changed().await;
             })

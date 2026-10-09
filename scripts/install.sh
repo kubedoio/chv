@@ -54,6 +54,7 @@ CHV_LOG_DIR="/var/log/chv"
 CHV_RUN_DIR="/run/chv"
 CHV_UI_DIR="/opt/chv/ui"
 CHV_MIGRATIONS_DIR="/usr/local/share/chv/migrations"
+CHV_MONITORING_MIGRATIONS_DIR="/usr/local/share/chv/monitoring-migrations"
 CHV_DB_PATH="${CHV_DATA_DIR}/controlplane.db"
 
 GITHUB_REPO="${GITHUB_REPO:-kubedoio/chv}"
@@ -395,6 +396,16 @@ install_binaries_and_assets() {
     info "Installing database migrations..."
     cp -r "${EXTRACT_DIR}/migrations/"* "$CHV_MIGRATIONS_DIR/"
     chown -R "$CHV_USER:$CHV_USER" "$CHV_MIGRATIONS_DIR"
+
+    # Monitoring store migrations (ADR-027, #602): applied to the
+    # separate disposable monitoring.db; failure to open that file only
+    # degrades monitoring.
+    mkdir -p "$CHV_MONITORING_MIGRATIONS_DIR" "$CHV_DATA_DIR/monitoring"
+    if [ -d "${EXTRACT_DIR}/monitoring-migrations" ]; then
+        cp -r "${EXTRACT_DIR}/monitoring-migrations/"* "$CHV_MONITORING_MIGRATIONS_DIR/"
+        chown -R "$CHV_USER:$CHV_USER" "$CHV_MONITORING_MIGRATIONS_DIR"
+        chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR/monitoring"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -981,6 +992,11 @@ migrations_dir = "${CHV_MIGRATIONS_DIR}"
 max_connections = 4
 min_connections = 1
 acquire_timeout_secs = 5
+
+[monitoring]
+enabled = true
+database_url = "sqlite://${CHV_DATA_DIR}/monitoring/monitoring.db"
+migrations_dir = "${CHV_MONITORING_MIGRATIONS_DIR}"
 
 [tls]
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"

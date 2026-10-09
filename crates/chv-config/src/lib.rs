@@ -721,6 +721,110 @@ fn default_webui_dir() -> PathBuf {
     PathBuf::from(DEFAULT_CONTROLPLANE_WEBUI_DIR)
 }
 
+/// Native monitoring history configuration (`[monitoring]`, ADR-027,
+/// campaign #602). Backs the isolated monitoring SQLite database; all
+/// knobs are advisory budgets enforced by `chv-monitoring-store` — the
+/// store treats its file as disposable telemetry and never lets a
+/// budget breach block the control plane.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MonitoringConfig {
+    /// Master switch. Default: enabled. When disabled (or when the
+    /// store cannot be opened) the control plane serves
+    /// `monitoring_unavailable` and VM lifecycle is unaffected.
+    #[serde(default = "default_monitoring_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_monitoring_database_url")]
+    pub database_url: String,
+    #[serde(default = "default_monitoring_migrations_dir")]
+    pub migrations_dir: PathBuf,
+    #[serde(default = "default_monitoring_max_connections")]
+    pub max_connections: u32,
+    /// Maintenance pass cadence (rollups, retention, WAL checkpoint).
+    #[serde(default = "default_monitoring_maintenance_interval_secs")]
+    pub maintenance_interval_secs: u64,
+    /// Raw sample retention (ADR-027 first-release target: 48 hours).
+    #[serde(default = "default_monitoring_raw_retention_hours")]
+    pub raw_retention_hours: u64,
+    /// Five-minute rollup retention (30 days).
+    #[serde(default = "default_monitoring_rollup_5m_retention_days")]
+    pub rollup_5m_retention_days: u64,
+    /// One-hour rollup retention (180 days).
+    #[serde(default = "default_monitoring_rollup_1h_retention_days")]
+    pub rollup_1h_retention_days: u64,
+    /// Per-target series cap (ingestion contract v1).
+    #[serde(default = "default_monitoring_max_series_per_target")]
+    pub max_series_per_target: i64,
+    /// Filesystem headroom floor in MiB: ingestion stops and monitoring
+    /// degrades below it (a separate file on the same filesystem does
+    /// NOT isolate disk-full risk — ADR-027).
+    #[serde(default = "default_monitoring_min_headroom_mib")]
+    pub min_headroom_mib: u64,
+    /// Hard database size budget in GiB; maintenance evicts oldest raw
+    /// data first when exceeded.
+    #[serde(default = "default_monitoring_max_db_gib")]
+    pub max_db_gib: u64,
+    /// Maximum node metric batches accepted per sender per minute
+    /// (rate cap; the agent's 15 s cadence needs 4).
+    #[serde(default = "default_monitoring_batches_per_minute")]
+    pub batches_per_minute: u32,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_monitoring_enabled(),
+            database_url: default_monitoring_database_url(),
+            migrations_dir: default_monitoring_migrations_dir(),
+            max_connections: default_monitoring_max_connections(),
+            maintenance_interval_secs: default_monitoring_maintenance_interval_secs(),
+            raw_retention_hours: default_monitoring_raw_retention_hours(),
+            rollup_5m_retention_days: default_monitoring_rollup_5m_retention_days(),
+            rollup_1h_retention_days: default_monitoring_rollup_1h_retention_days(),
+            max_series_per_target: default_monitoring_max_series_per_target(),
+            min_headroom_mib: default_monitoring_min_headroom_mib(),
+            max_db_gib: default_monitoring_max_db_gib(),
+            batches_per_minute: default_monitoring_batches_per_minute(),
+        }
+    }
+}
+
+fn default_monitoring_enabled() -> bool {
+    true
+}
+fn default_monitoring_database_url() -> String {
+    "sqlite:///var/lib/chv/monitoring/monitoring.db".to_string()
+}
+fn default_monitoring_migrations_dir() -> PathBuf {
+    PathBuf::from("cmd/chv-controlplane/monitoring-migrations")
+}
+fn default_monitoring_max_connections() -> u32 {
+    4
+}
+fn default_monitoring_maintenance_interval_secs() -> u64 {
+    60
+}
+fn default_monitoring_raw_retention_hours() -> u64 {
+    48
+}
+fn default_monitoring_rollup_5m_retention_days() -> u64 {
+    30
+}
+fn default_monitoring_rollup_1h_retention_days() -> u64 {
+    180
+}
+fn default_monitoring_max_series_per_target() -> i64 {
+    1024
+}
+fn default_monitoring_min_headroom_mib() -> u64 {
+    256
+}
+fn default_monitoring_max_db_gib() -> u64 {
+    2
+}
+fn default_monitoring_batches_per_minute() -> u32 {
+    20
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ControlPlaneTlsConfig {
     #[serde(default)]
@@ -762,6 +866,12 @@ pub struct ControlPlaneConfig {
     /// default — fail-closed.
     #[serde(default)]
     pub webui: WebUiConfig,
+    /// Native monitoring history (ADR-027, campaign #602 PR-2). The
+    /// monitoring store is disposable telemetry in a separate SQLite
+    /// file with its own pool; a failure to connect degrades monitoring
+    /// and never aborts control-plane startup.
+    #[serde(default)]
+    pub monitoring: MonitoringConfig,
 }
 
 fn default_jwt_secret() -> String {
@@ -816,6 +926,7 @@ impl Default for ControlPlaneConfig {
             jwt_secret: default_jwt_secret(),
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
+            monitoring: MonitoringConfig::default(),
             agent_socket_pattern: default_agent_socket_pattern(),
             agent_runtime_dir: default_agent_runtime_dir(),
             kernel_path: default_kernel_path(),

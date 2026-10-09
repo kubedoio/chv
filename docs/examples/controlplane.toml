@@ -17,6 +17,24 @@ max_connections = 4
 min_connections = 1
 acquire_timeout_secs = 5
 
+# Native monitoring history (ADR-027): disposable telemetry in a
+# separate SQLite file with its own pool. A missing/corrupt/full
+# monitoring database degrades monitoring only — VM lifecycle is
+# unaffected. Disable with `enabled = false` to answer every ingest
+# with `ingestion_unavailable`.
+[monitoring]
+enabled = true
+database_url = "sqlite:///var/lib/chv/monitoring/monitoring.db"
+migrations_dir = "/usr/local/share/chv/monitoring-migrations"
+maintenance_interval_secs = 60
+raw_retention_hours = 48
+rollup_5m_retention_days = 30
+rollup_1h_retention_days = 180
+max_series_per_target = 1024
+min_headroom_mib = 256
+max_db_gib = 2
+batches_per_minute = 20
+
 [tls]
 # CA certificate and key used to issue node certificates during enrollment
 ca_cert_path = "/etc/chv/certs/ca.crt"

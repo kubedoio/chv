@@ -37,6 +37,12 @@ contents:
   - src: cmd/chv-controlplane/migrations/
     dst: /usr/share/chv/migrations
     type: tree
+  # Native monitoring store migrations (ADR-027, #602): the monitoring
+  # database is disposable telemetry — packaged beside the operational
+  # migrations but applied to a separate SQLite file with its own pool.
+  - src: cmd/chv-controlplane/monitoring-migrations/
+    dst: /usr/share/chv/monitoring-migrations
+    type: tree
   - src: packaging/systemd/chv-controlplane.service
     dst: /lib/systemd/system/chv-controlplane.service
   - src: ${TMPDIR}/configs/controlplane.toml

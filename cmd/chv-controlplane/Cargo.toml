@@ -28,6 +28,7 @@ netbox-demo = ["chv-controlplane-service/netbox-demo"]
 [dependencies]
 chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
+chv-monitoring-store = { path = "../../crates/chv-monitoring-store" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
 chv-controlplane-seed = { path = "../../crates/chv-controlplane-seed" }
 chv-webui-bff = { path = "../../crates/chv-webui-bff" }

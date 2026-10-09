@@ -297,6 +297,42 @@ impl ObservedStateRepository {
         Ok(())
     }
 
+    /// The node a VM is currently observed running on (its placement
+    /// authority for ingestion contract v1): `None` when the VM is
+    /// unknown or has no observed node. The monitoring ingest path uses
+    /// this to reject batches claiming VM samples for VMs the
+    /// authenticated sender does not own — a node may never write
+    /// another node's VM telemetry.
+    pub async fn vm_reporting_node(
+        &self,
+        vm_id: &ResourceId,
+    ) -> Result<Option<NodeId>, StoreError> {
+        let node: Option<String> =
+            sqlx::query_scalar("SELECT node_id FROM vm_observed_state WHERE vm_id = ? LIMIT 1")
+                .bind(vm_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
+        match node {
+            None => Ok(None),
+            Some(raw) => match NodeId::new(&raw) {
+                Ok(id) => Ok(Some(id)),
+                // A malformed node_id is store corruption, not a
+                // placement decision: surface it loudly and fail the
+                // ownership check closed (None ⇒ the sender cannot
+                // prove ownership).
+                Err(e) => {
+                    tracing::warn!(
+                        vm_id = vm_id.as_str(),
+                        error = %e,
+                        "vm_observed_state carries a malformed node_id; failing ownership closed"
+                    );
+                    Ok(None)
+                }
+            },
+        }
+    }
+
     pub async fn upsert_vm(&self, input: &VmObservedStateInput) -> Result<(), StoreError> {
         sqlx::query(UPSERT_VM_OBSERVED_STATE_SQL)
             .bind(input.vm_id.as_str())

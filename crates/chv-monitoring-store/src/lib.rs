@@ -24,6 +24,7 @@ pub mod headroom;
 pub mod ingest;
 pub mod maintenance;
 pub mod query;
+pub mod status;
 
 pub use config::MonitoringStoreConfig;
 pub use db::MonitoringStore;
@@ -35,6 +36,7 @@ pub use query::{
     DEFAULT_MAX_POINTS_PER_SERIES, MAX_AGGREGATED_RANGE_MS, MAX_DETAILED_RANGE_MS,
     MAX_METRIC_IDS_PER_QUERY, MAX_POINTS_PER_SERIES,
 };
+pub use status::{MonitoringHealth, MonitoringHealthSnapshot};
 
 #[cfg(test)]
 mod tests;
