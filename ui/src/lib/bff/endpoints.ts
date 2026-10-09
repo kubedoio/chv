@@ -92,5 +92,12 @@ export const BFFEndpoints = {
 	netboxExport: '/v1/architectures/netbox/export',
 	netboxRunsList: '/v1/architectures/netbox/runs/list',
 	netboxRunsGet: '/v1/architectures/netbox/runs/get',
-	netboxRunsRetry: '/v1/architectures/netbox/runs/retry'
+	netboxRunsRetry: '/v1/architectures/netbox/runs/retry',
+
+	// Native monitoring read API (query/alerts contract v1, #602).
+	monitoringCatalog: '/v1/monitoring/catalog',
+	monitoringOverview: '/v1/monitoring/overview',
+	monitoringCurrent: '/v1/monitoring/current',
+	monitoringHistory: '/v1/monitoring/history',
+	monitoringHealth: '/v1/monitoring/health'
 } as const;

@@ -19,6 +19,7 @@
 	import VmDetailSummaryTab from '#lib/components/vms/VmDetailSummaryTab.svelte';
 	import VmConsoleTab from '#lib/components/vms/VmConsoleTab.svelte';
 	import VmMetricsTab from '#lib/components/vms/VmMetricsTab.svelte';
+	import TargetMonitoringPanel from '#lib/components/monitoring/TargetMonitoringPanel.svelte';
 	import VmTasksTab from '#lib/components/vms/VmTasksTab.svelte';
 	import VmBootLogTab from '#lib/components/vms/VmBootLogTab.svelte';
 	import type { ShellTone } from '#lib/shell/app-shell.ts';
@@ -259,6 +260,11 @@
 						health={detail.summary.health}
 						attachedVolumes={detail.summary.attached_volumes ?? []}
 						attachedNics={detail.summary.attached_nics ?? []}
+					/>
+					<TargetMonitoringPanel
+						targetKind="vm"
+						targetId={detail.summary.vm_id}
+						metricIds={['vm.cpu.cores_used', 'vm.memory.host_accounted_bytes']}
 					/>
 				{:else if detail.currentTab === 'summary'}
 					<VmDetailSummaryTab

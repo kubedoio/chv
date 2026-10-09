@@ -11,6 +11,7 @@
 	import LoadingState from '#lib/components/shell/LoadingState.svelte';
 	import TopologyCanvas from '#lib/components/shared/TopologyCanvas.svelte';
 	import CompactMetricCard from '#lib/components/shared/CompactMetricCard.svelte';
+	import MonitoringHealthCard from '#lib/components/monitoring/MonitoringHealthCard.svelte';
 	import {
 		Activity,
 		AlertCircle,
@@ -278,13 +279,11 @@
 											</div>
 										</div>
 									{/each}
-									<div class="capacity-footnote">
-										<span>Network throughput index</span>
-										<strong>Nominal</strong>
-									</div>
 								</div>
 							</SectionCard>
 						{/if}
+
+						<MonitoringHealthCard />
 					</aside>
 				{/if}
 			</div>

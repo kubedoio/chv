@@ -14,7 +14,7 @@ import Button from '#lib/components/primitives/Button.svelte';
 	import ErrorState from '#lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '#lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle, ShieldCheck } from 'lucide-svelte';
-	import NodeHealthDashboard from '#lib/components/nodes/NodeHealthDashboard.svelte';
+	import TargetMonitoringPanel from '#lib/components/monitoring/TargetMonitoringPanel.svelte';
 	import type { ShellTone } from '#lib/shell/app-shell.ts';
 
 	let { data }: { data: PageData } = $props();
@@ -52,9 +52,9 @@ import Button from '#lib/components/primitives/Button.svelte';
 
 	const postureProps = $derived([
 		{ label: 'Control State', value: detail.summary.state },
-		{ label: 'Safety Integrity', value: detail.summary.health },
-		{ label: 'Storage Fabric', value: detail.summary.storage },
-		{ label: 'Network Fabric', value: detail.summary.network },
+		{ label: 'Health', value: detail.summary.health },
+		{ label: 'Storage', value: detail.summary.storage },
+		{ label: 'Network', value: detail.summary.network },
 		{ label: 'KVM Capability', value: detail.summary.hypervisor_capabilities?.includes('kvm') ? 'Enabled' : 'Unavailable' }
 	]);
 
@@ -117,20 +117,30 @@ import Button from '#lib/components/primitives/Button.svelte';
 		</ResourceDetailHeader>
 
 		<div class="inventory-metrics">
-			<CompactMetricCard label="CPU Pressure" value={detail.summary.cpu} color="primary" />
-			<CompactMetricCard label="Memory Entropy" value={detail.summary.memory} color="primary" />
-			<CompactMetricCard label="IOPS Density" value={detail.summary.storage} color="neutral" />
-			<CompactMetricCard label="Net Throughput" value={detail.summary.network} color="neutral" />
+			<CompactMetricCard label="CPU" value={detail.summary.cpu} color="primary" />
+			<CompactMetricCard label="Memory" value={detail.summary.memory} color="primary" />
+			<CompactMetricCard label="Storage" value={detail.summary.storage} color="neutral" />
+			<CompactMetricCard label="Network" value={detail.summary.network} color="neutral" />
 		</div>
 
 		<main class="inventory-main">
 			<section class="detail-content">
-				<SectionCard title="Compute Posture" icon={Activity}>
+				<SectionCard title="Node Overview" icon={Activity}>
 					<PropertyGrid properties={postureProps} columns={2} />
 				</SectionCard>
 
-				<SectionCard title="Hardware Fabric" icon={Activity}>
-					<NodeHealthDashboard />
+				<SectionCard title="Node Metrics" icon={Activity}>
+					<TargetMonitoringPanel
+						targetKind="node"
+						targetId={detail.summary.node_id}
+						metricIds={[
+							'node.cpu.capacity_ratio',
+							'node.cpu.load1',
+							'node.memory.available_bytes',
+							'node.swap.used_bytes',
+							'node.fs.available_bytes'
+						]}
+					/>
 				</SectionCard>
 
 				<SectionCard title="Resident Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
