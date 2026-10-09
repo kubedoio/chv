@@ -1231,12 +1231,12 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         // value latched, so a sender that subscribes late sees the pause
         // already signaled and proceeds immediately.
         //
-        // Known residue (out of scope here): the guard drops when a
-        // sender future exits, so a resume aimed at an already-terminal
-        // sibling still hits a closed channel and errors — unreachable
-        // in the pause handshake flow (the agent fires resume-all once,
-        // before any volume can complete), and strictly narrower than
-        // the pre-fix behavior.
+        // The guard drops when the sender future exits — by which point
+        // the task is terminal (every non-panic exit sets
+        // Completed/Failed before returning; a panicking future skips
+        // the marking and leaves the pre-fix behavior: a loud resume
+        // error) — and `resume_disk_migration` treats a failed send on
+        // a terminal task as a benign no-op (#582).
         let (task, pause_rx) = MigrationTask::new(
             req.volume_id.clone(),
             req.attachment_handle.clone(),
@@ -1424,6 +1424,30 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         if req.vm_paused {
             if let Err(e) = task.pause_tx.send(true) {
+                // The pause channel's receiver lives exactly as long as
+                // the spawned sender future (`_pause_channel_guard`,
+                // #578), and every non-panic exit of that future sets a
+                // terminal phase before it returns — so a failed send
+                // means the migration already finished. A resume racing
+                // completion is a benign no-op, not an error (#582
+                // review residue): erroring here made the agent's
+                // resume-all abort a migration that had in fact
+                // succeeded. (A panicking future skips the terminal
+                // marking; that resume then errors, as before.)
+                let state = task.state.read().await;
+                if matches!(
+                    state.phase,
+                    MigrationPhase::Completed | MigrationPhase::Failed
+                ) {
+                    tracing::info!(
+                        migration_id = %req.migration_id,
+                        phase = ?state.phase,
+                        "resume for terminal migration treated as a no-op"
+                    );
+                    return Ok(Response::new(proto::ResumeDiskMigrationResponse {
+                        result: Some(Self::ok_result()),
+                    }));
+                }
                 tracing::warn!(
                     migration_id = %req.migration_id,
                     error = %e,

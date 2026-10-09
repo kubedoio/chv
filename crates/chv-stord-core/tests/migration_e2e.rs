@@ -317,8 +317,16 @@ async fn small_volume_completes_and_matches() {
         .await
         .expect("migration must not hang (ack-window flush regression?)")
         .expect("migration must succeed");
-    assert_eq!(task.state.read().await.phase, MigrationPhase::Completed);
-    assert_finalize_digest_observed(&*task.state.read().await);
+    {
+        let state = task.state.read().await;
+        assert_eq!(state.phase, MigrationPhase::Completed);
+        // #582 residue: no pause wait is pending on a completed task.
+        assert!(
+            !state.needs_vm_pause,
+            "a Completed task must not report a pending VM pause"
+        );
+        assert_finalize_digest_observed(&state);
+    }
 
     let dest = std::fs::read(dest_dir.path().join("vol-e2e-small.img"))
         .expect("receiving volume file must exist");
@@ -389,6 +397,11 @@ async fn dirty_rounds_converge_preseeded_writes() {
 
     let state = task.state.read().await;
     assert_eq!(state.phase, MigrationPhase::Completed);
+    // #582 residue: no pause wait is pending on a completed task.
+    assert!(
+        !state.needs_vm_pause,
+        "a Completed task must not report a pending VM pause"
+    );
     assert!(
         state.convergence_round >= 1,
         "migration must converge through at least one dirty sync round"
@@ -624,6 +637,13 @@ async fn source_write_during_pause_window_fails_at_finalize_digest() {
         "task error_message must name the failure: {}",
         state.error_message
     );
+    // #582 residue: this task DID request the VM pause (the flag was
+    // set at the final-sync gate) — a terminal task must not keep
+    // reporting a pending pause.
+    assert!(
+        !state.needs_vm_pause,
+        "a Failed task must not report a pending VM pause"
+    );
     // Unlike the canary's fail-fast path, this failure is *late* by
     // design: the digest was computed (the #392 gate did the catching).
     assert_finalize_digest_observed(&state);
@@ -719,6 +739,11 @@ async fn pause_handshake_releases_final_sync() {
         .expect("migration task must not panic");
     let state = task.state.read().await;
     assert_eq!(state.phase, MigrationPhase::Completed);
+    // #582 residue: no pause wait is pending on a completed task.
+    assert!(
+        !state.needs_vm_pause,
+        "a Completed task must not report a pending VM pause"
+    );
     assert_finalize_digest_observed(&state);
     drop(state);
 
@@ -856,6 +881,11 @@ async fn pause_first_pauses_before_bulk_copy() {
         .expect("migration task must not panic");
     let state = task.state.read().await;
     assert_eq!(state.phase, MigrationPhase::Completed);
+    // #582 residue: no pause wait is pending on a completed task.
+    assert!(
+        !state.needs_vm_pause,
+        "a Completed task must not report a pending VM pause"
+    );
     assert_finalize_digest_observed(&state);
     drop(state);
 
@@ -1005,6 +1035,155 @@ async fn pause_signal_latches_for_senders_not_yet_at_their_gate() {
     );
 
     hold.abort();
+}
+
+/// **Resume after completion is a benign no-op** (#582 review residue):
+/// the pause channel's receiver lives exactly as long as the spawned
+/// sender future, so once a migration completes the channel is closed
+/// and a `ResumeDiskMigration` would hit a failed watch send. Before
+/// the fix that errored the resume RPC — and a caller doing
+/// resume-all (the agent's shape) would have treated a succeeded
+/// migration as failed. A resume racing completion must answer OK.
+///
+/// Driven through the REAL handlers end-to-end: trigger pause-first,
+/// latch an early resume (the sibling-volume shape), drive to
+/// `Completed` via `GetDiskMigrationStatus`, then resume again — the
+/// send provably fails on the closed channel (the sender future has
+/// exited), and the handler must answer OK, not `Internal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_completion_is_a_benign_noop() {
+    install_crypto_provider();
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    let expected = write_source_image(src_dir.path(), "vol-resume.img", 2);
+
+    let backend = Arc::new(LocalFileBackend::new(src_dir.path().to_path_buf()));
+    let (addr, ca) = spawn_receiver(dest_dir.path()).await;
+
+    let svc = chv_stord_core::handlers::StorageServiceImpl::new(
+        backend.clone(),
+        Arc::new(chv_stord_core::session::SessionTable::new()),
+        Arc::new(chv_observability::Metrics::new()),
+        src_dir.path().to_path_buf(),
+        vec!["local".to_string()],
+        vec![],
+        vec![],
+        vec![], // migration_dest_allowlist: empty = allow all
+        Some(sender_tls(&ca)),
+    );
+
+    let handle = open_source_volume(&backend, "vol-resume", "vol-resume.img", 2 * BLOCK).await;
+    svc.sessions().upsert(chv_stord_core::session::Session {
+        volume_id: "vol-resume".to_string(),
+        vm_id: None,
+        attachment_handle: handle.clone(),
+        export_kind: "raw".to_string(),
+        export_path: src_dir
+            .path()
+            .join("vol-resume.img")
+            .to_string_lossy()
+            .to_string(),
+        runtime_status: "open".to_string(),
+    });
+
+    // Trigger through the REAL handler, pause-first, then latch an
+    // early resume (the sender has not reached its gate — the shape
+    // the agent's resume-all produces for sibling volumes).
+    let resp = chv_stord_api::chv_stord_api::storage_service_server::StorageService::trigger_disk_migration(
+        &svc,
+        Request::new(chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest {
+            meta: None,
+            volume_id: "vol-resume".to_string(),
+            attachment_handle: handle,
+            dest_endpoint: format!("https://{addr}"),
+            pause_first: true,
+        }),
+    )
+    .await
+    .expect("trigger must be served")
+    .into_inner();
+    assert_eq!(
+        resp.result.as_ref().map(|r| r.status.as_str()),
+        Some("OK"),
+        "trigger must succeed"
+    );
+    let migration_id = resp.migration_id;
+
+    let resume = chv_stord_api::chv_stord_api::storage_service_server::StorageService::resume_disk_migration(
+        &svc,
+        Request::new(chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest {
+            migration_id: migration_id.clone(),
+            vm_paused: true,
+        }),
+    )
+    .await
+    .expect("early resume must be served");
+    assert_eq!(
+        resume.into_inner().result.expect("result present").status,
+        "OK",
+        "the early resume must latch"
+    );
+
+    // Drive to completion.
+    let deadline = tokio::time::Instant::now() + MIGRATION_TIMEOUT;
+    loop {
+        let status = chv_stord_api::chv_stord_api::storage_service_server::StorageService::get_disk_migration_status(
+            &svc,
+            Request::new(chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest {
+                migration_id: migration_id.clone(),
+            }),
+        )
+        .await
+        .expect("status must be served")
+        .into_inner();
+        if status.phase
+            == chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase::Completed
+                as i32
+        {
+            assert!(
+                !status.needs_vm_pause,
+                "the completed task must not report a pending VM pause"
+            );
+            break;
+        }
+        assert_ne!(
+            status.phase,
+            chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase::Failed as i32,
+            "migration failed: {}",
+            status.error_message
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "migration never completed (stuck at phase {})",
+            status.phase
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The discriminating call: the sender future has exited, the pause
+    // channel is closed, the send fails — the handler must still
+    // answer OK for the terminal task.
+    let late_resume = chv_stord_api::chv_stord_api::storage_service_server::StorageService::resume_disk_migration(
+        &svc,
+        Request::new(chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest {
+            migration_id: migration_id.clone(),
+            vm_paused: true,
+        }),
+    )
+    .await
+    .expect("late resume must be served");
+    let result = late_resume.into_inner().result.expect("result present");
+    assert_eq!(
+        result.status, "OK",
+        "a resume racing completion must be a benign no-op, got: {}",
+        result.human_summary
+    );
+
+    let dest = std::fs::read(dest_dir.path().join("vol-resume.img"))
+        .expect("receiving volume file must exist");
+    assert_eq!(dest, expected, "destination must match the source bytes");
 }
 
 /// **Corruption detection at finalize** (issue #392, the reason the digest
