@@ -39,8 +39,9 @@
 //!   NetBox — and the simulator — cannot fault a single HTTP method,
 //!   so a per-kind 5xx fails the run during the plan's remote-state
 //!   fetch, before any mutation. The sim port therefore reconstructs
-//!   the post-failure world of a half-executed attempt (its VLAN
-//!   create had landed) via the `/__seed` control plane and keeps the
+//!   the post-failure world of a half-executed attempt — as if its
+//!   VLAN create had landed — via the `/__seed` control plane and
+//!   keeps the
 //!   scenario's real substance: transient failure → auto-requeue →
 //!   resume resolves the half-created object by natural key → final
 //!   state has exactly one object per natural key. The wiremock
@@ -57,6 +58,13 @@
 //!   recorded requests. The simulator validates tokens itself (401
 //!   otherwise), so a successful run proves authenticated mutations
 //!   without inspecting the wire.
+//!
+//! One narrowing the state-based swap cannot avoid: state counting
+//! observes object counts and content, not the wire, so a hypothetical
+//! delete-and-recreate under `MarkStale` retention would keep counts
+//! identical and go unremarked here (the foreign-object scenario pins
+//! the seeded id as a partial guard). The wire-level no-DELETE
+//! guarantee remains covered at the worker-suite level.
 //!
 //! Documented deviation (inherited from the wiremock suite, PR 6 of
 //! the #239 plan): the apply-run terminal transition site does not
@@ -146,6 +154,16 @@ impl NetboxBackend {
     /// The backend's full object state, in the `/__state` dump shape
     /// (sim: the control-plane dump; real backend: a list-via-API
     /// dump normalized to the same shape).
+    ///
+    /// The shape is a load-bearing contract for PR 5's qualification
+    /// mode: a top-level `objects` map keyed by collection name
+    /// (`devices`, `virtual_machines`, `interfaces`, `prefixes`,
+    /// `vlans`, `ip_addresses`), each collection an array in
+    /// **deterministic ascending-id order** (the sim dumps in id
+    /// order; a real backend must sort likewise). Assertions index
+    /// this shape directly, and [`assert_state_unchanged`] byte-
+    /// compares full dumps — the deterministic ordering is what makes
+    /// that comparison meaningful.
     fn state(&self) -> Value {
         match self {
             Self::Sim(sim) => {
@@ -464,6 +482,16 @@ async fn full_lifecycle_apply_to_projection_to_reapply() {
 
     let run = get_run(&db, "netrun-reexport").await;
     assert_eq!(run.status, NetboxProjectionRunStatus::Succeeded);
+    // Secret-freedom: the recorded outcome (provenance envelope +
+    // executed plan, the document the BFF later serves) carries no
+    // token material.
+    assert!(
+        !run.result_json
+            .as_deref()
+            .expect("result json")
+            .contains(backend.token().as_str()),
+        "the recorded outcome must be secret-free"
+    );
     let outcome = outcome_of(&run);
     assert!(outcome.error.is_none());
     assert_eq!(outcome.summary.skipped, 6, "all no_op");
@@ -716,7 +744,11 @@ async fn foreign_object_at_natural_key_is_never_written() {
         6,
         "the five unoccupied kinds created"
     );
-    assert_eq!(vlan_with_vid(&state, 42).unwrap()["id"], json!(55));
+    assert_eq!(
+        vlan_with_vid(&state, 42).unwrap()["id"],
+        foreign_before["id"],
+        "the foreign object keeps its original id (never deleted and recreated)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -759,16 +791,18 @@ async fn netbox_outage_never_changes_the_apply_result() {
     // executes it against the faulted NetBox: the run fails with the
     // transient (retryable) 5xx classification and is auto-requeued
     // with a backoff.
-    assert!(
-        backend.inject_fault(
-            None,
-            FaultConfig {
-                server_error: Some(500),
-                ..FaultConfig::default()
-            }
-        ),
-        "the simulator supports fault injection"
-    );
+    if !backend.inject_fault(
+        None,
+        FaultConfig {
+            server_error: Some(500),
+            ..FaultConfig::default()
+        },
+    ) {
+        // A real NetBox has no fault control plane: the outage leg is
+        // simulator-only. PR 5's qualification mode skips this
+        // scenario rather than faking an outage (see module docs).
+        return;
+    }
 
     worker_for(&db)
         .tick()
@@ -890,6 +924,23 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
     add_succeeded_apply_run(&db, "apply-partial", "topo-partial", "v-1").await;
     setup_post_apply_config(&db, backend.base_url(), "topo-partial").await;
 
+    // The transient failure: every prefix request answers 5xx. Check
+    // fault support BEFORE seeding so a backend without a fault
+    // control plane skips without leaving residue.
+    if !backend.inject_fault(
+        Some(SimKind::Prefix),
+        FaultConfig {
+            server_error: Some(500),
+            ..FaultConfig::default()
+        },
+    ) {
+        // A real NetBox has no fault control plane: the failure leg
+        // is simulator-only. PR 5's qualification mode skips this
+        // scenario rather than faking a mid-plan failure (see module
+        // docs).
+        return;
+    }
+
     // The half-created state of a partially-executed attempt: its VLAN
     // create landed (chv-owned, desired content) before the run hit
     // its mid-plan failure.
@@ -898,18 +949,6 @@ async fn partial_failure_requeues_and_retry_resumes_without_duplicate_create() {
         .find(|object| matches!(object, NetBoxObject::Vlan(_)))
         .expect("desired vlan");
     backend.seed(&json!({ "vlans": [vlan_seed_body(&vlan)] }));
-
-    // The transient failure: every prefix request answers 5xx.
-    assert!(
-        backend.inject_fault(
-            Some(SimKind::Prefix),
-            FaultConfig {
-                server_error: Some(500),
-                ..FaultConfig::default()
-            }
-        ),
-        "the simulator supports fault injection"
-    );
 
     worker_for(&db).tick().await.expect("tick succeeds");
 
