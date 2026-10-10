@@ -36,8 +36,10 @@ CHV_G1_IMAGE=/var/lib/chv/qual/images/noble-qual-patched.img \
 cargo test -p chv-agent --bin chv-agent g2_real_vmm -- --nocapture
 ```
 
-Result: **1 passed in 11.18s** (CI skips this test — no KVM; the run
-above is the real-host record).
+Result: **1 passed in 11.19s** (CI skips this test — no KVM; the run
+above is the real-host record, re-verified on the final branch state
+after the review-round fixes; the verbatim observations below are from
+the recorded run).
 
 ### 2. Disk-full trigger (storage failure)
 
