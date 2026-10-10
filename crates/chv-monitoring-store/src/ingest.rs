@@ -22,11 +22,14 @@ pub struct NodeBatch {
 /// Canonical digest of a batch: any change to any field — including
 /// dimension order — changes the digest, which is what turns a
 /// same-key-different-body resend into a `ReplayConflict`.
+/// `sent_at_ms` is deliberately EXCLUDED: it is send-attempt metadata,
+/// not observation content — a retry of the same samples at a later
+/// send time is a `Duplicate` (the previous durable outcome), never a
+/// conflict.
 pub fn batch_digest(batch: &NodeBatch) -> String {
     let mut hasher = Sha256::new();
     hasher.update(batch.boot_id.as_bytes());
     hasher.update(batch.sequence.to_le_bytes());
-    hasher.update(batch.sent_at_ms.to_le_bytes());
     hasher.update(batch.samples.len().to_le_bytes());
     for s in &batch.samples {
         let mut line = String::with_capacity(128);

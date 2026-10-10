@@ -384,7 +384,13 @@ async fn disk_full_degrades_monitoring_but_not_lifecycle() {
     let mut fixture = Fixture::new().await;
     let real_free = chv_monitoring_store::headroom::available_bytes(fixture._monitoring_dir.path())
         .expect("statvfs on the monitoring dir");
-    fixture.set_headroom_floor(real_free + 1);
+    // 64 MiB above the real free space, not +1: free space on a live
+    // filesystem moves by kilobytes between the read here and the
+    // service's own probe (other processes, tempdir neighbors) — a
+    // one-byte margin races that churn and flakes. 64 MiB is far above
+    // any incidental drift and still the identical statvfs comparison
+    // production performs every batch.
+    fixture.set_headroom_floor(real_free + 64 * 1024 * 1024);
 
     // Disk-full: typed outcome, nothing committed, health degrades
     // with the headroom reason and counts the unavailable batch.

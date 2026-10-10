@@ -84,7 +84,6 @@ async fn connect_monitoring_store(
         rollup_5m_retention_ms: config.rollup_5m_retention_days * 24 * 60 * 60 * 1000,
         rollup_1h_retention_ms: config.rollup_1h_retention_days * 24 * 60 * 60 * 1000,
         max_series_per_target: config.max_series_per_target,
-        min_headroom_bytes: config.min_headroom_mib * 1024 * 1024,
         max_db_bytes: config.max_db_gib * 1024 * 1024 * 1024,
         dedup_retention_ms: chv_monitoring_store::MonitoringStoreConfig::default()
             .dedup_retention_ms,

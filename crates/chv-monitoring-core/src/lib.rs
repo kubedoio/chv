@@ -65,6 +65,6 @@ pub use model::{
 };
 pub use registry::{MetricDef, REGISTRY};
 pub use sampler::{
-    run_sampler, NetworkProviderSource, NodeOsSource, SamplerConfig, SamplerError, SamplerHealth,
-    StorageProviderSource, VmRuntimeSource,
+    run_sampler, NetworkProviderSource, NodeOsSource, SamplerConfig, SamplerError, SamplerEvent,
+    SamplerHealth, StorageProviderSource, VmRuntimeSource,
 };

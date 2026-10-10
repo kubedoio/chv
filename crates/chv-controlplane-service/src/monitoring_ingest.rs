@@ -470,6 +470,24 @@ impl MonitoringIngestService for MonitoringIngestImplementation {
                 "boot_id must be 1..=128 bytes".to_string(),
             ));
         }
+        // The wire type is uint64 but the store's high-water mark is a
+        // signed SQLite INTEGER: a sequence beyond i64::MAX could wrap
+        // on the cast and masquerade as a low sequence. No honest
+        // sender reaches it (one batch per 15 s is ~2M/year); reject it
+        // at the boundary instead of storing a wrapped watermark.
+        if request.sequence > i64::MAX as u64 {
+            self.health.update(|s| s.rejected_batches += 1);
+            return Ok(self.respond(
+                &request,
+                OUTCOME_INVALID_BATCH,
+                0,
+                0,
+                format!(
+                    "sequence {} exceeds the i64 watermark range",
+                    request.sequence
+                ),
+            ));
+        }
         if request.samples.len() > MAX_SAMPLES_PER_BATCH {
             self.health.update(|s| s.rejected_batches += 1);
             return Ok(self.respond(
@@ -690,10 +708,15 @@ pub async fn run_monitoring_maintenance(
                             h.last_maintenance_at_ms = Some(now_ms);
                             h.raw_samples = Some(raw_count);
                         });
+                        health.clear_maintenance();
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "monitoring maintenance pass failed");
-                        health.degrade(format!("maintenance failure: {e}"));
+                        // Maintenance flavor: cleared only by a
+                        // successful pass — a durable ingest success
+                        // (which clears the STORE flavor) must not
+                        // flap this away while the worker still fails.
+                        health.degrade_maintenance(format!("maintenance failure: {e}"));
                     }
                 }
             }

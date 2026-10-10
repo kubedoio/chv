@@ -65,6 +65,11 @@ pub struct HistorySeries {
     /// Valid points / total points in the requested range (0.0 when no
     /// points at all).
     pub coverage_ratio: f64,
+    /// Whether thinning dropped points to honor the caller's
+    /// `max_points` ceiling — an honesty signal for the wire contract
+    /// (a series AT the ceiling is not necessarily truncated; only a
+    /// series that EXCEEDED it is).
+    pub truncated: bool,
     /// Why the series has no stored data, when it has none (the
     /// contract's single absence vocabulary).
     pub reason: Option<SeriesReason>,
@@ -268,7 +273,7 @@ impl MonitoringStore {
                 .cloned()
                 .unwrap_or_default();
 
-            let (points, coverage) = match tier {
+            let (points, coverage, truncated) = match tier {
                 QueryTier::Raw => {
                     let raw = self
                         .fetch_raw(
@@ -291,8 +296,8 @@ impl MonitoringStore {
                     } else {
                         valid_raw as f64 / raw.len() as f64
                     };
-                    let bucketed = bucket_raw(raw, from_ms, to_ms, max_points, &kind);
-                    (bucketed, coverage)
+                    let (bucketed, truncated) = bucket_raw(raw, from_ms, to_ms, max_points, &kind);
+                    (bucketed, coverage, truncated)
                 }
                 QueryTier::Rollup5m | QueryTier::Rollup1h => {
                     let tier_str = match tier {
@@ -326,10 +331,11 @@ impl MonitoringStore {
                         .into_iter()
                         .map(|r| rollup_point(r, window_ms.unsigned_abs(), &kind))
                         .collect();
-                    if points.len() > max_points {
+                    let truncated = points.len() > max_points;
+                    if truncated {
                         points = thin_to_max(points, max_points);
                     }
-                    (points, coverage)
+                    (points, coverage, truncated)
                 }
             };
 
@@ -350,6 +356,7 @@ impl MonitoringStore {
                 unit,
                 points,
                 coverage_ratio: coverage,
+                truncated,
                 reason,
             });
         }
@@ -708,9 +715,9 @@ fn bucket_raw(
     to_ms: u64,
     max_points: usize,
     kind: &MetricKind,
-) -> Vec<HistoryPoint> {
+) -> (Vec<HistoryPoint>, bool) {
     if raw.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let range = (to_ms - from_ms).max(1);
     let bucket_ms = (range / max_points.max(1) as u64).max(1);
@@ -831,10 +838,11 @@ fn bucket_raw(
             }
         }
     }
-    if out.len() > max_points {
+    let truncated = out.len() > max_points;
+    if truncated {
         out = thin_to_max(out, max_points);
     }
-    out
+    (out, truncated)
 }
 
 /// Deterministic thinning that preserves order and endpoints.

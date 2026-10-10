@@ -35,8 +35,8 @@ use chv_monitoring_core::model::{
 };
 use chv_monitoring_core::node_os::{NodeOsCollector, NodeOsSnapshot};
 use chv_monitoring_core::sampler::{
-    run_sampler, NodeOsSource, SamplerConfig, SamplerError, SamplerHealth, SamplerSources,
-    VmRuntimeSource,
+    run_sampler, NodeOsSource, SamplerConfig, SamplerError, SamplerEvent, SamplerHealth,
+    SamplerSources, VmRuntimeSource,
 };
 use tokio::sync::Mutex;
 
@@ -484,6 +484,37 @@ impl LatestSamples {
         }
     }
 
+    /// Reconcile VM-target series against the sampler's observed
+    /// roster: every stored VM-target series whose target is NOT in
+    /// the roster is stale by construction (the VM left this node) and
+    /// is dropped. Node-target series are never touched — a roster
+    /// event only ever describes VM targets. Called only when the
+    /// sampler's listing SUCCEEDED; an unknown roster must not evict.
+    pub async fn retain_vms(&self, roster: &[String]) {
+        let mut inner = self.inner.lock().await;
+        let before = inner.len();
+        inner.retain(|_, s| s.target_kind != TargetKind::Vm || roster.contains(&s.target_id));
+        let evicted = before - inner.len();
+        if evicted > 0 {
+            tracing::debug!(
+                evicted,
+                live = roster.len(),
+                "evicted VM-target series no longer on this node"
+            );
+        }
+    }
+
+    /// The latest samples (any order), pruned of series whose stored
+    /// observation aged past `max_age_ms` — a sample the control plane
+    /// would reject for age must never poison the whole batch (the
+    /// ingestion contract rejects an over-age sample together with
+    /// everything shipped beside it).
+    pub async fn all_fresh(&self, now_ms: u64, max_age_ms: u64) -> Vec<Sample> {
+        let mut inner = self.inner.lock().await;
+        inner.retain(|_, s| now_ms.saturating_sub(s.observed_at_ms) <= max_age_ms);
+        inner.values().cloned().collect()
+    }
+
     /// The latest samples (any order). Consumed by PR-2's node ingest;
     /// test-used until then.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -516,7 +547,7 @@ pub fn spawn_monitoring_sampler(
 ) -> (Arc<SamplerHealth>, Arc<LatestSamples>) {
     let health = Arc::new(SamplerHealth::new());
     let store = Arc::new(LatestSamples::new());
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Sample>>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SamplerEvent>(256);
 
     let sources = SamplerSources {
         node: Arc::new(NodeOsSampleSource::new(node_id)),
@@ -533,8 +564,19 @@ pub fn spawn_monitoring_sampler(
     tokio::spawn(run_sampler(config, sources, tx, health.clone()));
     let consumer_store = store.clone();
     tokio::spawn(async move {
-        while let Some(batch) = rx.recv().await {
-            consumer_store.replace(batch).await;
+        while let Some(event) = rx.recv().await {
+            match event {
+                SamplerEvent::Samples(batch) => consumer_store.replace(batch).await,
+                // Reconcile against the roster the sampler actually
+                // observed: series for VM targets that left this node
+                // (deleted, migrated away) stop being shipped NOW — the
+                // control plane fails the WHOLE batch for an unowned VM
+                // target, so one departed VM would otherwise poison
+                // every future batch from this node.
+                SamplerEvent::VmRoster(roster) => {
+                    consumer_store.retain_vms(&roster).await;
+                }
+            }
         }
     });
 
@@ -548,6 +590,10 @@ const MAX_SAMPLES_PER_BATCH: usize = 512;
 /// Reconnect backoff bounds for the dedicated ingest client.
 const RECONNECT_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_secs(1);
 const RECONNECT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+/// Samples older than this are never shipped: the control plane's
+/// ingestion contract rejects over-age samples together with the whole
+/// batch, so one stale series must not poison the node's telemetry.
+const SEND_MAX_SAMPLE_AGE_MS: u64 = 2 * 60 * 1000;
 
 /// Convert one contract sample to the wire shape. The sample was built
 /// through the contract-validating `SampleBuilder`, so this is a pure
@@ -647,7 +693,16 @@ pub fn spawn_monitoring_ingest_sender(
 
             tokio::time::sleep(SEND_INTERVAL).await;
 
-            let all = samples.all().await;
+            // Age-pruned latest samples: an over-age observation (the
+            // control plane rejects samples older than 5 minutes
+            // together with the whole batch that carries them) must
+            // never poison the node's other series. 2 minutes is well
+            // under that cap and far above the sampler cadences.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let all = samples.all_fresh(now_ms, SEND_MAX_SAMPLE_AGE_MS).await;
             if all.is_empty() {
                 continue;
             }
@@ -1251,5 +1306,108 @@ mod tests {
         checkpoint("query done; cleaning up");
         let _ = runtime.delete_vm("g2-vm", None).await;
         checkpoint("delete_vm done");
+    }
+
+    fn vm_memory_sample(vm_id: &str, observed_ms: u64) -> Sample {
+        SampleBuilder::new(
+            TargetKind::Vm,
+            vm_id,
+            "vm.memory.host_accounted_bytes",
+            Source::Vmm,
+            observed_ms,
+        )
+        .unwrap()
+        .value(SampleValue::Integer(402_264_064))
+        .build()
+        .unwrap()
+    }
+
+    fn node_cpu_sample(observed_ms: u64) -> Sample {
+        SampleBuilder::new(
+            TargetKind::Node,
+            "node-1",
+            "node.cpu.capacity_ratio",
+            Source::NodeOs,
+            observed_ms,
+        )
+        .unwrap()
+        .value(SampleValue::Float(0.42))
+        .build()
+        .unwrap()
+    }
+
+    /// The round-2 review finding, pinned: a VM that left this node
+    /// (deleted, migrated) must stop being shipped IMMEDIATELY — the
+    /// control plane rejects the WHOLE batch for an unowned VM target,
+    /// so one stale series would poison every future batch from the
+    /// node. The sampler's roster event drives eviction; node series
+    /// are never collateral damage.
+    #[tokio::test]
+    async fn departed_vm_series_are_evicted_by_roster() {
+        let store = LatestSamples::new();
+        let now = 1_700_000_000_000;
+        store
+            .replace(vec![
+                node_cpu_sample(now),
+                vm_memory_sample("vm-a", now),
+                vm_memory_sample("vm-b", now),
+            ])
+            .await;
+        assert_eq!(store.len().await, 3);
+
+        // Roster shrinks to vm-a: vm-b's series must go, the rest stay.
+        store.retain_vms(&["vm-a".to_string()]).await;
+        let all = store.all().await;
+        assert!(all.iter().all(|s| s.target_id != "vm-b"), "vm-b evicted");
+        assert!(all.iter().any(|s| s.target_id == "vm-a"));
+        assert!(all.iter().any(|s| s.target_id == "node-1"));
+
+        // Empty roster (all VMs gone): every VM series goes, node
+        // series survive.
+        store.retain_vms(&[]).await;
+        let all = store.all().await;
+        assert!(
+            all.iter().all(|s| s.target_kind != TargetKind::Vm),
+            "no VM series remain"
+        );
+        assert!(all.iter().any(|s| s.target_id == "node-1"));
+    }
+
+    fn node_swap_sample(observed_ms: u64) -> Sample {
+        SampleBuilder::new(
+            TargetKind::Node,
+            "node-1",
+            "node.swap.used_bytes",
+            Source::NodeOs,
+            observed_ms,
+        )
+        .unwrap()
+        .value(SampleValue::Integer(0))
+        .build()
+        .unwrap()
+    }
+
+    /// Belt to the roster braces: a stored observation that aged past
+    /// the send cutoff is never shipped — the control plane rejects
+    /// over-age samples together with the whole batch carrying them.
+    #[tokio::test]
+    async fn stale_samples_are_pruned_from_the_send_set() {
+        let store = LatestSamples::new();
+        let now = 1_700_000_060_000;
+        store
+            .replace(vec![
+                node_cpu_sample(now),
+                // 5 minutes old: past the 2-minute send cutoff.
+                node_swap_sample(now - 300_000),
+                vm_memory_sample("vm-a", now - 300_000),
+            ])
+            .await;
+        assert_eq!(store.len().await, 3);
+
+        let fresh = store.all_fresh(now, 2 * 60 * 1000).await;
+        assert_eq!(fresh.len(), 1, "only the fresh observation survives");
+        assert_eq!(fresh[0].target_id, "node-1");
+        // The prune is durable, not a read-time filter.
+        assert_eq!(store.len().await, 1);
     }
 }

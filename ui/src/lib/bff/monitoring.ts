@@ -32,6 +32,8 @@ export interface MonitoringSeries {
 	unit: string;
 	points: MonitoringPoint[];
 	coverage_ratio: number;
+	/** Whether points were thinned to honor the max-points ceiling. */
+	truncated: boolean;
 	/** Why the series has no stored data (absence vocabulary). */
 	reason?: string | null;
 }

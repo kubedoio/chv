@@ -25,19 +25,28 @@ const EMBEDDED_MIGRATIONS: &[(&str, &str)] = &[(
 fn embedded_migrator() -> Result<sqlx::migrate::Migrator, MonitoringStoreError> {
     let mut migrations = Vec::new();
     for (name, sql) in EMBEDDED_MIGRATIONS {
+        // Mirror the directory resolver's filename semantics exactly
+        // (version prefix, reversible-direction suffix, `_` → ` ` in
+        // the description) so embedded and dir-sourced migrations
+        // produce identical Migration values — same version, same
+        // checksum, same description.
         let (version, description) = name
             .strip_suffix(".sql")
             .and_then(|stem| {
                 let (v, d) = stem.split_once('_')?;
-                Some((v.parse::<i64>().ok()?, d.to_string()))
+                Some((v.parse::<i64>().ok()?, d))
             })
             .ok_or_else(|| MonitoringStoreError::Degraded {
                 reason: format!("embedded migration name {name:?} is malformed"),
             })?;
+        let migration_type = sqlx::migrate::MigrationType::from_filename(description);
+        let description = description
+            .trim_end_matches(migration_type.suffix())
+            .replace('_', " ");
         migrations.push(sqlx::migrate::Migration::new(
             version,
             Cow::Owned(description),
-            sqlx::migrate::MigrationType::Simple,
+            migration_type,
             Cow::Borrowed(sql),
             false,
         ));

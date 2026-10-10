@@ -176,6 +176,10 @@ fn series_json(series: &HistorySeries) -> Value {
         "unit": series.unit.as_str(),
         "points": series.points.iter().map(point_json).collect::<Vec<_>>(),
         "coverage_ratio": series.coverage_ratio,
+        // Honest truncation: only a series whose points EXCEEDED the
+        // ceiling and were thinned says true — a series merely AT the
+        // ceiling is complete.
+        "truncated": series.truncated,
         "reason": series.reason.as_ref().map(SeriesReason::as_str),
     })
 }
@@ -335,12 +339,11 @@ pub async fn history(
             "unit": def.map(|d| d.unit.as_str()),
             "points": [],
             "coverage_ratio": 0.0,
+            "truncated": false,
             "reason": "not_collected",
         }));
     }
-    let truncated = series.iter().any(|s| {
-        s.points.len() >= max_points.clamp(1, chv_monitoring_store::MAX_POINTS_PER_SERIES)
-    });
+    let truncated = series.iter().any(|s| s.truncated);
     Ok(Json(json!({
         "schema_version": 1,
         "target_kind": payload.target_kind,

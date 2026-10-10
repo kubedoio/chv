@@ -39,6 +39,11 @@ pub struct MonitoringHealthSnapshot {
     /// corruption): cleared by a durable ingest success or operator
     /// intervention, never by headroom recovery.
     pub store_degraded: Option<String>,
+    /// Maintenance-flavor degradation (rollup/retention/checkpoint
+    /// worker failure): cleared only by a successful maintenance pass —
+    /// a durable ingest success must not flap it away while the worker
+    /// is still failing (both run concurrently against the same store).
+    pub maintenance_degraded: Option<String>,
     /// Headroom-flavor degradation (disk-full floor breach): cleared
     /// by headroom recovery only.
     pub headroom_degraded: Option<String>,
@@ -99,6 +104,25 @@ impl MonitoringHealth {
         });
     }
 
+    /// Mark monitoring degraded because a maintenance pass (rollups,
+    /// retention, WAL checkpoint) failed. Cleared only by a successful
+    /// pass — durable ingest successes run concurrently and must not
+    /// flap this flavor away while the worker is still failing.
+    pub fn degrade_maintenance(&self, reason: String) {
+        self.update(|s| {
+            s.maintenance_degraded = Some(reason);
+            s.recompute_degraded_reason();
+        });
+    }
+
+    /// Clear maintenance-flavor degradation (a pass succeeded).
+    pub fn clear_maintenance(&self) {
+        self.update(|s| {
+            s.maintenance_degraded = None;
+            s.recompute_degraded_reason();
+        });
+    }
+
     /// Clear headroom-flavor degradation (headroom recovered).
     pub fn clear_headroom(&self) {
         self.update(|s| {
@@ -120,6 +144,7 @@ impl MonitoringHealth {
     pub fn clear_degraded(&self) {
         self.update(|s| {
             s.store_degraded = None;
+            s.maintenance_degraded = None;
             s.headroom_degraded = None;
             s.degraded_reason = None;
         });
@@ -127,12 +152,13 @@ impl MonitoringHealth {
 }
 
 impl MonitoringHealthSnapshot {
-    /// `degraded_reason` is the presentation of the two flavor
-    /// trackers: a store problem is the more severe one and wins.
+    /// `degraded_reason` is the presentation of the three flavor
+    /// trackers: a store problem is the most severe and wins.
     fn recompute_degraded_reason(&mut self) {
         self.degraded_reason = self
             .store_degraded
             .clone()
+            .or_else(|| self.maintenance_degraded.clone())
             .or_else(|| self.headroom_degraded.clone());
     }
 }

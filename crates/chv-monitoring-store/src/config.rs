@@ -28,10 +28,6 @@ pub const MAX_FUTURE_SKEW_MS: u64 = 2 * 60 * 1000;
 /// How often the maintenance pass runs (rollups, retention, checkpoint).
 pub const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 60 * 1000;
 
-/// Filesystem headroom floor: ingestion refuses new batches below this
-/// and marks monitoring degraded (ADR-027: a separate file on the same
-/// filesystem does NOT isolate disk-full risk).
-pub const DEFAULT_MIN_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 /// Hard budget for the monitoring database file itself; maintenance
 /// evicts oldest raw data first when exceeded.
 pub const DEFAULT_MAX_DB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -57,8 +53,6 @@ pub struct MonitoringStoreConfig {
     pub dedup_retention_ms: u64,
     #[serde(default = "default_max_series_per_target")]
     pub max_series_per_target: i64,
-    #[serde(default = "default_min_headroom_bytes")]
-    pub min_headroom_bytes: u64,
     #[serde(default = "default_max_db_bytes")]
     pub max_db_bytes: u64,
 }
@@ -74,7 +68,6 @@ impl Default for MonitoringStoreConfig {
             rollup_1h_retention_ms: DEFAULT_ROLLUP_1H_RETENTION_MS,
             dedup_retention_ms: DEFAULT_DEDUP_RETENTION_MS,
             max_series_per_target: DEFAULT_MAX_SERIES_PER_TARGET,
-            min_headroom_bytes: DEFAULT_MIN_HEADROOM_BYTES,
             max_db_bytes: DEFAULT_MAX_DB_BYTES,
         }
     }
@@ -106,10 +99,6 @@ fn default_dedup_retention_ms() -> u64 {
 
 fn default_max_series_per_target() -> i64 {
     DEFAULT_MAX_SERIES_PER_TARGET
-}
-
-fn default_min_headroom_bytes() -> u64 {
-    DEFAULT_MIN_HEADROOM_BYTES
 }
 
 fn default_max_db_bytes() -> u64 {

@@ -183,16 +183,36 @@ pub struct SamplerSources {
     pub network: Option<Arc<dyn NetworkProviderSource>>,
 }
 
+/// One event from the sampler loop to its consumer.
+#[derive(Debug)]
+pub enum SamplerEvent {
+    /// A batch of samples from one source collection (the node source
+    /// per cycle, one batch per VM, provider batches on their stride).
+    Samples(Vec<Sample>),
+    /// The VM roster observed on a VM-due cycle: the target ids
+    /// currently on this node (possibly empty). Emitted only when the
+    /// listing SUCCEEDED — a failed listing emits nothing, because an
+    /// unknown roster must not look like an empty one. Consumers
+    /// reconcile: series for VM targets no longer in the roster are
+    /// stale by construction (the VM left the node, was deleted, or
+    /// was migrated away) and must stop being shipped — the control
+    /// plane fails the WHOLE batch for an unowned VM target.
+    VmRoster(Vec<String>),
+}
+
 /// Run the bounded sampler loop until aborted or the sink closes.
 ///
 /// Each cycle: node source, then every VM (bounded fan-out, per-call
 /// timeout), then the optional provider sources; every produced batch is
 /// `try_send`-ed to the bounded sink — a full sink drops the batch and
-/// counts the samples, it never blocks or grows memory.
+/// counts the samples, it never blocks or grows memory. On every VM-due
+/// cycle with a successful listing, a [`SamplerEvent::VmRoster`] is
+/// emitted BEFORE the per-VM sample batches so consumers can evict
+/// departed targets first.
 pub async fn run_sampler(
     config: SamplerConfig,
     sources: SamplerSources,
-    sink: mpsc::Sender<Vec<Sample>>,
+    sink: mpsc::Sender<SamplerEvent>,
     health: Arc<SamplerHealth>,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_vm_collections.max(1)));
@@ -209,7 +229,7 @@ pub async fn run_sampler(
         // --- node source ---
         match tokio::time::timeout(config.source_timeout, sources.node.collect_node()).await {
             Ok(Ok(samples)) => {
-                if !send_batch(&sink, &samples, &health) {
+                if !send_batch(&sink, SamplerEvent::Samples(samples), &health) {
                     return;
                 }
                 health.cycles_completed.fetch_add(1, Ordering::Relaxed);
@@ -228,59 +248,78 @@ pub async fn run_sampler(
         // --- VM sources, bounded fan-out (every vm_stride cycles) ---
         if vm_due {
             if let Some(vms) = sources.vms.clone() {
-                let ids = match tokio::time::timeout(config.source_timeout, vms.vm_ids()).await {
-                    Ok(Ok(ids)) => ids,
+                // A failed listing yields an UNKNOWN roster: emit no
+                // roster event (an unknown roster must not evict live
+                // VM series), and skip this cycle's collections.
+                let listing = match tokio::time::timeout(config.source_timeout, vms.vm_ids()).await
+                {
+                    Ok(Ok(ids)) => Some(ids),
                     Ok(Err(e)) => {
                         cycle_ok = false;
                         tracing::warn!(error = %e, "vm id listing failed");
-                        Vec::new()
+                        None
                     }
                     Err(_) => {
                         cycle_ok = false;
                         health.source_timeouts.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!("vm id listing timed out");
-                        Vec::new()
+                        None
                     }
                 };
+                // Roster first (see `SamplerEvent::VmRoster`); an
+                // UNKNOWN listing (None) emits nothing — no eviction,
+                // no collections this cycle — and the provider sources
+                // below still run. A full channel drops the event
+                // (eviction retries next cycle); a closed channel ends
+                // the loop.
+                if let Some(ids) = listing {
+                    match sink.try_send(SamplerEvent::VmRoster(ids.clone())) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::debug!("sample sink full; VM roster event dropped");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return,
+                    }
 
-                let mut pending = tokio::task::JoinSet::new();
-                for vm_id in ids {
-                    // Acquiring the permit before spawn keeps the JoinSet
-                    // itself bounded to the concurrency limit.
-                    let permit = match semaphore.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => return, // sampler torn down
-                    };
-                    let vms = vms.clone();
-                    let sink = sink.clone();
-                    let health = health.clone();
-                    let timeout = config.source_timeout;
-                    pending.spawn(async move {
-                        let _permit = permit;
-                        match tokio::time::timeout(timeout, vms.collect_vm(&vm_id)).await {
-                            Ok(Ok(samples)) => {
-                                if !send_batch(&sink, &samples, &health) {
-                                    tracing::warn!("sample sink closed; sampler exiting");
+                    let mut pending = tokio::task::JoinSet::new();
+                    for vm_id in ids {
+                        // Acquiring the permit before spawn keeps the JoinSet
+                        // itself bounded to the concurrency limit.
+                        let permit = match semaphore.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => return, // sampler torn down
+                        };
+                        let vms = vms.clone();
+                        let sink = sink.clone();
+                        let health = health.clone();
+                        let timeout = config.source_timeout;
+                        pending.spawn(async move {
+                            let _permit = permit;
+                            match tokio::time::timeout(timeout, vms.collect_vm(&vm_id)).await {
+                                Ok(Ok(samples)) => {
+                                    if !send_batch(&sink, SamplerEvent::Samples(samples), &health) {
+                                        tracing::warn!("sample sink closed; sampler exiting");
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    health
+                                        .vm_collection_failures
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    // The error text may name the VM; it goes to
+                                    // logs only, never to metric labels.
+                                    tracing::warn!(error = %e, "vm sample collection failed");
+                                }
+                                Err(_) => {
+                                    health.source_timeouts.fetch_add(1, Ordering::Relaxed);
+                                    tracing::warn!("vm sample collection timed out");
                                 }
                             }
-                            Ok(Err(e)) => {
-                                health
-                                    .vm_collection_failures
-                                    .fetch_add(1, Ordering::Relaxed);
-                                // The error text may name the VM; it goes to
-                                // logs only, never to metric labels.
-                                tracing::warn!(error = %e, "vm sample collection failed");
-                            }
-                            Err(_) => {
-                                health.source_timeouts.fetch_add(1, Ordering::Relaxed);
-                                tracing::warn!("vm sample collection timed out");
-                            }
+                        });
+                    }
+                    while let Some(joined) = pending.join_next().await {
+                        if joined.is_err() {
+                            cycle_ok = false;
                         }
-                    });
-                }
-                while let Some(joined) = pending.join_next().await {
-                    if joined.is_err() {
-                        cycle_ok = false;
                     }
                 }
             }
@@ -313,7 +352,9 @@ pub async fn run_sampler(
             for (name, result) in provider_results {
                 match result {
                     Some(Ok(Ok(samples))) => {
-                        if !samples.is_empty() && !send_batch(&sink, &samples, &health) {
+                        if !samples.is_empty()
+                            && !send_batch(&sink, SamplerEvent::Samples(samples), &health)
+                        {
                             return;
                         }
                     }
@@ -355,21 +396,25 @@ pub async fn run_sampler(
 /// closed (sampler should exit); `true` otherwise (a full sink drops and
 /// counts).
 fn send_batch(
-    sink: &mpsc::Sender<Vec<Sample>>,
-    samples: &[Sample],
+    sink: &mpsc::Sender<SamplerEvent>,
+    event: SamplerEvent,
     health: &Arc<SamplerHealth>,
 ) -> bool {
-    if samples.is_empty() {
+    let samples_len = match &event {
+        SamplerEvent::Samples(samples) => samples.len(),
+        SamplerEvent::VmRoster(_) => 0,
+    };
+    if samples_len == 0 {
         return !sink.is_closed();
     }
-    match sink.try_send(samples.to_vec()) {
+    match sink.try_send(event) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
             health
                 .dropped_samples
-                .fetch_add(samples.len() as u64, Ordering::Relaxed);
+                .fetch_add(samples_len as u64, Ordering::Relaxed);
             tracing::warn!(
-                count = samples.len(),
+                count = samples_len,
                 "sample sink full; dropping batch (counted, never unbounded)"
             );
             true
@@ -469,8 +514,12 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let mut total = 0;
-        while let Ok(batch) = rx.try_recv() {
-            total += batch.len();
+        let mut roster_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                SamplerEvent::Samples(batch) => total += batch.len(),
+                SamplerEvent::VmRoster(_) => roster_events += 1,
+            }
         }
         // Paused-clock tick boundaries may start a further cycle before
         // the sleep returns, so this is a lower bound, not an exact
@@ -479,6 +528,9 @@ mod tests {
             total >= 2 * (1 + 2),
             "two cycles of node+2vm samples, got {total}"
         );
+        // Each VM-due cycle with a successful listing emits exactly one
+        // roster event before its sample batches.
+        assert!(roster_events >= 1, "at least one VM roster event");
         let snap = health.snapshot();
         assert!(snap.cycles_completed >= 2);
         assert_eq!(snap.cycle_failures, 0);
