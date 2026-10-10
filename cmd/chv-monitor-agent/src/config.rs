@@ -91,7 +91,7 @@ impl Default for CollectorsConfig {
 }
 
 /// systemd checks configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServicesConfig {
     /// Explicit systemd unit names to check (e.g. "nginx.service"),
@@ -102,15 +102,6 @@ pub struct ServicesConfig {
     /// discovered units). Off by default.
     #[serde(default)]
     pub discover: bool,
-}
-
-impl Default for ServicesConfig {
-    fn default() -> Self {
-        Self {
-            configured: Vec::new(),
-            discover: false,
-        }
-    }
 }
 
 /// Declarative local checks (empty by default).

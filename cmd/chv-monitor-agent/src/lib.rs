@@ -5,9 +5,11 @@
 //! `docs/specs/contracts/chv-monitor-agent-security-plugins-v1.md`.
 
 pub mod agent;
+pub mod checks;
 pub mod client;
 pub mod config;
 pub mod credential;
+pub mod plugins;
 pub mod spool;
 pub mod state;
 pub mod wire;

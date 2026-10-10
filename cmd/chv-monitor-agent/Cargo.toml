@@ -21,6 +21,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
+# Plugin sandbox (security/plugins contract v1, "Execution limits"):
+# kill(2) has no std API — the sandbox SIGKILLs the whole plugin
+# process group on timeout/output overflow (descendant-kill
+# guarantee), and tests gate the root-ownership acceptance path on
+# geteuid(2). Same rationale as chv-monitor-collectors' libc dep.
+libc = "0.2"
+# Plugin sandbox: streamed SHA-256 verification of pinned plugin
+# executables (security/plugins contract v1 — digest re-verified
+# before every execution).
+sha2 = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 # Same reqwest line as chv-netbox-adapter / chvctl (rustls, JSON bodies).
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
