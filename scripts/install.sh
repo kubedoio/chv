@@ -401,11 +401,9 @@ install_binaries_and_assets() {
     # separate disposable monitoring.db; failure to open that file only
     # degrades monitoring.
     mkdir -p "$CHV_MONITORING_MIGRATIONS_DIR" "$CHV_DATA_DIR/monitoring"
-    if [ -d "${EXTRACT_DIR}/monitoring-migrations" ]; then
-        cp -r "${EXTRACT_DIR}/monitoring-migrations/"* "$CHV_MONITORING_MIGRATIONS_DIR/"
-        chown -R "$CHV_USER:$CHV_USER" "$CHV_MONITORING_MIGRATIONS_DIR"
-        chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR/monitoring"
-    fi
+    cp -r "${EXTRACT_DIR}/monitoring-migrations/"* "$CHV_MONITORING_MIGRATIONS_DIR/"
+    chown -R "$CHV_USER:$CHV_USER" "$CHV_MONITORING_MIGRATIONS_DIR"
+    chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR/monitoring"
 }
 
 # -----------------------------------------------------------------------------

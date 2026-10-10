@@ -25,9 +25,6 @@ pub const MAX_SAMPLE_AGE_MS: u64 = 5 * 60 * 1000;
 /// Maximum accepted future skew of a sample's timestamp.
 pub const MAX_FUTURE_SKEW_MS: u64 = 2 * 60 * 1000;
 
-/// How often the maintenance pass runs (rollups, retention, checkpoint).
-pub const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 60 * 1000;
-
 /// Hard budget for the monitoring database file itself; maintenance
 /// evicts oldest raw data first when exceeded.
 pub const DEFAULT_MAX_DB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
