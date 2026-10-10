@@ -125,7 +125,7 @@ Common fields:
 | `for_seconds` | integer | hold before firing; default 300, 0..=86400 (0 fires immediately) |
 | `recovery_seconds` | integer | condition-false window before resolving; default 120, 0..=86400 |
 | `missing_data` | string | `unknown`, `fire`, or `ignore`; default `unknown` |
-| `enabled` | boolean | rules are created enabled; `enabled` takes effect through update |
+| `enabled` | boolean | optional, defaults to `true`; the create-from-template flow creates disabled rules (templates never auto-enable) |
 | `rule_id`, `expected_revision` | — | update/delete only: the revision precondition |
 
 The five typed spec shapes (every field at the top level of the same object):
@@ -219,7 +219,7 @@ Incident detail — body `{alert_id}` → `{incident, transitions}` (transitions
 
 Rules list — body `{enabled_only?, target_kind?, limit?, offset?}` → `{rules, total}`; each rule is the flat wire shape plus `rule_id`, `rule_type`, `revision`, `created_by`, `created_at_ms`, `updated_at_ms`.
 
-Create — flat rule body → `{rule}`. Update — flat rule body plus `{rule_id, expected_revision}` (a full replacement of name, spec, severity, holds, `missing_data`, and `enabled`) → `{rule}` with the incremented revision. Delete — `{rule_id, expected_revision}` → `{deleted: true}`.
+Create — flat rule body → `{rule}`. Update — flat rule body plus `{rule_id, expected_revision}` (a replacement of name, spec, severity, holds, and `missing_data`; `enabled` is optional — omitted keeps the current state, so a partial update never silently re-enables a disabled rule) → `{rule}` with the incremented revision. Delete — `{rule_id, expected_revision}` → `{deleted: true}`.
 
 Acknowledge — `{alert_id}` → `{acknowledged: true}`; only active (pending/firing) incidents can be acknowledged, otherwise 404.
 

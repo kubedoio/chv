@@ -120,7 +120,7 @@ Neither state affects the monitoring dashboards or VM lifecycle.
 A `dead` status means CHV gave up on that event — either permanently rejected, or retried to exhaustion:
 
 1. **Read the delivery audit** (`/notifications/deliveries` or the UI delivery view) and find rows with `status: "dead"`. `last_response` says why: `http 404` (permanent 4xx — wrong URL or the receiver rejects the payload), `429`/`5xx`/`transport: …` retried to `max_attempts`, or the removed-destination note from §6.
-2. **Check the courtesy event.** When an event dead-letters, CHV enqueues one `delivery_failed` notification for the same incident so the outage is visible on the alerting surfaces, and appends a durable audit event (`monitoring.notification.dead_letter`, actor `system:notification-dispatcher`) to the events feed.
+2. **Check the courtesy event.** When an event dead-letters, CHV enqueues one `delivery_failed` notification for the same incident — routed to a surviving configured channel when the dead event's own channel is gone — so the outage is visible on the alerting surfaces, and appends a durable audit event (`monitoring.notification.dead_letter`, actor `system:notification-dispatcher`) to the events feed. When no destination remains configured at all, the courtesy notification is skipped (it could only dead-letter too); the audit event still records the failure.
 3. **Fix and re-test.** Permanent 4xx usually means a wrong `webhook_url` or a receiver that moved; fix the config, restart, and send a test per §5. Dead-lettered events are **not** automatically retried after the fix — the incident's later transitions (still firing, eventual resolved) notify normally; use the test endpoint to confirm the pipeline.
 
 ## 9. What acknowledge and silence do — and do not
