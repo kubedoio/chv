@@ -773,6 +773,15 @@ pub struct MonitoringConfig {
     /// plain-HTTP listener exposed to the VM network).
     #[serde(default)]
     pub guest_ingestion: MonitoringGuestIngestConfig,
+    /// Native alerting (ADR-027, G4 part 2). On by default but a
+    /// no-op with zero rules — the default install changes nothing.
+    #[serde(default)]
+    pub alerting: MonitoringAlertingConfig,
+    /// Outbound notifications (ADR-027, G4 part 2). Unset by default:
+    /// with no destination configured, incidents are UI-only and no
+    /// outbox events are enqueued.
+    #[serde(default)]
+    pub notifications: MonitoringNotificationsConfig,
 }
 
 /// Guest monitoring agent ingestion configuration
@@ -911,6 +920,295 @@ fn default_guest_enrollment_grace_seconds() -> u32 {
     600
 }
 
+/// Native alerting configuration (`[monitoring.alerting]`, ADR-027,
+/// campaign #602, prompt 05 / G4 part 2).
+///
+/// The evaluator is a no-op until rules exist: with zero rules (the
+/// default install) it evaluates nothing, opens nothing and notifies
+/// nobody — enabling alerting never changes a deployment that has not
+/// asked for it. The evaluator only runs while the monitoring store
+/// is connected (it reads samples from it).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitoringAlertingConfig {
+    #[serde(default = "default_alerting_enabled")]
+    pub enabled: bool,
+    /// Evaluator tick. Bounded so hold-down windows in the tens of
+    /// seconds stay honest.
+    #[serde(default = "default_alerting_evaluation_interval_secs")]
+    pub evaluation_interval_secs: u64,
+    /// Ceiling on stored rules; creating beyond it fails loudly.
+    /// Bounds per-tick evaluation work (rules are per-target in v1).
+    #[serde(default = "default_alerting_max_rules")]
+    pub max_rules: u32,
+}
+
+impl Default for MonitoringAlertingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_alerting_enabled(),
+            evaluation_interval_secs: default_alerting_evaluation_interval_secs(),
+            max_rules: default_alerting_max_rules(),
+        }
+    }
+}
+
+impl MonitoringAlertingConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        const MIN_INTERVAL_SECS: u64 = 5;
+        const MAX_INTERVAL_SECS: u64 = 60;
+        const MIN_RULES: u32 = 1;
+        const MAX_RULES_CEILING: u32 = 500;
+        if self.evaluation_interval_secs < MIN_INTERVAL_SECS
+            || self.evaluation_interval_secs > MAX_INTERVAL_SECS
+        {
+            return Err(format!(
+                "monitoring.alerting.evaluation_interval_secs must be \
+                 {MIN_INTERVAL_SECS}..={MAX_INTERVAL_SECS}, got {}",
+                self.evaluation_interval_secs
+            ));
+        }
+        if self.max_rules < MIN_RULES || self.max_rules > MAX_RULES_CEILING {
+            return Err(format!(
+                "monitoring.alerting.max_rules must be {MIN_RULES}..={MAX_RULES_CEILING}, got {}",
+                self.max_rules
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_alerting_enabled() -> bool {
+    true
+}
+fn default_alerting_evaluation_interval_secs() -> u64 {
+    15
+}
+fn default_alerting_max_rules() -> u32 {
+    200
+}
+
+/// The webhook signing secret. Debug-redacted so a printed config can
+/// never leak it.
+#[derive(Clone, Default)]
+pub struct NotificationSecret(String);
+
+impl std::fmt::Debug for NotificationSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NotificationSecret([redacted])")
+    }
+}
+
+impl<'de> Deserialize<'de> for NotificationSecret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(NotificationSecret(raw))
+    }
+}
+
+impl NotificationSecret {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Outbound notification configuration (`[monitoring.notifications]`).
+///
+/// Everything is optional and unset by default: with no destination
+/// configured the evaluator still records incidents (the UI is always
+/// a channel) but enqueues no webhook events — an unconfigured system
+/// never accumulates outbox rows.
+///
+/// Destinations come ONLY from this operator section. That is the
+/// allowlist: rules and the UI can never direct a notification
+/// anywhere. The transport adds the remaining guardrails (HTTPS-only,
+/// no redirects), and boot validation rejects credentials-in-URL and
+/// link-local/unspecified IP literals (the cloud-metadata SSRF
+/// hazard). Loopback and private ranges are allowed on purpose — an
+/// internal receiver is a legitimate destination for an
+/// operator-configured webhook.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitoringNotificationsConfig {
+    /// Signed webhook destination (contract envelope, HMAC-SHA256).
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// HMAC secret for `webhook_url` deliveries (`v1=` signatures).
+    /// Required (>= 16 chars) whenever a destination is set.
+    #[serde(default)]
+    pub webhook_signing_secret: NotificationSecret,
+    /// Optional Slack incoming-webhook destination (plain `{"text":…}`
+    /// posts; the URL itself is Slack's secret).
+    #[serde(default)]
+    pub slack_webhook_url: Option<String>,
+    /// Optional PEM CA bundle for internal destinations; system roots
+    /// when unset.
+    #[serde(default)]
+    pub webhook_ca_path: Option<PathBuf>,
+    /// Delivery attempts before an event is dead-lettered.
+    #[serde(default = "default_notifications_max_attempts")]
+    pub max_attempts: u32,
+    /// Dispatcher tick.
+    #[serde(default = "default_notifications_dispatch_interval_secs")]
+    pub dispatch_interval_secs: u64,
+    /// Events claimed per dispatch pass.
+    #[serde(default = "default_notifications_max_batch")]
+    pub max_batch: u32,
+}
+
+impl Default for MonitoringNotificationsConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            webhook_signing_secret: NotificationSecret::default(),
+            slack_webhook_url: None,
+            webhook_ca_path: None,
+            max_attempts: default_notifications_max_attempts(),
+            dispatch_interval_secs: default_notifications_dispatch_interval_secs(),
+            max_batch: default_notifications_max_batch(),
+        }
+    }
+}
+
+impl MonitoringNotificationsConfig {
+    /// Whether any destination is configured (events are enqueued at
+    /// all only when this is true).
+    pub fn has_destination(&self) -> bool {
+        self.webhook_url.is_some() || self.slack_webhook_url.is_some()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        const MIN_SECRET_BYTES: usize = 16;
+        const MAX_SECRET_BYTES: usize = 256;
+
+        for (label, url) in [
+            ("webhook_url", &self.webhook_url),
+            ("slack_webhook_url", &self.slack_webhook_url),
+        ] {
+            let Some(url) = url else { continue };
+            validate_notification_url(label, url)?;
+        }
+
+        if self.has_destination() {
+            let secret = self.webhook_signing_secret.as_str();
+            if secret.is_empty() {
+                return Err(
+                    "monitoring.notifications.webhook_signing_secret is required when a \
+                     destination URL is set (HMAC-SHA256 webhook signatures)"
+                        .to_string(),
+                );
+            }
+            if secret.len() < MIN_SECRET_BYTES || secret.len() > MAX_SECRET_BYTES {
+                return Err(format!(
+                    "monitoring.notifications.webhook_signing_secret must be \
+                     {MIN_SECRET_BYTES}..={MAX_SECRET_BYTES} bytes"
+                ));
+            }
+        }
+
+        if !(1..=20).contains(&self.max_attempts) {
+            return Err(format!(
+                "monitoring.notifications.max_attempts must be 1..=20, got {}",
+                self.max_attempts
+            ));
+        }
+        if !(1..=60).contains(&self.dispatch_interval_secs) {
+            return Err(format!(
+                "monitoring.notifications.dispatch_interval_secs must be 1..=60, got {}",
+                self.dispatch_interval_secs
+            ));
+        }
+        if !(1..=50).contains(&self.max_batch) {
+            return Err(format!(
+                "monitoring.notifications.max_batch must be 1..=50, got {}",
+                self.max_batch
+            ));
+        }
+
+        if let Some(ca_path) = &self.webhook_ca_path {
+            if !ca_path.is_file() {
+                return Err(format!(
+                    "monitoring.notifications.webhook_ca_path is not a readable file: {}",
+                    ca_path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Structural destination-URL validation (boot-time, fail-loud):
+/// HTTPS only, no credentials, and no link-local/unspecified IP
+/// literal (the cloud-metadata SSRF hazard). Transport-level
+/// enforcement (https-only, no redirects) is repeated at send time.
+fn validate_notification_url(label: &str, url: &str) -> Result<(), String> {
+    const MAX_URL_BYTES: usize = 2048;
+    if url.len() > MAX_URL_BYTES {
+        return Err(format!(
+            "monitoring.notifications.{label} exceeds {MAX_URL_BYTES} bytes"
+        ));
+    }
+    let rest = url.strip_prefix("https://").ok_or_else(|| {
+        format!("monitoring.notifications.{label} must use https://, got {url:?}")
+    })?;
+    // Authority ends at the first path/query/fragment separator.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return Err(format!("monitoring.notifications.{label} has no host"));
+    }
+    if authority.contains('@') {
+        return Err(format!(
+            "monitoring.notifications.{label} must not carry credentials in the URL"
+        ));
+    }
+    // Host without port (IPv6 literals carry their colons inside
+    // brackets; a port is the last colon after any ']').
+    let host_port = authority.rsplit_once(']').map(|(head, tail)| {
+        // "[::1]:8443" -> "::1"; "[::1]" -> "::1"
+        let host = &head[head.find('[').map(|i| i + 1).unwrap_or(0)..];
+        let _ = tail;
+        host.to_string()
+    });
+    let host = match host_port {
+        Some(host) => host,
+        None => authority
+            .rsplit_once(':')
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_else(|| authority.to_string()),
+    };
+    let reject_ip_prefix = |prefix: &str| host.starts_with(prefix);
+    if host == "0.0.0.0" || host == "::" {
+        return Err(format!(
+            "monitoring.notifications.{label} must not use the unspecified address"
+        ));
+    }
+    if reject_ip_prefix("169.254.") || host == "fe80::" {
+        return Err(format!(
+            "monitoring.notifications.{label} must not use a link-local address \
+             (cloud metadata services live there)"
+        ));
+    }
+    Ok(())
+}
+
+fn default_notifications_max_attempts() -> u32 {
+    8
+}
+fn default_notifications_dispatch_interval_secs() -> u64 {
+    5
+}
+fn default_notifications_max_batch() -> u32 {
+    10
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
@@ -927,6 +1225,8 @@ impl Default for MonitoringConfig {
             max_db_gib: default_monitoring_max_db_gib(),
             batches_per_minute: default_monitoring_batches_per_minute(),
             guest_ingestion: MonitoringGuestIngestConfig::default(),
+            alerting: MonitoringAlertingConfig::default(),
+            notifications: MonitoringNotificationsConfig::default(),
         }
     }
 }
@@ -1145,6 +1445,208 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alerting_and_notifications_default_to_no_op() {
+        let monitoring = MonitoringConfig::default();
+        // Alerting: on by default but inert with zero rules.
+        assert!(monitoring.alerting.enabled);
+        assert_eq!(monitoring.alerting.evaluation_interval_secs, 15);
+        assert_eq!(monitoring.alerting.max_rules, 200);
+        assert!(monitoring.alerting.validate().is_ok());
+        // Notifications: nothing configured — no destination, no
+        // secret requirement, valid.
+        assert!(!monitoring.notifications.has_destination());
+        assert!(monitoring.notifications.webhook_url.is_none());
+        assert!(monitoring.notifications.webhook_signing_secret.is_empty());
+        assert!(monitoring.notifications.validate().is_ok());
+    }
+
+    #[test]
+    fn alerting_sections_parse_from_toml() {
+        let raw = r#"
+[monitoring.alerting]
+enabled = false
+evaluation_interval_secs = 30
+max_rules = 50
+
+[monitoring.notifications]
+webhook_url = "https://alerts.example.internal/hooks/chv"
+webhook_signing_secret = "0123456789abcdef0123456789abcdef"
+max_attempts = 4
+dispatch_interval_secs = 10
+max_batch = 5
+"#;
+        let value: toml::Value = toml::from_str(raw).expect("parse toml");
+        let alerting: MonitoringAlertingConfig = value
+            .get("monitoring")
+            .unwrap()
+            .get("alerting")
+            .map(|v| MonitoringAlertingConfig::deserialize(v.clone()).expect("alerting section"))
+            .unwrap_or_default();
+        assert!(!alerting.enabled);
+        assert_eq!(alerting.evaluation_interval_secs, 30);
+        assert_eq!(alerting.max_rules, 50);
+
+        let notifications: MonitoringNotificationsConfig = value
+            .get("monitoring")
+            .unwrap()
+            .get("notifications")
+            .map(|v| {
+                MonitoringNotificationsConfig::deserialize(v.clone())
+                    .expect("notifications section")
+            })
+            .unwrap_or_default();
+        assert!(notifications.has_destination());
+        assert_eq!(
+            notifications.webhook_url.as_deref(),
+            Some("https://alerts.example.internal/hooks/chv")
+        );
+        assert_eq!(notifications.webhook_signing_secret.as_str().len(), 32);
+        assert_eq!(notifications.max_attempts, 4);
+        assert_eq!(notifications.dispatch_interval_secs, 10);
+        assert_eq!(notifications.max_batch, 5);
+        assert!(notifications.validate().is_ok());
+    }
+
+    #[test]
+    fn notification_secret_is_debug_redacted() {
+        let cfg = MonitoringNotificationsConfig {
+            webhook_signing_secret: NotificationSecret(
+                "super-secret-value-never-in-logs".to_string(),
+            ),
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("super-secret-value"),
+            "secret leaked: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"));
+    }
+
+    #[test]
+    fn notifications_validation_rejects_bad_destinations() {
+        let secret = NotificationSecret("0123456789abcdef0123456789abcdef".to_string());
+        let base = || MonitoringNotificationsConfig {
+            webhook_signing_secret: secret.clone(),
+            ..Default::default()
+        };
+
+        // Plain HTTP is rejected.
+        let mut cfg = base();
+        cfg.webhook_url = Some("http://alerts.example.internal/hook".into());
+        assert!(cfg.validate().is_err());
+
+        // Credentials in the URL are rejected.
+        let mut cfg = base();
+        cfg.webhook_url = Some("https://user:pass@alerts.example.internal/hook".into());
+        assert!(cfg.validate().is_err());
+
+        // Link-local (cloud metadata) is rejected.
+        let mut cfg = base();
+        cfg.webhook_url = Some("https://169.254.169.254/latest/meta-data".into());
+        assert!(cfg.validate().is_err());
+
+        // Unspecified address is rejected.
+        let mut cfg = base();
+        cfg.webhook_url = Some("https://0.0.0.0/hook".into());
+        assert!(cfg.validate().is_err());
+
+        // A destination without a signing secret is rejected.
+        let cfg = MonitoringNotificationsConfig {
+            webhook_url: Some("https://alerts.example.internal/hook".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("webhook_signing_secret"), "{err}");
+
+        // A too-short secret is rejected.
+        let cfg = MonitoringNotificationsConfig {
+            webhook_url: Some("https://alerts.example.internal/hook".into()),
+            webhook_signing_secret: NotificationSecret("short".to_string()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        // Loopback, private hosts and ports are legitimate internal
+        // destinations for an operator-configured webhook.
+        let mut cfg = base();
+        cfg.webhook_url = Some("https://127.0.0.1:9443/hook".into());
+        assert!(cfg.validate().is_ok());
+        let mut cfg = base();
+        cfg.webhook_url = Some("https://10.1.2.3/hook".into());
+        assert!(cfg.validate().is_ok());
+        let mut cfg = base();
+        cfg.slack_webhook_url = Some("https://hooks.slack.com/services/T/B/X".into());
+        assert!(cfg.validate().is_ok());
+
+        // Range checks.
+        let mut cfg = base();
+        cfg.max_attempts = 21;
+        assert!(cfg.validate().is_err());
+        let mut cfg = base();
+        cfg.dispatch_interval_secs = 0;
+        assert!(cfg.validate().is_err());
+        let mut cfg = base();
+        cfg.max_batch = 51;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn alerting_validation_rejects_out_of_range() {
+        let cfg = MonitoringAlertingConfig {
+            evaluation_interval_secs: 4,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        let cfg = MonitoringAlertingConfig {
+            evaluation_interval_secs: 61,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        let cfg = MonitoringAlertingConfig {
+            evaluation_interval_secs: 60,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+        let cfg = MonitoringAlertingConfig {
+            max_rules: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        let cfg = MonitoringAlertingConfig {
+            max_rules: 501,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        let cfg = MonitoringAlertingConfig {
+            max_rules: 500,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn example_controlplane_toml_documents_alerting_sections() {
+        // Drift guard: the shipped example documents the alerting and
+        // notifications sections with their no-op-by-default contract.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/controlplane.toml"
+        );
+        let config = load_controlplane_config(Some(std::path::Path::new(path)))
+            .expect("docs/examples/controlplane.toml must parse");
+        assert!(config.monitoring.alerting.enabled);
+        assert_eq!(config.monitoring.alerting.evaluation_interval_secs, 15);
+        assert_eq!(config.monitoring.alerting.max_rules, 200);
+        // No destination in the shipped example: notifications off.
+        assert!(!config.monitoring.notifications.has_destination());
+        assert!(config.monitoring.notifications.webhook_url.is_none());
+        assert_eq!(config.monitoring.notifications.max_attempts, 8);
+        assert!(config.monitoring.notifications.validate().is_ok());
+        assert!(config.monitoring.alerting.validate().is_ok());
+    }
 
     #[test]
     fn example_controlplane_toml_parses_with_guest_ingestion_sections() {
