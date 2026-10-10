@@ -38,6 +38,16 @@
 				metricIds,
 				selectedRange
 			);
+			// A response that is not the documented shape (a proxy or
+			// misrouted gateway answering with its own JSON) is a
+			// request error — never a crash, and never a silent
+			// "no data" that would misread an outage as an absence.
+			if (!response || !Array.isArray(response.series)) {
+				degraded = false;
+				error = 'Monitoring service returned an unexpected response';
+				series = [];
+				return;
+			}
 			series = response.series;
 			nowMs = response.generated_at_ms;
 			degraded = false;

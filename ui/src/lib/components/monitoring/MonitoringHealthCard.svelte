@@ -13,7 +13,13 @@
 
 	async function load() {
 		try {
-			health = await getMonitoringHealth();
+			const response = await getMonitoringHealth();
+			// A response that is not the documented shape (a proxy or
+			// misrouted gateway) is a failure — never a guessed state.
+			if (!response || typeof response.available !== 'boolean') {
+				throw new Error('unexpected response shape');
+			}
+			health = response;
 			failed = false;
 			nowMs = Date.now();
 		} catch {
