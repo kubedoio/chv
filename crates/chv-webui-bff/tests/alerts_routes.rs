@@ -651,7 +651,7 @@ async fn incidents_are_visible_and_acknowledge_silence_are_overlays() {
     // surfaces it with include_resolved.
     state
         .alert_repo
-        .resolve_incident(&alert_id, 2_000_000, "recovered", None, None)
+        .resolve_incident(&alert_id, 2_000_000, "recovered", None, &[])
         .await
         .expect("resolve");
     let (_, body) = request(

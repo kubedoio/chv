@@ -253,9 +253,10 @@ impl AlertRepository {
     }
 
     /// Promote a pending incident to firing, optionally enqueueing the
-    /// notification event on the same transaction (all-or-nothing).
-    /// Returns `false` when the incident is no longer pending (the
-    /// evaluator treats that as already-promoted, never an error).
+    /// notification events (one per configured channel) on the same
+    /// transaction (all-or-nothing). Returns `false` when the incident
+    /// is no longer pending (the evaluator treats that as
+    /// already-promoted, never an error).
     pub async fn promote_to_firing(
         &self,
         alert_id: &str,
@@ -263,7 +264,7 @@ impl AlertRepository {
         last_observed: Option<&str>,
         evidence_from_ms: i64,
         evidence_to_ms: i64,
-        notify: Option<&NotificationEventInput>,
+        notify: &[NotificationEventInput],
     ) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
         let promoted: Option<(String,)> = sqlx::query_as(
@@ -300,8 +301,10 @@ impl AlertRepository {
         .bind(last_observed)
         .execute(&mut *tx)
         .await?;
-        if let Some(event) = notify {
-            enqueue_on_tx(&mut tx, event).await?;
+        if !notify.is_empty() {
+            for event in notify {
+                enqueue_on_tx(&mut tx, event).await?;
+            }
         }
         tx.commit().await?;
         Ok(true)
@@ -371,7 +374,7 @@ impl AlertRepository {
     }
 
     /// Resolve a firing incident, optionally enqueueing the resolved
-    /// notification on the same transaction. Returns `false` when the
+    /// notifications on the same transaction. Returns `false` when the
     /// incident is no longer firing (treated as already-resolved).
     pub async fn resolve_incident(
         &self,
@@ -379,7 +382,7 @@ impl AlertRepository {
         now_ms: i64,
         reason: &str,
         last_observed: Option<&str>,
-        notify: Option<&NotificationEventInput>,
+        notify: &[NotificationEventInput],
     ) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
         let resolved: Option<(String,)> = sqlx::query_as(
@@ -415,8 +418,10 @@ impl AlertRepository {
         .bind(last_observed)
         .execute(&mut *tx)
         .await?;
-        if let Some(event) = notify {
-            enqueue_on_tx(&mut tx, event).await?;
+        if !notify.is_empty() {
+            for event in notify {
+                enqueue_on_tx(&mut tx, event).await?;
+            }
         }
         tx.commit().await?;
         Ok(true)
@@ -653,7 +658,7 @@ mod tests {
                 Some("0.95 (x)"),
                 1_100_000,
                 1_200_000,
-                Some(&firing_event),
+                std::slice::from_ref(&firing_event),
             )
             .await
             .expect("promote");
@@ -673,7 +678,7 @@ mod tests {
 
         // A second promotion is a no-op, not an error.
         let again = repo
-            .promote_to_firing(&alert_id, 1_300_000, None, 0, 0, None)
+            .promote_to_firing(&alert_id, 1_300_000, None, 0, 0, &[])
             .await
             .expect("promote again");
         assert!(!again);
@@ -704,7 +709,7 @@ mod tests {
                 1_700_000,
                 "condition false for recovery window",
                 None,
-                Some(&resolved_event),
+                std::slice::from_ref(&resolved_event),
             )
             .await
             .expect("resolve");
@@ -731,7 +736,7 @@ mod tests {
 
         // Resolving again is a no-op.
         let again = repo
-            .resolve_incident(&alert_id, 1_800_000, "replay", None, None)
+            .resolve_incident(&alert_id, 1_800_000, "replay", None, &[])
             .await
             .expect("resolve again");
         assert!(!again);
@@ -785,10 +790,10 @@ mod tests {
             .expect("find")
             .expect("active")
             .alert_id;
-        repo.promote_to_firing(&alert_id, 1_100_000, None, 0, 0, None)
+        repo.promote_to_firing(&alert_id, 1_100_000, None, 0, 0, &[])
             .await
             .expect("promote");
-        repo.resolve_incident(&alert_id, 1_200_000, "recovered", None, None)
+        repo.resolve_incident(&alert_id, 1_200_000, "recovered", None, &[])
             .await
             .expect("resolve");
         repo.open_pending(&open_input("rule-1:vm:vm-3:-", "vm", "vm-3"))
@@ -803,7 +808,7 @@ mod tests {
             .open_pending(&open_input("rule-1:vm:vm-4:-", "vm", "vm-4"))
             .await
             .expect("open");
-        repo.promote_to_firing(&alert_id, 1_100_000, None, 0, 0, None)
+        repo.promote_to_firing(&alert_id, 1_100_000, None, 0, 0, &[])
             .await
             .expect("promote");
 
@@ -831,7 +836,7 @@ mod tests {
             .is_err());
 
         // Resolving still works under overlays.
-        repo.resolve_incident(&alert_id, 1_300_000, "recovered", None, None)
+        repo.resolve_incident(&alert_id, 1_300_000, "recovered", None, &[])
             .await
             .expect("resolve");
         // Ack on a resolved incident is a no-op.
@@ -852,17 +857,17 @@ mod tests {
             .open_pending(&open_input("r:vm:vm-b:-", "vm", "vm-b"))
             .await
             .expect("b");
-        repo.promote_to_firing(&b, 1_100_000, None, 0, 0, None)
+        repo.promote_to_firing(&b, 1_100_000, None, 0, 0, &[])
             .await
             .expect("promote b");
         let c = repo
             .open_pending(&open_input("r:node:node-c:-", "node", "node-c"))
             .await
             .expect("c");
-        repo.promote_to_firing(&c, 1_100_000, None, 0, 0, None)
+        repo.promote_to_firing(&c, 1_100_000, None, 0, 0, &[])
             .await
             .expect("promote c");
-        repo.resolve_incident(&c, 1_200_000, "recovered", None, None)
+        repo.resolve_incident(&c, 1_200_000, "recovered", None, &[])
             .await
             .expect("resolve c");
 

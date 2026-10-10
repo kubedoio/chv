@@ -634,6 +634,494 @@ fn bound_text(text: String) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Worker: the async half of the evaluator (ADR-027, prompt 05). Each
+// tick lists enabled rules, queries the monitoring store for each
+// rule's target, runs the pure core above, and applies the returned
+// action through the operational store — with the notification
+// enqueue on the SAME transaction as the transition it reports.
+// ---------------------------------------------------------------------------
+
+/// Channels the bootstrap has destinations configured for; events
+/// are enqueued one per channel. Booleans only: no secret crosses
+/// into the evaluator (the dispatcher signs at send time).
+#[derive(Clone, Default)]
+pub struct EvaluatorChannels {
+    pub webhook: bool,
+    pub slack: bool,
+}
+
+impl EvaluatorChannels {
+    fn any(&self) -> bool {
+        self.webhook || self.slack
+    }
+}
+
+/// Background worker evaluating alert rules against the monitoring
+/// store. Degraded monitoring degrades alerting, never the control
+/// plane: every store/query error is logged and skipped (the rule
+/// retries next tick); nothing here can panic or block VM lifecycle.
+#[derive(Clone)]
+pub struct AlertEvaluatorWorker {
+    rules: chv_controlplane_store::AlertRuleRepository,
+    alerts: chv_controlplane_store::AlertRepository,
+    monitoring: std::sync::Arc<chv_monitoring_store::MonitoringStore>,
+    channels: EvaluatorChannels,
+}
+
+/// History points per rate query (window_seconds ≤ 3600; raw points
+/// arrive on the agent cadence, so this is generous headroom).
+const RATE_MAX_POINTS: usize = 240;
+
+impl AlertEvaluatorWorker {
+    pub fn new(
+        rules: chv_controlplane_store::AlertRuleRepository,
+        alerts: chv_controlplane_store::AlertRepository,
+        monitoring: std::sync::Arc<chv_monitoring_store::MonitoringStore>,
+        channels: EvaluatorChannels,
+    ) -> Self {
+        Self {
+            rules,
+            alerts,
+            monitoring,
+            channels,
+        }
+    }
+
+    /// Run until shutdown, one bounded evaluation pass per tick.
+    pub async fn run(
+        &self,
+        interval: std::time::Duration,
+        mut shutdown: tokio::sync::watch::Receiver<()>,
+    ) {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = ticker.tick() => {}
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let evaluated = self.evaluation_pass(now_ms).await;
+            tracing::debug!(rules_evaluated = evaluated, "alert evaluation pass");
+        }
+    }
+
+    /// One pass over the enabled rules. Returns how many rules were
+    /// evaluated. Individual rule failures are logged and skipped —
+    /// one bad rule (or a flaky monitoring query) never blocks the
+    /// rest of the tick.
+    pub async fn evaluation_pass(&self, now_ms: i64) -> usize {
+        let rules = match self.rules.list_enabled(RATE_MAX_POINTS as i64).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::warn!(error = %e, "alert evaluation: rule listing failed");
+                return 0;
+            }
+        };
+        for rule in &rules {
+            if let Err(e) = self.evaluate_rule(rule, now_ms).await {
+                tracing::warn!(
+                    rule_id = %rule.rule_id,
+                    error = %e,
+                    "alert evaluation: rule skipped"
+                );
+            }
+        }
+        rules.len()
+    }
+
+    async fn evaluate_rule(
+        &self,
+        rule: &AlertRule,
+        now_ms: i64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let kind = match rule.target_kind.as_str() {
+            "node" => chv_monitoring_core::model::TargetKind::Node,
+            "vm" => chv_monitoring_core::model::TargetKind::Vm,
+            other => {
+                return Err(format!("unknown target_kind {other:?}").into());
+            }
+        };
+
+        // Gather exactly the data this rule's spec can read.
+        let metric_ids = spec_metric_ids(&rule.spec);
+        let needs_checks = spec_needs_checks(&rule.spec);
+        let rate_window_secs = spec_rate_window_seconds(&rule.spec);
+
+        let current = if metric_ids.is_empty() {
+            // Check-status-only rules read no samples.
+            Vec::new()
+        } else {
+            self.monitoring
+                .query_current(&kind, &rule.target_id, &metric_ids, None, now_ms as u64)
+                .await?
+        };
+        let checks = if needs_checks {
+            self.monitoring
+                .query_checks(&kind, &rule.target_id, now_ms as u64)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let history = if let Some(window_secs) = rate_window_secs {
+            let from = (now_ms - window_secs.saturating_mul(1000)).max(0) as u64;
+            let series = self
+                .monitoring
+                .query_history(
+                    &kind,
+                    &rule.target_id,
+                    &metric_ids,
+                    None,
+                    from,
+                    now_ms as u64,
+                    RATE_MAX_POINTS,
+                    chv_monitoring_store::Resolution::Raw,
+                )
+                .await?;
+            series
+                .into_iter()
+                .flat_map(|s| s.points)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let data = EvaluationData {
+            now_ms,
+            current: &current,
+            checks: &checks,
+            history: &history,
+        };
+        let result = evaluate_condition(&rule.spec, &data);
+        let evaluation = apply_missing_data_policy(result, rule.missing_data);
+
+        let key = dedup_key(rule);
+        let incident = self.alerts.find_active_incident(&key).await?;
+        let snapshot = incident.as_ref().map(|row| IncidentSnapshot {
+            status: match row.status.as_str() {
+                INCIDENT_STATUS_PENDING => IncidentStatus::Pending,
+                _ => IncidentStatus::Firing,
+            },
+            pending_since_ms: row.pending_since_ms.unwrap_or(now_ms),
+            clear_since_ms: row.clear_since_ms,
+        });
+
+        let action = next_state(
+            snapshot.as_ref(),
+            &evaluation,
+            now_ms,
+            rule.for_seconds,
+            rule.recovery_seconds,
+        );
+        self.apply_action(rule, incident.as_ref(), action, &evaluation, now_ms)
+            .await?;
+        Ok(())
+    }
+
+    /// Execute the state machine's decision through the operational
+    /// store, with the notification enqueue riding the transition's
+    /// transaction. Every branch is idempotent under a racing tick:
+    /// guarded updates return "already done" instead of erroring.
+    async fn apply_action(
+        &self,
+        rule: &AlertRule,
+        incident: Option<&chv_controlplane_store::IncidentRow>,
+        action: IncidentAction,
+        evaluation: &RuleEvaluation,
+        now_ms: i64,
+    ) -> Result<(), chv_controlplane_store::StoreError> {
+        let observation_text = match evaluation {
+            RuleEvaluation::Met { observation } | RuleEvaluation::NotMet { observation } => {
+                format_observation(&rule.spec, observation)
+            }
+            RuleEvaluation::NoData => "no data (ignored)".to_string(),
+        };
+        // Evidence window: from the incident's first occurrence (or
+        // the hold window at open) to now.
+        let evidence_from = incident
+            .and_then(|i| i.first_occurrence_ms)
+            .unwrap_or_else(|| {
+                now_ms.saturating_sub(rule.for_seconds.saturating_mul(1000).max(1_000))
+            });
+        let alert_id = incident.map(|i| i.alert_id.clone());
+
+        match action {
+            IncidentAction::None => {}
+            IncidentAction::OpenPending | IncidentAction::OpenFiring => {
+                let message = format!("{} (rule '{}')", observation_text, rule.name);
+                let alert_id = match self
+                    .alerts
+                    .open_pending(&chv_controlplane_store::IncidentOpenInput {
+                        rule_id: rule.rule_id.clone(),
+                        rule_revision: rule.revision,
+                        dedup_key: dedup_key(rule),
+                        severity: rule.severity.clone(),
+                        target_kind: rule.target_kind.clone(),
+                        target_id: rule.target_id.clone(),
+                        // Monitoring incidents never set node_id: the
+                        // FK would couple incident creation to node
+                        // existence (a rule can outlive its node),
+                        // and target identity already lives in
+                        // resource_kind/resource_id + rule linkage.
+                        node_id: None,
+                        message,
+                        now_ms,
+                        last_observed: Some(observation_text.clone()),
+                        evidence_from_ms: evidence_from,
+                        evidence_to_ms: now_ms,
+                    })
+                    .await
+                {
+                    Ok(alert_id) => alert_id,
+                    Err(e @ chv_controlplane_store::StoreError::Database(_)) => {
+                        // A racing tick opened the same dedup key: the
+                        // partial unique index already holds it.
+                        tracing::debug!(
+                            rule_id = %rule.rule_id,
+                            error = %e,
+                            "alert evaluation: incident already open"
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
+                if action == IncidentAction::OpenFiring {
+                    // Zero hold: fire in the same pass; the store
+                    // records both transitions.
+                    let notify = self.notify_events(
+                        rule,
+                        &alert_id,
+                        chv_controlplane_store::EVENT_TYPE_FIRING,
+                        &observation_text,
+                        now_ms,
+                        None,
+                    );
+                    self.alerts
+                        .promote_to_firing(
+                            &alert_id,
+                            now_ms,
+                            Some(&observation_text),
+                            evidence_from,
+                            now_ms,
+                            &notify,
+                        )
+                        .await?;
+                }
+            }
+            IncidentAction::PromoteToFiring => {
+                let Some(alert_id) = &alert_id else {
+                    return Ok(());
+                };
+                let notify = self.notify_events(
+                    rule,
+                    alert_id,
+                    chv_controlplane_store::EVENT_TYPE_FIRING,
+                    &observation_text,
+                    now_ms,
+                    incident,
+                );
+                self.alerts
+                    .promote_to_firing(
+                        alert_id,
+                        now_ms,
+                        Some(&observation_text),
+                        evidence_from,
+                        now_ms,
+                        &notify,
+                    )
+                    .await?;
+            }
+            IncidentAction::Observe => {
+                let Some(alert_id) = &alert_id else {
+                    return Ok(());
+                };
+                self.alerts
+                    .note_observation(
+                        alert_id,
+                        now_ms,
+                        Some(&observation_text),
+                        evidence_from,
+                        now_ms,
+                    )
+                    .await?;
+            }
+            IncidentAction::ClearPending => {
+                let Some(alert_id) = &alert_id else {
+                    return Ok(());
+                };
+                self.alerts.clear_pending(alert_id).await?;
+            }
+            IncidentAction::StartRecovery => {
+                let Some(alert_id) = &alert_id else {
+                    return Ok(());
+                };
+                self.alerts.mark_condition_false(alert_id, now_ms).await?;
+            }
+            IncidentAction::Resolve => {
+                let Some(alert_id) = &alert_id else {
+                    return Ok(());
+                };
+                let notify = self.notify_events(
+                    rule,
+                    alert_id,
+                    chv_controlplane_store::EVENT_TYPE_RESOLVED,
+                    &observation_text,
+                    now_ms,
+                    incident,
+                );
+                self.alerts
+                    .resolve_incident(
+                        alert_id,
+                        now_ms,
+                        "condition false for the recovery window",
+                        Some(&observation_text),
+                        &notify,
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the notification events for a transition, one per
+    /// configured channel — or an empty vec when notifications are
+    /// off, no destination exists, or the incident is silenced (an
+    /// overlay that suppresses delivery, never a resolution). All
+    /// events carry the same pre-rendered envelope; the dispatcher
+    /// renders channel-specific bodies at send time. Enqueueing on
+    /// the transition's transaction is the caller's job (the store
+    /// methods take the slice).
+    fn notify_events(
+        &self,
+        rule: &AlertRule,
+        alert_id: &str,
+        event_type: &str,
+        observation_text: &str,
+        now_ms: i64,
+        incident: Option<&chv_controlplane_store::IncidentRow>,
+    ) -> Vec<chv_controlplane_store::NotificationEventInput> {
+        if !self.channels.any() {
+            return Vec::new();
+        }
+        // Silence is an overlay: the transition still happens, only
+        // the notification is suppressed.
+        if let Some(until) = incident.and_then(|i| i.silenced_until_ms) {
+            if until > now_ms {
+                return Vec::new();
+            }
+        }
+        let summary = truncate_summary(&format!(
+            "{} — {} ({})",
+            rule.name, observation_text, rule.severity
+        ));
+        let resource_url = format!("/{}s/{}", rule.target_kind, rule.target_id);
+        let incident_key = dedup_key(rule);
+        let channels = [
+            (
+                self.channels.webhook,
+                chv_controlplane_store::CHANNEL_WEBHOOK,
+            ),
+            (self.channels.slack, chv_controlplane_store::CHANNEL_SLACK),
+        ];
+        channels
+            .iter()
+            .filter(|(configured, _)| *configured)
+            .map(|(_, channel)| {
+                let event_id = uuid::Uuid::new_v4().to_string();
+                let payload = chv_monitoring_core::notifications::render_envelope(
+                    &event_id,
+                    alert_id,
+                    event_type,
+                    &rule.severity,
+                    &rule.target_kind,
+                    &rule.target_id,
+                    &summary,
+                    now_ms,
+                    &resource_url,
+                );
+                chv_controlplane_store::NotificationEventInput {
+                    event_id,
+                    alert_id: alert_id.to_string(),
+                    incident_key: incident_key.clone(),
+                    event_type: event_type.to_string(),
+                    severity: rule.severity.clone(),
+                    target_kind: rule.target_kind.clone(),
+                    target_id: rule.target_id.clone(),
+                    summary: summary.clone(),
+                    occurred_at_ms: now_ms,
+                    payload,
+                    channel: channel.to_string(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Bound a notification summary to the outbox's 512-byte validation.
+fn truncate_summary(text: &str) -> String {
+    const MAX: usize = 480;
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    let mut cut = MAX;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text[..cut].to_string()
+}
+
+/// Metric ids a spec (recursively) reads — deduplicated, since group
+/// conditions may share a metric. Empty for check-status-only specs.
+fn spec_metric_ids(spec: &AlertRuleSpec) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    fn collect(spec: &AlertRuleSpec, ids: &mut Vec<String>) {
+        match spec {
+            AlertRuleSpec::Threshold { metric_id, .. }
+            | AlertRuleSpec::Rate { metric_id, .. }
+            | AlertRuleSpec::Availability { metric_id, .. } => {
+                if !ids.contains(metric_id) {
+                    ids.push(metric_id.clone());
+                }
+            }
+            AlertRuleSpec::CheckStatus { .. } => {}
+            AlertRuleSpec::Group { conditions, .. } => {
+                for condition in conditions {
+                    collect(condition, ids);
+                }
+            }
+        }
+    }
+    collect(spec, &mut ids);
+    ids
+}
+
+/// Whether any (nested) condition reads the guest check inventory.
+fn spec_needs_checks(spec: &AlertRuleSpec) -> bool {
+    match spec {
+        AlertRuleSpec::CheckStatus { .. } => true,
+        AlertRuleSpec::Group { conditions, .. } => conditions.iter().any(spec_needs_checks),
+        _ => false,
+    }
+}
+
+/// The widest rate window a (nested) rate condition requires; `None`
+/// when the spec reads no rates. The pure core filters points to each
+/// condition's own window, so one query at the widest window feeds
+/// every condition.
+fn spec_rate_window_seconds(spec: &AlertRuleSpec) -> Option<i64> {
+    match spec {
+        AlertRuleSpec::Rate { window_seconds, .. } => Some(*window_seconds),
+        AlertRuleSpec::Group { conditions, .. } => {
+            conditions.iter().filter_map(spec_rate_window_seconds).max()
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1975,5 +2463,453 @@ mod tests {
         assert!(text.chars().all(|c| !c.is_control()));
         // The bound cuts, it never grows.
         assert!(text.starts_with('1'));
+    }
+}
+
+/// End-to-end worker tests: a real file-backed monitoring store, the
+/// real operational store, and the real pure core — no fakes between
+/// them. Times are explicit (`evaluation_pass(now_ms)`), so the state
+/// machine is driven deterministically tick by tick.
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use chv_controlplane_store::test_util::create_test_pool;
+    use chv_controlplane_store::{
+        AlertRepository, AlertRuleRepository, NotificationOutboxRepository, RuleCreateInput,
+    };
+    use chv_monitoring_core::model::{SampleBuilder, SampleValue, Source, TargetKind};
+    use chv_monitoring_store::{IngestOutcome, MonitoringStore, MonitoringStoreConfig, NodeBatch};
+
+    struct Fixture {
+        worker: AlertEvaluatorWorker,
+        rules: AlertRuleRepository,
+        alerts: AlertRepository,
+        outbox: NotificationOutboxRepository,
+        monitoring: std::sync::Arc<MonitoringStore>,
+        /// Monotonic batch sequence (the store dedups replays by
+        /// boot_id + sequence).
+        next_sequence: std::cell::Cell<u64>,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Fixed evaluation clock base: passes run at BASE, BASE+30s, …
+    const BASE_MS: i64 = 10_000_000_000;
+
+    async fn fixture(channels: EvaluatorChannels) -> Fixture {
+        let pool = create_test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let monitoring = std::sync::Arc::new(
+            MonitoringStore::connect(MonitoringStoreConfig {
+                database_url: format!("sqlite://{}/monitoring.db", dir.path().display()),
+                migrations_dir: std::path::PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../cmd/chv-controlplane/monitoring-migrations"
+                )),
+                ..MonitoringStoreConfig::default()
+            })
+            .await
+            .expect("connect monitoring store"),
+        );
+        let rules = AlertRuleRepository::new(pool.clone());
+        let alerts = AlertRepository::new(pool.clone());
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let worker =
+            AlertEvaluatorWorker::new(rules.clone(), alerts.clone(), monitoring.clone(), channels);
+        Fixture {
+            worker,
+            rules,
+            alerts,
+            outbox,
+            monitoring,
+            next_sequence: std::cell::Cell::new(0),
+            _dir: dir,
+        }
+    }
+
+    impl Fixture {
+        /// Ingest one gauge sample for node-1's CPU ratio.
+        async fn seed_cpu(&self, observed_at_ms: u64, value: f64) {
+            let sample = SampleBuilder::new(
+                TargetKind::Node,
+                "node-1",
+                "node.cpu.capacity_ratio",
+                Source::NodeOs,
+                observed_at_ms,
+            )
+            .unwrap()
+            .value(SampleValue::Float(value))
+            .build()
+            .unwrap();
+            let sequence = self.next_sequence.get();
+            self.next_sequence.set(sequence + 1);
+            let batch = NodeBatch {
+                boot_id: "boot-1".to_string(),
+                sequence,
+                sent_at_ms: observed_at_ms,
+                samples: vec![sample],
+            };
+            let outcome = self
+                .monitoring
+                .ingest_node_batch("node-1", &batch, observed_at_ms)
+                .await
+                .expect("ingest");
+            assert!(matches!(outcome, IngestOutcome::Accepted { samples: 1 }));
+        }
+    }
+
+    fn cpu_rule(for_seconds: i64, recovery_seconds: i64, threshold: f64) -> RuleCreateInput {
+        RuleCreateInput {
+            name: "Node CPU pressure".into(),
+            target_kind: "node".into(),
+            target_id: "node-1".into(),
+            spec: AlertRuleSpec::Threshold {
+                metric_id: "node.cpu.capacity_ratio".into(),
+                dimension_match: None,
+                operator: ThresholdOperator::GreaterThan,
+                threshold,
+            },
+            severity: "warning".into(),
+            for_seconds,
+            recovery_seconds,
+            missing_data: MissingDataPolicy::Unknown,
+            created_by: "test".into(),
+            now_ms: BASE_MS,
+        }
+    }
+
+    async fn active_incident(
+        f: &Fixture,
+        dedup: &str,
+    ) -> Option<chv_controlplane_store::IncidentRow> {
+        f.alerts.find_active_incident(dedup).await.expect("find")
+    }
+
+    async fn outbox_count(f: &Fixture, event_type: &str) -> usize {
+        f.outbox
+            .list_recent(100)
+            .await
+            .expect("list")
+            .iter()
+            .filter(|e| e.event_type == event_type)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn zero_hold_rule_fires_immediately_with_notification() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        let evaluated = f.worker.evaluation_pass(BASE_MS).await;
+        assert_eq!(evaluated, 1);
+
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("incident opened");
+        assert_eq!(incident.status, "firing");
+        assert_eq!(incident.rule_revision, Some(1));
+        // The firing notification was enqueued on the transition.
+        assert_eq!(outbox_count(&f, "firing").await, 1);
+    }
+
+    #[tokio::test]
+    async fn hold_window_promotes_then_recovers() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        // 120s hold, 60s recovery.
+        let rule = f.rules.create(&cpu_rule(120, 60, 0.9)).await.expect("rule");
+
+        // Tick 1: condition true, hold not elapsed -> pending, no
+        // notification yet.
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("pending opened");
+        assert_eq!(incident.status, "pending");
+        assert_eq!(outbox_count(&f, "firing").await, 0);
+
+        // Tick 2 at +180s: hold elapsed -> firing + notification.
+        f.seed_cpu((BASE_MS as u64) + 150_000, 0.96).await;
+        f.worker.evaluation_pass(BASE_MS + 180_000).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still open");
+        assert_eq!(incident.status, "firing");
+        assert_eq!(outbox_count(&f, "firing").await, 1);
+
+        // Tick 3 at +210s: condition false -> recovery starts, no
+        // resolution yet.
+        f.seed_cpu((BASE_MS as u64) + 200_000, 0.5).await;
+        f.worker.evaluation_pass(BASE_MS + 210_000).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still firing");
+        assert_eq!(incident.status, "firing");
+        assert_eq!(incident.clear_since_ms, Some(BASE_MS + 210_000));
+
+        // Tick 4 at +280s: recovery elapsed -> resolved + notification.
+        f.worker.evaluation_pass(BASE_MS + 280_000).await;
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+        assert_eq!(outbox_count(&f, "resolved").await, 1);
+        // The firing and resolved events are the only notifications.
+        let all = f.outbox.list_recent(100).await.expect("list");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pending_cleared_before_hold_is_deleted() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        let rule = f.rules.create(&cpu_rule(600, 60, 0.9)).await.expect("rule");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_some());
+
+        // Condition false well before the 600s hold: the pending
+        // incident is deleted, not stored as noise.
+        f.seed_cpu((BASE_MS as u64) + 30_000, 0.4).await;
+        f.worker.evaluation_pass(BASE_MS + 60_000).await;
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_data_never_fires_unknown_policy() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        // No samples ingested at all: the series is absent.
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+        f.worker.evaluation_pass(BASE_MS).await;
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_none(),
+            "absent data must not fire a threshold rule under the unknown policy"
+        );
+        assert_eq!(f.outbox.list_recent(100).await.expect("list").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_sample_is_not_zero() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        // A `value < 0.5` rule would fire on a fabricated zero; a
+        // stale sample must evaluate Missing instead.
+        let mut input = cpu_rule(0, 60, 0.5);
+        input.spec = AlertRuleSpec::Threshold {
+            metric_id: "node.cpu.capacity_ratio".into(),
+            dimension_match: None,
+            operator: ThresholdOperator::LessThan,
+            threshold: 0.5,
+        };
+        let rule = f.rules.create(&input).await.expect("rule");
+
+        // Sample ingested, but evaluated 10 minutes later: stale.
+        f.seed_cpu((BASE_MS as u64) - 600_000, 0.1).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_none(),
+            "stale data must not be read as zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn availability_rule_fires_on_absence() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        let mut input = cpu_rule(0, 60, 0.9);
+        input.spec = AlertRuleSpec::Availability {
+            metric_id: "node.cpu.capacity_ratio".into(),
+            dimension_match: None,
+        };
+        let rule = f.rules.create(&input).await.expect("rule");
+
+        // Absence IS the condition.
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("availability fires on absence");
+        assert_eq!(incident.status, "firing");
+        assert_eq!(outbox_count(&f, "firing").await, 1);
+
+        // A fresh healthy value starts recovery…
+        f.seed_cpu((BASE_MS as u64) + 30_000, 0.42).await;
+        f.worker.evaluation_pass(BASE_MS + 60_000).await;
+        // …and a still-fresh value after the recovery window resolves
+        // it (a stale sample would read as absence and re-fire).
+        f.seed_cpu((BASE_MS as u64) + 100_000, 0.42).await;
+        f.worker.evaluation_pass(BASE_MS + 130_000).await;
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+        assert_eq!(outbox_count(&f, "resolved").await, 1);
+    }
+
+    #[tokio::test]
+    async fn silenced_incident_transitions_without_notifying() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("firing");
+        assert_eq!(outbox_count(&f, "firing").await, 1);
+
+        // Silence past the next evaluation, then let the condition
+        // clear: the transition happens, the notification does not.
+        f.alerts
+            .silence_incident(&incident.alert_id, "op-user", BASE_MS + 300_000, BASE_MS)
+            .await
+            .expect("silence");
+        f.seed_cpu((BASE_MS as u64) + 60_000, 0.4).await;
+        f.worker.evaluation_pass(BASE_MS + 120_000).await;
+        f.worker.evaluation_pass(BASE_MS + 200_000).await;
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+        assert_eq!(
+            outbox_count(&f, "resolved").await,
+            0,
+            "a silenced incident resolves without notifying"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_destination_means_incidents_without_outbox_rows() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("incident");
+        assert_eq!(incident.status, "firing");
+        assert_eq!(
+            f.outbox.list_recent(100).await.expect("list").len(),
+            0,
+            "unconfigured notifications enqueue nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_channels_enqueue_one_event_each() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: true,
+        })
+        .await;
+        f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let events = f.outbox.list_recent(100).await.expect("list");
+        assert_eq!(events.len(), 2);
+        let channels: std::collections::BTreeSet<&str> =
+            events.iter().map(|e| e.channel.as_str()).collect();
+        assert_eq!(
+            channels,
+            std::collections::BTreeSet::from(["webhook", "slack"])
+        );
+        // Both carry the same pre-rendered envelope.
+        for event in &events {
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.payload).expect("envelope json");
+            assert_eq!(payload["event_type"], "firing");
+            assert_eq!(payload["severity"], "warning");
+            assert_eq!(payload["target_id"], "node-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn rule_revision_updates_incident_openings() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        let rule = f.rules.create(&cpu_rule(600, 60, 0.9)).await.expect("rule");
+
+        // Open pending under revision 1.
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("pending");
+        assert_eq!(incident.rule_revision, Some(1));
+
+        // Edit the rule (revision 2): the pending incident keeps
+        // evaluating under the new revision at promotion time.
+        f.rules
+            .update(&chv_controlplane_store::RuleUpdateInput {
+                rule_id: rule.rule_id.clone(),
+                expected_revision: 1,
+                name: "Node CPU pressure".into(),
+                enabled: true,
+                spec: AlertRuleSpec::Threshold {
+                    metric_id: "node.cpu.capacity_ratio".into(),
+                    dimension_match: None,
+                    operator: ThresholdOperator::GreaterThan,
+                    threshold: 0.9,
+                },
+                severity: "critical".into(),
+                for_seconds: 120,
+                recovery_seconds: 60,
+                missing_data: MissingDataPolicy::Unknown,
+                updated_by: "test".into(),
+                now_ms: BASE_MS + 10_000,
+            })
+            .await
+            .expect("update");
+
+        f.seed_cpu((BASE_MS as u64) + 150_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS + 180_000).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("promoted");
+        assert_eq!(incident.status, "firing");
+        // Severity is captured at open time: the mid-pending rule edit
+        // applies to future incidents, not the one already open.
+        assert_eq!(incident.severity, "warning");
+    }
+
+    #[tokio::test]
+    async fn disabled_rules_are_not_evaluated() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+        f.rules
+            .update(&chv_controlplane_store::RuleUpdateInput {
+                rule_id: rule.rule_id.clone(),
+                expected_revision: 1,
+                name: "Node CPU pressure".into(),
+                enabled: false,
+                spec: AlertRuleSpec::Threshold {
+                    metric_id: "node.cpu.capacity_ratio".into(),
+                    dimension_match: None,
+                    operator: ThresholdOperator::GreaterThan,
+                    threshold: 0.9,
+                },
+                severity: "warning".into(),
+                for_seconds: 0,
+                recovery_seconds: 60,
+                missing_data: MissingDataPolicy::Unknown,
+                updated_by: "test".into(),
+                now_ms: BASE_MS + 10_000,
+            })
+            .await
+            .expect("disable");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        let evaluated = f.worker.evaluation_pass(BASE_MS).await;
+        assert_eq!(evaluated, 0, "disabled rules are skipped");
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
     }
 }
