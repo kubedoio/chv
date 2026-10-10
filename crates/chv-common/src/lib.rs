@@ -54,6 +54,15 @@ pub fn sha256_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Compute SHA-256 of raw bytes and return it as a lowercase hex
+/// string (certificate fingerprints and similar DER digests).
+pub fn sha256_hex_bytes(input: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    hex::encode(hasher.finalize())
+}
+
 /// Compute FNV-1a hash for a string input.
 pub fn fnv1a_hash(input: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis

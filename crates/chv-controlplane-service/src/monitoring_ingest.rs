@@ -25,13 +25,11 @@
 //! error that could backpressure reconciliation.
 
 use crate::error::ControlPlaneServiceError;
+use crate::monitoring_validate::{reject, RawSample, RawValue, SampleRejection, MAX_BOOT_ID_BYTES};
 use async_trait::async_trait;
 use chv_controlplane_store::{NodeRepository, ObservedStateRepository};
 use chv_controlplane_types::domain::{NodeId, ResourceId};
-use chv_monitoring_core::model::{
-    MetricKind, SampleBuilder, SampleQuality, SampleValue, Source, TargetKind, Unit,
-};
-use chv_monitoring_core::registry;
+use chv_monitoring_core::model::{Sample, TargetKind};
 use chv_monitoring_store::{headroom, IngestOutcome, MonitoringHealth, MonitoringStore, NodeBatch};
 use control_plane_node_api::control_plane_node_api as proto;
 use dashmap::DashMap;
@@ -39,29 +37,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Ingestion caps (contract v1 initial defaults; adjustable only
-/// within these ceilings).
-pub const MAX_SAMPLES_PER_BATCH: usize = 512;
-/// Maximum accepted age of a sample timestamp (live raw ingestion).
-pub const MAX_SAMPLE_AGE_MS: i64 = 5 * 60 * 1000;
-/// Maximum accepted future skew of a sample timestamp.
-pub const MAX_FUTURE_SKEW_MS: i64 = 2 * 60 * 1000;
-/// Maximum boot_id length (sender epoch identifier).
-pub const MAX_BOOT_ID_BYTES: usize = 128;
+// Caps and wire outcome vocabulary are shared with the guest-agent
+// transport (monitoring_validate); re-exported here so the crate's
+// public paths stay stable.
+pub use crate::monitoring_validate::{
+    MAX_SAMPLES_PER_BATCH, OUTCOME_ACCEPTED, OUTCOME_BATCH_TOO_LARGE, OUTCOME_DUPLICATE,
+    OUTCOME_INGESTION_UNAVAILABLE, OUTCOME_INVALID_BATCH, OUTCOME_RATE_LIMITED,
+    OUTCOME_REPLAY_CONFLICT, OUTCOME_SERIES_CAP_EXCEEDED, OUTCOME_STALE_SEQUENCE,
+    OUTCOME_UNSUPPORTED_METRIC,
+};
+
 /// Rate-limit window.
 const RATE_WINDOW_MS: u64 = 60 * 1000;
-
-/// Wire outcome vocabulary (ingestion contract v1).
-pub const OUTCOME_ACCEPTED: &str = "accepted";
-pub const OUTCOME_DUPLICATE: &str = "duplicate";
-pub const OUTCOME_REPLAY_CONFLICT: &str = "replay_conflict";
-pub const OUTCOME_INVALID_BATCH: &str = "invalid_batch";
-pub const OUTCOME_BATCH_TOO_LARGE: &str = "batch_too_large";
-pub const OUTCOME_UNSUPPORTED_METRIC: &str = "unsupported_metric";
-pub const OUTCOME_RATE_LIMITED: &str = "rate_limited";
-pub const OUTCOME_INGESTION_UNAVAILABLE: &str = "ingestion_unavailable";
-pub const OUTCOME_SERIES_CAP_EXCEEDED: &str = "series_cap_exceeded";
-pub const OUTCOME_STALE_SEQUENCE: &str = "stale_sequence";
 
 /// The Rust-side contract of the gRPC `MonitoringService`.
 #[async_trait]
@@ -97,19 +84,6 @@ pub struct MonitoringIngestImplementation {
     health: MonitoringHealth,
     rate_windows: Arc<DashMap<String, RateWindow>>,
     limits: IngestLimits,
-}
-
-/// A whole-batch rejection with its contract outcome.
-struct Rejection {
-    outcome: &'static str,
-    detail: String,
-}
-
-fn reject(outcome: &'static str, detail: impl std::fmt::Display) -> Rejection {
-    Rejection {
-        outcome,
-        detail: detail.to_string(),
-    }
 }
 
 impl MonitoringIngestImplementation {
@@ -247,20 +221,20 @@ impl MonitoringIngestImplementation {
         }
     }
 
-    /// Convert one proto sample to a contract `Sample`, validating
-    /// against the v1 registry. Whole-batch rejection semantics.
+    /// Convert one proto sample to a contract `Sample`. The registry,
+    /// source, kind/unit, value/quality, timestamp and dimension rules
+    /// live in the shared validator (`monitoring_validate`) so the
+    /// node and guest transports enforce identical contracts; this
+    /// method adds the node transport's ownership rule (node targets
+    /// must be self-referential) and maps the proto wire shape.
     fn convert_sample(
         &self,
         s: &proto::MetricSampleV1,
         sender_node_id: &str,
         now_ms: i64,
-    ) -> Result<chv_monitoring_core::model::Sample, Rejection> {
-        let target_kind = TargetKind::from_str(&s.target_kind)
+    ) -> Result<Sample, SampleRejection> {
+        let target_kind = chv_monitoring_core::model::TargetKind::from_str(&s.target_kind)
             .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("target_kind: {e}")))?;
-
-        // Target ownership: node samples must be self-referential;
-        // VM samples are checked against observed placement by the
-        // caller (it needs an async store read).
         match target_kind {
             TargetKind::Node => {
                 if s.target_id != sender_node_id {
@@ -288,143 +262,24 @@ impl MonitoringIngestImplementation {
             }
         }
 
-        let metric = registry::lookup(&s.metric_id).ok_or_else(|| {
-            reject(
-                OUTCOME_UNSUPPORTED_METRIC,
-                format!("unknown metric {}", s.metric_id),
-            )
-        })?;
-        let source = Source::from_str(&s.source)
-            .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("source: {e}")))?;
-        if !metric.allowed_sources.contains(&source) {
-            return Err(reject(
-                OUTCOME_UNSUPPORTED_METRIC,
-                format!("metric {} does not allow source {}", s.metric_id, s.source),
-            ));
-        }
-        let kind = MetricKind::from_str(&s.kind)
-            .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("kind: {e}")))?;
-        if kind != metric.kind {
-            return Err(reject(
-                OUTCOME_INVALID_BATCH,
-                format!(
-                    "metric {} is a {:?}, not {}",
-                    s.metric_id, metric.kind, s.kind
-                ),
-            ));
-        }
-        let unit = Unit::from_str(&s.unit)
-            .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("unit: {e}")))?;
-        if unit != metric.unit {
-            return Err(reject(
-                OUTCOME_INVALID_BATCH,
-                format!(
-                    "metric {} is measured in {:?}, not {}",
-                    s.metric_id, metric.unit, s.unit
-                ),
-            ));
-        }
-
-        let quality = SampleQuality::parse(&s.quality).ok_or_else(|| {
-            reject(
-                OUTCOME_INVALID_BATCH,
-                format!("unknown quality {}", s.quality),
-            )
-        })?;
-        let value = match (&s.value, quality) {
-            (Some(proto::metric_sample_v1::Value::FloatValue(v)), SampleQuality::Valid) => {
-                Some(SampleValue::Float(*v))
-            }
-            (Some(proto::metric_sample_v1::Value::IntegerValue(v)), SampleQuality::Valid) => {
-                Some(SampleValue::Integer(*v))
-            }
-            (None, SampleQuality::Valid) => {
-                return Err(reject(
-                    OUTCOME_INVALID_BATCH,
-                    format!("metric {} claims quality valid with no value", s.metric_id),
-                ));
-            }
-            (Some(_), _) => {
-                return Err(reject(
-                    OUTCOME_INVALID_BATCH,
-                    format!(
-                        "metric {} carries a value with non-valid quality {}",
-                        s.metric_id, s.quality
-                    ),
-                ));
-            }
-            (None, _) => None,
+        let raw = RawSample {
+            target_kind: s.target_kind.clone(),
+            target_id: s.target_id.clone(),
+            metric_id: s.metric_id.clone(),
+            source: s.source.clone(),
+            kind: s.kind.clone(),
+            unit: s.unit.clone(),
+            observed_at_ms: s.observed_at_ms,
+            quality: s.quality.clone(),
+            value: s.value.as_ref().map(|v| match v {
+                proto::metric_sample_v1::Value::FloatValue(f) => RawValue::Float(*f),
+                proto::metric_sample_v1::Value::IntegerValue(i) => RawValue::Integer(*i),
+            }),
+            dimensions: s.dimensions.clone().into_iter().collect(),
+            boot_id: s.boot_id.clone(),
+            identity_epoch: s.identity_epoch.clone(),
         };
-        // Counters are integer-valued on the wire and in the store
-        // (exact decimal-string deltas): a float counter would be
-        // accepted and durably stored, then never surfaced by the
-        // integer-only query/rollup paths — reject it at the boundary
-        // instead of committing data that can never be read back.
-        if metric.kind == MetricKind::Counter {
-            if let Some(SampleValue::Float(_)) = value {
-                return Err(reject(
-                    OUTCOME_INVALID_BATCH,
-                    format!(
-                        "counter metric {} must carry an integer value, not a float",
-                        s.metric_id
-                    ),
-                ));
-            }
-        }
-
-        // Timestamp bounds: live raw ingestion only.
-        let age = now_ms - s.observed_at_ms;
-        if age > MAX_SAMPLE_AGE_MS {
-            return Err(reject(
-                OUTCOME_INVALID_BATCH,
-                format!(
-                    "metric {} observation is {} ms old (max {})",
-                    s.metric_id, age, MAX_SAMPLE_AGE_MS
-                ),
-            ));
-        }
-        if age < -MAX_FUTURE_SKEW_MS {
-            return Err(reject(
-                OUTCOME_INVALID_BATCH,
-                format!(
-                    "metric {} observation is {} ms in the future (max skew {})",
-                    s.metric_id, -age, MAX_FUTURE_SKEW_MS
-                ),
-            ));
-        }
-
-        let builder = SampleBuilder::new(
-            target_kind,
-            &s.target_id,
-            &s.metric_id,
-            source,
-            s.observed_at_ms as u64,
-        )
-        .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("sample rejected: {e}")))?;
-        let builder = match quality {
-            SampleQuality::Valid => builder,
-            other => builder.quality(other),
-        };
-        let builder = match value {
-            Some(v) => builder.value(v),
-            None => builder,
-        };
-        // Counter-epoch fence: build() rejects a valid counter sample
-        // without one (a restarted counter source must never be
-        // subtracted as a delta). Non-counter series may omit it.
-        let builder = match (s.boot_id.as_str(), s.identity_epoch.as_str()) {
-            (boot, epoch) if !boot.is_empty() && !epoch.is_empty() => builder.epoch(boot, epoch),
-            _ => builder,
-        };
-        let mut builder = builder;
-        for (k, v) in &s.dimensions {
-            builder = builder
-                .dimension(k, v)
-                .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("dimension: {e}")))?;
-        }
-        builder
-            .build()
-            .map_err(|e| reject(OUTCOME_INVALID_BATCH, format!("sample rejected: {e}")))
+        crate::monitoring_validate::validate_sample(&raw, now_ms)
     }
 }
 

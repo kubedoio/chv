@@ -172,6 +172,26 @@ pub fn admin_router(
     convergence_metrics: SharedConvergenceMetrics,
     webui: chv_config::WebUiConfig,
 ) -> Router {
+    admin_router_with_guest_agents(bff_state, convergence_metrics, webui, None, None)
+}
+
+/// The full admin router, optionally including the guest monitoring
+/// agent surfaces (ADR-026, G3):
+/// - `agent_browser`: the browser-authenticated pair (viewer-tier
+///   inventory + operator-tier lifecycle actions), role-gated with the
+///   same middlewares as their BFF siblings and CSRF-protected like
+///   every other JSON-mutating browser route;
+/// - `agent_ingest`: the certificate-authenticated guest transport
+///   (NO session auth — mounted only when the listener serves TLS;
+///   its identity is the TLS client credential plus the registry
+///   binding).
+pub fn admin_router_with_guest_agents(
+    bff_state: AppState,
+    convergence_metrics: SharedConvergenceMetrics,
+    webui: chv_config::WebUiConfig,
+    agent_browser: Option<(Router<AppState>, Router<AppState>)>,
+    agent_ingest: Option<Router<AppState>>,
+) -> Router {
     let bff_router = chv_webui_bff::bff_router(bff_state.clone());
 
     // Legacy cookie-authenticated backup routes. Mounted on the outer
@@ -279,6 +299,40 @@ pub fn admin_router(
         .merge(legacy_backup_routes)
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub));
+
+    // Guest monitoring agent surfaces (G3). The browser-tier routes
+    // carry the same role + CSRF middlewares as their BFF siblings;
+    // the agent-authenticated transport deliberately carries none
+    // (TLS client credential + registry binding is its only
+    // identity).
+    let router = match agent_browser {
+        Some((viewer, operator)) => router
+            .merge(
+                viewer
+                    .layer(middleware::from_fn(
+                        chv_webui_bff::csrf_middleware::csrf_protection,
+                    ))
+                    .layer(middleware::from_fn_with_state(
+                        bff_state.clone(),
+                        chv_webui_bff::auth::viewer_middleware,
+                    )),
+            )
+            .merge(
+                operator
+                    .layer(middleware::from_fn(
+                        chv_webui_bff::csrf_middleware::csrf_protection,
+                    ))
+                    .layer(middleware::from_fn_with_state(
+                        bff_state.clone(),
+                        chv_webui_bff::auth::operator_middleware,
+                    )),
+            ),
+        None => router,
+    };
+    let router = match agent_ingest {
+        Some(ingest) => router.merge(ingest),
+        None => router,
+    };
 
     // Fallback (issue #447): with `[webui] enabled = true` the JSON 404
     // is replaced — for NON-reserved prefixes only — by the static UI
