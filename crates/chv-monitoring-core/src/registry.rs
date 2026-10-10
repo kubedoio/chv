@@ -15,8 +15,10 @@
 //!   lookups resolve, but sources must not emit them; the only allowed
 //!   source is [`Source::Derived`].
 //! - Guest-agent and check metrics appear here so the registry is the
-//!   complete v1 allowlist, but nothing produces them until ADR-026's
-//!   optional guest agent lands (G3/G4).
+//!   complete v1 allowlist. The G3 baseline guest collectors produce
+//!   `vm.memory.guest_available_bytes`, `vm.guest.cpu.utilization_ratio`,
+//!   `vm.guest.load1` and `vm.guest.uptime_seconds`; the fs/service/
+//!   process/check families remain without a producer until G4.
 //! - `check.status` is a typed state (`ok`/`warning`/`critical`/`unknown`),
 //!   never a float; its value modelling arrives with the guest-agent
 //!   implementation. No PR-1 producer exists.
@@ -252,6 +254,27 @@ pub static REGISTRY: &[MetricDef] = &[
         dimensions: &["process_selector"],
     },
     MetricDef {
+        id: "vm.guest.cpu.utilization_ratio",
+        kind: Gauge,
+        unit: Ratio,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &[],
+    },
+    MetricDef {
+        id: "vm.guest.load1",
+        kind: Gauge,
+        unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &[],
+    },
+    MetricDef {
+        id: "vm.guest.uptime_seconds",
+        kind: Gauge,
+        unit: Seconds,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &[],
+    },
+    MetricDef {
         id: "vm.guest.net.rx_errors_total",
         kind: Counter,
         unit: Count,
@@ -309,6 +332,24 @@ mod tests {
         assert!(lookup("node.cpu.capacity_ratio").is_some());
         assert!(lookup("monitoring.agent.last_seen_age_seconds").is_some());
         assert!(lookup("made.up.metric").is_none());
+    }
+
+    #[test]
+    fn g3_baseline_guest_metrics_resolve() {
+        // The prompt-03 baseline collectors (resources profile) emit
+        // exactly these guest gauges; the rest of the guest families
+        // stay producer-less until G4.
+        for id in [
+            "vm.memory.guest_available_bytes",
+            "vm.guest.cpu.utilization_ratio",
+            "vm.guest.load1",
+            "vm.guest.uptime_seconds",
+        ] {
+            let def = lookup(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(def.kind, Gauge, "{id}");
+            assert_eq!(def.allowed_sources, GUEST_ONLY, "{id}");
+            assert!(def.dimensions.is_empty(), "{id}");
+        }
     }
 
     #[test]

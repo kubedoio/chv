@@ -51,7 +51,9 @@ For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or 
 | `vm.memory.provisioned_bytes` | gauge bytes | derived | Configured guest memory |
 | `vm.memory.host_accounted_bytes` | gauge bytes | vm_cgroup, vmm | Host-accounted VM memory; not guest working set. The `vm_cgroup` arm reads a verified runtime-owned cgroup's `memory.current`; the `vmm` arm reads the identity-fenced VMM process's resident set (`VmRSS`) when no dedicated per-VM cgroup exists — the two arms measure the same phenomenon at different scopes and carry their source honestly |
 | `vm.memory.guest_available_bytes` | gauge bytes | guest_agent | Memory available inside guest OS |
-| `vm.block.read_bytes_total`, `write_bytes_total` | counter bytes | vmm, storage_provider | Per-VM virtual block bytes when attributable |
+| `vm.guest.cpu.utilization_ratio` | gauge ratio | guest_agent | Guest OS CPU busy fraction from `/proc/stat` deltas, computed in-guest over the same boot; first observation after guest boot has no rate and must be absent (`insufficient_samples`), never zero |
+| `vm.guest.load1` | gauge count | guest_agent | Guest OS 1-minute load average |
+| `vm.guest.uptime_seconds` | gauge seconds | guest_agent | Guest OS seconds since boot || `vm.block.read_bytes_total`, `write_bytes_total` | counter bytes | vmm, storage_provider | Per-VM virtual block bytes when attributable |
 | `vm.net.rx_bytes_total`, `tx_bytes_total` | counter bytes | vmm, network_provider | Per-VM virtual NIC bytes when attributable |
 | `vm.guest.fs.available_bytes`, `total_bytes` | gauge bytes | guest_agent | Guest filesystem data keyed by mount |
 | `vm.guest.service.up` | state boolean | guest_agent | Configured/discovered service known running |
