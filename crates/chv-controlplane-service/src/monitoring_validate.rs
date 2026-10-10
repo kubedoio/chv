@@ -301,11 +301,11 @@ fn validate_check_identifier(field: &str, value: &str) -> Result<(), SampleRejec
     }
     if !value
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'))
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-' | b'@'))
     {
         return Err(reject(
             OUTCOME_INVALID_BATCH,
-            format!("{field} must contain only [A-Za-z0-9._:/-]"),
+            format!("{field} must contain only [A-Za-z0-9._:/@-]"),
         ));
     }
     Ok(())
@@ -631,6 +631,35 @@ mod tests {
         let err = validate_check(&c, 2_000).unwrap_err();
         assert_eq!(err.outcome, OUTCOME_INVALID_BATCH);
         assert!(err.detail.contains("future"));
+    }
+
+    #[test]
+    fn check_identifiers_accept_systemd_instance_units() {
+        // G4 real-VM lesson (the gate exists to catch exactly this):
+        // bounded service discovery on any real systemd host finds
+        // INSTANCE units — `user@1000.service` starts the moment a
+        // user logs in, `systemd-fsck@dev-sda1.service` on every boot.
+        // The check-id charset must carry their `@`, or every batch
+        // containing one is rejected whole and the agent's store
+        // connection silently starves.
+        let mut c = raw_check();
+        c.check_id = "service:user@1000.service".into();
+        c.service_key = Some("user@1000.service".into());
+        let record = validate_check(&c, 2_000).unwrap();
+        assert_eq!(record.check_id, "service:user@1000.service");
+        assert_eq!(record.service_key.as_deref(), Some("user@1000.service"));
+
+        let mut c = raw_check();
+        c.check_id = "service:systemd-fsck@dev-sda1.service".into();
+        assert!(validate_check(&c, 2_000).is_ok());
+
+        // The amendment widens ONLY the identifier charset: control
+        // characters and spaces remain whole-batch rejections.
+        let mut c = raw_check();
+        c.check_id = "service:bad\nid".into();
+        let err = validate_check(&c, 2_000).unwrap_err();
+        assert_eq!(err.outcome, OUTCOME_INVALID_BATCH);
+        assert!(err.detail.contains("must contain only"));
     }
 
     #[test]

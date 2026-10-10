@@ -73,7 +73,7 @@ The `checks` array carries check records (agent spec "Check records"; the metric
 | Field | Rules |
 |---|---|
 | `schema_version` | Exactly `1` |
-| `check_id` | Stable namespaced identifier, ≤ 128 bytes, charset `[A-Za-z0-9._:/-]` — for example `service:nginx.service`, `http:local:8080`, `plugin:example.http-health` |
+| `check_id` | Stable namespaced identifier, ≤ 128 bytes, charset `[A-Za-z0-9._:/@-]` — for example `service:nginx.service`, `service:user@1000.service` (systemd instance units), `http:local:8080`, `plugin:example.http-health` |
 | `service_key` | Optional; same rules as `check_id` (the systemd unit name for service checks) |
 | `status` | One of `ok`, `warning`, `critical`, `unknown` — `unknown` is never conflated with healthy |
 | `summary` | Optional, ≤ 256 bytes, printable (the manager rejects control characters); plain text, never rendered as HTML |
