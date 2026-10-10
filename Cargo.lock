@@ -1034,6 +1034,9 @@ dependencies = [
 [[package]]
 name = "chv-monitor-collectors"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "chv-monitoring-core"

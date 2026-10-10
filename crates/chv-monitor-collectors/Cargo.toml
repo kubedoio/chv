@@ -4,8 +4,11 @@ version = "0.1.0"
 license = "Apache-2.0"
 edition = "2021"
 publish = false
-description = "Read-only /proc collectors for the chv guest monitoring agent (ADR-026 baseline set)"
+description = "Read-only /proc collectors for the chv guest monitoring agent (ADR-026 baseline + G4 families)"
 
 [dependencies]
+# statvfs(3) has no std API and the G4 filesystem family needs
+# per-mount sizes/inodes; the crate is otherwise parse-pure std.
+libc = "0.2"
 
 [dev-dependencies]

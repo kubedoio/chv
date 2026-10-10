@@ -21,7 +21,7 @@ use crate::wire::{
     EnvelopeJson, OsJson, SampleJson, QUALITY_VALID, SCHEMA_VERSION, SOURCE_GUEST_AGENT,
     TARGET_KIND_VM,
 };
-use chv_monitor_collectors::{CollectedSample, GuestCollectors};
+use chv_monitor_collectors::{CollectedSample, GuestCollectors, SampleValue};
 use std::collections::BTreeMap;
 
 /// Rotate when the credential expires within this horizon, even if
@@ -413,8 +413,28 @@ fn build_samples(
         .iter()
         .filter_map(|s| {
             let def = chv_monitoring_core::registry::lookup(s.metric_id)?;
-            if !s.value.is_finite() {
-                return None;
+            let value = match s.value {
+                SampleValue::Float(v) => {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    serde_json::json!(v)
+                }
+                SampleValue::Integer(v) => {
+                    // Contract: exact integers above the JavaScript
+                    // safe range (2^53 - 1) travel as decimal strings
+                    // — the manager parses them back exactly, and a
+                    // JSON number would lose precision in any JS hop.
+                    if v > (1u64 << 53) - 1 {
+                        serde_json::json!(v.to_string())
+                    } else {
+                        serde_json::json!(v)
+                    }
+                }
+            };
+            let mut dimensions = BTreeMap::new();
+            if let Some((key, dim)) = &s.dimension {
+                dimensions.insert(key.to_string(), dim.clone());
             }
             Some(SampleJson {
                 schema_version: SCHEMA_VERSION,
@@ -425,9 +445,9 @@ fn build_samples(
                 kind: def.kind.as_str().to_string(),
                 unit: def.unit.as_str().to_string(),
                 observed_at_ms: now_ms,
-                value: serde_json::json!(s.value),
+                value,
                 quality: QUALITY_VALID.to_string(),
-                dimensions: BTreeMap::new(),
+                dimensions,
                 boot_id: boot_id.to_string(),
                 identity_epoch: identity_epoch.to_string(),
             })
@@ -470,4 +490,43 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         src = s.source();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chv_monitor_collectors::SampleValue;
+
+    #[test]
+    fn build_samples_encodes_big_integers_as_decimal_strings() {
+        // Contract: integers above the JS-safe range (2^53 - 1)
+        // travel as decimal strings; smaller ones stay JSON numbers.
+        let collected = vec![
+            CollectedSample {
+                metric_id: "vm.guest.net.rx_bytes_total",
+                value: SampleValue::Integer((1u64 << 53) - 1),
+                dimension: Some(("interface_id", "phys:eth0".to_string())),
+            },
+            CollectedSample {
+                metric_id: "vm.guest.net.tx_bytes_total",
+                value: SampleValue::Integer(1u64 << 53),
+                dimension: Some(("interface_id", "phys:eth0".to_string())),
+            },
+        ];
+        let out = build_samples(&collected, "vm-1", "boot", "epoch-1", 1_000);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].value, serde_json::json!((1u64 << 53) - 1));
+        assert_eq!(
+            out[1].value,
+            serde_json::json!((1u64 << 53).to_string()),
+            "2^53 must encode as a decimal string"
+        );
+        assert_eq!(
+            out[0].dimensions.get("interface_id").map(String::as_str),
+            Some("phys:eth0")
+        );
+        // Kind/unit resolve from the registry, never hard-coded.
+        assert_eq!(out[0].kind, "counter");
+        assert_eq!(out[0].unit, "bytes");
+    }
 }
