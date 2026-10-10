@@ -20,6 +20,8 @@
 	import VmConsoleTab from '#lib/components/vms/VmConsoleTab.svelte';
 	import VmMetricsTab from '#lib/components/vms/VmMetricsTab.svelte';
 	import TargetMonitoringPanel from '#lib/components/monitoring/TargetMonitoringPanel.svelte';
+	import GuestAgentCard from '#lib/components/monitoring/GuestAgentCard.svelte';
+	import GuestAgentEnrollDialog from '#lib/components/monitoring/GuestAgentEnrollDialog.svelte';
 	import VmTasksTab from '#lib/components/vms/VmTasksTab.svelte';
 	import VmBootLogTab from '#lib/components/vms/VmBootLogTab.svelte';
 	import type { ShellTone } from '#lib/shell/app-shell.ts';
@@ -43,6 +45,7 @@
 	let supportRailOpen = $state(false);
 	let migrateModalOpen = $state(false);
 	let migrateSubmitting = $state(false);
+	let agentEnrollOpen = $state(false);
 
 	async function ensureVmConsole() {
 		if (!browser || VmConsoleComponent) return;
@@ -261,6 +264,11 @@
 						attachedVolumes={detail.summary.attached_volumes ?? []}
 						attachedNics={detail.summary.attached_nics ?? []}
 					/>
+					<GuestAgentCard
+						vmId={detail.summary.vm_id}
+						vmName={detail.summary.name}
+						onEnroll={() => (agentEnrollOpen = true)}
+					/>
 					<TargetMonitoringPanel
 						targetKind="vm"
 						targetId={detail.summary.vm_id}
@@ -271,7 +279,10 @@
 							'vm.block.read_bytes_total',
 							'vm.block.write_bytes_total',
 							'vm.net.rx_bytes_total',
-							'vm.net.tx_bytes_total'
+							'vm.net.tx_bytes_total',
+							'vm.guest.cpu.utilization_ratio',
+							'vm.guest.load1',
+							'vm.guest.uptime_seconds'
 						]}
 					/>
 				{:else if detail.currentTab === 'summary'}
@@ -296,6 +307,13 @@
 		</main>
 	{/if}
 </div>
+
+<GuestAgentEnrollDialog
+	open={agentEnrollOpen}
+	vmId={detail?.summary?.vm_id ?? ''}
+	vmName={detail?.summary?.name}
+	onClose={() => (agentEnrollOpen = false)}
+/>
 
 <VmMigrateModal
 	bind:open={migrateModalOpen}
