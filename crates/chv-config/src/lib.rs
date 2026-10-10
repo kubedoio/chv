@@ -1118,6 +1118,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn example_controlplane_toml_parses_with_guest_ingestion_sections() {
+        // Drift guard for docs/examples/controlplane.toml: the shipped
+        // example must stay loadable as the real control-plane config
+        // (guest ingestion + http_tls sections included, ADR-026).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/controlplane.toml"
+        );
+        let config = load_controlplane_config(Some(std::path::Path::new(path)))
+            .expect("docs/examples/controlplane.toml must parse");
+        let guest = &config.monitoring.guest_ingestion;
+        // The example documents the disabled-by-default contract.
+        assert!(!guest.enabled);
+        assert_eq!(guest.credential_ttl_days, 30);
+        assert!(guest.agent_ca_cert_path.is_some());
+        assert!(config.http_tls.is_some(), "example documents [http_tls]");
+    }
+
+    #[test]
     fn watchdog_section_parses_with_defaults_and_overrides() {
         let base = r#"
 socket_path = "/run/chv/agent/api.sock"

@@ -131,4 +131,34 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)));
     }
+
+    #[test]
+    fn example_config_refuses_to_start_until_configured() {
+        // Drift guard for docs/examples/monitor-agent.toml: the
+        // shipped example is deliberately incomplete — the agent must
+        // refuse it loudly, never guess a manager. Uncommenting the
+        // two documented values must make it valid with the packaged
+        // defaults.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/monitor-agent.toml"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let err = AgentConfig::from_toml(&text).unwrap_err();
+        assert!(
+            err.to_string().contains("server_url"),
+            "the failure must point at server_url, got: {err}"
+        );
+
+        let configured = text
+            .replace("# server_url = ", "server_url = ")
+            .replace("# manager_ca_path = ", "manager_ca_path = ");
+        let config = AgentConfig::from_toml(&configured).unwrap();
+        assert_eq!(config.state_dir, PathBuf::from("/var/lib/chv-monitor"));
+        assert_eq!(
+            config.spool_dir,
+            PathBuf::from("/var/lib/chv-monitor/spool")
+        );
+        assert_eq!(config.interval_seconds, 30);
+    }
 }

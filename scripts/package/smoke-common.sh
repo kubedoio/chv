@@ -214,6 +214,99 @@ verify_reinstall_state() {
 }
 
 # ---------------------------------------------------------------------------
+# Guest monitoring agent (ADR-026): a separate credential and package
+# domain — installed inside VMs, disabled by default, state preserved
+# on removal. Verified independently of the host packages.
+# ---------------------------------------------------------------------------
+verify_guest_agent_install_state() {
+    info "Checking chv-monitor-agent install state..."
+
+    if [[ -x /usr/bin/chv-monitor-agent ]]; then
+        info "  Found: /usr/bin/chv-monitor-agent"
+    else
+        error "Missing or not executable: /usr/bin/chv-monitor-agent"
+    fi
+
+    if [[ -f /etc/chv-monitor/agent.toml ]]; then
+        info "  Found: /etc/chv-monitor/agent.toml"
+    else
+        error "Missing: /etc/chv-monitor/agent.toml"
+    fi
+
+    if getent passwd chv-monitor >/dev/null 2>&1; then
+        info "  Dedicated user 'chv-monitor' created"
+    else
+        error "User 'chv-monitor' was not created"
+    fi
+
+    # State dir must exist and be owner-only: it holds the client
+    # credential once the agent enrolls.
+    if [[ -d /var/lib/chv-monitor ]]; then
+        local mode
+        mode="$(stat -c '%a' /var/lib/chv-monitor 2>/dev/null || echo 'unknown')"
+        if [[ "$mode" == "700" ]]; then
+            info "  State dir /var/lib/chv-monitor is 0700"
+        else
+            error "State dir /var/lib/chv-monitor has mode ${mode}, expected 700"
+        fi
+    else
+        error "Missing: /var/lib/chv-monitor"
+    fi
+
+    # Unit hardening: dedicated user, no capabilities, one writable path.
+    local unit="/lib/systemd/system/chv-monitor-agent.service"
+    if [[ -f "$unit" ]]; then
+        for directive in \
+            "User=chv-monitor" \
+            "Group=chv-monitor" \
+            "NoNewPrivileges=true" \
+            "ProtectSystem=strict" \
+            "ReadWritePaths=/var/lib/chv-monitor" \
+            "CapabilityBoundingSet=" ; do
+            if grep -qx "$directive" "$unit"; then
+                info "  Unit directive ok: $directive"
+            else
+                error "chv-monitor-agent.service missing security directive: $directive"
+            fi
+        done
+    else
+        error "Missing: $unit"
+    fi
+
+    # Disabled by default: the unit must not be pulled into any boot
+    # target (the agent needs a configured server_url + a claim before
+    # starting — starting it unconfigured would just log and idle).
+    if [[ -e /etc/systemd/system/multi-user.target.wants/chv-monitor-agent.service ]]; then
+        error "chv-monitor-agent is enabled by default; it must stay disabled"
+    else
+        info "  chv-monitor-agent disabled by default (correct)"
+    fi
+}
+
+verify_guest_agent_removed_state() {
+    info "Checking chv-monitor-agent post-removal state..."
+
+    if [[ -e /usr/bin/chv-monitor-agent ]]; then
+        error "Binary still present after remove: chv-monitor-agent"
+    else
+        info "  Removed: /usr/bin/chv-monitor-agent"
+    fi
+
+    # State (credential, spool, counters) is deliberately PRESERVED on
+    # remove — deleting it is an operator decision, never a package
+    # side effect.
+    if [[ -d /var/lib/chv-monitor ]]; then
+        info "  Preserved: /var/lib/chv-monitor (by design)"
+    else
+        info "  Note: /var/lib/chv-monitor absent (fresh install never enrolled)"
+    fi
+
+    if getent passwd chv-monitor >/dev/null 2>&1; then
+        info "  User 'chv-monitor' preserved (expected)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 smoke_summary() {
