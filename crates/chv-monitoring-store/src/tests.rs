@@ -1,4 +1,5 @@
 use crate::config::MonitoringStoreConfig;
+use crate::error::IngestOutcome;
 use crate::ingest::NodeBatch;
 use crate::query::Resolution;
 use crate::MonitoringStore;
@@ -788,5 +789,86 @@ async fn rollup_lone_counter_sample_has_no_delta() {
         point.quality,
         SampleQuality::Valid,
         "Valid always means has-a-number"
+    );
+}
+
+/// Truncation is honest: a series whose points EXCEEDED the ceiling
+/// and were thinned reports `truncated: true` (with at most
+/// `max_points` points); a series merely AT the ceiling is complete
+/// and stays `false`. The wire contract's downsampling signal must
+/// never fire for a full-fidelity series.
+#[tokio::test]
+async fn history_reports_truncation_only_when_thinned() {
+    let (_dir, s) = store().await;
+    // 20 distinct gauge observations.
+    let mut samples = Vec::new();
+    for i in 0..20u64 {
+        samples.push(node_gauge(T0 + i * 1_000, 0.1 * (i + 1) as f64));
+    }
+    s.ingest_node_batch("node-1", &batch("b", 0, samples), T0 + 20_000)
+        .await
+        .unwrap();
+
+    let query = |to_ms: u64, max_points: usize| {
+        let s = &s;
+        async move {
+            s.query_history(
+                &TargetKind::Node,
+                "node-1",
+                &["node.cpu.capacity_ratio".to_string()],
+                None,
+                T0,
+                to_ms,
+                max_points,
+                Resolution::Raw,
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // 20 samples over a 20s range with a 20-point ceiling: one bucket
+    // per second, exactly at the ceiling — complete, not truncated.
+    let series = query(T0 + 20_000, 20).await;
+    assert_eq!(series[0].points.len(), 20);
+    assert!(!series[0].truncated, "at-ceiling is not truncation");
+
+    // The same data with the range ending ON the last sample and a
+    // 5-point ceiling: the boundary bucket overflows the ceiling, the
+    // series is thinned and must say so.
+    let series = query(T0 + 19_000, 5).await;
+    assert_eq!(series[0].points.len(), 5);
+    assert!(series[0].truncated, "over-ceiling is truncated");
+
+    // The degenerate 1-point ceiling keeps exactly one point.
+    let series = query(T0 + 19_000, 1).await;
+    assert_eq!(series[0].points.len(), 1, "one-point ceiling is honored");
+    assert!(series[0].truncated);
+}
+
+/// A retry that is byte-identical except the send timestamp is a
+/// Duplicate (the previous durable outcome), never a ReplayConflict:
+/// `sent_at_ms` is send-attempt metadata, not observation content.
+#[tokio::test]
+async fn later_send_time_alone_is_a_duplicate_not_a_conflict() {
+    let (_dir, s) = store().await;
+    let samples = vec![node_gauge(T0, 0.5)];
+    let first = s
+        .ingest_node_batch("node-1", &batch("b", 7, samples.clone()), T0 + 1_000)
+        .await
+        .unwrap();
+    assert!(matches!(first, IngestOutcome::Accepted { .. }));
+
+    // Same key, same samples, a later sent_at_ms (a retry after an
+    // unknown-fate transport failure, re-read from the latest store).
+    let mut retried = batch("b", 7, samples);
+    retried.sent_at_ms = T0 + 30_000;
+    let second = s
+        .ingest_node_batch("node-1", &retried, T0 + 31_000)
+        .await
+        .unwrap();
+    assert!(
+        matches!(second, IngestOutcome::Duplicate { .. }),
+        "identical samples at a later send time: {second:?}"
     );
 }

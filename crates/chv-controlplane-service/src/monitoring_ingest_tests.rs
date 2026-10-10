@@ -315,6 +315,12 @@ async fn envelope_limits_reject_with_typed_outcomes() {
     let resp = f.ingest(0, vec![old]).await;
     assert_eq!(resp.outcome, "invalid_batch");
 
+    // Sequence beyond the store's signed watermark range: rejected at
+    // the boundary instead of wrapping to a low sequence on the cast.
+    let beyond = f.request(i64::MAX as u64 + 1, vec![node_cpu_sample(now_ms(), 0.5)]);
+    let resp = f.service.ingest_node_metric_batch(beyond).await.unwrap();
+    assert_eq!(resp.outcome, "invalid_batch");
+
     // Unenrolled sender.
     let mut req = f.request(0, vec![node_cpu_sample(now_ms(), 0.5)]);
     req.node_id = "node-ghost-1".to_string();

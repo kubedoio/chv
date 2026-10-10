@@ -82,6 +82,9 @@
 			{#if hasPoints}
 				<span class="meta-item">coverage: {coveragePercent}%</span>
 			{/if}
+			{#if series.truncated}
+				<span class="meta-item">downsampled to {series.points.length} points</span>
+			{/if}
 		</div>
 	</div>
 

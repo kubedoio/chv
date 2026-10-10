@@ -162,3 +162,65 @@ impl MonitoringHealthSnapshot {
             .or_else(|| self.headroom_degraded.clone());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The round-2 invariant, pinned: the three degradation flavors
+    /// clear independently and only for their own recovery event — a
+    /// durable ingest success (store flavor) must never flap away a
+    /// maintenance-worker degrade that is still failing, headroom
+    /// recovery must never wipe a store error, and the presented
+    /// `degraded_reason` keeps store > maintenance > headroom
+    /// precedence.
+    #[test]
+    fn degrade_flavors_clear_independently_with_precedence() {
+        let health = MonitoringHealth::new();
+        health.degrade_headroom("headroom floor breached".to_string());
+        assert_eq!(
+            health.snapshot().degraded_reason,
+            Some("headroom floor breached".to_string())
+        );
+
+        health.degrade_maintenance("maintenance failure".to_string());
+        // Maintenance outranks headroom in presentation.
+        assert_eq!(
+            health.snapshot().degraded_reason,
+            Some("maintenance failure".to_string())
+        );
+
+        health.degrade("ingest failure".to_string());
+        // Store outranks both.
+        assert_eq!(
+            health.snapshot().degraded_reason,
+            Some("ingest failure".to_string())
+        );
+
+        // A durable ingest success clears ONLY the store flavor —
+        // the maintenance worker may still be failing.
+        health.clear_store_degraded();
+        let snap = health.snapshot();
+        assert_eq!(
+            snap.degraded_reason,
+            Some("maintenance failure".to_string())
+        );
+        assert_eq!(snap.store_degraded, None);
+
+        // A successful maintenance pass clears ONLY maintenance —
+        // headroom may still be breached.
+        health.clear_maintenance();
+        let snap = health.snapshot();
+        assert_eq!(
+            snap.degraded_reason,
+            Some("headroom floor breached".to_string())
+        );
+        assert_eq!(snap.maintenance_degraded, None);
+
+        // Headroom recovery clears the last flavor.
+        health.clear_headroom();
+        let snap = health.snapshot();
+        assert_eq!(snap.degraded_reason, None);
+        assert_eq!(snap.headroom_degraded, None);
+    }
+}

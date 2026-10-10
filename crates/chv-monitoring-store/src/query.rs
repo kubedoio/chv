@@ -850,6 +850,12 @@ fn thin_to_max(points: Vec<HistoryPoint>, max_points: usize) -> Vec<HistoryPoint
     if points.len() <= max_points {
         return points;
     }
+    if max_points <= 1 {
+        // A one-point ceiling keeps the newest observation — the
+        // naive push-first-then-last shape below would return TWO
+        // points for a one-point cap.
+        return vec![points[points.len() - 1].clone()];
+    }
     let mut thinned = Vec::with_capacity(max_points);
     thinned.push(points[0].clone());
     let step = (points.len() - 1) as f64 / (max_points - 1).max(1) as f64;
