@@ -107,6 +107,7 @@ A healthy pipeline shows the test event moving from `pending` to `delivered` wit
 - **A crashed dispatch batch returns on its own.** Claimed events carry a 5-minute lease; a dispatcher that dies mid-batch has its claims expire and the events retry — no reaper, no manual unstick.
 - **Monitoring-store degradation degrades alerting only.** Without a connected monitoring store the evaluator does not run (boot) or skips rules with warnings (runtime) — it never fires on the absence itself. The dispatcher keeps delivering events already enqueued, and VM lifecycle is unaffected throughout. See the [monitoring store runbook](monitoring-store.md) for the store side.
 - **A destination removed from config dead-letters honestly.** Events already enqueued for the removed channel are marked `dead` with `"webhook destination removed from configuration"` rather than being dropped silently.
+- **Deleting a rule retires its incidents — no ghosts.** A deleted rule's firing incident would otherwise fire forever with no recovery path (the rule that could recover it is gone). Deletion resolves it (reason `rule deleted`, resolved notification unless silenced) and deletes any never-fired pending; the response reports `retired_incidents`. The same retirement happens when an update changes the rule's dimension match (the incident identity changes with it). **Disabling** a rule is different and recoverable: incidents hold in place and resume when it is re-enabled.
 
 ## 7. Running UI-only, and disabling alerting
 

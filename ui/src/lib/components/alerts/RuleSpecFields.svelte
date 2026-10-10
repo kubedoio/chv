@@ -15,6 +15,8 @@
 		groupSummary?: string;
 		/** Honest hint for editing multi-key dimension matches. */
 		dimensionNote?: string;
+		/** Marks the dialog's dimension fields as edited. */
+		onDimensionEdit?: () => void;
 		metricId?: string;
 		operator?: ThresholdOperator;
 		threshold?: number;
@@ -30,6 +32,7 @@
 		ruleType,
 		groupSummary = '',
 		dimensionNote = '',
+		onDimensionEdit,
 		metricId = $bindable(''),
 		operator = $bindable('greater_than'),
 		threshold = $bindable(0),
@@ -78,11 +81,11 @@
 	{/if}
 	<label class="block">
 		<span class={labelClass}>Dimension match key (optional)</span>
-		<input class={inputClass} type="text" bind:value={dimensionKey} placeholder="mount_id" />
+		<input class={inputClass} type="text" bind:value={dimensionKey} placeholder="mount_id" oninput={onDimensionEdit} />
 	</label>
 	<label class="block">
 		<span class={labelClass}>Dimension match value</span>
-		<input class={inputClass} type="text" bind:value={dimensionValue} placeholder="ext4:/" />
+		<input class={inputClass} type="text" bind:value={dimensionValue} placeholder="ext4:/" oninput={onDimensionEdit} />
 	</label>
 	{#if dimensionNote}
 		<p class="sm:col-span-2 m-0 text-xs text-[var(--color-warning-dark)]">{dimensionNote}</p>

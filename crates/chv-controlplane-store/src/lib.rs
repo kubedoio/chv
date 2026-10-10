@@ -25,8 +25,8 @@ pub use alert_rules::{
     MIN_RATE_WINDOW_SECONDS,
 };
 pub use alerts::{
-    AlertCreateInput, AlertRepository, IncidentListFilter, IncidentOpenInput, IncidentRow,
-    IncidentTransitionRow, ALERT_SOURCE_MONITORING, ALERT_TYPE_MONITORING_RULE,
+    dedup_key, AlertCreateInput, AlertRepository, IncidentListFilter, IncidentOpenInput,
+    IncidentRow, IncidentTransitionRow, ALERT_SOURCE_MONITORING, ALERT_TYPE_MONITORING_RULE,
     INCIDENT_STATUS_FIRING, INCIDENT_STATUS_PENDING, INCIDENT_STATUS_RESOLVED,
 };
 pub use architectures::{

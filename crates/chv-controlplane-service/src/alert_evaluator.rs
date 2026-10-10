@@ -618,32 +618,10 @@ pub fn next_state(
 // Incident identity and rendering
 // ---------------------------------------------------------------------------
 
-/// The incident identity: `{rule_id}:{target_kind}:{target_id}:{dim}`.
-/// The dimension part is the canonical (BTreeMap-ordered) compact
-/// JSON of the rule's dimension match — order-independent by
-/// construction — or `-` when the rule has no dimension match or is
-/// not dimension-shaped (check_status / group rules).
-pub fn dedup_key(rule: &AlertRule) -> String {
-    let dimension_part = match &rule.spec {
-        AlertRuleSpec::Threshold {
-            dimension_match, ..
-        }
-        | AlertRuleSpec::Rate {
-            dimension_match, ..
-        }
-        | AlertRuleSpec::Availability {
-            dimension_match, ..
-        } => match dimension_match {
-            Some(match_map) => serde_json::to_string(match_map).unwrap_or_else(|_| "-".to_string()),
-            None => "-".to_string(),
-        },
-        AlertRuleSpec::CheckStatus { .. } | AlertRuleSpec::Group { .. } => "-".to_string(),
-    };
-    format!(
-        "{}:{}:{}:{}",
-        rule.rule_id, rule.target_kind, rule.target_id, dimension_part
-    )
-}
+/// The persisted incident identity lives with the incident store
+/// (`chv_controlplane_store::dedup_key`); re-exported here for the
+/// evaluator's callers (worker tests, the g4b rig).
+pub use chv_controlplane_store::dedup_key;
 
 /// Hard byte bound for rendered observation text (`last_observed`
 /// column), cut at a UTF-8 char boundary.
@@ -930,6 +908,27 @@ impl AlertEvaluatorWorker {
 
         match action {
             IncidentAction::OpenPending | IncidentAction::OpenFiring => {
+                // Stale-pass guard: this pass may hold a rule that was
+                // deleted or edited (target, dimension match, any
+                // revision bump) after the pass listed it. Opening an
+                // incident the CURRENT rule set will never evaluate
+                // again would strand it — it could never recover or
+                // resolve. Re-read the rule and open only when it is
+                // still exactly this one.
+                let still_current = match self.rules.get(&rule.rule_id).await {
+                    Ok(current) => {
+                        current.revision == rule.revision && dedup_key(&current) == dedup_key(rule)
+                    }
+                    Err(chv_controlplane_store::StoreError::NotFound { .. }) => false,
+                    Err(e) => return Err(e),
+                };
+                if !still_current {
+                    tracing::debug!(
+                        rule_id = %rule.rule_id,
+                        "alert evaluation: rule changed or was deleted mid-pass; not opening an incident"
+                    );
+                    return Ok(());
+                }
                 let message = format!("{} (rule '{}')", observation_text, rule.name);
                 let alert_id = match self
                     .alerts
@@ -2655,6 +2654,7 @@ mod worker_tests {
     use chv_controlplane_store::test_util::create_test_pool;
     use chv_controlplane_store::{
         AlertRepository, AlertRuleRepository, NotificationOutboxRepository, RuleCreateInput,
+        RuleUpdateInput,
     };
     use chv_monitoring_core::model::{SampleBuilder, SampleValue, Source, TargetKind};
     use chv_monitoring_store::{IngestOutcome, MonitoringStore, MonitoringStoreConfig, NodeBatch};
@@ -2772,6 +2772,72 @@ mod worker_tests {
             .iter()
             .filter(|e| e.event_type == event_type)
             .count()
+    }
+
+    #[tokio::test]
+    async fn stale_rule_snapshot_never_opens_an_incident() {
+        // A pass can hold a rule row that was deleted or edited after
+        // the pass listed it. Opening an incident from the stale
+        // snapshot would strand it: the current rule set would never
+        // evaluate that dedup key again, so it could never recover or
+        // resolve. The open path re-reads the rule and refuses.
+        let f = fixture(EvaluatorChannels {
+            webhook: false,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+        f.seed_cpu(BASE_MS as u64 - 30_000, 0.95).await;
+
+        // Deleted mid-pass: the stale snapshot must not open.
+        f.rules
+            .delete(&rule.rule_id, rule.revision)
+            .await
+            .expect("delete");
+        f.worker
+            .evaluate_rule(&rule, BASE_MS)
+            .await
+            .expect("evaluate stale snapshot");
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_none(),
+            "a deleted rule's stale snapshot must not open an incident"
+        );
+
+        // Edited mid-pass to a different dimension match (the dedup
+        // key changes): the stale snapshot must not open at the OLD
+        // key.
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule 2");
+        let updated = f
+            .rules
+            .update(&RuleUpdateInput {
+                rule_id: rule.rule_id.clone(),
+                expected_revision: rule.revision,
+                name: rule.name.clone(),
+                enabled: None,
+                spec: AlertRuleSpec::Threshold {
+                    metric_id: "vm.guest.fs.available_bytes".into(),
+                    dimension_match: Some([("mount_id".to_string(), "/".to_string())].into()),
+                    operator: ThresholdOperator::LessThan,
+                    threshold: 2.0,
+                },
+                severity: "warning".into(),
+                for_seconds: 0,
+                recovery_seconds: 60,
+                missing_data: MissingDataPolicy::Unknown,
+                updated_by: "test".into(),
+                now_ms: BASE_MS,
+            })
+            .await
+            .expect("update");
+        assert_ne!(dedup_key(&updated), dedup_key(&rule));
+        f.worker
+            .evaluate_rule(&rule, BASE_MS)
+            .await
+            .expect("evaluate stale snapshot");
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_none(),
+            "the old dedup key's stale snapshot must not open"
+        );
     }
 
     #[tokio::test]

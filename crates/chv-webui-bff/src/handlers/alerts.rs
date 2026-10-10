@@ -22,8 +22,8 @@ use crate::router::AppState;
 use crate::BffError;
 use axum::{extract::State, response::Json};
 use chv_controlplane_store::{
-    AlertRule, AlertRuleSpec, IncidentListFilter, IncidentRow, IncidentTransitionRow,
-    NotificationEventInput, OutboxEventRow,
+    dedup_key, AlertRule, AlertRuleSpec, IncidentListFilter, IncidentRow, IncidentTransitionRow,
+    NotificationEventInput, OutboxEventRow, CHANNEL_SLACK, CHANNEL_WEBHOOK, EVENT_TYPE_RESOLVED,
 };
 use chv_monitoring_core::registry;
 use serde::Deserialize;
@@ -500,6 +500,9 @@ pub async fn update_rule(
     let spec = extract_spec(&body)?;
     let missing_data = parse_missing_data(common.missing_data.as_deref())?;
 
+    // The pre-update rule: its dedup key identifies the active
+    // incident an edit that changes the dimension match would strand.
+    let old = state.alert_rules.get(&common.rule_id).await?;
     let rule = state
         .alert_rules
         .update(&chv_controlplane_store::RuleUpdateInput {
@@ -516,6 +519,25 @@ pub async fn update_rule(
             now_ms: now_ms(),
         })
         .await?;
+    // A dimension-match edit changes the incident identity: retire
+    // the old key's active incident (same semantics as delete — a
+    // firing ghost with no recovery path otherwise).
+    let mut retired = 0;
+    if dedup_key(&old) != dedup_key(&rule) {
+        if let Some(incident) = state
+            .alert_repo
+            .find_active_incident(&dedup_key(&old))
+            .await?
+        {
+            retired = retire_incident(
+                &state,
+                &incident,
+                "rule edited to a different dimension match",
+                now_ms(),
+            )
+            .await?;
+        }
+    }
     audit(
         &state,
         claims,
@@ -525,6 +547,7 @@ pub async fn update_rule(
             "event": "monitoring.alert_rule.update",
             "rule_id": rule.rule_id,
             "revision": rule.revision,
+            "retired_incidents": retired,
         }),
     )
     .await;
@@ -537,9 +560,114 @@ pub struct DeleteRuleBody {
     pub expected_revision: i64,
 }
 
+/// Retire an active incident whose rule can no longer evaluate it
+/// (the rule was deleted, or edited to a different dimension match):
+/// left alone it would be a permanent ghost — firing forever,
+/// counted in every badge, with no recovery path because the rule
+/// that could recover or resolve it is gone. A firing incident
+/// resolves with the reason (and the resolved notification, unless
+/// silenced — silence is an overlay that suppresses delivery, never
+/// the transition); a pending one never fired and is deleted like a
+/// pending cleared before its hold. Returns 1 when an incident was
+/// resolved, 0 otherwise.
+async fn retire_incident(
+    state: &AppState,
+    incident: &IncidentRow,
+    reason: &str,
+    now: i64,
+) -> Result<usize, BffError> {
+    if incident.status == chv_controlplane_store::INCIDENT_STATUS_FIRING {
+        let notify = resolved_notify_events(state, incident, reason, now);
+        state
+            .alert_repo
+            .resolve_incident(
+                &incident.alert_id,
+                now,
+                reason,
+                incident.last_observed.as_deref(),
+                &notify,
+            )
+            .await?;
+        Ok(1)
+    } else {
+        state.alert_repo.clear_pending(&incident.alert_id).await?;
+        Ok(0)
+    }
+}
+
+/// The resolved-notification events for a retired incident, one per
+/// configured channel — mirroring the evaluator's transition events
+/// (silence suppresses enqueue, not the transition). Empty when
+/// notifications are off, no destination exists, or the incident is
+/// silenced.
+fn resolved_notify_events(
+    state: &AppState,
+    incident: &IncidentRow,
+    reason: &str,
+    now: i64,
+) -> Vec<NotificationEventInput> {
+    let channels = state.notification_channels;
+    if !channels.any() {
+        return Vec::new();
+    }
+    if incident.silenced_until_ms.is_some_and(|until| until > now) {
+        return Vec::new();
+    }
+    let target_kind = incident.resource_kind.clone().unwrap_or_default();
+    let target_id = incident.resource_id.clone().unwrap_or_default();
+    let mut summary = format!("{} — {}", incident.message, reason);
+    // The outbox validation caps summaries at 512 bytes; cut at a
+    // UTF-8 char boundary with headroom.
+    if summary.len() > 480 {
+        let mut end = 480;
+        while !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        summary.truncate(end);
+    }
+    let resource_url = format!("/{}s/{}", target_kind, target_id);
+    let configured = [
+        (channels.webhook, CHANNEL_WEBHOOK),
+        (channels.slack, CHANNEL_SLACK),
+    ];
+    configured
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, channel)| {
+            let event_id = uuid_v4();
+            let payload = chv_monitoring_core::notifications::render_envelope(
+                &event_id,
+                &incident.alert_id,
+                EVENT_TYPE_RESOLVED,
+                &incident.severity,
+                &target_kind,
+                &target_id,
+                &summary,
+                now,
+                &resource_url,
+            );
+            NotificationEventInput {
+                event_id,
+                alert_id: incident.alert_id.clone(),
+                incident_key: incident.dedup_key.clone().unwrap_or_default(),
+                event_type: EVENT_TYPE_RESOLVED.to_string(),
+                severity: incident.severity.clone(),
+                target_kind: target_kind.clone(),
+                target_id: target_id.clone(),
+                summary: summary.clone(),
+                occurred_at_ms: now,
+                payload,
+                channel: channel.to_string(),
+            }
+        })
+        .collect()
+}
+
 /// `POST /v1/monitoring/alert-rules/delete` — delete under a revision
-/// precondition. Incidents the rule produced are historical record
-/// and are NOT deleted.
+/// precondition. The rule's active incidents are retired in the same
+/// request: firing ones resolve (`rule deleted`) with their resolved
+/// notification, pending ones (never fired) are deleted. Resolved
+/// history is retained as record.
 pub async fn delete_rule(
     State(state): State<AppState>,
     bearer: BearerToken,
@@ -550,6 +678,26 @@ pub async fn delete_rule(
         .alert_rules
         .delete(&body.rule_id, body.expected_revision)
         .await?;
+    // Retire the rule's active incidents: without this they would be
+    // permanent ghosts (firing forever, no recovery path — the rule
+    // that could recover them no longer exists).
+    let now = now_ms();
+    let (active, _) = state
+        .alert_repo
+        .list_incidents(
+            &IncidentListFilter {
+                rule_id: Some(body.rule_id.clone()),
+                include_resolved: false,
+                ..Default::default()
+            },
+            MAX_PAGE_SIZE,
+            0,
+        )
+        .await?;
+    let mut retired = 0;
+    for incident in &active {
+        retired += retire_incident(&state, incident, "rule deleted", now).await?;
+    }
     audit(
         &state,
         claims,
@@ -558,10 +706,13 @@ pub async fn delete_rule(
         json!({
             "event": "monitoring.alert_rule.delete",
             "rule_id": body.rule_id,
+            "retired_incidents": retired,
         }),
     )
     .await;
-    Ok(Json(json!({ "deleted": true })))
+    Ok(Json(
+        json!({ "deleted": true, "retired_incidents": retired }),
+    ))
 }
 
 #[derive(Deserialize)]

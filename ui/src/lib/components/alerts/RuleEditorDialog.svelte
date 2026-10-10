@@ -44,10 +44,12 @@
 	let dimensionKey = $state('');
 	let dimensionValue = $state('');
 	// The original rule's full dimension_match (edit mode). The dialog
-	// edits ONE key, but the store allows two — rebuilding the match
+	// edits ONE key, but a rule can carry two — rebuilding the match
 	// from the two state fields would silently drop a second key the
-	// operator never touched.
+	// operator never touched. `dimensionTouched` distinguishes an
+	// untouched round-trip from an explicit edit.
 	let originalDimensions: Record<string, string> | undefined = $state();
+	let dimensionTouched = $state(false);
 	let submitting = $state(false);
 	let validationError = $state('');
 
@@ -56,14 +58,15 @@
 	);
 
 	// Editing a rule whose match carries more than the one key the
-	// dialog can edit: tell the operator what untouched vs edited
-	// dimension fields will do, instead of silently narrowing the
-	// match on save.
+	// dialog can edit: the untouched form cannot be saved through this
+	// dialog (no registered metric declares two dimensions, so the
+	// server rejects it loudly); editing the dimension fields replaces
+	// the whole match with the single key shown.
 	const dimensionNote = $derived.by(() => {
 		if (!isEdit || !originalDimensions) return '';
 		const keys = Object.keys(originalDimensions);
 		if (keys.length < 2) return '';
-		return `This rule matches ${keys.length} dimensions (${keys.join(', ')}). Leave the dimension fields untouched to keep them all; editing them replaces the whole match with the single key shown.`;
+		return `This rule matches ${keys.length} dimensions (${keys.join(', ')}). That form cannot be saved through this dialog; leave the fields untouched to keep it unchanged, or edit them to replace the match with the single key shown.`;
 	});
 
 	function applyTemplate(template: RuleTemplate) {
@@ -86,6 +89,7 @@
 		dimensionKey = Object.keys(dimensions)[0] ?? '';
 		dimensionValue = dimensions[dimensionKey] ?? '';
 		originalDimensions = undefined;
+		dimensionTouched = false;
 	}
 
 	function applyRule(source: AlertRule) {
@@ -108,6 +112,7 @@
 		dimensionKey = Object.keys(dimensions)[0] ?? '';
 		dimensionValue = dimensions[dimensionKey] ?? '';
 		originalDimensions = source.dimension_match;
+		dimensionTouched = false;
 	}
 
 	// Initialize whenever the dialog opens for a new target.
@@ -126,11 +131,15 @@
 
 	function dimensionMatch(): Record<string, string> | undefined {
 		if (!dimensionKey.trim() || !dimensionValue.trim()) return undefined;
-		// Untouched multi-key match: round-trip the ORIGINAL verbatim.
-		// The dialog edits one key, the store allows two — rebuilding
-		// from these two fields would silently drop the second key.
+		// Untouched multi-key match: round-trip the ORIGINAL verbatim
+		// so common-field-only edits never silently narrow it (the
+		// server will reject the multi-key form loudly — no registered
+		// metric declares two dimensions — which is the honest outcome
+		// for a legacy row). Editing the fields replaces the match
+		// with the single key shown, exactly as the note says.
 		const original = originalDimensions;
 		if (
+			!dimensionTouched &&
 			original &&
 			Object.keys(original).length > 1 &&
 			original[dimensionKey.trim()] === dimensionValue.trim()
@@ -269,6 +278,7 @@
 			{ruleType}
 			groupSummary={rule ? ruleSpecSummary(rule) : ''}
 			dimensionNote={dimensionNote}
+			onDimensionEdit={() => (dimensionTouched = true)}
 			bind:metricId
 			bind:operator
 			bind:threshold

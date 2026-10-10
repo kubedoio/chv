@@ -100,6 +100,39 @@ pub const ALERT_SOURCE_MONITORING: &str = "monitoring";
 /// in the rule_id/rule_revision columns; the name is in `message`).
 pub const ALERT_TYPE_MONITORING_RULE: &str = "monitoring.rule";
 
+/// The incident identity: `{rule_id}:{target_kind}:{target_id}:{dim}`.
+/// The dimension part is the canonical (BTreeMap-ordered) compact
+/// JSON of the rule's dimension match — order-independent by
+/// construction — or `-` when the rule has no dimension match or is
+/// not dimension-shaped (check_status / group rules).
+///
+/// This is the persisted key the unique active index is built on, so
+/// it lives with the incident store: the BFF's rule-retire paths and
+/// the evaluator both need to compute it. (The evaluator re-exports
+/// it for its own callers.)
+pub fn dedup_key(rule: &crate::alert_rules::AlertRule) -> String {
+    let dimension_part = match &rule.spec {
+        crate::alert_rules::AlertRuleSpec::Threshold {
+            dimension_match, ..
+        }
+        | crate::alert_rules::AlertRuleSpec::Rate {
+            dimension_match, ..
+        }
+        | crate::alert_rules::AlertRuleSpec::Availability {
+            dimension_match, ..
+        } => match dimension_match {
+            Some(match_map) => serde_json::to_string(match_map).unwrap_or_else(|_| "-".to_string()),
+            None => "-".to_string(),
+        },
+        crate::alert_rules::AlertRuleSpec::CheckStatus { .. }
+        | crate::alert_rules::AlertRuleSpec::Group { .. } => "-".to_string(),
+    };
+    format!(
+        "{}:{}:{}:{}",
+        rule.rule_id, rule.target_kind, rule.target_id, dimension_part
+    )
+}
+
 /// An incident row, fully materialized. `Option<i64>` ms columns are
 /// NULL until the lifecycle sets them.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]

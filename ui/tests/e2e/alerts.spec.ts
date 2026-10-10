@@ -228,6 +228,59 @@ test('rules tab renders spec summaries and never auto-enables a new rule', async
 	await expect(enabledCheckbox).not.toBeChecked();
 });
 
+test('rules tab renders group summaries and the multi-key dimension hint', async ({ page }) => {
+	// A group rule's nested conditions ride the wire UNTAGGED (no
+	// rule_type on children); the summary must shape-sniff them. A
+	// two-key dimension match cannot be edited down to one key
+	// silently — the edit dialog says what untouched vs edited fields
+	// do.
+	await mockAlerting(page, {
+		rules: {
+			rules: [
+				ruleRow({
+					rule_id: 'rule-group',
+					name: 'Node pressure combo',
+					rule_type: 'group',
+					op: 'and',
+					conditions: [
+						{
+							rule_id: 'c1',
+							metric_id: 'node.cpu.load1',
+							operator: 'greater_than',
+							threshold: 8
+						},
+						{
+							rule_id: 'c2',
+							check_id: 'service:nginx.service',
+							status_match: 'critical'
+						}
+					]
+				}),
+				ruleRow({
+					rule_id: 'rule-legacy',
+					name: 'Legacy two-key match',
+					dimension_match: { mount_id: 'ext4:/', block_device_id: 'sda' }
+				})
+			],
+			total: 2
+		}
+	});
+	await page.goto('/alerts?tab=rules');
+
+	// The group summary renders every child via shape sniffing.
+	await expect(
+		page.getByText('node.cpu.load1 > 8 AND service:nginx.service is critical')
+	).toBeVisible();
+
+	// Editing the two-key rule shows the honest note.
+	await page.getByRole('button', { name: 'Edit rule' }).last().click();
+	const dialog = page.locator('[role="dialog"]');
+	await expect(dialog.getByText('Edit alert rule')).toBeVisible();
+	await expect(
+		dialog.getByText(/matches 2 dimensions \(mount_id, block_device_id\)/)
+	).toBeVisible();
+});
+
 test('rule update conflict shows the reload notice', async ({ page }) => {
 	await mockAlerting(page, { rules: { rules: [ruleRow()], total: 1 } });
 	await page.goto('/alerts?tab=rules');

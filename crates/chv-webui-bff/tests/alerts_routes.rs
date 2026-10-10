@@ -416,6 +416,226 @@ async fn rule_crud_lifecycle_with_revision_preconditions() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], true);
+    assert_eq!(body["retired_incidents"], 0, "no incidents were open");
+}
+
+#[tokio::test]
+async fn deleting_a_rule_retires_its_active_incidents() {
+    // A deleted rule's firing incident would otherwise be a permanent
+    // ghost: firing forever, counted in every badge, with no recovery
+    // path — the rule that could recover it is gone. Deletion retires
+    // it (resolved, with the honest reason and a resolved
+    // notification); a pending incident (never fired) is deleted.
+    let mut state = build_state().await;
+    state.notification_channels = chv_webui_bff::NotificationChannels {
+        webhook: true,
+        slack: false,
+    };
+    let operator = seed_jwt_as(&state, "operator").await;
+
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/create",
+        Some(&operator),
+        Some(threshold_rule_body()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rule_id = body["rule"]["rule_id"].as_str().unwrap().to_string();
+
+    // Seed incidents as the evaluator would: one firing, one pending.
+    let firing_id = state
+        .alert_repo
+        .open_pending(&IncidentOpenInput {
+            rule_id: rule_id.clone(),
+            rule_revision: 1,
+            dedup_key: format!("{rule_id}:node:node-1:-"),
+            severity: "warning".into(),
+            target_kind: "node".into(),
+            target_id: "node-1".into(),
+            node_id: None,
+            message: "CPU pressure above 0.90 (rule 'Node CPU pressure')".into(),
+            now_ms: 1_000,
+            last_observed: Some("0.95 (node.cpu.capacity_ratio)".into()),
+            evidence_from_ms: 0,
+            evidence_to_ms: 1_000,
+        })
+        .await
+        .expect("open firing");
+    state
+        .alert_repo
+        .promote_to_firing(
+            &firing_id,
+            2_000,
+            Some("0.95 (node.cpu.capacity_ratio)"),
+            0,
+            2_000,
+            &[],
+        )
+        .await
+        .expect("promote");
+    let pending_id = state
+        .alert_repo
+        .open_pending(&IncidentOpenInput {
+            rule_id: rule_id.clone(),
+            rule_revision: 1,
+            dedup_key: format!("{rule_id}:node:node-2:-"),
+            severity: "warning".into(),
+            target_kind: "node".into(),
+            target_id: "node-2".into(),
+            node_id: None,
+            message: "CPU pressure above 0.90 (rule 'Node CPU pressure')".into(),
+            now_ms: 1_000,
+            last_observed: Some("0.95 (node.cpu.capacity_ratio)".into()),
+            evidence_from_ms: 0,
+            evidence_to_ms: 1_000,
+        })
+        .await
+        .expect("open pending");
+
+    // Delete the rule through the BFF.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/delete",
+        Some(&operator),
+        Some(json!({"rule_id": rule_id, "expected_revision": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], true);
+    assert_eq!(body["retired_incidents"], 1, "exactly the firing one");
+
+    // The firing incident resolved with the honest reason, and the
+    // resolved notification is enqueued on the configured channel.
+    let resolved = state
+        .alert_repo
+        .get_incident(&firing_id)
+        .await
+        .expect("get");
+    assert_eq!(resolved.status, "resolved");
+    let transitions = state
+        .alert_repo
+        .list_transitions(&firing_id, 10)
+        .await
+        .expect("transitions");
+    let last = transitions.last().expect("at least one transition");
+    assert_eq!(last.to_state, "resolved");
+    assert_eq!(last.reason, "rule deleted");
+    let events = state
+        .notification_outbox
+        .list_recent(10)
+        .await
+        .expect("outbox");
+    let resolved_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.alert_id == firing_id && e.event_type == "resolved")
+        .collect();
+    assert_eq!(resolved_events.len(), 1, "one resolved event per channel");
+    assert_eq!(resolved_events[0].channel, "webhook");
+
+    // The pending incident (never fired) is gone entirely.
+    assert!(
+        state.alert_repo.get_incident(&pending_id).await.is_err(),
+        "pending incidents are deleted, not resolved"
+    );
+}
+
+#[tokio::test]
+async fn editing_a_rules_dimension_match_retires_the_old_key_incident() {
+    // The dedup key includes the dimension match: editing it strands
+    // the old key's active incident (the evaluator only ever looks
+    // up the CURRENT key). The update retires it, same semantics as
+    // deletion.
+    let state = build_state().await;
+    let operator = seed_jwt_as(&state, "operator").await;
+
+    let mut create = threshold_rule_body();
+    create["name"] = "VM guest storage".into();
+    create["target_kind"] = "vm".into();
+    create["target_id"] = "vm-1".into();
+    create["metric_id"] = "vm.guest.fs.available_bytes".into();
+    create["threshold"] = 2_147_483_648.0.into();
+    create["operator"] = "less_than".into();
+    create["dimension_match"] = json!({"mount_id": "/"});
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/create",
+        Some(&operator),
+        Some(create),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rule_id = body["rule"]["rule_id"].as_str().unwrap().to_string();
+    let old_key = format!("{rule_id}:vm:vm-1:{{\"mount_id\":\"/\"}}");
+
+    let alert_id = state
+        .alert_repo
+        .open_pending(&IncidentOpenInput {
+            rule_id: rule_id.clone(),
+            rule_revision: 1,
+            dedup_key: old_key.clone(),
+            severity: "warning".into(),
+            target_kind: "vm".into(),
+            target_id: "vm-1".into(),
+            node_id: None,
+            message: "Guest storage below 2 GiB (rule 'VM guest storage')".into(),
+            now_ms: 1_000,
+            last_observed: Some("1073741824 (vm.guest.fs.available_bytes)".into()),
+            evidence_from_ms: 0,
+            evidence_to_ms: 1_000,
+        })
+        .await
+        .expect("open");
+    state
+        .alert_repo
+        .promote_to_firing(&alert_id, 2_000, None, 0, 2_000, &[])
+        .await
+        .expect("promote");
+
+    // Edit the dimension match (the dedup key changes).
+    let mut update = threshold_rule_body();
+    update["name"] = "VM guest storage".into();
+    update["metric_id"] = "vm.guest.fs.available_bytes".into();
+    update["target_kind"] = "vm".into();
+    update["target_id"] = "vm-1".into();
+    update["threshold"] = 2_147_483_648.0.into();
+    update["operator"] = "less_than".into();
+    update["dimension_match"] = json!({"mount_id": "/var"});
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/update",
+        Some(&operator),
+        Some(json!({
+            "rule_id": rule_id,
+            "expected_revision": 1,
+            "name": "VM guest storage",
+            "target_kind": "vm",
+            "target_id": "vm-1",
+            "metric_id": "vm.guest.fs.available_bytes",
+            "operator": "less_than",
+            "threshold": 2147483648.0,
+            "severity": "warning",
+            "dimension_match": {"mount_id": "/var"},
+        })),
+    )
+    .await;
+    let _ = update;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The old key's incident resolved with the honest reason.
+    let resolved = state.alert_repo.get_incident(&alert_id).await.expect("get");
+    assert_eq!(resolved.status, "resolved");
+    let transitions = state
+        .alert_repo
+        .list_transitions(&alert_id, 10)
+        .await
+        .expect("transitions");
+    let last = transitions.last().expect("at least one transition");
+    assert_eq!(last.reason, "rule edited to a different dimension match");
 }
 
 #[tokio::test]

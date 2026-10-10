@@ -102,6 +102,20 @@ describe('ruleSpecSummary', () => {
 		expect(summary).toBe('vm.guest.net.rx_errors_total > 10/s over 300s');
 	});
 
+	it('renders a rate with its dimension match (two rates differing only in dimensions stay distinct)', () => {
+		const summary = ruleSpecSummary(
+			rule({
+				rule_type: 'rate',
+				metric_id: 'vm.guest.net.rx_errors_total',
+				dimension_match: { interface_id: 'eth0' },
+				operator: 'greater_than',
+				threshold_per_second: 10,
+				window_seconds: 300
+			})
+		);
+		expect(summary).toBe('vm.guest.net.rx_errors_total > 10/s over 300s (interface_id=eth0)');
+	});
+
 	it('renders availability as a staleness condition', () => {
 		const summary = ruleSpecSummary(
 			rule({
