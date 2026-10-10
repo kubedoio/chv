@@ -8,6 +8,7 @@ mod desired_state;
 mod events;
 mod hypervisor_settings;
 mod images;
+mod monitoring_agents;
 mod network_exposures;
 mod networks;
 mod nodes;
@@ -44,6 +45,10 @@ pub use desired_state::{
 pub use events::{EventAppendInput, EventRepository};
 pub use hypervisor_settings::{HypervisorSettingsRepository, HypervisorSettingsRow};
 pub use images::{ImageRepository, ImageRow};
+pub use monitoring_agents::{
+    AgentAuthError, AgentCredential, AgentOsMetadata, ClaimConsumeError, ConsumedClaim,
+    IssuedClaim, MonitoringAgentRepository, MonitoringAgentRow, RecordBatchOutcome,
+};
 pub use network_exposures::NetworkExposureInput;
 pub use networks::{NetworkRepository, NetworkRow};
 pub use nodes::{
