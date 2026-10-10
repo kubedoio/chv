@@ -171,6 +171,7 @@ async fn enroll(
             Json(json!({
                 "schema_version": 1,
                 "agent_id": agent.agent_id,
+                "vm_id": agent.vm_id,
                 "certificate_pem": agent.certificate_pem,
                 "ca_pem": agent.ca_pem,
                 "credential_epoch": agent.credential_epoch,

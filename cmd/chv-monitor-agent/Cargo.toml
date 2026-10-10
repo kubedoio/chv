@@ -1,0 +1,35 @@
+[package]
+name = "chv-monitor-agent"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+description = "Optional in-guest monitoring agent (ADR-026): read-only /proc collectors, claim enrollment, mTLS ingestion, credential rotation"
+
+[[bin]]
+name = "chv-monitor-agent"
+path = "src/main.rs"
+
+[dependencies]
+chv-monitor-collectors = { path = "../../crates/chv-monitor-collectors" }
+chv-monitoring-core = { path = "../../crates/chv-monitoring-core" }
+chv-observability = { path = "../../crates/chv-observability" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+# Same reqwest line as chv-netbox-adapter / chvctl (rustls, JSON bodies).
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+[dev-dependencies]
+chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
+chv-controlplane-store = { path = "../../crates/chv-controlplane-store", features = ["test-util"] }
+chv-monitoring-store = { path = "../../crates/chv-monitoring-store" }
+axum = { workspace = true }
+sqlx = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }

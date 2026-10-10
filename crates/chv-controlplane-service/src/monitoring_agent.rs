@@ -327,6 +327,9 @@ pub enum EnrollOutcome {
 #[derive(Debug)]
 pub struct EnrolledAgent {
     pub agent_id: String,
+    /// The VM this agent is bound to — the agent must target exactly
+    /// this id in every sample (the manager enforces it).
+    pub vm_id: String,
     pub certificate_pem: String,
     pub ca_pem: String,
     pub credential_epoch: u64,
@@ -588,6 +591,7 @@ impl MonitoringAgentService {
 
         Ok(EnrollOutcome::Enrolled(Box::new(EnrolledAgent {
             agent_id,
+            vm_id: consumed.vm_id,
             certificate_pem: issued.certificate_pem,
             ca_pem: self.issuer.ca_pem().to_string(),
             credential_epoch: row.credential_epoch as u64,

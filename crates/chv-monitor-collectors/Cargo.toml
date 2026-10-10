@@ -1,0 +1,11 @@
+[package]
+name = "chv-monitor-collectors"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+description = "Read-only /proc collectors for the chv guest monitoring agent (ADR-026 baseline set)"
+
+[dependencies]
+
+[dev-dependencies]
