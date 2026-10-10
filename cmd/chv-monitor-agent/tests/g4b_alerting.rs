@@ -965,6 +965,11 @@ async fn g4b_real_vm_alerting_and_signed_notifications() {
         },
     )
     .await;
+    assert_eq!(
+        firing.len(),
+        1,
+        "exactly one firing webhook (no duplicates)"
+    );
     let firing = &firing[0];
     assert_eq!(
         firing.content_type, "application/json",
@@ -981,7 +986,11 @@ async fn g4b_real_vm_alerting_and_signed_notifications() {
     assert_eq!(envelope["severity"], "critical");
     assert_eq!(envelope["target_kind"], "vm");
     assert_eq!(envelope["target_id"], VM_ID);
-    assert_eq!(envelope["alert_id"], envelope["alert_id"]); // present
+    assert_eq!(
+        envelope["incident_id"], incident.alert_id,
+        "the envelope identifies the incident it is about"
+    );
+    assert!(envelope["event_id"].as_str().is_some_and(|e| !e.is_empty()));
     assert!(
         envelope["summary"]
             .as_str()
@@ -1039,6 +1048,7 @@ async fn g4b_real_vm_alerting_and_signed_notifications() {
         },
     )
     .await;
+    assert_eq!(resolved_events.len(), 1, "exactly one resolved webhook");
     let resolved = &resolved_events[0];
     assert_eq!(
         resolved.signature.as_deref(),
@@ -1047,7 +1057,10 @@ async fn g4b_real_vm_alerting_and_signed_notifications() {
     );
     let resolved_envelope: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
     assert_eq!(resolved_envelope["event_type"], "resolved");
-    assert_eq!(resolved_envelope["alert_id"], envelope["alert_id"]);
+    assert_eq!(
+        resolved_envelope["incident_id"], envelope["incident_id"],
+        "firing and resolved carry the same incident identity"
+    );
     checkpoint("resolved webhook received and signature verified");
 
     // The outbox never accumulated retries beyond the delivered

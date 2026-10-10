@@ -20,6 +20,36 @@ use tower_http::cors::CorsLayer;
 use crate::cache::BffCache;
 use crate::mutations::MutationService;
 
+/// Which notification destinations the control plane configured
+/// (ADR-027, #602 PR-6). Booleans only: the BFF never sees the
+/// webhook URLs or the signing secret.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NotificationChannels {
+    /// `[monitoring.notifications].webhook_url` is set.
+    pub webhook: bool,
+    /// `[monitoring.notifications].slack_webhook_url` is set.
+    pub slack: bool,
+}
+
+impl NotificationChannels {
+    /// Whether any destination exists at all.
+    pub fn any(&self) -> bool {
+        self.webhook || self.slack
+    }
+
+    /// The channel a delivery test should ride: the signed webhook
+    /// when configured, else Slack. `None` when nothing can deliver.
+    pub fn test_channel(&self) -> Option<&'static str> {
+        if self.webhook {
+            Some(chv_controlplane_store::CHANNEL_WEBHOOK)
+        } else if self.slack {
+            Some(chv_controlplane_store::CHANNEL_SLACK)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: StorePool,
@@ -37,10 +67,11 @@ pub struct AppState {
     /// The `[monitoring.alerting]` rule ceiling, enforced loudly at
     /// rule creation (the config validation clamps the range).
     pub alerting_max_rules: i64,
-    /// Whether `[monitoring.notifications]` has any destination: the
-    /// delivery test refuses honestly when false. Booleans only — no
-    /// secret ever crosses into the BFF.
-    pub notifications_configured: bool,
+    /// Which notification destinations `[monitoring.notifications]`
+    /// configured: the delivery test rides a deliverable channel and
+    /// refuses honestly when there is none. Booleans only — no
+    /// secret or URL ever crosses into the BFF.
+    pub notification_channels: NotificationChannels,
     pub desired_state_repo: DesiredStateRepository,
     pub observed_state_repo: ObservedStateRepository,
     pub backup_repo: BackupRepository,

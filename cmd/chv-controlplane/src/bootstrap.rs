@@ -356,7 +356,10 @@ pub async fn build_service(
         alert_rules: Arc::new(AlertRuleRepository::new(pool.clone())),
         notification_outbox: Arc::new(NotificationOutboxRepository::new(pool.clone())),
         alerting_max_rules: config.monitoring.alerting.max_rules as i64,
-        notifications_configured: config.monitoring.notifications.has_destination(),
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: config.monitoring.notifications.webhook_url.is_some(),
+            slack: config.monitoring.notifications.slack_webhook_url.is_some(),
+        },
         desired_state_repo: desired_state_repo.clone(),
         observed_state_repo: observed_state_repo.clone(),
         backup_repo: backup_repo.clone(),
@@ -798,8 +801,8 @@ pub async fn build_service(
             None => {
                 tracing::warn!(
                     "monitoring.alerting is enabled but the monitoring store is unavailable; \
-                     alert evaluation is degraded until it recovers (VM lifecycle and \
-                     incident reads are unaffected)"
+                     alert evaluation is degraded until the control plane is restarted with the \
+                     monitoring store reachable (VM lifecycle and incident reads are unaffected)"
                 );
                 tokio::spawn(async {})
             }

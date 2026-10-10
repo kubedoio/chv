@@ -59,9 +59,9 @@ pub struct EvaluationData<'a> {
     pub current: &'a [CurrentSample],
     /// The target's check inventory (latest record per check).
     pub checks: &'a [StoredCheck],
-    /// History points of the rule's exact series over the rate
-    /// window (rate rules only; empty otherwise).
-    pub history: &'a [HistoryPoint],
+    /// History series of the rule's target over the rate window
+    /// (rate rules only; empty otherwise), with series identity.
+    pub history: &'a [HistorySlice],
 }
 
 /// The measurement a condition evaluated against: a real value, or
@@ -83,13 +83,30 @@ pub enum ConditionResult {
     Missing { reason: String },
 }
 
+/// One series' history for rate evaluation: the raw points of a
+/// single (metric, dimensions) series with their identity intact.
+/// Rate conditions sum ONLY the series matching their own
+/// metric_id and dimension subset — never points of other metrics
+/// or unrelated dimensions (a group rule may carry rate conditions
+/// on different metrics in one evaluation pass).
+#[derive(Debug, Clone)]
+pub struct HistorySlice {
+    pub metric_id: String,
+    pub dimensions: std::collections::BTreeMap<String, String>,
+    pub points: Vec<HistoryPoint>,
+}
+
 /// A condition outcome after the rule's missing-data policy has been
-/// applied. `NoData` means "ignore": no state change at all.
+/// applied. `NoData` means "ignore": no state change at all. `Gap`
+/// means "unknown": no state change either — a data gap must never
+/// clear a pending incident or resolve a firing one — but the gap is
+/// recorded on an active incident.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleEvaluation {
     Met { observation: Observation },
     NotMet { observation: Observation },
     NoData,
+    Gap { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -112,15 +129,24 @@ pub fn evaluate_condition(spec: &AlertRuleSpec, data: &EvaluationData) -> Condit
             *threshold,
             data,
         ),
-        // The rate's metric/dimension selection was applied by the
-        // caller when it queried `data.history` — the points carry no
-        // series identity, so there is nothing left to filter here.
+        // The rate's metric/dimension selection is applied per
+        // series INSIDE evaluate_rate: history carries every
+        // matching-metric series with identity, and the condition
+        // sums only its own series.
         AlertRuleSpec::Rate {
+            metric_id,
+            dimension_match,
             operator,
             threshold_per_second,
             window_seconds,
-            ..
-        } => evaluate_rate(operator, *threshold_per_second, *window_seconds, data),
+        } => evaluate_rate(
+            metric_id,
+            dimension_match.as_ref(),
+            operator,
+            *threshold_per_second,
+            *window_seconds,
+            data,
+        ),
         AlertRuleSpec::Availability {
             metric_id,
             dimension_match,
@@ -170,6 +196,8 @@ fn evaluate_threshold(
 /// cover at least half the rule's window before the rate is trusted;
 /// anything less is an honest unknown.
 fn evaluate_rate(
+    metric_id: &str,
+    dimension_match: Option<&DimensionMatch>,
     operator: &ThresholdOperator,
     threshold_per_second: f64,
     window_seconds: i64,
@@ -180,23 +208,34 @@ fn evaluate_rate(
     };
     let window_ms = window_seconds.saturating_mul(1000).max(0);
     let from_ms = data.now_ms.saturating_sub(window_ms);
+    // Only this condition's own series: same metric, dimensions a
+    // superset of the (optional) match. Multiple matching series are
+    // summed — the aggregate rate of everything selected (e.g. every
+    // interface when no dimension_match narrows it).
+    let matching: Vec<&HistorySlice> = data
+        .history
+        .iter()
+        .filter(|s| s.metric_id == metric_id && dimensions_subset(&s.dimensions, dimension_match))
+        .collect();
     let mut value_sum = 0.0f64;
     let mut window_sum_ms: u64 = 0;
     let mut last_ts: i64 = i64::MIN;
-    for point in data.history {
-        let ts = ms_i64(point.timestamp_ms);
-        if ts < from_ms || ts > data.now_ms {
-            continue; // outside the rule's window
+    for slice in matching {
+        for point in &slice.points {
+            let ts = ms_i64(point.timestamp_ms);
+            if ts < from_ms || ts > data.now_ms {
+                continue; // outside the rule's window
+            }
+            let Some(value) = point.value else {
+                continue; // honest absence (reset / epoch crossing)
+            };
+            if value < 0.0 || !value.is_finite() {
+                continue; // defensive reset guard: never a negative delta
+            }
+            value_sum += value;
+            window_sum_ms = window_sum_ms.saturating_add(point.window_ms);
+            last_ts = last_ts.max(ts);
         }
-        let Some(value) = point.value else {
-            continue; // honest absence (reset / epoch crossing)
-        };
-        if value < 0.0 || !value.is_finite() {
-            continue; // defensive reset guard: never a negative delta
-        }
-        value_sum += value;
-        window_sum_ms = window_sum_ms.saturating_add(point.window_ms);
-        last_ts = last_ts.max(ts);
     }
     if window_sum_ms == 0 {
         return missing(SeriesReason::NoHistory.as_str());
@@ -420,8 +459,11 @@ fn ms_i64(ms: u64) -> i64 {
 
 /// Apply the rule's missing-data policy to a condition result:
 ///
-/// - `Unknown` (default): the incident records the gap but does not
-///   fire — Missing becomes NotMet with a Missing observation.
+/// - `Unknown` (default): the gap is recorded on an active incident
+///   but nothing changes state — a data gap must never clear a
+///   pending incident, resolve a firing one, or reset a hold window.
+///   (Recording the gap resets `clear_since`: recovery must be
+///   re-established by real false observations, never by absence.)
 /// - `Fire`: absence is condition-true — Missing becomes Met.
 /// - `Ignore`: absence is no state change at all — NoData.
 ///
@@ -434,9 +476,7 @@ pub fn apply_missing_data_policy(
         ConditionResult::Met { observation } => RuleEvaluation::Met { observation },
         ConditionResult::NotMet { observation } => RuleEvaluation::NotMet { observation },
         ConditionResult::Missing { reason } => match policy {
-            MissingDataPolicy::Unknown => RuleEvaluation::NotMet {
-                observation: Observation::Missing { reason },
-            },
+            MissingDataPolicy::Unknown => RuleEvaluation::Gap { reason },
             MissingDataPolicy::Fire => RuleEvaluation::Met {
                 observation: Observation::Missing { reason },
             },
@@ -515,7 +555,9 @@ pub fn next_state(
                     IncidentAction::OpenFiring
                 }
             }
-            RuleEvaluation::NotMet { .. } | RuleEvaluation::NoData => IncidentAction::None,
+            RuleEvaluation::NotMet { .. } | RuleEvaluation::NoData | RuleEvaluation::Gap { .. } => {
+                IncidentAction::None
+            }
         };
     };
     match incident.status {
@@ -536,6 +578,9 @@ pub fn next_state(
             // Ignore-policy absence holds the pending: absence is
             // never evidence the condition stopped.
             RuleEvaluation::NoData => IncidentAction::None,
+            // Unknown-policy absence holds it too, and the gap is
+            // recorded on the incident (see apply_action).
+            RuleEvaluation::Gap { .. } => IncidentAction::None,
         },
         IncidentStatus::Firing => match evaluation {
             // Condition true again: the worker refreshes the incident
@@ -558,6 +603,10 @@ pub fn next_state(
             },
             // Never resolve on absence.
             RuleEvaluation::NoData => IncidentAction::None,
+            // Unknown-policy absence never resolves either; the gap
+            // is recorded (and resets the recovery window — absence
+            // is not evidence the condition recovered).
+            RuleEvaluation::Gap { .. } => IncidentAction::None,
         },
         // Defensive: the evaluator only loads active incidents, so a
         // resolved snapshot never receives actions.
@@ -614,7 +663,24 @@ pub fn format_observation(spec: &AlertRuleSpec, observation: &Observation) -> St
         AlertRuleSpec::Group { .. } => "group",
     };
     let text = match observation {
-        Observation::Observed { value, .. } => format!("{value} ({label})"),
+        Observation::Observed { value, .. } => {
+            // Check-status observations carry the contract's numeric
+            // state code as their value; render the state NAME —
+            // `critical (http:app)`, not `2 (http:app)`.
+            match spec {
+                AlertRuleSpec::CheckStatus { .. } => {
+                    let state = match *value as i64 {
+                        0 => "ok".to_string(),
+                        1 => "warning".to_string(),
+                        2 => "critical".to_string(),
+                        3 => "unknown".to_string(),
+                        other => other.to_string(),
+                    };
+                    format!("{state} ({label})")
+                }
+                _ => format!("{value} ({label})"),
+            }
+        }
         Observation::Missing { reason } => format!("missing ({reason}) ({label})"),
     };
     bound_text(text)
@@ -788,9 +854,15 @@ impl AlertEvaluatorWorker {
                     chv_monitoring_store::Resolution::Raw,
                 )
                 .await?;
+            // Series identity is preserved: each rate condition sums
+            // only its own (metric, dimensions) series.
             series
                 .into_iter()
-                .flat_map(|s| s.points)
+                .map(|s| HistorySlice {
+                    metric_id: s.metric_id,
+                    dimensions: s.dimensions,
+                    points: s.points,
+                })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -845,6 +917,7 @@ impl AlertEvaluatorWorker {
                 format_observation(&rule.spec, observation)
             }
             RuleEvaluation::NoData => "no data (ignored)".to_string(),
+            RuleEvaluation::Gap { reason } => format!("no data ({reason})"),
         };
         // Evidence window: from the incident's first occurrence (or
         // the hold window at open) to now.
@@ -856,7 +929,6 @@ impl AlertEvaluatorWorker {
         let alert_id = incident.map(|i| i.alert_id.clone());
 
         match action {
-            IncidentAction::None => {}
             IncidentAction::OpenPending | IncidentAction::OpenFiring => {
                 let message = format!("{} (rule '{}')", observation_text, rule.name);
                 let alert_id = match self
@@ -954,6 +1026,25 @@ impl AlertEvaluatorWorker {
                         now_ms,
                     )
                     .await?;
+            }
+            IncidentAction::None => {
+                // A recorded gap (unknown policy on an active
+                // incident) still refreshes the observation — which
+                // also resets the recovery window: absence is not
+                // evidence the condition recovered.
+                if let RuleEvaluation::Gap { .. } = evaluation {
+                    if let Some(alert_id) = &alert_id {
+                        self.alerts
+                            .note_observation(
+                                alert_id,
+                                now_ms,
+                                Some(&observation_text),
+                                evidence_from,
+                                now_ms,
+                            )
+                            .await?;
+                    }
+                }
             }
             IncidentAction::ClearPending => {
                 let Some(alert_id) = &alert_id else {
@@ -1197,11 +1288,19 @@ mod tests {
         }
     }
 
+    fn slice(metric_id: &str, points: &[HistoryPoint]) -> HistorySlice {
+        HistorySlice {
+            metric_id: metric_id.to_string(),
+            dimensions: Default::default(),
+            points: points.to_vec(),
+        }
+    }
+
     fn data<'a>(
         now_ms: i64,
         current: &'a [CurrentSample],
         checks: &'a [StoredCheck],
-        history: &'a [HistoryPoint],
+        history: &'a [HistorySlice],
     ) -> EvaluationData<'a> {
         EvaluationData {
             now_ms,
@@ -1746,15 +1845,20 @@ mod tests {
 
     // -- rate -----------------------------------------------------------------
 
-    fn rate_history() -> Vec<HistoryPoint> {
+    fn rate_history() -> Vec<HistorySlice> {
         // Window [9_700_000, 10_000_000] (300 s rule): 900 counter
         // units over 150 s of real observed windows — coverage is
         // exactly half the rule's window.
-        vec![
+        vec![rate_points(&[
             point(9_750_000, 10_000, Some(100.0)),
             point(9_800_000, 20_000, Some(200.0)),
             point(9_900_000, 120_000, Some(600.0)),
-        ]
+        ])]
+    }
+
+    /// The rate spec's own series carrying the given points.
+    fn rate_points(points: &[HistoryPoint]) -> HistorySlice {
+        slice("vm.guest.net.rx_errors_total", points)
     }
 
     #[test]
@@ -1794,7 +1898,7 @@ mod tests {
     #[test]
     fn rate_insufficient_window_coverage_is_missing() {
         let spec = rate_spec(5.0, 300);
-        let history = [point(9_900_000, 10_000, Some(100.0))];
+        let history = [rate_points(&[point(9_900_000, 10_000, Some(100.0))])];
         let input = data(10_000_000, &[], &[], &history);
         let result = evaluate_condition(&spec, &input);
         assert_eq!(missing_reason(&result), "insufficient_samples");
@@ -1803,11 +1907,11 @@ mod tests {
     #[test]
     fn rate_skips_points_without_values() {
         let spec = rate_spec(2.0, 300);
-        let history = [
+        let history = [rate_points(&[
             point(9_750_000, 100_000, None), // reset/epoch-crossing bucket
             point(9_850_000, 100_000, Some(200.0)),
             point(9_950_000, 100_000, Some(400.0)),
-        ];
+        ])];
         let input = data(10_000_000, &[], &[], &history);
         let result = evaluate_condition(&spec, &input);
         // 600 / 200 s = 3/s; the valueless point contributes neither
@@ -1819,10 +1923,10 @@ mod tests {
     #[test]
     fn rate_skips_negative_point_values() {
         let spec = rate_spec(0.01, 60);
-        let history = [
+        let history = [rate_points(&[
             point(9_950_000, 30_000, Some(-50.0)), // defensive reset guard
             point(9_980_000, 30_000, Some(600.0)),
-        ];
+        ])];
         let input = data(10_000_000, &[], &[], &history);
         let result = evaluate_condition(&spec, &input);
         // Only the positive point counts: 600 / 30 s = 20/s.
@@ -1841,11 +1945,11 @@ mod tests {
     #[test]
     fn rate_ignores_points_outside_the_window() {
         let spec = rate_spec(5.0, 300);
-        let history = [
+        let history = [rate_points(&[
             point(7_000_000, 290_000, Some(5_000.0)), // before the window
             point(9_900_000, 5_000, Some(100.0)),     // in window
             point(10_500_000, 100_000, Some(900.0)),  // future-dated
-        ];
+        ])];
         let input = data(10_000_000, &[], &[], &history);
         let result = evaluate_condition(&spec, &input);
         // Only 5 s of in-window coverage against a 300 s window.
@@ -1855,10 +1959,77 @@ mod tests {
     #[test]
     fn rate_zero_summed_window_is_missing_not_a_division_by_zero() {
         let spec = rate_spec(5.0, 60);
-        let history = [point(10_000_000, 0, Some(10.0))];
+        let history = [rate_points(&[point(10_000_000, 0, Some(10.0))])];
         let input = data(10_000_000, &[], &[], &history);
         let result = evaluate_condition(&spec, &input);
         assert_eq!(missing_reason(&result), "no_history");
+    }
+
+    #[test]
+    fn rate_sums_only_its_own_metric_series() {
+        // Regression: history used to be flattened across series, so
+        // a group rule with rate conditions on different metrics (or
+        // a second series on the target) computed one combined rate.
+        let spec = rate_spec(3.0, 300);
+        let history = [
+            rate_points(&[point(9_900_000, 150_000, Some(600.0))]), // 4/s
+            HistorySlice {
+                metric_id: "vm.guest.net.tx_errors_total".to_string(),
+                dimensions: Default::default(),
+                points: vec![point(9_900_000, 150_000, Some(600_000.0))], // would be 4000/s
+            },
+        ];
+        let input = data(10_000_000, &[], &[], &history);
+        let result = evaluate_condition(&spec, &input);
+        assert!((value_of(&result) - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_dimension_match_selects_only_matching_series() {
+        let spec = AlertRuleSpec::Rate {
+            metric_id: "vm.guest.net.rx_errors_total".to_string(),
+            dimension_match: Some([("interface_id".to_string(), "eth0".to_string())].into()),
+            operator: ThresholdOperator::GreaterThan,
+            threshold_per_second: 3.0,
+            window_seconds: 300,
+        };
+        let eth0 = HistorySlice {
+            metric_id: "vm.guest.net.rx_errors_total".to_string(),
+            dimensions: [("interface_id".to_string(), "eth0".to_string())].into(),
+            points: vec![point(9_900_000, 150_000, Some(600.0))], // 4/s -> Met
+        };
+        let eth1 = HistorySlice {
+            metric_id: "vm.guest.net.rx_errors_total".to_string(),
+            dimensions: [("interface_id".to_string(), "eth1".to_string())].into(),
+            points: vec![point(9_900_000, 150_000, Some(600_000.0))], // excluded
+        };
+        let history = [eth0, eth1];
+        let input = data(10_000_000, &[], &[], &history);
+        let result = evaluate_condition(&spec, &input);
+        assert!(matches!(result, ConditionResult::Met { .. }));
+        assert!((value_of(&result) - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_no_matching_series_is_missing() {
+        let spec = AlertRuleSpec::Rate {
+            metric_id: "vm.guest.net.rx_errors_total".to_string(),
+            dimension_match: Some([("interface_id".to_string(), "eth9".to_string())].into()),
+            operator: ThresholdOperator::GreaterThan,
+            threshold_per_second: 5.0,
+            window_seconds: 300,
+        };
+        let other_dims = HistorySlice {
+            metric_id: "vm.guest.net.rx_errors_total".to_string(),
+            dimensions: [("interface_id".to_string(), "eth0".to_string())].into(),
+            points: vec![point(9_900_000, 100_000, Some(600.0))],
+        };
+        let history = [other_dims];
+        let input = data(10_000_000, &[], &[], &history);
+        assert_eq!(
+            missing_reason(&evaluate_condition(&spec, &input)),
+            "no_history"
+        );
     }
 
     // -- group ----------------------------------------------------------------
@@ -2054,7 +2225,8 @@ mod tests {
                 }
             );
         }
-        // Missing + Unknown: record the gap, do not fire.
+        // Missing + Unknown: hold the state and record the gap — a
+        // data gap is never evidence the condition stopped.
         assert_eq!(
             apply_missing_data_policy(
                 ConditionResult::Missing {
@@ -2062,8 +2234,8 @@ mod tests {
                 },
                 MissingDataPolicy::Unknown
             ),
-            RuleEvaluation::NotMet {
-                observation: absent.clone()
+            RuleEvaluation::Gap {
+                reason: "stale".to_string()
             }
         );
         // Missing + Fire: absence is condition-true.
@@ -2445,7 +2617,7 @@ mod tests {
         };
         assert_eq!(
             format_observation(&spec, &observation),
-            "2 (service:nginx.service)"
+            "critical (service:nginx.service)"
         );
     }
 
@@ -2663,7 +2835,10 @@ mod worker_tests {
         assert_eq!(incident.status, "firing");
         assert_eq!(incident.clear_since_ms, Some(BASE_MS + 210_000));
 
-        // Tick 4 at +280s: recovery elapsed -> resolved + notification.
+        // Tick 4 at +280s: a FRESH false observation (resolution is
+        // never based on stale/absent data) with the recovery window
+        // elapsed -> resolved + notification.
+        f.seed_cpu((BASE_MS as u64) + 250_000, 0.5).await;
         f.worker.evaluation_pass(BASE_MS + 280_000).await;
         assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
         assert_eq!(outbox_count(&f, "resolved").await, 1);
@@ -2785,6 +2960,9 @@ mod worker_tests {
             .expect("silence");
         f.seed_cpu((BASE_MS as u64) + 60_000, 0.4).await;
         f.worker.evaluation_pass(BASE_MS + 120_000).await;
+        // A fresh false observation for the resolving pass (stale
+        // data would hold the incident, not resolve it).
+        f.seed_cpu((BASE_MS as u64) + 190_000, 0.4).await;
         f.worker.evaluation_pass(BASE_MS + 200_000).await;
         assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
         assert_eq!(
@@ -2919,6 +3097,77 @@ mod worker_tests {
         let evaluated = f.worker.evaluation_pass(BASE_MS).await;
         assert_eq!(evaluated, 0, "disabled rules are skipped");
         assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn data_gap_holds_state_and_resets_recovery_under_unknown_policy() {
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+
+        // Fire on a fresh high value.
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("firing");
+        assert_eq!(outbox_count(&f, "firing").await, 1);
+
+        // The feed stops. Passes far past the recovery window with
+        // stale data must NOT resolve the incident and must NOT
+        // notify: absence is never evidence of recovery.
+        f.worker.evaluation_pass(BASE_MS + 600_000).await;
+        f.worker.evaluation_pass(BASE_MS + 700_000).await;
+        let held = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still firing across the gap");
+        assert_eq!(held.status, "firing");
+        assert_eq!(outbox_count(&f, "resolved").await, 0);
+        assert!(
+            held.last_observed
+                .as_deref()
+                .unwrap_or("")
+                .contains("no data"),
+            "the gap is recorded on the incident: {:?}",
+            held.last_observed
+        );
+
+        // A real false observation starts recovery…
+        f.seed_cpu((BASE_MS as u64) + 800_000, 0.4).await;
+        f.worker.evaluation_pass(BASE_MS + 830_000).await;
+        let recovering = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still firing");
+        assert_eq!(
+            recovering.clear_since_ms,
+            Some(BASE_MS + 830_000),
+            "recovery starts on the real false observation"
+        );
+
+        // …another gap resets it (absence cannot carry the recovery
+        // window to completion).
+        f.worker.evaluation_pass(BASE_MS + 900_000).await;
+        let gapped = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still firing");
+        assert_eq!(
+            gapped.clear_since_ms, None,
+            "the gap resets the recovery window"
+        );
+
+        // …and a contiguous fresh false window finally resolves.
+        f.seed_cpu((BASE_MS as u64) + 950_000, 0.4).await;
+        f.worker.evaluation_pass(BASE_MS + 980_000).await;
+        f.seed_cpu((BASE_MS as u64) + 1_050_000, 0.4).await;
+        f.worker.evaluation_pass(BASE_MS + 1_080_000).await;
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_none(),
+            "a real contiguous false window resolves"
+        );
+        assert_eq!(outbox_count(&f, "resolved").await, 1);
     }
 
     #[tokio::test]

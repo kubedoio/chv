@@ -163,7 +163,10 @@ async fn build_state() -> AppState {
         alert_rules: std::sync::Arc::new(AlertRuleRepository::new(pool.clone())),
         notification_outbox: std::sync::Arc::new(NotificationOutboxRepository::new(pool.clone())),
         alerting_max_rules: 200,
-        notifications_configured: false,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo: DesiredStateRepository::new(pool.clone()),
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),

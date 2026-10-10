@@ -128,11 +128,15 @@ A `dead` status means CHV gave up on that event — either permanently rejected,
 Both are **overlays on active (pending/firing) incidents**, set from the `/alerts` UI or the BFF by an operator:
 
 - **Acknowledge** records who looked at the incident and when. It does **not** resolve the incident, does not stop the condition from evaluating, and does not suppress firing/resolved notifications.
-- **Silence** suppresses notification **enqueue** while the deadline is in the future (relative `duration_minutes`, 1..=10080, or absolute `until_ms` — never both). The transition itself still happens and remains fully visible; when the deadline passes, later transitions notify again. Silence does **not** resolve the incident.
+- **Silence** suppresses notification **enqueue** while the deadline is in the future (relative `duration_minutes`, 1..=10080, or absolute `until_ms` — never both, and the absolute form is bounded to the same 7-day horizon). The transition itself still happens and remains fully visible; when the deadline passes, later transitions notify again. Silence does **not** resolve the incident.
 
 Only the recovery window — the condition being observably false for `recovery_seconds` — resolves an incident. Neither overlay can substitute for fixing the underlying problem.
 
-## 10. Escalation criteria
+## 10. Growth and retention (v1 boundary)
+
+Resolved incidents (with their transition history) and delivered/dead outbox rows are **retained indefinitely in v1**: they are durable audit state in the operational database, reads are paged (incidents/rules ≤100 per page, deliveries ≤50), and nothing is deleted on a schedule. On a long-lived fleet these tables grow with incident volume; a bounded retention/archival policy is recorded as follow-up debt on the campaign tracking issue (#602). Until then, treat operational-database growth monitoring as part of normal control-plane capacity planning — the DR guidance in [control-plane-dr.md](control-plane-dr.md) covers the database these rows live in.
+
+## 11. Escalation criteria
 
 Escalate beyond this runbook only when:
 

@@ -213,8 +213,57 @@ impl NotificationTransport for ReqwestTransport {
         let response = request
             .send()
             .await
-            .map_err(|e| TransportError(e.to_string()))?;
+            .map_err(|e| TransportError(redact_transport_error(&e)))?;
         Ok(response.status().as_u16())
+    }
+}
+
+/// Classify a reqwest error WITHOUT the URL: reqwest's Display
+/// embeds the request URL, and a Slack webhook URL carries its
+/// credential in the path. The classified string is persisted in
+/// `last_response` (viewer-readable) and logged — it must never
+/// contain the destination or its credentials.
+fn redact_transport_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        "network timeout".to_string()
+    } else if error.is_connect() {
+        "connect failed".to_string()
+    } else if error.is_request() {
+        "request failed".to_string()
+    } else if error.is_body() || error.is_decode() {
+        "invalid response body".to_string()
+    } else {
+        "network error".to_string()
+    }
+}
+
+#[cfg(test)]
+mod transport_redaction_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_errors_never_expose_the_destination_url() {
+        // A request to a reserved-invalid domain fails; reqwest's
+        // Display for the error EMBEDS the URL (and a Slack webhook
+        // URL carries its credential in the path). The redacted
+        // classification must contain none of it.
+        let client = reqwest::Client::builder().https_only(true).build().unwrap();
+        let secret_path = "T000/B000/XXXXXXXsecretcredential";
+        let error = client
+            .post(format!("https://nonexistent.invalid/{secret_path}"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect_err("the .invalid domain cannot resolve");
+        let raw = error.to_string();
+        assert!(raw.contains("nonexistent.invalid"), "sanity: {raw}");
+        let redacted = redact_transport_error(&error);
+        assert!(
+            !redacted.contains("nonexistent.invalid")
+                && !redacted.contains(secret_path)
+                && !redacted.contains("https://"),
+            "the redacted classification must not carry the destination: {redacted}"
+        );
     }
 }
 
@@ -238,6 +287,10 @@ pub struct NotificationDispatcher {
     events: chv_controlplane_store::EventRepository,
     transport: std::sync::Arc<dyn NotificationTransport>,
     settings: DispatcherSettings,
+    /// Backoff jitter source (contract: seeded/testable, not the
+    /// ambient global RNG). Defaults to the ±20% draw; tests inject
+    /// a deterministic one.
+    jitter: std::sync::Arc<dyn Fn(Duration) -> i64 + Send + Sync>,
 }
 
 impl NotificationDispatcher {
@@ -267,7 +320,18 @@ impl NotificationDispatcher {
             events,
             transport,
             settings,
+            jitter: std::sync::Arc::new(jitter_ms),
         }
+    }
+
+    /// Replace the backoff jitter source (tests inject deterministic
+    /// draws; the default is the ±20% production jitter).
+    pub fn with_jitter(
+        mut self,
+        jitter: std::sync::Arc<dyn Fn(Duration) -> i64 + Send + Sync>,
+    ) -> Self {
+        self.jitter = jitter;
+        self
     }
 
     /// Run until shutdown, one bounded dispatch pass per tick.
@@ -401,7 +465,7 @@ impl NotificationDispatcher {
             return self.dead_letter(event, now_ms, note).await;
         }
         let backoff = backoff_delay(attempts + 1);
-        let jitter = jitter_ms(backoff);
+        let jitter = (self.jitter)(backoff);
         let next_attempt_at_ms = now_ms + backoff.as_millis() as i64 + jitter;
         self.outbox
             .schedule_retry(&event.event_id, next_attempt_at_ms, now_ms, note)
@@ -1035,6 +1099,34 @@ mod tests {
         let rows = outbox.list_recent(10).await.expect("list");
         assert_eq!(rows[0].status, "delivered");
         assert_eq!(rows[0].attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn injected_jitter_makes_backoff_scheduling_deterministic() {
+        // The contract pins the jitter to a seeded/testable source:
+        // with a fixed draw the scheduled next attempt is exactly
+        // now + backoff + jitter, no ±20% tolerance bands.
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let events = chv_controlplane_store::EventRepository::new(pool.clone());
+        let transport = std::sync::Arc::new(FakeTransport::new(vec![None, Some(204)]));
+        let dispatcher = NotificationDispatcher::with_transport(
+            outbox.clone(),
+            events,
+            dispatcher_settings(),
+            transport,
+        )
+        .with_jitter(std::sync::Arc::new(|_backoff| 1_234));
+        outbox
+            .enqueue(&firing_event("evt-fixed", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass");
+        let rows = outbox.list_recent(10).await.expect("list");
+        // Backoff for attempt 2 is 10s (5s * 2^1); jitter is fixed.
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].next_attempt_at_ms, 2_000 + 10_000 + 1_234);
     }
 
     #[tokio::test]

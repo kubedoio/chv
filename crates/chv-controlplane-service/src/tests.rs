@@ -64,7 +64,10 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
             chv_controlplane_store::NotificationOutboxRepository::new(pool_for_alerting),
         ),
         alerting_max_rules: 200,
-        notifications_configured: false,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo,
         observed_state_repo,
         backup_repo,

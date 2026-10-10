@@ -1146,8 +1146,17 @@ impl MonitoringNotificationsConfig {
 
 /// Structural destination-URL validation (boot-time, fail-loud):
 /// HTTPS only, no credentials, and no link-local/unspecified IP
-/// literal (the cloud-metadata SSRF hazard). Transport-level
-/// enforcement (https-only, no redirects) is repeated at send time.
+/// literal (the cloud-metadata SSRF hazard). Loopback and private
+/// ranges are deliberately ALLOWED: the operator's config IS the
+/// allowlist, and internal receivers on private networks are a
+/// first-class deployment shape.
+///
+/// Hosts are parsed with the `url` crate — the SAME WHATWG parser
+/// reqwest uses at send time — so every encoding form (integer and
+/// hex IPv4, IPv4-mapped and IPv4-compatible IPv6, bracketed
+/// literals) is seen exactly as the HTTP client will see it. A
+/// string-prefix check would miss `https://2852039166/` (integer
+/// 169.254.169.254) or `https://[::ffff:169.254.169.254]/`.
 fn validate_notification_url(label: &str, url: &str) -> Result<(), String> {
     const MAX_URL_BYTES: usize = 2048;
     if url.len() > MAX_URL_BYTES {
@@ -1155,48 +1164,53 @@ fn validate_notification_url(label: &str, url: &str) -> Result<(), String> {
             "monitoring.notifications.{label} exceeds {MAX_URL_BYTES} bytes"
         ));
     }
-    let rest = url.strip_prefix("https://").ok_or_else(|| {
-        format!("monitoring.notifications.{label} must use https://, got {url:?}")
-    })?;
-    // Authority ends at the first path/query/fragment separator.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.is_empty() {
-        return Err(format!("monitoring.notifications.{label} has no host"));
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("monitoring.notifications.{label} is not a valid URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "monitoring.notifications.{label} must use https://, got {url:?}"
+        ));
     }
-    if authority.contains('@') {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!(
             "monitoring.notifications.{label} must not carry credentials in the URL"
         ));
     }
-    // Host without port (IPv6 literals carry their colons inside
-    // brackets; a port is the last colon after any ']').
-    let host_port = authority.rsplit_once(']').map(|(head, tail)| {
-        // "[::1]:8443" -> "::1"; "[::1]" -> "::1"
-        let host = &head[head.find('[').map(|i| i + 1).unwrap_or(0)..];
-        let _ = tail;
-        host.to_string()
-    });
-    let host = match host_port {
-        Some(host) => host,
-        None => authority
-            .rsplit_once(':')
-            .map(|(host, _)| host.to_string())
-            .unwrap_or_else(|| authority.to_string()),
-    };
-    let reject_ip_prefix = |prefix: &str| host.starts_with(prefix);
-    if host == "0.0.0.0" || host == "::" {
-        return Err(format!(
-            "monitoring.notifications.{label} must not use the unspecified address"
-        ));
-    }
-    if reject_ip_prefix("169.254.") || host == "fe80::" {
-        return Err(format!(
-            "monitoring.notifications.{label} must not use a link-local address \
-             (cloud metadata services live there)"
-        ));
+    let is_bad_ipv4 =
+        |v4: std::net::Ipv4Addr| v4.is_unspecified() || v4.is_link_local() || v4.is_broadcast();
+    match parsed.host() {
+        None => {
+            return Err(format!("monitoring.notifications.{label} has no host"));
+        }
+        Some(url::Host::Ipv4(v4)) => {
+            if is_bad_ipv4(v4) {
+                return Err(rejected_ip(label));
+            }
+        }
+        Some(url::Host::Ipv6(v6)) => {
+            // Unspecified and the full fe80::/10 link-local range
+            // (not just the exact fe80:: node), plus IPv4-mapped and
+            // IPv4-compatible forms that hide a bad IPv4 literal.
+            let mapped_bad = v6.to_ipv4().is_some_and(is_bad_ipv4);
+            let link_local_v6 = v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80;
+            if mapped_bad || link_local_v6 {
+                return Err(rejected_ip(label));
+            }
+        }
+        Some(url::Host::Domain(_)) => {
+            // A hostname is the operator's choice; it is not an IP
+            // literal and DNS is outside this boot check's scope
+            // (the config itself is the allowlist).
+        }
     }
     Ok(())
+}
+
+fn rejected_ip(label: &str) -> String {
+    format!(
+        "monitoring.notifications.{label} must not use an unspecified, broadcast or \
+         link-local address (cloud metadata services live there)"
+    )
 }
 
 fn default_notifications_max_attempts() -> u32 {
@@ -1547,6 +1561,27 @@ max_batch = 5
         let mut cfg = base();
         cfg.webhook_url = Some("https://169.254.169.254/latest/meta-data".into());
         assert!(cfg.validate().is_err());
+
+        // …in every encoding form the WHATWG URL parser accepts: the
+        // same parser reqwest uses at send time, so none of these
+        // can slip past boot validation and still be dialed.
+        for bypass in [
+            "https://2852039166/hook",               // integer 169.254.169.254
+            "https://0xa9fea9fe/hook",               // hex 169.254.169.254
+            "https://[::ffff:169.254.169.254]/hook", // IPv4-mapped
+            "https://[::169.254.169.254]/hook",      // IPv4-compatible
+            "https://[fe80::1]/hook",                // link-local range, not just fe80::
+            "https://[::]/hook",                     // unspecified v6
+            "https://255.255.255.255/hook",          // broadcast
+        ] {
+            let mut cfg = base();
+            cfg.webhook_url = Some(bypass.into());
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.contains("link-local") || err.contains("unspecified"),
+                "{bypass} must be rejected as a metadata/SSRF hazard: {err}"
+            );
+        }
 
         // Unspecified address is rejected.
         let mut cfg = base();

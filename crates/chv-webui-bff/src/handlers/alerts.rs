@@ -601,8 +601,15 @@ pub async fn silence(
         (None, Some(until)) => {
             // Pre-validate: the store enforces this too, but its error
             // class is a store violation, not a request-shape error.
+            // The absolute form is bounded to the same horizon as
+            // duration_minutes: no effectively-forever silences.
             if until <= now {
                 return Err(invalid("until_ms must be in the future".into()));
+            }
+            if until > now + MAX_SILENCE_MINUTES * 60_000 {
+                return Err(invalid(format!(
+                    "until_ms must be at most {MAX_SILENCE_MINUTES} minutes out"
+                )));
             }
             until
         }
@@ -653,13 +660,14 @@ pub async fn test_notification(
     bearer: BearerToken,
 ) -> Result<Json<Value>, BffError> {
     let claims = &bearer.0;
-    if !state.notifications_configured {
+    let Some(channel) = state.notification_channels.test_channel() else {
         return Err(BffError::Conflict(
             "no notification destination is configured; set \
-             monitoring.notifications.webhook_url (and signing secret) first"
+             monitoring.notifications.webhook_url or slack_webhook_url \
+             (and the signing secret) first"
                 .into(),
         ));
-    }
+    };
     let event_id = uuid_v4();
     let summary = format!("CHV notification test by {}", claims.username);
     let payload = chv_monitoring_core::notifications::render_envelope(
@@ -686,7 +694,7 @@ pub async fn test_notification(
             summary,
             occurred_at_ms: now_ms(),
             payload,
-            channel: chv_controlplane_store::CHANNEL_WEBHOOK.into(),
+            channel: channel.to_string(),
         })
         .await?;
     audit(

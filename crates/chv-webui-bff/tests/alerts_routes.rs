@@ -160,7 +160,10 @@ async fn build_state() -> AppState {
         alert_rules: Arc::new(AlertRuleRepository::new(pool.clone())),
         notification_outbox: Arc::new(NotificationOutboxRepository::new(pool.clone())),
         alerting_max_rules: 200,
-        notifications_configured: false,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo: DesiredStateRepository::new(pool.clone()),
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),
@@ -828,7 +831,10 @@ async fn deliveries_list_and_notification_test_gate() {
 
     // Configured: the test enqueues a real deliverable event.
     let mut state = state;
-    state.notifications_configured = true;
+    state.notification_channels = chv_webui_bff::NotificationChannels {
+        webhook: true,
+        slack: false,
+    };
     let (status, body) = request(
         &state,
         "POST",

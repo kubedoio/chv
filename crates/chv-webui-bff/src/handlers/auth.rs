@@ -532,7 +532,10 @@ mod tests {
                 pool.clone(),
             )),
             alerting_max_rules: 200,
-            notifications_configured: false,
+            notification_channels: crate::router::NotificationChannels {
+                webhook: false,
+                slack: false,
+            },
             desired_state_repo: DesiredStateRepository::new(pool.clone()),
             observed_state_repo: ObservedStateRepository::new(pool.clone()),
             backup_repo: BackupRepository::new(pool.clone()),
