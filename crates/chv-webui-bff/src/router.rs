@@ -9,10 +9,11 @@ use axum::{
 };
 use chv_common::Clock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
-    DriftReportRepository, EventRepository, ImageRepository, NetboxProjectionConfigRepository,
-    NetboxProjectionRunRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-    OperationRepository, StorePool, TopologyRepository,
+    AlertRepository, AlertRuleRepository, ApplyRunRepository, BackupRepository,
+    DesiredStateRepository, DriftReportRepository, EventRepository, ImageRepository,
+    NetboxProjectionConfigRepository, NetboxProjectionRunRepository, NetworkRepository,
+    NodeRepository, NotificationOutboxRepository, ObservedStateRepository, OperationRepository,
+    StorePool, TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -26,6 +27,20 @@ pub struct AppState {
     pub operation_repo: OperationRepository,
     pub event_repo: EventRepository,
     pub alert_repo: AlertRepository,
+    /// Typed alert rules + incident lifecycle (ADR-027, #602 PR-6).
+    /// Wraps the `alert_rules` table; the evaluator worker executes
+    /// them. Stored as `Arc` so `AppState` stays cheap to clone.
+    pub alert_rules: std::sync::Arc<AlertRuleRepository>,
+    /// Durable notification outbox (ADR-027, #602 PR-6): the delivery
+    /// audit view and the authorized delivery test.
+    pub notification_outbox: std::sync::Arc<NotificationOutboxRepository>,
+    /// The `[monitoring.alerting]` rule ceiling, enforced loudly at
+    /// rule creation (the config validation clamps the range).
+    pub alerting_max_rules: i64,
+    /// Whether `[monitoring.notifications]` has any destination: the
+    /// delivery test refuses honestly when false. Booleans only — no
+    /// secret ever crosses into the BFF.
+    pub notifications_configured: bool,
     pub desired_state_repo: DesiredStateRepository,
     pub observed_state_repo: ObservedStateRepository,
     pub backup_repo: BackupRepository,
@@ -135,6 +150,25 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/monitoring/health",
             get(crate::handlers::monitoring::health),
+        )
+        // Native alerting reads (query/alerts contract v1, #602 PR-6):
+        // incidents, rules and the delivery audit. Viewer-gated —
+        // pending incidents are visible before they notify.
+        .route(
+            "/v1/monitoring/alerts",
+            post(crate::handlers::alerts::list_incidents),
+        )
+        .route(
+            "/v1/monitoring/alerts/detail",
+            post(crate::handlers::alerts::incident_detail),
+        )
+        .route(
+            "/v1/monitoring/alert-rules",
+            post(crate::handlers::alerts::list_rules),
+        )
+        .route(
+            "/v1/monitoring/notifications/deliveries",
+            post(crate::handlers::alerts::list_deliveries),
         )
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
@@ -304,6 +338,29 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/nodes/mutate",
             post(crate::handlers::nodes::mutate_node),
+        )
+        // Native alerting mutations (query/alerts contract v1, #602
+        // PR-6): rule CRUD under revision preconditions, incident
+        // acknowledge and time-bound silence. Operator-gated.
+        .route(
+            "/v1/monitoring/alert-rules/create",
+            post(crate::handlers::alerts::create_rule),
+        )
+        .route(
+            "/v1/monitoring/alert-rules/update",
+            post(crate::handlers::alerts::update_rule),
+        )
+        .route(
+            "/v1/monitoring/alert-rules/delete",
+            post(crate::handlers::alerts::delete_rule),
+        )
+        .route(
+            "/v1/monitoring/alerts/acknowledge",
+            post(crate::handlers::alerts::acknowledge),
+        )
+        .route(
+            "/v1/monitoring/alerts/silence",
+            post(crate::handlers::alerts::silence),
         )
         .route("/v1/vms/create", post(crate::handlers::vms::create_vm))
         .route("/v1/vms/delete", post(crate::handlers::vms::delete_vm))
@@ -566,6 +623,13 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
 
     // Admin — user management, settings, node enrollment
     let admin = Router::new()
+        // Authorized notification delivery test (query/alerts contract
+        // v1, #602 PR-6). Admin-only: it exercises the operator's
+        // configured destination.
+        .route(
+            "/v1/monitoring/notifications/test",
+            post(crate::handlers::alerts::test_notification),
+        )
         .route("/v1/users", post(crate::handlers::users::list_users))
         .route(
             "/v1/users/create",

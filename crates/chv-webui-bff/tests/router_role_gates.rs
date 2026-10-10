@@ -20,9 +20,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chv_common::{ManualClock, SystemClock};
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
-    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, TopologyRepository,
+    AlertRepository, AlertRuleRepository, ApplyRunRepository, BackupRepository,
+    DesiredStateRepository, DriftReportRepository, EventRepository, ImageRepository,
+    NetworkRepository, NodeRepository, NotificationOutboxRepository, ObservedStateRepository,
+    OperationRepository, TopologyRepository,
 };
 use chv_webui_bff::auth::Claims;
 use chv_webui_bff::mutations::MutationService;
@@ -149,6 +150,10 @@ async fn build_state() -> AppState {
         operation_repo: OperationRepository::new(pool.clone()),
         event_repo: EventRepository::new(pool.clone()),
         alert_repo: AlertRepository::new(pool.clone()),
+        alert_rules: std::sync::Arc::new(AlertRuleRepository::new(pool.clone())),
+        notification_outbox: std::sync::Arc::new(NotificationOutboxRepository::new(pool.clone())),
+        alerting_max_rules: 200,
+        notifications_configured: false,
         desired_state_repo: DesiredStateRepository::new(pool.clone()),
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),
@@ -301,4 +306,91 @@ async fn drift_lets_operator_through_to_handler() {
         StatusCode::FORBIDDEN,
         "operator must clear /v1/architectures/drift role gate"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Native alerting routes (#602 PR-6, query/alerts contract v1):
+// reads are Viewer-gated, rule/incident mutations are Operator-gated,
+// the delivery test is Admin-gated.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn alert_reads_are_viewer_accessible() {
+    let state = build_state().await;
+    let viewer = token_for(&state, "viewer");
+    for (path, body) in [
+        ("/v1/monitoring/alerts", "{}"),
+        ("/v1/monitoring/alerts/detail", r#"{"alert_id":"none"}"#),
+        ("/v1/monitoring/alert-rules", "{}"),
+        ("/v1/monitoring/notifications/deliveries", "{}"),
+    ] {
+        let status = post_with_token(state.clone(), path, &viewer, body).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "viewer must clear the role gate for {path}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "viewer must authenticate for {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn alert_rule_mutations_reject_viewer_with_403() {
+    let state = build_state().await;
+    let viewer = token_for(&state, "viewer");
+    for (path, body) in [
+        (
+            "/v1/monitoring/alert-rules/create",
+            r#"{"name":"x","target_kind":"vm","target_id":"vm-x","severity":"warning"}"#,
+        ),
+        (
+            "/v1/monitoring/alert-rules/update",
+            r#"{"rule_id":"none","expected_revision":1,"name":"x","severity":"warning"}"#,
+        ),
+        (
+            "/v1/monitoring/alert-rules/delete",
+            r#"{"rule_id":"none","expected_revision":1}"#,
+        ),
+        (
+            "/v1/monitoring/alerts/acknowledge",
+            r#"{"alert_id":"none"}"#,
+        ),
+        (
+            "/v1/monitoring/alerts/silence",
+            r#"{"alert_id":"none","duration_minutes":30}"#,
+        ),
+    ] {
+        let status = post_with_token(state.clone(), path, &viewer, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "viewer must not reach {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn notifications_test_rejects_operator_and_viewer_with_403() {
+    // The delivery test is Admin-only: it exercises the operator's
+    // notification destination.
+    let state = build_state().await;
+    for role in ["viewer", "operator"] {
+        let token = token_for(&state, role);
+        let status = post_with_token(
+            state.clone(),
+            "/v1/monitoring/notifications/test",
+            &token,
+            "{}",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{role} must not reach /v1/monitoring/notifications/test"
+        );
+    }
 }
