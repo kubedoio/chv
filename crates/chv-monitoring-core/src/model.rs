@@ -190,6 +190,92 @@ impl std::str::FromStr for Unit {
     }
 }
 
+/// The typed state of a check record (metrics contract v1,
+/// `check.status`): one of `ok`/`warning`/`critical`/`unknown` — a
+/// typed state, **never a float**. On the sample wire the value is the
+/// integer state code (`0` = ok, `1` = warning, `2` = critical,
+/// `3` = unknown); the manager rejects any other encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    Warning,
+    Critical,
+    Unknown,
+}
+
+impl CheckStatus {
+    /// Canonical snake_case wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Warning => "warning",
+            CheckStatus::Critical => "critical",
+            CheckStatus::Unknown => "unknown",
+        }
+    }
+
+    /// Parse from the canonical wire string.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "ok" => CheckStatus::Ok,
+            "warning" => CheckStatus::Warning,
+            "critical" => CheckStatus::Critical,
+            "unknown" => CheckStatus::Unknown,
+            _ => return None,
+        })
+    }
+
+    /// The integer state code a `check.status` sample carries on the
+    /// wire (metrics contract v1: 0=ok, 1=warning, 2=critical,
+    /// 3=unknown).
+    pub fn code(&self) -> u64 {
+        match self {
+            CheckStatus::Ok => 0,
+            CheckStatus::Warning => 1,
+            CheckStatus::Critical => 2,
+            CheckStatus::Unknown => 3,
+        }
+    }
+
+    /// Parse the integer state code a `check.status` sample carries on
+    /// the wire. Any other integer (or a float) is an invalid encoding
+    /// the manager must reject.
+    pub fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => CheckStatus::Ok,
+            1 => CheckStatus::Warning,
+            2 => CheckStatus::Critical,
+            3 => CheckStatus::Unknown,
+            _ => return None,
+        })
+    }
+}
+
+/// One check record as the agent spec defines it (agent spec §"Check
+/// records"; ingestion contract v1's `checks` array): a stable
+/// `check_id` (namespaced identifier like `service:nginx.service`,
+/// `http:local:8080`, `plugin:example.http-health`), an optional
+/// `service_key`, a typed [`CheckStatus`], a bounded sanitized
+/// summary and the observation time. Check records are disposable
+/// inventory telemetry — never operational state.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CheckRecord {
+    /// Namespaced check identifier (contract dimension conventions).
+    pub check_id: String,
+    /// Normalized service unit name when the check is service-shaped.
+    pub service_key: Option<String>,
+    /// Typed state — never a float.
+    pub status: CheckStatus,
+    /// Bounded, control-character-free summary (absent when the
+    /// check produced none).
+    pub summary: Option<String>,
+    /// Source observation time in Unix milliseconds (the manager
+    /// stamps `received_at_ms` separately and never trusts the
+    /// sender for it).
+    pub observed_at_ms: u64,
+}
+
 /// Truthfulness marker for a sample. `quality != valid` ⇒ `value` MUST be
 /// absent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -813,6 +899,48 @@ mod tests {
         let neg: SampleValue = serde_json::from_value(serde_json::json!(-5)).unwrap();
         assert_eq!(neg, SampleValue::Float(-5.0));
         assert_eq!(neg.as_u64(), None);
+    }
+
+    #[test]
+    fn check_status_roundtrips_wire_forms() {
+        // String form ↔ enum, and the integer state code a check.status
+        // sample carries on the wire (metrics contract v1: typed state,
+        // never a float; 0=ok, 1=warning, 2=critical, 3=unknown).
+        for (status, s, code) in [
+            (CheckStatus::Ok, "ok", 0u64),
+            (CheckStatus::Warning, "warning", 1),
+            (CheckStatus::Critical, "critical", 2),
+            (CheckStatus::Unknown, "unknown", 3),
+        ] {
+            assert_eq!(status.as_str(), s);
+            assert_eq!(CheckStatus::parse(s), Some(status));
+            assert_eq!(status.code(), code);
+            assert_eq!(CheckStatus::from_code(code), Some(status));
+        }
+        assert_eq!(CheckStatus::parse("fine"), None);
+        assert_eq!(CheckStatus::from_code(4), None);
+        // Unknown codes never wrap or clamp — rejection, not repair.
+        assert_eq!(CheckStatus::from_code(u64::MAX), None);
+    }
+
+    #[test]
+    fn check_record_serializes_status_as_its_string_form() {
+        let record = CheckRecord {
+            check_id: "service:nginx.service".to_string(),
+            service_key: Some("nginx.service".to_string()),
+            status: CheckStatus::Warning,
+            summary: Some("active (running)".to_string()),
+            observed_at_ms: 1_791_576_000_000,
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["check_id"], "service:nginx.service");
+        assert_eq!(json["service_key"], "nginx.service");
+        assert_eq!(json["status"], "warning");
+        assert_eq!(json["summary"], "active (running)");
+        assert_eq!(json["observed_at_ms"], 1_791_576_000_000u64);
+        let back: CheckRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, record);
+        assert_eq!(back.status.code(), 1);
     }
 
     #[test]

@@ -17,10 +17,16 @@ use std::time::Duration;
 /// When a migration file is added under
 /// `cmd/chv-controlplane/monitoring-migrations/`, add its embedded
 /// entry here — the test at the bottom of this file fails otherwise.
-const EMBEDDED_MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_initial.sql",
-    include_str!("../../../cmd/chv-controlplane/monitoring-migrations/0001_initial.sql"),
-)];
+const EMBEDDED_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_initial.sql",
+        include_str!("../../../cmd/chv-controlplane/monitoring-migrations/0001_initial.sql"),
+    ),
+    (
+        "0002_checks.sql",
+        include_str!("../../../cmd/chv-controlplane/monitoring-migrations/0002_checks.sql"),
+    ),
+];
 
 fn embedded_migrator() -> Result<sqlx::migrate::Migrator, MonitoringStoreError> {
     let mut migrations = Vec::new();

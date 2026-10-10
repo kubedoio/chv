@@ -125,6 +125,10 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::monitoring::current),
         )
         .route(
+            "/v1/monitoring/checks",
+            post(crate::handlers::monitoring::checks),
+        )
+        .route(
             "/v1/monitoring/history",
             post(crate::handlers::monitoring::history),
         )

@@ -8,6 +8,7 @@
 //! Layers:
 //! - [`db`] — pool, migrations, integrity probe, size accounting
 //! - [`ingest`] — durable dedup + high-water marks + series caps
+//! - [`checks`] — latest-record-per-check inventory (guest agents)
 //! - [`query`] — bounded history/current reads with honest absence
 //! - [`maintenance`] — idempotent rollups, retention, eviction, WAL
 //!   checkpointing
@@ -17,6 +18,7 @@
 //! Nothing in this crate may be used from VM lifecycle paths: a failure
 //! here is a degraded monitoring signal, never a lifecycle error.
 
+pub mod checks;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -26,6 +28,7 @@ pub mod maintenance;
 pub mod query;
 pub mod status;
 
+pub use checks::{StoredCheck, CHECK_STALE_AFTER_MS};
 pub use config::MonitoringStoreConfig;
 pub use db::MonitoringStore;
 pub use error::{IngestOutcome, MonitoringStoreError, QueryRejection};

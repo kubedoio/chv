@@ -22,7 +22,7 @@ use axum::{extract::State, response::Json};
 use chv_monitoring_core::model::{SampleQuality, Source, TargetKind};
 use chv_monitoring_core::registry;
 use chv_monitoring_store::{
-    CurrentSample, HistoryPoint, HistorySeries, MonitoringStore, SeriesReason,
+    CurrentSample, HistoryPoint, HistorySeries, MonitoringStore, SeriesReason, StoredCheck,
     DEFAULT_MAX_POINTS_PER_SERIES,
 };
 use serde::Deserialize;
@@ -167,6 +167,22 @@ fn current_value_json(sample: &CurrentSample) -> Value {
     v
 }
 
+/// One stored check record: the typed status in its string form
+/// (`ok`/`warning`/`critical`/`unknown`), never a float, plus the
+/// server-side staleness decision.
+fn check_json(c: &StoredCheck) -> Value {
+    json!({
+        "check_id": c.check_id,
+        "service_key": c.service_key,
+        "status": c.status.as_str(),
+        "summary": c.summary,
+        "observed_at_ms": c.observed_at_ms,
+        "received_at_ms": c.received_at_ms,
+        "agent_id": c.agent_id,
+        "stale": c.stale,
+    })
+}
+
 fn series_json(series: &HistorySeries) -> Value {
     json!({
         "metric_id": series.metric_id,
@@ -264,6 +280,47 @@ pub async fn current(
         "target_id": payload.target_id,
         "samples": samples.iter().map(current_value_json).collect::<Vec<_>>(),
         "generated_at_ms": generated_at,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ChecksRequest {
+    pub target_kind: String,
+    pub target_id: String,
+}
+
+/// `POST /v1/monitoring/checks` — the latest-record-per-check
+/// inventory for one target (agent spec: "Discovery creates
+/// service/check inventory in the manager"). Only `vm` and `node`
+/// targets carry check inventory in v1; a target with no recorded
+/// checks answers an empty list (honest absence, never a fabricated
+/// row).
+pub async fn checks(
+    crate::auth::BearerToken(_claims): BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<ChecksRequest>,
+) -> Result<Json<Value>, BffError> {
+    let store = monitoring_store(&state)?;
+    let kind = target_kind(&payload.target_kind)?;
+    if !matches!(kind, TargetKind::Vm | TargetKind::Node) {
+        return Err(BffError::MonitoringQuery {
+            code: "invalid_target_kind".to_string(),
+            message: format!(
+                "target_kind must be vm or node for the v1 check inventory, got {:?}",
+                payload.target_kind
+            ),
+        });
+    }
+    let stored = store
+        .query_checks(&kind, &payload.target_id, now_ms())
+        .await
+        .map_err(map_store_error)?;
+    Ok(Json(json!({
+        "schema_version": 1,
+        "target_kind": payload.target_kind,
+        "target_id": payload.target_id,
+        "checks": stored.iter().map(check_json).collect::<Vec<_>>(),
+        "generated_at_ms": now_ms(),
     })))
 }
 
