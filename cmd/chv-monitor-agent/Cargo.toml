@@ -26,8 +26,11 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [dev-dependencies]
+chv-agent-core = { path = "../../crates/chv-agent-core" }
+chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store", features = ["test-util"] }
+chv-hypervisor-api = { path = "../../crates/chv-hypervisor-api" }
 chv-monitoring-store = { path = "../../crates/chv-monitoring-store" }
 axum = { workspace = true }
 sqlx = { workspace = true }

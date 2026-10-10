@@ -1009,8 +1009,11 @@ name = "chv-monitor-agent"
 version = "0.3.0"
 dependencies = [
  "axum 0.7.9",
+ "chv-agent-core",
+ "chv-agent-runtime-ch",
  "chv-controlplane-service",
  "chv-controlplane-store",
+ "chv-hypervisor-api",
  "chv-monitor-collectors",
  "chv-monitoring-core",
  "chv-monitoring-store",
