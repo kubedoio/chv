@@ -205,7 +205,7 @@ Group — bounded one-level AND/OR (2..=5 conditions, each one of the four simpl
 
 ### Honesty rules
 
-- **Unknown metrics are refused, not parked.** Every `metric_id` must exist in the published registry ([metric contract v1](chv-monitoring-metrics-v1.md)); create and update return `400 unknown_metric` instead of storing a rule that can never fire. `check_id` is not registry-validated (checks are per-guest discoveries) but is charset- and length-bounded.
+- **Unknown metrics are refused, not parked.** Every `metric_id` must exist in the published registry ([metric contract v1](chv-monitoring-metrics-v1.md)); create and update return `400 unknown_metric` instead of storing a rule that can never fire. The same honesty applies to `dimension_match` keys: each key must be a dimension the metric declares in the registry (`400 unknown_dimension`), because a typo'd key matches no series — silently never firing for thresholds and rates, and permanently firing for availability rules. `check_id` is not registry-validated (checks are per-guest discoveries) but is charset- and length-bounded.
 - **Spec parsing is strict.** Each typed shape accepts exactly its own field set: unknown fields, missing fields, or a typo'd operator are `400 invalid_rule`, never a silent reinterpretation as another shape. A stored `spec` that no longer parses is a loud load error, never a silent rule skip.
 - **Updates and deletes carry a revision precondition.** A mismatched `expected_revision` changes nothing and returns **409**; the client reloads the rule and retries. Revisions advance monotonically. Target identity is immutable — an update never moves a rule between targets (delete and recreate instead). Deleting a rule never deletes the incidents it produced; they are historical record.
 - **The rule ceiling is a loud limit.** Creating a rule beyond the configured `monitoring.alerting.max_rules` (default 200) returns **409**, not a silent clamp.
@@ -279,7 +279,7 @@ Use HTTPS and a strict destination allowlist to prevent server-side request forg
 
 ## Error model
 
-Responses use typed error codes `invalid_range`, `unknown_metric`, `invalid_rule`, `unsupported_source`, `permission_denied`, `query_too_large`, `monitoring_unavailable`, `revision_conflict`. Alerting adds two conflict (409) classes: a rule revision precondition mismatch (the client reloads and retries) and the configured rule ceiling; the delivery test also answers 409 when no destination is configured. Alerting reads and mutations are backed by the operational database and do not return `monitoring_unavailable`. Return a request ID for operator correlation. Monitoring unavailable does not mean node or VM unhealthy.
+Responses use typed error codes `invalid_range`, `unknown_metric`, `unknown_dimension`, `invalid_rule`, `unsupported_source`, `permission_denied`, `query_too_large`, `monitoring_unavailable`, `revision_conflict`. Alerting adds two conflict (409) classes: a rule revision precondition mismatch (the client reloads and retries) and the configured rule ceiling; the delivery test also answers 409 when no destination is configured. Alerting reads and mutations are backed by the operational database and do not return `monitoring_unavailable`. Return a request ID for operator correlation. Monitoring unavailable does not mean node or VM unhealthy.
 
 ## Acceptance
 

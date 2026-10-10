@@ -15,6 +15,7 @@
 
 import type {
 	AlertRule,
+	AlertRuleCondition,
 	AlertSeverity,
 	CheckStatusMatch,
 	MissingDataPolicy,
@@ -112,7 +113,7 @@ function dimensionSuffix(dimensionMatch?: Record<string, string>): string {
 	return ` (${parts.join(', ')})`;
 }
 
-function conditionSummary(condition: AlertRule): string {
+function conditionSummary(condition: AlertRuleCondition & { rule_type?: RuleType }): string {
 	// A group's nested conditions carry NO `rule_type` on the wire
 	// (the store serializes specs untagged; `rule_type` is derived
 	// and added only at the top level by rule_wire) — so shape-sniff
@@ -133,7 +134,7 @@ function conditionSummary(condition: AlertRule): string {
 		case 'threshold':
 			return `${condition.metric_id ?? '?'} ${operatorSymbol(condition.operator)} ${formatThresholdValue(condition.threshold ?? 0)}${dimensionSuffix(condition.dimension_match)}`;
 		case 'rate':
-			return `${condition.metric_id ?? '?'} ${operatorSymbol(condition.operator)} ${condition.threshold_per_second ?? 0}/s over ${condition.window_seconds ?? 0}s`;
+			return `${condition.metric_id ?? '?'} ${operatorSymbol(condition.operator)} ${condition.threshold_per_second ?? 0}/s over ${condition.window_seconds ?? 0}s${dimensionSuffix(condition.dimension_match)}`;
 		case 'availability':
 			return `no data: ${condition.metric_id ?? '?'}${dimensionSuffix(condition.dimension_match)}`;
 		case 'check_status':

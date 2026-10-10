@@ -119,17 +119,48 @@ fn extract_spec(body: &Value) -> Result<AlertRuleSpec, BffError> {
 
 /// Every metric a rule references must exist in the published
 /// registry — a rule on a nonexistent metric is a silent never-firing
-/// trap, refused loudly at creation time.
+/// trap, refused loudly at creation time. The same honesty applies to
+/// dimension keys: a typo'd key (`mountpath` instead of `mount_id`)
+/// matches no series — silently never firing for thresholds and
+/// PERMANENTLY firing for availability (absence is the condition) —
+/// so every `dimension_match` key must be a dimension the metric
+/// actually declares.
 fn validate_spec_metrics(spec: &AlertRuleSpec) -> Result<(), BffError> {
     match spec {
-        AlertRuleSpec::Threshold { metric_id, .. }
-        | AlertRuleSpec::Rate { metric_id, .. }
-        | AlertRuleSpec::Availability { metric_id, .. } => {
-            if registry::lookup(metric_id).is_none() {
+        AlertRuleSpec::Threshold {
+            metric_id,
+            dimension_match,
+            ..
+        }
+        | AlertRuleSpec::Rate {
+            metric_id,
+            dimension_match,
+            ..
+        }
+        | AlertRuleSpec::Availability {
+            metric_id,
+            dimension_match,
+            ..
+        } => {
+            let Some(definition) = registry::lookup(metric_id) else {
                 return Err(BffError::MonitoringQuery {
                     code: "unknown_metric".to_string(),
                     message: format!("unknown metric id {metric_id:?}"),
                 });
+            };
+            if let Some(match_spec) = dimension_match {
+                for key in match_spec.keys() {
+                    if !definition.dimensions.contains(&key.as_str()) {
+                        return Err(BffError::MonitoringQuery {
+                            code: "unknown_dimension".to_string(),
+                            message: format!(
+                                "metric {metric_id:?} has no dimension {key:?} \
+                                 (registered dimensions: {})",
+                                definition.dimensions.join(", ")
+                            ),
+                        });
+                    }
+                }
             }
             Ok(())
         }

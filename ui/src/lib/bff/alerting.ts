@@ -116,7 +116,28 @@ export interface AlertRule {
 	check_id?: string;
 	status_match?: CheckStatusMatch;
 	op?: 'and' | 'or';
-	conditions?: AlertRule[];
+	conditions?: AlertRuleCondition[];
+}
+
+/**
+ * A group rule's nested condition, as it actually rides the wire: the
+ * store serializes spec children UNTAGGED (no `rule_type`, none of
+ * the common rule fields — `rule_wire` adds those only at the top
+ * level). Typing them as `AlertRule` would let future code read
+ * `child.name` / `child.revision` and silently get `undefined`.
+ */
+export interface AlertRuleCondition {
+	metric_id?: string;
+	dimension_match?: Record<string, string>;
+	operator?: ThresholdOperator;
+	threshold?: number;
+	threshold_per_second?: number;
+	window_seconds?: number;
+	check_id?: string;
+	status_match?: CheckStatusMatch;
+	/** The store rejects nested groups; kept for the sniff's totality. */
+	op?: 'and' | 'or';
+	conditions?: AlertRuleCondition[];
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +189,7 @@ export interface RuleMutateBody {
 	check_id?: string;
 	status_match?: CheckStatusMatch;
 	op?: 'and' | 'or';
-	conditions?: AlertRule[];
+	conditions?: AlertRuleCondition[];
 }
 
 // ---------------------------------------------------------------------------

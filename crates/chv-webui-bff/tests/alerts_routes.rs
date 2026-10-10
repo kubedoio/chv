@@ -13,7 +13,8 @@
 //!   silent reinterpretation as another rule shape);
 //! - every `metric_id` is registry-validated at creation — a rule on a
 //!   nonexistent metric is a `unknown_metric` 400, not a silent
-//!   never-firing trap;
+//!   never-firing trap — and so is every `dimension_match` key
+//!   (`unknown_dimension`): a typo'd key matches no series;
 //! - rule mutations are revision-preconditioned (a stale replay is a
 //!   409 conflict and changes nothing);
 //! - incidents opened by the evaluator are visible to the viewer
@@ -436,6 +437,41 @@ async fn rule_spec_validation_is_strict() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "UNKNOWN_METRIC");
+
+    // A dimension_match key the metric does not declare is a typed
+    // unknown_dimension 400 — a typo'd key would match no series:
+    // a silent never-firing threshold (or a PERMANENTLY firing
+    // availability rule).
+    let mut body = threshold_rule_body();
+    body["dimension_match"] = serde_json::json!({"mountpath": "/"});
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/create",
+        Some(&operator),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "UNKNOWN_DIMENSION");
+
+    // The registry-declared dimension passes (vm.guest.fs metrics
+    // carry mount_id).
+    let mut body = threshold_rule_body();
+    body["name"] = "VM guest storage".into();
+    body["target_kind"] = "vm".into();
+    body["target_id"] = "vm-1".into();
+    body["metric_id"] = "vm.guest.fs.available_bytes".into();
+    body["dimension_match"] = serde_json::json!({"mount_id": "/"});
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/create",
+        Some(&operator),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     // A typo'd operator must not silently parse as another shape.
     let mut body = threshold_rule_body();
