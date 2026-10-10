@@ -12,17 +12,19 @@
 //!   is imminent; the old credential keeps working through the
 //!   manager's grace window while rotation is retried.
 
+use crate::checks::{CheckOutcome, LocalChecks, ServiceChecks};
 use crate::client::{ClientError, ManagerClient};
 use crate::config::AgentConfig;
 use crate::credential::StoredCredential;
+use crate::plugins::PluginEngine;
 use crate::spool::{DrainResult, DrainSummary, Spool, SpoolEntry};
 use crate::state::AgentState;
 use crate::wire::{
-    EnvelopeJson, OsJson, SampleJson, QUALITY_VALID, SCHEMA_VERSION, SOURCE_GUEST_AGENT,
+    CheckJson, EnvelopeJson, OsJson, SampleJson, QUALITY_VALID, SCHEMA_VERSION, SOURCE_GUEST_AGENT,
     TARGET_KIND_VM,
 };
 use chv_monitor_collectors::{CollectedSample, GuestCollectors, SampleValue};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Rotate when the credential expires within this horizon, even if
 /// the manager has not flagged renewal yet (covers agents that were
@@ -63,9 +65,19 @@ pub struct Agent {
     collectors: GuestCollectors,
     /// Per-family collection cadence (component spec profiles):
     /// baseline resources + network ride every tick (15 s default);
-    /// filesystems at 60 s and processes at 30 s are time-gated so
-    /// one interval setting cannot starve or flood a family.
+    /// filesystems, checks (60 s) and processes (30 s) are time-gated
+    /// so one interval setting cannot starve or flood a family.
     cadence: FamilyCadence,
+    /// The check engines (G4): systemd services, declarative local
+    /// http/tcp, and the opt-in plugin sandbox (constructed only when
+    /// `[plugins] enabled` — disabled means no engine, no directory
+    /// scan, nothing executed).
+    service_checks: ServiceChecks,
+    local_checks: LocalChecks,
+    plugin_engine: Option<PluginEngine>,
+    /// Per-plugin last-run stamps for interval due-ness (caller-owned
+    /// by the engine's contract; agent restart simply re-runs).
+    plugin_last_run: HashMap<String, i64>,
     state: AgentState,
     spool: Spool,
     credential: Option<StoredCredential>,
@@ -84,11 +96,15 @@ pub struct Agent {
 struct FamilyCadence {
     last_filesystems_ms: Option<i64>,
     last_processes_ms: Option<i64>,
+    last_checks_ms: Option<i64>,
 }
 
 /// Component spec profile intervals.
 const FILESYSTEMS_INTERVAL_MS: i64 = 60_000;
 const PROCESSES_INTERVAL_MS: i64 = 30_000;
+/// The checks family (systemd services, local http/tcp, plugins)
+/// rides the same 60 s profile as the service discovery it serves.
+const CHECKS_INTERVAL_MS: i64 = 60_000;
 
 impl FamilyCadence {
     fn filesystems_due(&self, now_ms: i64) -> bool {
@@ -98,6 +114,10 @@ impl FamilyCadence {
     fn processes_due(&self, now_ms: i64) -> bool {
         self.last_processes_ms
             .is_none_or(|last| now_ms - last >= PROCESSES_INTERVAL_MS)
+    }
+    fn checks_due(&self, now_ms: i64) -> bool {
+        self.last_checks_ms
+            .is_none_or(|last| now_ms - last >= CHECKS_INTERVAL_MS)
     }
 }
 
@@ -137,10 +157,20 @@ impl Agent {
         if config.collectors.processes {
             collectors = collectors.enable_processes(config.collectors.process_selectors.clone());
         }
+        // The plugin engine exists only when explicitly enabled: a
+        // disabled config never touches the allowlist directory.
+        let plugin_engine = config
+            .plugins
+            .enabled
+            .then(|| PluginEngine::new(config.plugins.directory.clone()));
         Ok(Self {
             config,
             collectors,
             cadence: FamilyCadence::default(),
+            service_checks: ServiceChecks::new(),
+            local_checks: LocalChecks::new(),
+            plugin_engine,
+            plugin_last_run: HashMap::new(),
             state,
             spool,
             credential,
@@ -176,7 +206,7 @@ impl Agent {
         }
 
         let now_ms = chrono_like_now_ms();
-        let envelope = self.build_envelope(&credential, now_ms);
+        let envelope = self.build_envelope(&credential, now_ms).await;
         let samples = envelope.samples.len();
         if let Err(e) = self.spool.push(SpoolEntry {
             agent_id: envelope.agent_id.clone(),
@@ -356,7 +386,7 @@ impl Agent {
         }
     }
 
-    fn build_envelope(&mut self, credential: &StoredCredential, now_ms: i64) -> EnvelopeJson {
+    async fn build_envelope(&mut self, credential: &StoredCredential, now_ms: i64) -> EnvelopeJson {
         // Baseline (resources profile) rides every tick; the G4
         // families follow their profile cadence. Everything collected
         // in one cycle forms one batch, bounded by the family budgets
@@ -372,6 +402,42 @@ impl Agent {
         if self.cadence.processes_due(now_ms) {
             collected.extend(self.collectors.collect_processes(now_ms.unsigned_abs()));
             self.cadence.last_processes_ms = Some(now_ms);
+        }
+        // The checks family (60 s profile): systemd services,
+        // declarative local http/tcp and due plugins. The outcomes
+        // become the envelope's checks array AND the check.status /
+        // check.duration_seconds samples (dimensioned by check_id);
+        // service outcomes additionally justify their
+        // vm.guest.service.up samples. The agent is the authoritative
+        // timekeeper — durations are engine-measured, never trusted
+        // from check output. Worst case stays inside the ingest
+        // contract's 512-sample batch ceiling (see the budget note on
+        // the collectors' bound constants).
+        let mut checks_json: Vec<CheckJson> = Vec::new();
+        if self.cadence.checks_due(now_ms) {
+            self.cadence.last_checks_ms = Some(now_ms);
+            let mut outcomes: Vec<CheckOutcome> = Vec::new();
+            if self.config.collectors.services {
+                let services = self
+                    .service_checks
+                    .run(
+                        &self.config.services.configured,
+                        self.config.services.discover,
+                        now_ms,
+                    )
+                    .await;
+                collected.extend(services.service_up_samples);
+                outcomes.extend(services.outcomes);
+            }
+            if !self.config.checks.http.is_empty() || !self.config.checks.tcp.is_empty() {
+                outcomes.extend(self.local_checks.run(&self.config.checks, now_ms).await);
+            }
+            if let Some(engine) = &self.plugin_engine {
+                outcomes.extend(engine.run_due(now_ms, &mut self.plugin_last_run).await);
+            }
+            let (records, samples) = outcomes_to_wire(outcomes);
+            checks_json = records;
+            collected.extend(samples);
         }
         let os = self.collectors.os_identity();
         let boot_id = {
@@ -410,11 +476,36 @@ impl Agent {
                 kernel_release: os.kernel_release,
             }),
             samples,
-            // The service/http/tcp/plugin check engines attach their
-            // records here (60 s cadence family).
-            checks: Vec::new(),
+            // The 60 s checks family's records (empty when no checks
+            // are configured or the family is between cadence ticks).
+            checks: checks_json,
         }
     }
+}
+
+/// Map check-engine outcomes to their envelope forms: the records
+/// for the `checks` array plus the `check.status` (typed integer
+/// state, never a float) and `check.duration_seconds` samples, each
+/// dimensioned by `check_id`. Pure — unit-tested without engines.
+/// The agent is the authoritative timekeeper: durations here are the
+/// engine-measured values, never a check's own claim.
+fn outcomes_to_wire(outcomes: Vec<CheckOutcome>) -> (Vec<CheckJson>, Vec<CollectedSample>) {
+    let mut records = Vec::with_capacity(outcomes.len());
+    let mut samples = Vec::with_capacity(outcomes.len() * 2);
+    for outcome in outcomes {
+        samples.push(CollectedSample {
+            metric_id: "check.status",
+            value: SampleValue::Integer(outcome.status().code()),
+            dimension: Some(("check_id", outcome.check.check_id.clone())),
+        });
+        samples.push(CollectedSample {
+            metric_id: "check.duration_seconds",
+            value: SampleValue::Float(outcome.duration_ms as f64 / 1000.0),
+            dimension: Some(("check_id", outcome.check.check_id.clone())),
+        });
+        records.push(outcome.check);
+    }
+    (records, samples)
 }
 
 /// Map a transport result to the spool's drain decision. Pure
@@ -576,6 +667,70 @@ mod tests {
         // A backwards clock never re-arms a family.
         c.last_filesystems_ms = Some(100_000);
         assert!(!c.filesystems_due(61_000));
+    }
+
+    #[test]
+    fn family_cadence_gates_the_sixty_second_checks_family() {
+        let mut c = FamilyCadence::default();
+        assert!(c.checks_due(1_000), "first tick: checks due");
+        c.last_checks_ms = Some(1_000);
+        assert!(!c.checks_due(16_000), "+15 s: not due");
+        assert!(!c.checks_due(60_000), "+59 s: not due");
+        assert!(c.checks_due(61_000), "+60 s: due");
+        c.last_checks_ms = Some(100_000);
+        assert!(!c.checks_due(61_000), "backwards clock never re-arms");
+    }
+
+    #[test]
+    fn outcomes_to_wire_maps_records_and_typed_state_samples() {
+        use crate::checks::CheckOutcome;
+        use crate::wire::CheckJson;
+        use chv_monitoring_core::model::CheckStatus;
+
+        let outcome = |check_id: &str, status: CheckStatus, duration_ms: u64| CheckOutcome {
+            check: CheckJson {
+                schema_version: 1,
+                check_id: check_id.to_string(),
+                service_key: Some("nginx.service".to_string()),
+                status: status.as_str().to_string(),
+                summary: Some("active (running)".to_string()),
+                observed_at_ms: 1_000,
+            },
+            duration_ms,
+        };
+        let (records, samples) = outcomes_to_wire(vec![
+            outcome("service:nginx.service", CheckStatus::Ok, 42),
+            outcome("http:app", CheckStatus::Critical, 5_100),
+        ]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].check_id, "service:nginx.service");
+        // One status + one duration sample per record, dimensioned by
+        // check_id, statuses as TYPED INTEGER state codes (never
+        // floats), durations as engine-measured seconds.
+        assert_eq!(samples.len(), 4);
+        let status = samples
+            .iter()
+            .find(|s| {
+                s.metric_id == "check.status"
+                    && s.dimension.as_ref().map(|d| d.1.as_str()) == Some("http:app")
+            })
+            .expect("http:app status sample");
+        assert_eq!(status.value, SampleValue::Integer(2), "critical = code 2");
+        let duration = samples
+            .iter()
+            .find(|s| {
+                s.metric_id == "check.duration_seconds"
+                    && s.dimension.as_ref().map(|d| d.1.as_str()) == Some("http:app")
+            })
+            .expect("http:app duration sample");
+        match duration.value {
+            SampleValue::Float(v) => assert!((v - 5.1).abs() < 1e-9, "5100 ms -> 5.1 s"),
+            other => panic!("duration must be a float, got {other:?}"),
+        }
+        // Empty outcomes: empty wire forms (no fabricated samples).
+        let (records, samples) = outcomes_to_wire(Vec::new());
+        assert!(records.is_empty());
+        assert!(samples.is_empty());
     }
 
     #[test]
