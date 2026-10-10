@@ -8,6 +8,7 @@ pub struct ControlPlaneClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
     telemetry: proto::telemetry_service_client::TelemetryServiceClient<Channel>,
     inventory: proto::inventory_service_client::InventoryServiceClient<Channel>,
+    monitoring: proto::monitoring_service_client::MonitoringServiceClient<Channel>,
 }
 
 impl ControlPlaneClient {
@@ -84,8 +85,29 @@ impl ControlPlaneClient {
             telemetry: proto::telemetry_service_client::TelemetryServiceClient::new(
                 channel.clone(),
             ),
-            inventory: proto::inventory_service_client::InventoryServiceClient::new(channel),
+            inventory: proto::inventory_service_client::InventoryServiceClient::new(
+                channel.clone(),
+            ),
+            monitoring: proto::monitoring_service_client::MonitoringServiceClient::new(channel),
         })
+    }
+
+    /// Ingest one node metric batch (campaign #602 PR-2). Purely
+    /// observational: a transport failure is a retry-later condition and
+    /// must never influence reconciliation or state reports. The batch
+    /// sender owns a dedicated client instance so manager backpressure
+    /// can never pause reconciliation.
+    pub async fn ingest_node_metric_batch(
+        &mut self,
+        request: proto::NodeMetricBatchRequest,
+    ) -> Result<proto::NodeMetricBatchResponse, ChvError> {
+        self.monitoring
+            .ingest_node_metric_batch(request)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
     }
 
     pub fn stale_generation_check(

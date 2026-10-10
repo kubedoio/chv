@@ -38,6 +38,10 @@ pub async fn health(
     Ok(Json(json!({
         "status": if db_ok == 1 { "ok" } else { "degraded" },
         "database": "reachable",
+        // Disposable telemetry (ADR-027): monitoring degradation NEVER
+        // flips the overall status — it is surfaced, not escalated.
+        // Detail lives on GET /v1/monitoring/health.
+        "monitoring": if state.monitoring.is_some() { "ok" } else { "degraded" },
     })))
 }
 

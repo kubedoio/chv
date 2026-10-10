@@ -932,16 +932,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "0.0.0.0:9100".to_string());
     let node_id = cache.lock().await.node_id.clone();
     let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(node_id.clone())));
-    // Native monitoring sampler (G1, #602): one bounded task,
+    // Native monitoring sampler (G1/G2, #602): one bounded task,
     // independent of reconciliation and state reports, collecting node
-    // contract samples through chv-monitoring-core. Health counters are
-    // exported on /metrics without VM identifiers; the latest samples
-    // feed PR-2's ingest.
-    let (sampler_health, _latest_node_samples) = monitoring::spawn_monitoring_sampler(
-        node_id,
+    // contract samples (5 s cadence) and VM samples (10 s cadence)
+    // through chv-monitoring-core. Health counters are exported on
+    // /metrics without VM identifiers; the latest samples feed the
+    // batch sender below.
+    let (sampler_health, latest_samples) = monitoring::spawn_monitoring_sampler(
+        node_id.clone(),
+        vm_runtime.clone(),
         chv_monitoring_core::sampler::SamplerConfig::default(),
     );
     metrics_state.lock().await.sampler_health = Some(sampler_health);
+
+    // Node metric batch sender (G2, #602): ships the latest samples to
+    // the control plane every 15 s on a DEDICATED client so manager
+    // backpressure can never pause reconciliation. Purely best-effort:
+    // connection failures retry with backoff and nothing here can
+    // affect the agent's control loops.
+    {
+        let (tls_cert, tls_key, ca_cert) = resolve_tls_paths(&cache, &config).await;
+        monitoring::spawn_monitoring_ingest_sender(
+            node_id.clone(),
+            latest_samples,
+            config.control_plane_addr.clone(),
+            tls_cert,
+            tls_key,
+            ca_cert,
+        );
+    }
     let metrics_state_clone = metrics_state.clone();
     tokio::spawn(async move {
         let app = metrics_router(metrics_state_clone);

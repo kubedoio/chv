@@ -603,6 +603,85 @@ service TelemetryService {
   rpc ReportMigrationProgress(MigrationProgress) returns (AckResponse);
 }
 
+// Native monitoring ingestion v1 (#602, ADR-025/027, ingestion contract
+// docs/specs/contracts/chv-monitoring-ingestion-v1.md). Served on the
+// same mTLS node channel as TelemetryService; the peer certificate
+// identifies the sender and every sample's target must be owned by that
+// node. Delivery is at-least-once: batches are deduplicated durably by
+// (authenticated sender, boot_id, sequence); the same triple with a
+// different body is a replay_conflict. An acknowledgment means the batch
+// is durably committed to the monitoring store, never an in-memory
+// enqueue. Ingestion is observational only — a rejected or dropped batch
+// can never mutate VM or node state.
+service MonitoringService {
+  rpc IngestNodeMetricBatch(NodeMetricBatchRequest) returns (NodeMetricBatchResponse);
+}
+
+// One sample in the v1 metric contract's model
+// (crates/chv-monitoring-core/src/model.rs is the normative Rust shape).
+message MetricSampleV1 {
+  // node | vm | volume | network | check
+  string target_kind = 1;
+  string target_id = 2;
+  // Registry metric id (validated against the v1 allowlist).
+  string metric_id = 3;
+  // node_os | vmm | vm_cgroup | storage_provider | network_provider |
+  // guest_agent | derived — attributed only to the layer that observed it.
+  string source = 4;
+  // gauge | counter | state
+  string kind = 5;
+  // ratio | cores | bytes | bytes_per_second | seconds | count |
+  // operations | celsius | boolean
+  string unit = 6;
+  int64 observed_at_ms = 7;
+  // Exactly one form is set when quality == "valid"; both are absent for
+  // any non-valid quality (missing data is never encoded as zero).
+  // Counters are exact uint64 on this transport; the BFF JSON wire
+  // encodes values above 2^53-1 as decimal strings.
+  oneof value {
+    double float_value = 8;
+    uint64 integer_value = 9;
+  }
+  // valid | insufficient_samples | unsupported | unavailable | invalid | stale
+  string quality = 10;
+  // Bounded dimension set (registry-validated keys; e.g. interface_id).
+  map<string, string> dimensions = 11;
+  // Counter-epoch fencing: identifies the restartable source so a reset
+  // can never be subtracted as a delta. Empty for series without a
+  // restartable counter source.
+  string boot_id = 12;
+  string identity_epoch = 13;
+}
+
+message NodeMetricBatchRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  // Must be 1.
+  int32 schema_version = 3;
+  // Sender epoch for the dedup key: a per-agent-run identifier (a fresh
+  // value on agent start), NOT the host boot id — a restarted agent must
+  // never collide with its previous incarnation's sequences.
+  string boot_id = 4;
+  // Monotonic within (sender, boot_id); starts at 0 in each run.
+  uint64 sequence = 5;
+  int64 sent_at_ms = 6;
+  repeated MetricSampleV1 samples = 7;
+}
+
+message NodeMetricBatchResponse {
+  ResultMeta meta = 1;
+  // accepted | duplicate | replay_conflict | invalid_batch |
+  // batch_too_large | unsupported_metric | rate_limited |
+  // ingestion_unavailable
+  string outcome = 2;
+  // Samples durably committed (0 for every non-accepted outcome).
+  uint32 accepted_samples = 3;
+  // Correlation id for operator debugging.
+  string request_id = 4;
+  // Bounded retry hint; 0 unless outcome == "rate_limited".
+  uint32 retry_after_seconds = 5;
+}
+
 message MigrateVmRequest {
   RequestMeta meta = 1;
   string node_id = 2;

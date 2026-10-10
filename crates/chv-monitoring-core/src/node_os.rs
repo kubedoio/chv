@@ -170,7 +170,7 @@ pub fn parse_loadavg(line: &str) -> (Option<f64>, Option<f64>, Option<f64>) {
     (one, five, fifteen)
 }
 
-pub(crate) fn unix_now_ms() -> u64 {
+pub fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

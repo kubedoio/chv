@@ -324,6 +324,20 @@ impl NodeRepository {
         Ok(())
     }
 
+    /// Whether a node record exists. The monitoring ingest path checks
+    /// this before accepting a batch (an unenrolled node gets a typed
+    /// rejection, never an auto-created record — unlike
+    /// [`Self::ensure_node_record`] on the state-report path, telemetry
+    /// batches must not manufacture inventory).
+    pub async fn node_exists(&self, node_id: &NodeId) -> Result<bool, StoreError> {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM nodes WHERE node_id = ? LIMIT 1")
+                .bind(node_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(exists.is_some())
+    }
+
     pub async fn upsert_inventory(&self, input: &NodeInventoryInput) -> Result<(), StoreError> {
         sqlx::query(UPSERT_NODE_INVENTORY_SQL)
             .bind(input.node_id.as_str())

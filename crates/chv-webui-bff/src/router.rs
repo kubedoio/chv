@@ -60,6 +60,14 @@ pub struct AppState {
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
     pub cache: BffCache,
+    /// Native monitoring history store (ADR-027, #602). `None` ⇒
+    /// monitoring is disabled or degraded and every `/v1/monitoring/*`
+    /// read answers `monitoring_unavailable` — which never means nodes
+    /// or VMs are unhealthy.
+    pub monitoring: Option<Arc<chv_monitoring_store::MonitoringStore>>,
+    /// Shared monitoring health state (written by the ingest path and
+    /// the maintenance worker, read by `/v1/monitoring/health`).
+    pub monitoring_health: chv_monitoring_store::MonitoringHealth,
     /// Wall-clock abstraction. Production wires `Arc::new(SystemClock)`; tests
     /// inject `Arc::new(ManualClock::new(...))` to drive plan TTL/expiry
     /// timing deterministically. Wired in Phase 4 of Architecture Designer for
@@ -101,6 +109,29 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             get(crate::handlers::health::node_health),
         )
         .route("/v1/metrics", post(crate::handlers::metrics::get_metrics))
+        // Native monitoring read API (query/alerts contract v1, #602).
+        // Viewer-role gated: the middleware checks the role before any
+        // handler reads a target or presents metric existence.
+        .route(
+            "/v1/monitoring/catalog",
+            get(crate::handlers::monitoring::catalog),
+        )
+        .route(
+            "/v1/monitoring/overview",
+            post(crate::handlers::monitoring::overview),
+        )
+        .route(
+            "/v1/monitoring/current",
+            post(crate::handlers::monitoring::current),
+        )
+        .route(
+            "/v1/monitoring/history",
+            post(crate::handlers::monitoring::history),
+        )
+        .route(
+            "/v1/monitoring/health",
+            get(crate::handlers::monitoring::health),
+        )
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
         .route("/v1/vms", post(crate::handlers::vms::list_vms))

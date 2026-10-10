@@ -16,3 +16,7 @@ pub use cache::BffCache;
 pub use error::BffError;
 pub use mutations::MutationService;
 pub use router::{bff_router, AppState};
+// Re-exported so AppState consumers (tests, control-plane bootstrap)
+// can construct the monitoring health handle without depending on the
+// store crate directly.
+pub use chv_monitoring_store::MonitoringHealth;

@@ -118,7 +118,7 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 
 mkdir -p "${TMPDIR}/configs"
 
-sed 's|/usr/local/share/chv/migrations|/usr/share/chv/migrations|g' \
+sed 's|/usr/local/share/chv/migrations|/usr/share/chv/migrations|g; s|/usr/local/share/chv/monitoring-migrations|/usr/share/chv/monitoring-migrations|g' \
     docs/examples/controlplane.toml > "${TMPDIR}/configs/controlplane.toml"
 
 sed 's|/usr/local/bin/chv-stord|/usr/bin/chv-stord|g; s|/usr/local/bin/chv-nwd|/usr/bin/chv-nwd|g' \

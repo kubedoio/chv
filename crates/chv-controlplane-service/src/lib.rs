@@ -27,6 +27,12 @@ mod reconcile;
 mod server;
 mod telemetry;
 
+pub mod monitoring_ingest;
+
+pub use monitoring_ingest::{
+    run_monitoring_maintenance, MonitoringIngestImplementation, MonitoringIngestService,
+};
+
 pub use backup_shipper::{shipper_from_destination, BackupShipper, NullShipper};
 pub use backup_worker::BackupWorker;
 pub use bff_mutations::ControlPlaneMutationService;
@@ -52,7 +58,8 @@ pub use peer_identity::{
 };
 pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
 pub use server::{
-    EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer,
+    EnrollmentServer, InventoryServer, LifecycleServer, MonitoringServer, ReconcileServer,
+    TelemetryServer,
 };
 pub use telemetry::{TelemetryService, TelemetryServiceImplementation};
 
@@ -61,6 +68,9 @@ mod tests;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod monitoring_ingest_tests;
 
 #[cfg(test)]
 mod netbox_projection_worker_tests;

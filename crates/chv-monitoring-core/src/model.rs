@@ -22,6 +22,34 @@ pub enum TargetKind {
     Check,
 }
 
+impl TargetKind {
+    /// Canonical snake_case wire string (matches serde and the proto
+    /// `target_kind` field).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TargetKind::Node => "node",
+            TargetKind::Vm => "vm",
+            TargetKind::Volume => "volume",
+            TargetKind::Network => "network",
+            TargetKind::Check => "check",
+        }
+    }
+}
+
+impl std::str::FromStr for TargetKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "node" => Ok(TargetKind::Node),
+            "vm" => Ok(TargetKind::Vm),
+            "volume" => Ok(TargetKind::Volume),
+            "network" => Ok(TargetKind::Network),
+            "check" => Ok(TargetKind::Check),
+            other => Err(format!("unknown target kind {other:?}")),
+        }
+    }
+}
+
 /// Which observation layer generated a number. Values are attributed only
 /// to the layer that actually observed them — a cgroup reading is never
 /// labelled `vmm`, a VMM-process `/proc` reading is never labelled
@@ -47,6 +75,37 @@ pub enum Source {
     Derived,
 }
 
+impl Source {
+    /// Canonical snake_case wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Source::NodeOs => "node_os",
+            Source::Vmm => "vmm",
+            Source::VmCgroup => "vm_cgroup",
+            Source::StorageProvider => "storage_provider",
+            Source::NetworkProvider => "network_provider",
+            Source::GuestAgent => "guest_agent",
+            Source::Derived => "derived",
+        }
+    }
+}
+
+impl std::str::FromStr for Source {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "node_os" => Ok(Source::NodeOs),
+            "vmm" => Ok(Source::Vmm),
+            "vm_cgroup" => Ok(Source::VmCgroup),
+            "storage_provider" => Ok(Source::StorageProvider),
+            "network_provider" => Ok(Source::NetworkProvider),
+            "guest_agent" => Ok(Source::GuestAgent),
+            "derived" => Ok(Source::Derived),
+            other => Err(format!("unknown source {other:?}")),
+        }
+    }
+}
+
 /// Measurement kind. Counters are monotonically increasing within one boot
 /// epoch; rates are computed from positive same-epoch deltas only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -55,6 +114,29 @@ pub enum MetricKind {
     Gauge,
     Counter,
     State,
+}
+
+impl MetricKind {
+    /// Canonical snake_case wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MetricKind::Gauge => "gauge",
+            MetricKind::Counter => "counter",
+            MetricKind::State => "state",
+        }
+    }
+}
+
+impl std::str::FromStr for MetricKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "gauge" => Ok(MetricKind::Gauge),
+            "counter" => Ok(MetricKind::Counter),
+            "state" => Ok(MetricKind::State),
+            other => Err(format!("unknown metric kind {other:?}")),
+        }
+    }
 }
 
 /// Canonical unit. Unit conversion belongs to query/UI formatting; the unit
@@ -71,6 +153,41 @@ pub enum Unit {
     Operations,
     Celsius,
     Boolean,
+}
+
+impl Unit {
+    /// Canonical snake_case wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Unit::Ratio => "ratio",
+            Unit::Cores => "cores",
+            Unit::Bytes => "bytes",
+            Unit::BytesPerSecond => "bytes_per_second",
+            Unit::Seconds => "seconds",
+            Unit::Count => "count",
+            Unit::Operations => "operations",
+            Unit::Celsius => "celsius",
+            Unit::Boolean => "boolean",
+        }
+    }
+}
+
+impl std::str::FromStr for Unit {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ratio" => Ok(Unit::Ratio),
+            "cores" => Ok(Unit::Cores),
+            "bytes" => Ok(Unit::Bytes),
+            "bytes_per_second" => Ok(Unit::BytesPerSecond),
+            "seconds" => Ok(Unit::Seconds),
+            "count" => Ok(Unit::Count),
+            "operations" => Ok(Unit::Operations),
+            "celsius" => Ok(Unit::Celsius),
+            "boolean" => Ok(Unit::Boolean),
+            other => Err(format!("unknown unit {other:?}")),
+        }
+    }
 }
 
 /// Truthfulness marker for a sample. `quality != valid` ⇒ `value` MUST be
@@ -94,6 +211,33 @@ pub enum SampleQuality {
     Invalid,
     /// The observation is too old to be presented as current.
     Stale,
+}
+
+impl SampleQuality {
+    /// Canonical snake_case wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SampleQuality::Valid => "valid",
+            SampleQuality::InsufficientSamples => "insufficient_samples",
+            SampleQuality::Unsupported => "unsupported",
+            SampleQuality::Unavailable => "unavailable",
+            SampleQuality::Invalid => "invalid",
+            SampleQuality::Stale => "stale",
+        }
+    }
+
+    /// Parse from the canonical wire string.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "valid" => SampleQuality::Valid,
+            "insufficient_samples" => SampleQuality::InsufficientSamples,
+            "unsupported" => SampleQuality::Unsupported,
+            "unavailable" => SampleQuality::Unavailable,
+            "invalid" => SampleQuality::Invalid,
+            "stale" => SampleQuality::Stale,
+            _ => return None,
+        })
+    }
 }
 
 /// A sample's value. Ratios and cores are finite f64; byte and operation

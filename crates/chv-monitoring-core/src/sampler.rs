@@ -77,8 +77,16 @@ pub trait NetworkProviderSource: Send + Sync {
 /// Sampler bounds and cadence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SamplerConfig {
-    /// Cadence, measured cycle-start to cycle-start.
+    /// Base cadence, measured cycle-start to cycle-start. This is the
+    /// native spec's light-node-metrics timer (default 5 s): the node
+    /// source runs every cycle.
     pub interval: Duration,
+    /// VM collection cadence. Rounded up to a whole multiple of
+    /// [`Self::interval`] (10 s over a 5 s base ⇒ every 2nd cycle).
+    pub vm_interval: Duration,
+    /// Provider (stord/nwd) collection cadence, rounded the same way
+    /// (15 s over a 5 s base ⇒ every 3rd cycle).
+    pub provider_interval: Duration,
     /// Maximum concurrent VM collections (cross-VM fan-out bound).
     pub max_concurrent_vm_collections: usize,
     /// Per-source-call timeout.
@@ -88,14 +96,35 @@ pub struct SamplerConfig {
 impl Default for SamplerConfig {
     fn default() -> Self {
         SamplerConfig {
-            // The native spec's light-node-metrics timer (default 5 s);
-            // the VM (10 s) and provider (15 s) timers split out with
-            // their sources in PR-2.
+            // The native spec's timer split: node 5 s, VM 10 s,
+            // provider 15 s (PR-2).
             interval: Duration::from_secs(5),
+            vm_interval: Duration::from_secs(10),
+            provider_interval: Duration::from_secs(15),
             max_concurrent_vm_collections: 8,
             source_timeout: Duration::from_secs(2),
         }
     }
+}
+
+impl SamplerConfig {
+    /// How many base cycles pass between VM collections (>= 1).
+    fn vm_stride(&self) -> u64 {
+        stride(self.interval, self.vm_interval)
+    }
+
+    /// How many base cycles pass between provider collections (>= 1).
+    fn provider_stride(&self) -> u64 {
+        stride(self.interval, self.provider_interval)
+    }
+}
+
+fn stride(base: Duration, target: Duration) -> u64 {
+    if base.is_zero() {
+        return 1;
+    }
+    let n = target.as_nanos().div_ceil(base.as_nanos());
+    n.clamp(1, u64::MAX as u128) as u64
 }
 
 /// Point-in-time health snapshot for the Prometheus surface (global
@@ -154,27 +183,53 @@ pub struct SamplerSources {
     pub network: Option<Arc<dyn NetworkProviderSource>>,
 }
 
+/// One event from the sampler loop to its consumer.
+#[derive(Debug)]
+pub enum SamplerEvent {
+    /// A batch of samples from one source collection (the node source
+    /// per cycle, one batch per VM, provider batches on their stride).
+    Samples(Vec<Sample>),
+    /// The VM roster observed on a VM-due cycle: the target ids
+    /// currently on this node (possibly empty). Emitted only when the
+    /// listing SUCCEEDED — a failed listing emits nothing, because an
+    /// unknown roster must not look like an empty one. Consumers
+    /// reconcile: series for VM targets no longer in the roster are
+    /// stale by construction (the VM left the node, was deleted, or
+    /// was migrated away) and must stop being shipped — the control
+    /// plane fails the WHOLE batch for an unowned VM target.
+    VmRoster(Vec<String>),
+}
+
 /// Run the bounded sampler loop until aborted or the sink closes.
 ///
 /// Each cycle: node source, then every VM (bounded fan-out, per-call
 /// timeout), then the optional provider sources; every produced batch is
 /// `try_send`-ed to the bounded sink — a full sink drops the batch and
-/// counts the samples, it never blocks or grows memory.
+/// counts the samples, it never blocks or grows memory. On every VM-due
+/// cycle with a successful listing, a [`SamplerEvent::VmRoster`] is
+/// emitted BEFORE the per-VM sample batches so consumers can evict
+/// departed targets first.
 pub async fn run_sampler(
     config: SamplerConfig,
     sources: SamplerSources,
-    sink: mpsc::Sender<Vec<Sample>>,
+    sink: mpsc::Sender<SamplerEvent>,
     health: Arc<SamplerHealth>,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_vm_collections.max(1)));
+    let vm_stride = config.vm_stride();
+    let provider_stride = config.provider_stride();
+    let mut cycle_index: u64 = 0;
     loop {
         let cycle_start = std::time::Instant::now();
         let mut cycle_ok = true;
+        let vm_due = cycle_index.is_multiple_of(vm_stride);
+        let providers_due = cycle_index.is_multiple_of(provider_stride);
+        cycle_index = cycle_index.wrapping_add(1);
 
         // --- node source ---
         match tokio::time::timeout(config.source_timeout, sources.node.collect_node()).await {
             Ok(Ok(samples)) => {
-                if !send_batch(&sink, &samples, &health) {
+                if !send_batch(&sink, SamplerEvent::Samples(samples), &health) {
                     return;
                 }
                 health.cycles_completed.fetch_add(1, Ordering::Relaxed);
@@ -190,105 +245,130 @@ pub async fn run_sampler(
             }
         }
 
-        // --- VM sources, bounded fan-out ---
-        if let Some(vms) = sources.vms.clone() {
-            let ids = match tokio::time::timeout(config.source_timeout, vms.vm_ids()).await {
-                Ok(Ok(ids)) => ids,
-                Ok(Err(e)) => {
-                    cycle_ok = false;
-                    tracing::warn!(error = %e, "vm id listing failed");
-                    Vec::new()
-                }
-                Err(_) => {
-                    cycle_ok = false;
-                    health.source_timeouts.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!("vm id listing timed out");
-                    Vec::new()
-                }
-            };
-
-            let mut pending = tokio::task::JoinSet::new();
-            for vm_id in ids {
-                // Acquiring the permit before spawn keeps the JoinSet
-                // itself bounded to the concurrency limit.
-                let permit = match semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => return, // sampler torn down
+        // --- VM sources, bounded fan-out (every vm_stride cycles) ---
+        if vm_due {
+            if let Some(vms) = sources.vms.clone() {
+                // A failed listing yields an UNKNOWN roster: emit no
+                // roster event (an unknown roster must not evict live
+                // VM series), and skip this cycle's collections.
+                let listing = match tokio::time::timeout(config.source_timeout, vms.vm_ids()).await
+                {
+                    Ok(Ok(ids)) => Some(ids),
+                    Ok(Err(e)) => {
+                        cycle_ok = false;
+                        tracing::warn!(error = %e, "vm id listing failed");
+                        None
+                    }
+                    Err(_) => {
+                        cycle_ok = false;
+                        health.source_timeouts.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!("vm id listing timed out");
+                        None
+                    }
                 };
-                let vms = vms.clone();
-                let sink = sink.clone();
-                let health = health.clone();
-                let timeout = config.source_timeout;
-                pending.spawn(async move {
-                    let _permit = permit;
-                    match tokio::time::timeout(timeout, vms.collect_vm(&vm_id)).await {
-                        Ok(Ok(samples)) => {
-                            if !send_batch(&sink, &samples, &health) {
-                                tracing::warn!("sample sink closed; sampler exiting");
+                // Roster first (see `SamplerEvent::VmRoster`); an
+                // UNKNOWN listing (None) emits nothing — no eviction,
+                // no collections this cycle — and the provider sources
+                // below still run. A full channel drops the event
+                // (eviction retries next cycle); a closed channel ends
+                // the loop.
+                if let Some(ids) = listing {
+                    match sink.try_send(SamplerEvent::VmRoster(ids.clone())) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::debug!("sample sink full; VM roster event dropped");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return,
+                    }
+
+                    let mut pending = tokio::task::JoinSet::new();
+                    for vm_id in ids {
+                        // Acquiring the permit before spawn keeps the JoinSet
+                        // itself bounded to the concurrency limit.
+                        let permit = match semaphore.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => return, // sampler torn down
+                        };
+                        let vms = vms.clone();
+                        let sink = sink.clone();
+                        let health = health.clone();
+                        let timeout = config.source_timeout;
+                        pending.spawn(async move {
+                            let _permit = permit;
+                            match tokio::time::timeout(timeout, vms.collect_vm(&vm_id)).await {
+                                Ok(Ok(samples)) => {
+                                    if !send_batch(&sink, SamplerEvent::Samples(samples), &health) {
+                                        tracing::warn!("sample sink closed; sampler exiting");
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    health
+                                        .vm_collection_failures
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    // The error text may name the VM; it goes to
+                                    // logs only, never to metric labels.
+                                    tracing::warn!(error = %e, "vm sample collection failed");
+                                }
+                                Err(_) => {
+                                    health.source_timeouts.fetch_add(1, Ordering::Relaxed);
+                                    tracing::warn!("vm sample collection timed out");
+                                }
                             }
-                        }
-                        Ok(Err(e)) => {
-                            health
-                                .vm_collection_failures
-                                .fetch_add(1, Ordering::Relaxed);
-                            // The error text may name the VM; it goes to
-                            // logs only, never to metric labels.
-                            tracing::warn!(error = %e, "vm sample collection failed");
-                        }
-                        Err(_) => {
-                            health.source_timeouts.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!("vm sample collection timed out");
+                        });
+                    }
+                    while let Some(joined) = pending.join_next().await {
+                        if joined.is_err() {
+                            cycle_ok = false;
                         }
                     }
-                });
-            }
-            while let Some(joined) = pending.join_next().await {
-                if joined.is_err() {
-                    cycle_ok = false;
                 }
             }
         }
 
-        // --- optional provider sources ---
-        type ProviderOutcome =
-            Option<Result<Result<Vec<Sample>, SamplerError>, tokio::time::error::Elapsed>>;
-        let provider_results: [(&str, ProviderOutcome); 2] = [
-            (
-                "storage",
-                match &sources.storage {
-                    Some(s) => {
-                        Some(tokio::time::timeout(config.source_timeout, s.collect_storage()).await)
+        // --- optional provider sources (every provider_stride cycles) ---
+        if providers_due {
+            type ProviderOutcome =
+                Option<Result<Result<Vec<Sample>, SamplerError>, tokio::time::error::Elapsed>>;
+            let provider_results: [(&str, ProviderOutcome); 2] = [
+                (
+                    "storage",
+                    match &sources.storage {
+                        Some(s) => Some(
+                            tokio::time::timeout(config.source_timeout, s.collect_storage()).await,
+                        ),
+                        None => None,
+                    },
+                ),
+                (
+                    "network",
+                    match &sources.network {
+                        Some(s) => Some(
+                            tokio::time::timeout(config.source_timeout, s.collect_network()).await,
+                        ),
+                        None => None,
+                    },
+                ),
+            ];
+            for (name, result) in provider_results {
+                match result {
+                    Some(Ok(Ok(samples))) => {
+                        if !samples.is_empty()
+                            && !send_batch(&sink, SamplerEvent::Samples(samples), &health)
+                        {
+                            return;
+                        }
                     }
-                    None => None,
-                },
-            ),
-            (
-                "network",
-                match &sources.network {
-                    Some(s) => {
-                        Some(tokio::time::timeout(config.source_timeout, s.collect_network()).await)
+                    Some(Ok(Err(e))) => {
+                        cycle_ok = false;
+                        tracing::warn!(provider = name, error = %e, "provider sample collection failed");
                     }
-                    None => None,
-                },
-            ),
-        ];
-        for (name, result) in provider_results {
-            match result {
-                Some(Ok(Ok(samples))) => {
-                    if !samples.is_empty() && !send_batch(&sink, &samples, &health) {
-                        return;
+                    Some(Err(_)) => {
+                        cycle_ok = false;
+                        health.source_timeouts.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(provider = name, "provider sample collection timed out");
                     }
+                    None => {}
                 }
-                Some(Ok(Err(e))) => {
-                    cycle_ok = false;
-                    tracing::warn!(provider = name, error = %e, "provider sample collection failed");
-                }
-                Some(Err(_)) => {
-                    cycle_ok = false;
-                    health.source_timeouts.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(provider = name, "provider sample collection timed out");
-                }
-                None => {}
             }
         }
 
@@ -316,21 +396,25 @@ pub async fn run_sampler(
 /// closed (sampler should exit); `true` otherwise (a full sink drops and
 /// counts).
 fn send_batch(
-    sink: &mpsc::Sender<Vec<Sample>>,
-    samples: &[Sample],
+    sink: &mpsc::Sender<SamplerEvent>,
+    event: SamplerEvent,
     health: &Arc<SamplerHealth>,
 ) -> bool {
-    if samples.is_empty() {
+    let samples_len = match &event {
+        SamplerEvent::Samples(samples) => samples.len(),
+        SamplerEvent::VmRoster(_) => 0,
+    };
+    if samples_len == 0 {
         return !sink.is_closed();
     }
-    match sink.try_send(samples.to_vec()) {
+    match sink.try_send(event) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
             health
                 .dropped_samples
-                .fetch_add(samples.len() as u64, Ordering::Relaxed);
+                .fetch_add(samples_len as u64, Ordering::Relaxed);
             tracing::warn!(
-                count = samples.len(),
+                count = samples_len,
                 "sample sink full; dropping batch (counted, never unbounded)"
             );
             true
@@ -369,6 +453,7 @@ mod tests {
 
     struct FakeVms {
         ids: Vec<String>,
+        calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -378,6 +463,7 @@ mod tests {
         }
 
         async fn collect_vm(&self, vm_id: &str) -> Result<Vec<Sample>, SamplerError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(vec![SampleBuilder::new(
                 TargetKind::Vm,
                 vm_id,
@@ -400,12 +486,15 @@ mod tests {
         });
         let vms = Arc::new(FakeVms {
             ids: vec!["vm-a".into(), "vm-b".into()],
+            calls: AtomicUsize::new(0),
         });
         let (tx, mut rx) = mpsc::channel(64);
         let health = Arc::new(SamplerHealth::new());
 
         let config = SamplerConfig {
             interval: Duration::from_secs(1),
+            vm_interval: Duration::from_secs(1),
+            provider_interval: Duration::from_secs(1),
             max_concurrent_vm_collections: 2,
             source_timeout: Duration::from_secs(1),
         };
@@ -425,8 +514,12 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let mut total = 0;
-        while let Ok(batch) = rx.try_recv() {
-            total += batch.len();
+        let mut roster_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                SamplerEvent::Samples(batch) => total += batch.len(),
+                SamplerEvent::VmRoster(_) => roster_events += 1,
+            }
         }
         // Paused-clock tick boundaries may start a further cycle before
         // the sleep returns, so this is a lower bound, not an exact
@@ -435,12 +528,75 @@ mod tests {
             total >= 2 * (1 + 2),
             "two cycles of node+2vm samples, got {total}"
         );
+        // Each VM-due cycle with a successful listing emits exactly one
+        // roster event before its sample batches.
+        assert!(roster_events >= 1, "at least one VM roster event");
         let snap = health.snapshot();
         assert!(snap.cycles_completed >= 2);
         assert_eq!(snap.cycle_failures, 0);
         assert_eq!(snap.dropped_samples, 0);
         assert!(snap.last_success_unix_ms > 0);
 
+        handle.abort();
+    }
+
+    #[test]
+    fn cadence_strides_round_up_to_whole_cycles() {
+        let config = SamplerConfig::default();
+        // 5 s base: 10 s VM cadence ⇒ every 2nd cycle, 15 s provider
+        // cadence ⇒ every 3rd.
+        assert_eq!(config.vm_stride(), 2);
+        assert_eq!(config.provider_stride(), 3);
+        // Sub-base targets round up to every cycle, never to zero.
+        let fast = SamplerConfig {
+            interval: Duration::from_secs(5),
+            vm_interval: Duration::from_secs(2),
+            provider_interval: Duration::from_secs(4),
+            ..SamplerConfig::default()
+        };
+        assert_eq!(fast.vm_stride(), 1);
+        assert_eq!(fast.provider_stride(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn vm_cadence_splits_from_node_cadence() {
+        let node = Arc::new(FakeNode {
+            calls: AtomicUsize::new(0),
+        });
+        let vms = Arc::new(FakeVms {
+            ids: vec!["vm-a".into()],
+            calls: AtomicUsize::new(0),
+        });
+        let (tx, _rx) = mpsc::channel(64);
+        let health = Arc::new(SamplerHealth::new());
+        // 100 ms base, VM every 300 ms ⇒ stride 3: over ~1 s the node
+        // source runs ~10 times, the VM source ~3-4.
+        let config = SamplerConfig {
+            interval: Duration::from_millis(100),
+            vm_interval: Duration::from_millis(300),
+            provider_interval: Duration::from_millis(300),
+            max_concurrent_vm_collections: 2,
+            source_timeout: Duration::from_secs(1),
+        };
+        let handle = tokio::spawn(run_sampler(
+            config,
+            SamplerSources {
+                node: node.clone(),
+                vms: Some(vms.clone()),
+                storage: None,
+                network: None,
+            },
+            tx,
+            health.clone(),
+        ));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let node_calls = node.calls.load(Ordering::Relaxed);
+        let vm_calls = vms.calls.load(Ordering::Relaxed);
+        assert!(node_calls >= 8, "node runs every cycle, got {node_calls}");
+        assert!(
+            vm_calls >= 2 && vm_calls * 3 <= node_calls + 3,
+            "vm runs at most every 3rd cycle: {vm_calls} vm vs {node_calls} node"
+        );
         handle.abort();
     }
 

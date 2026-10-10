@@ -4,8 +4,8 @@ use chv_controlplane_service::{
     validate_security_mode, ControlPlaneComponents, ControlPlaneMutationService,
     ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
     EnrollmentServiceImplementation, InventoryServiceImplementation,
-    LifecycleServiceImplementation, NodeClientPool, Orchestrator, ReconcileServiceImplementation,
-    TelemetryServiceImplementation,
+    LifecycleServiceImplementation, MonitoringIngestImplementation, NodeClientPool, Orchestrator,
+    ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
     connect_pool, run_migrations, AlertRepository, BackupRepository, BootstrapTokenRepository,
@@ -54,6 +54,72 @@ pub fn validate_tls(
     }
 
     Ok(())
+}
+
+/// Connect the isolated monitoring store (ADR-027, #602 PR-2).
+///
+/// Failure-tolerant by design: the monitoring database is disposable
+/// telemetry, so a disabled `[monitoring]` section or any connection
+/// failure returns `(None, degraded health)` and the control plane
+/// starts normally — VM lifecycle must work with this file deleted.
+/// Ingestion answers `ingestion_unavailable` until the operator
+/// fixes the store and restarts.
+async fn connect_monitoring_store(
+    config: &chv_config::MonitoringConfig,
+) -> (
+    Option<Arc<chv_monitoring_store::MonitoringStore>>,
+    chv_monitoring_store::MonitoringHealth,
+) {
+    let health = chv_monitoring_store::MonitoringHealth::new();
+    if !config.enabled {
+        health.degrade("monitoring disabled by configuration".to_string());
+        return (None, health);
+    }
+
+    let store_config = chv_monitoring_store::MonitoringStoreConfig {
+        database_url: config.database_url.clone(),
+        migrations_dir: config.migrations_dir.clone(),
+        max_connections: config.max_connections,
+        raw_retention_ms: config.raw_retention_hours * 60 * 60 * 1000,
+        rollup_5m_retention_ms: config.rollup_5m_retention_days * 24 * 60 * 60 * 1000,
+        rollup_1h_retention_ms: config.rollup_1h_retention_days * 24 * 60 * 60 * 1000,
+        max_series_per_target: config.max_series_per_target,
+        max_db_bytes: config.max_db_gib * 1024 * 1024 * 1024,
+        dedup_retention_ms: chv_monitoring_store::MonitoringStoreConfig::default()
+            .dedup_retention_ms,
+    };
+
+    // Create the parent directory first (a missing /var/lib/chv/monitoring
+    // on a fresh install is normal, not an error).
+    if let Some(dir) = store_config
+        .database_url
+        .strip_prefix("sqlite://")
+        .and_then(|p| std::path::Path::new(p).parent())
+        .map(|p| p.to_path_buf())
+    {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                error = %e,
+                path = %dir.display(),
+                "cannot create monitoring database directory; monitoring degraded"
+            );
+            health.degrade(format!("cannot create monitoring directory: {e}"));
+            return (None, health);
+        }
+    }
+
+    match chv_monitoring_store::MonitoringStore::connect(store_config).await {
+        Ok(store) => (Some(Arc::new(store)), health),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "monitoring store unavailable; starting control plane with monitoring degraded \
+                 (VM lifecycle is unaffected — the monitoring database is disposable telemetry)"
+            );
+            health.degrade(format!("monitoring store unavailable: {e}"));
+            (None, health)
+        }
+    }
 }
 
 /// Run the compatibility-matrix gate against enrolled node versions.
@@ -189,6 +255,13 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
+    // Monitoring store (ADR-027, campaign #602 PR-2): disposable
+    // telemetry in its own SQLite file and pool. A failure here —
+    // missing directory, corrupt file, full disk — DEGRADES monitoring
+    // and never aborts control-plane startup: VM lifecycle must work
+    // with this file deleted.
+    let (monitoring_store, monitoring_health) = connect_monitoring_store(&config.monitoring).await;
+
     // Seed the six canonical starter topologies on first deployment so the
     // operator lands on a populated /architectures dashboard. The seeder is
     // idempotent — once `system_settings.seed_starters_completed = '1'` it
@@ -296,6 +369,8 @@ pub async fn build_service(
             pool.clone(),
             lifecycle_service.clone(),
         )),
+        monitoring: monitoring_store.clone(),
+        monitoring_health: monitoring_health.clone(),
         jwt_secret: config.jwt_secret.clone(),
         agent_runtime_dir: config.agent_runtime_dir.clone(),
         cache: chv_webui_bff::BffCache::new(5),
@@ -359,6 +434,14 @@ pub async fn build_service(
         observed_state_repo.clone(),
         event_repo.clone(),
         alert_repo.clone(),
+    );
+    let monitoring_ingest_service = MonitoringIngestImplementation::new(
+        monitoring_store.clone(),
+        node_repo.clone(),
+        observed_state_repo.clone(),
+        monitoring_health.clone(),
+        config.monitoring.batches_per_minute,
+        config.monitoring.min_headroom_mib * 1024 * 1024,
     );
     let reconcile_service = ReconcileServiceImplementation::new(
         node_repo.clone(),
@@ -439,6 +522,20 @@ pub async fn build_service(
     );
     let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx.clone()));
 
+    // Monitoring maintenance worker (#602 PR-2): rollups, retention,
+    // size budget, WAL checkpoint — one bounded pass per interval. A
+    // failed pass degrades monitoring health and retries; it can never
+    // block or crash the control plane. Absent store ⇒ idle handle.
+    let monitoring_worker_handle = match monitoring_store.clone() {
+        Some(store) => tokio::spawn(chv_controlplane_service::run_monitoring_maintenance(
+            store,
+            monitoring_health.clone(),
+            std::time::Duration::from_secs(config.monitoring.maintenance_interval_secs.max(1)),
+            shutdown_rx.clone(),
+        )),
+        None => tokio::spawn(async {}),
+    };
+
     // NetBox projection worker (issue #239): claims queued projection
     // runs and executes them against each architecture's configured
     // NetBox instance. A NetBox outage can never propagate here — every
@@ -499,6 +596,7 @@ pub async fn build_service(
             telemetry_service,
             reconcile_service,
             (*lifecycle_service).clone(),
+            monitoring_ingest_service,
         ),
         shutdown_tx,
         vec![
@@ -506,6 +604,7 @@ pub async fn build_service(
             backup_worker_handle,
             netbox_projection_worker_handle,
             reaper_handle,
+            monitoring_worker_handle,
         ],
     ))
 }

@@ -234,6 +234,10 @@ pub struct MockCloudHypervisorAdapter {
     /// Fires when a `create_vm` call parks (the stored permit makes
     /// `notified()` deterministic regardless of await ordering).
     pub create_parked: Arc<tokio::sync::Notify>,
+    /// Injected `vm_counters` return value (PR-2 sample-path tests):
+    /// `None` ⇒ the all-default counters (nothing measured, no epoch —
+    /// the honest "VM just started / identity unknown" shape).
+    pub counters_result: Arc<Mutex<Option<VmCounters>>>,
 }
 
 #[async_trait]
@@ -396,7 +400,12 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
     }
 
     async fn vm_counters(&self, _vm_id: &str) -> Result<VmCounters, ChvError> {
-        Ok(VmCounters::default())
+        Ok(self
+            .counters_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default())
     }
 
     async fn ping(&self, _vm_id: &str) -> Result<bool, ChvError> {

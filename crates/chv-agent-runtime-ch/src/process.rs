@@ -4259,11 +4259,41 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let net = counters.net_sums();
         // Unavailable sums flatten to 0 for the legacy transport (the
         // proto has no quality field); the v1 sample path carries the
-        // quality markers instead. See VmCounters' field docs.
+        // per-device maps below instead.
         let disk_read = block.read_bytes.unwrap_or(0);
         let disk_written = block.write_bytes.unwrap_or(0);
         let net_rx = net.rx_bytes.unwrap_or(0);
         let net_tx = net.tx_bytes.unwrap_or(0);
+
+        // Per-device attribution for the v1 sample path: the device ids
+        // are the VMM's own keys, never summed across devices. A device
+        // missing a field (or reporting the no-data sentinel) is simply
+        // absent from the map — absent means unavailable, never zero.
+        let mut disk_read_by_device = std::collections::BTreeMap::new();
+        let mut disk_write_by_device = std::collections::BTreeMap::new();
+        let mut net_rx_by_device = std::collections::BTreeMap::new();
+        let mut net_tx_by_device = std::collections::BTreeMap::new();
+        for device in counters.device_ids() {
+            match counters.class_of(device) {
+                chv_monitoring_core::vmm_counters::DeviceClass::Block => {
+                    if let Some(v) = counters.field(device, "read_bytes") {
+                        disk_read_by_device.insert(device.to_string(), v);
+                    }
+                    if let Some(v) = counters.field(device, "write_bytes") {
+                        disk_write_by_device.insert(device.to_string(), v);
+                    }
+                }
+                chv_monitoring_core::vmm_counters::DeviceClass::Net => {
+                    if let Some(v) = counters.field(device, "rx_bytes") {
+                        net_rx_by_device.insert(device.to_string(), v);
+                    }
+                    if let Some(v) = counters.field(device, "tx_bytes") {
+                        net_tx_by_device.insert(device.to_string(), v);
+                    }
+                }
+                chv_monitoring_core::vmm_counters::DeviceClass::Unknown => {}
+            }
+        }
 
         // CPU: the pinned API exposes NO CPU-usage counter (G0b), so
         // VM host CPU is measured on the identity-fenced VMM process
@@ -4280,7 +4310,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // entry is detected there (and the epoch fencing would reject
         // a stale reading regardless).
         let mut cpu_percent = 0.0f64;
+        let mut cpu_measured = false;
         let mut memory_used = 0u64;
+        let mut memory_measured = false;
+        let mut epoch_parts: Option<(String, String)> = None;
         let pid = {
             let map = self.vms.read().await;
             map.get(vm_id).and_then(|proc| proc.child.vmm_pid())
@@ -4295,10 +4328,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // survive a host reboot).
                 let boot_id =
                     chv_monitoring_core::process_probe::read_boot_id(proc_root).unwrap_or_default();
-                let epoch = chv_monitoring_core::Epoch::new(boot_id, stat.identity_epoch());
+                let epoch = chv_monitoring_core::Epoch::new(boot_id.clone(), stat.identity_epoch());
+                // The epoch fence for every counter in this response:
+                // both the API device counters and the /proc process
+                // counters belong to this VMM process's lifetime.
+                epoch_parts = Some((boot_id, stat.identity_epoch()));
                 let ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
-                memory_used =
-                    chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid).unwrap_or(0);
+                let rss = chv_monitoring_core::process_probe::read_rss_bytes(proc_root, pid);
+                let rss_read_ok = rss.is_ok();
+                memory_used = rss.unwrap_or(0);
 
                 let mut map = self.vms.write().await;
                 let mut identity_confirmed = false;
@@ -4324,6 +4362,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                                     let delta_secs = delta_ticks as f64
                                         / chv_monitoring_core::process_probe::CLOCK_TICKS_HZ as f64;
                                     cpu_percent = (delta_secs / elapsed) * 100.0;
+                                    cpu_measured = true;
                                 }
                             }
                         }
@@ -4340,6 +4379,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     // incarnation and must not be reported.
                     memory_used = 0;
                 }
+                memory_measured = identity_confirmed && rss_read_ok;
             }
             // A missing stat (process gone between the map lookup
             // and the read) reports zeros this cycle; the
@@ -4352,12 +4392,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // fields at all on the pinned API (G0b).
         Ok(VmCounters {
             cpu_percent,
+            cpu_percent_measured: cpu_measured,
             memory_bytes_used: memory_used,
+            memory_measured,
             memory_bytes_total: 0,
             disk_bytes_read: disk_read,
             disk_bytes_written: disk_written,
             net_bytes_rx: net_rx,
             net_bytes_tx: net_tx,
+            disk_read_by_device,
+            disk_write_by_device,
+            net_rx_by_device,
+            net_tx_by_device,
+            counter_epoch: epoch_parts,
         })
     }
 

@@ -717,6 +717,7 @@ dependencies = [
  "chv-errors",
  "chv-hypervisor-api",
  "chv-monitoring-core",
+ "chv-monitoring-store",
  "chv-observability",
  "control-plane-node-api",
  "rustls",
@@ -724,6 +725,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -868,6 +870,7 @@ dependencies = [
  "chv-controlplane-seed",
  "chv-controlplane-service",
  "chv-controlplane-store",
+ "chv-monitoring-store",
  "chv-observability",
  "chv-webui-bff",
  "rustls",
@@ -909,6 +912,8 @@ dependencies = [
  "chv-controlplane-types",
  "chv-errors",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
+ "chv-monitoring-store",
  "chv-netbox-adapter",
  "chv-netbox-sim",
  "chv-observability",
@@ -1002,6 +1007,22 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "chv-monitoring-store"
+version = "0.3.0"
+dependencies = [
+ "chv-monitoring-core",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1191,6 +1212,8 @@ dependencies = [
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-hypervisor-api",
+ "chv-monitoring-core",
+ "chv-monitoring-store",
  "chv-netbox-adapter",
  "chv-webui-bff",
  "chv-webui-bff-api",

@@ -1015,3 +1015,43 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         Ok(Response::new(resp))
     }
 }
+
+/// gRPC adapter for the node metric batch service (campaign #602 PR-2).
+/// Same peer-identity discipline as every other node-facing RPC: the
+/// wire-asserted `node_id` must match the mTLS peer certificate, so a
+/// sender can never ingest telemetry under another node's identity.
+pub struct MonitoringServer {
+    service: Arc<dyn crate::monitoring_ingest::MonitoringIngestService>,
+}
+
+impl MonitoringServer {
+    pub fn new(service: Arc<dyn crate::monitoring_ingest::MonitoringIngestService>) -> Self {
+        Self { service }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::monitoring_service_server::MonitoringService for MonitoringServer {
+    async fn ingest_node_metric_batch(
+        &self,
+        request: Request<proto::NodeMetricBatchRequest>,
+    ) -> Result<Response<proto::NodeMetricBatchResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(
+            &request,
+            &request.get_ref().node_id,
+            "ingest_node_metric_batch",
+        )?;
+        let _span = tracing::info_span!("ingest_node_metric_batch", %op_id);
+        let resp = self
+            .service
+            .ingest_node_metric_batch(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "ingest_node_metric_batch failed");
+                tonic::Status::from(e)
+            })?;
+        Ok(Response::new(resp))
+    }
+}

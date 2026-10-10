@@ -1,0 +1,20 @@
+[package]
+name = "chv-monitoring-store"
+version = "0.3.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-monitoring-core = { path = "../chv-monitoring-core" }
+nix = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, default-features = false, features = ["uuid", "chrono"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

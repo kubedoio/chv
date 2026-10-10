@@ -11,6 +11,8 @@ chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-seed = { path = "../chv-controlplane-seed" }
 chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 chv-errors = { path = "../chv-errors" }
+chv-monitoring-core = { path = "../chv-monitoring-core" }
+chv-monitoring-store = { path = "../chv-monitoring-store" }
 chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }

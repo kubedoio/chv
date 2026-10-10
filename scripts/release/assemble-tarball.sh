@@ -71,6 +71,13 @@ cp target/release/chvctl          "${RELEASE_DIR}/bin/"
 
 cp -r ui/build/* "${RELEASE_DIR}/ui/"
 cp -r cmd/chv-controlplane/migrations/* "${RELEASE_DIR}/migrations/"
+# The monitoring store's own migrations (ADR-027, #602): the separate
+# disposable monitoring.db schema, applied to /usr/local/share/chv/
+# monitoring-migrations by install.sh. The control-plane binary also
+# embeds this set as a fallback, but the packaged tree stays the
+# operator-inspectable source of truth.
+mkdir -p "${RELEASE_DIR}/monitoring-migrations"
+cp -r cmd/chv-controlplane/monitoring-migrations/* "${RELEASE_DIR}/monitoring-migrations/"
 
 cp docs/examples/systemd/chv-controlplane.service "${RELEASE_DIR}/systemd/"
 cp docs/examples/systemd/chv-agent.service        "${RELEASE_DIR}/systemd/"
