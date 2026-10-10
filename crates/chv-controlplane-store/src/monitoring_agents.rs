@@ -67,6 +67,17 @@ pub struct IssuedClaim {
     pub expires_at_ms: i64,
 }
 
+/// A live (issued, unconsumed, unexpired) claim for a VM — powers the
+/// `enrolling` wire state between claim issuance and redemption. No
+/// token material: only the hash row's metadata.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LiveClaim {
+    pub vm_id: String,
+    pub issued_by: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsumedClaim {
     pub vm_id: String,
@@ -200,12 +211,48 @@ impl MonitoringAgentRepository {
         .execute(&self.pool)
         .await?;
 
+        // Retention: consumed/expired claims are unusable the moment
+        // they pass their expiry — keep them for a 24 h audit window,
+        // then delete. Pruning here (rather than a background task)
+        // keeps the table bounded with zero extra infrastructure; an
+        // unused claim's hash row is the only secret-shaped data
+        // involved, and it is already inert.
+        let _ = sqlx::query(
+            "DELETE FROM monitoring_agent_claims
+             WHERE expires_at_ms < $1 - 86_400_000",
+        )
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await;
+
         Ok(IssuedClaim {
             token,
             vm_id: vm_id.to_string(),
             tenant_id,
             expires_at_ms,
         })
+    }
+
+    /// The newest live (unconsumed, unexpired) claim for a VM, if any —
+    /// the `enrolling` state's backing query. Newest first: re-issuing
+    /// a claim while an older one is still live is legitimate (the
+    /// old token simply expires unused).
+    pub async fn find_live_claim_by_vm(
+        &self,
+        vm_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<LiveClaim>, StoreError> {
+        Ok(sqlx::query_as::<_, LiveClaim>(
+            "SELECT vm_id, issued_by, issued_at_ms, expires_at_ms
+             FROM monitoring_agent_claims
+             WHERE vm_id = $1 AND consumed_at_ms IS NULL AND expires_at_ms > $2
+             ORDER BY issued_at_ms DESC
+             LIMIT 1",
+        )
+        .bind(vm_id)
+        .bind(now_ms)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     /// Atomically consume a claim. All validity checks (exists, unused,

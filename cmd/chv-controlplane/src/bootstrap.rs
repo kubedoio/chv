@@ -387,6 +387,9 @@ pub async fn build_service(
     // silent degradation the operator discovers mid-enrollment.
     let guest_ingest = &config.monitoring.guest_ingestion;
     if guest_ingest.enabled {
+        if let Err(reason) = guest_ingest.validate() {
+            return Err(ControlPlaneServiceError::Internal(reason));
+        }
         if config.http_tls.is_none() {
             return Err(ControlPlaneServiceError::Internal(
                 "monitoring.guest_ingestion.enabled requires [http_tls]: guest ingestion must \
@@ -474,7 +477,16 @@ pub async fn build_service(
             let ingest = chv_controlplane_service::api::agent_routes::agent_router(service.clone());
             (Some((viewer, operator)), Some(ingest))
         }
-        None => (None, None),
+        None => {
+            // Guest ingestion not configured: the browser routes still
+            // exist and answer the typed `guest_ingestion_disabled`
+            // error (honest "off", never a 404); the agent-auth
+            // ingest routes stay unmounted entirely — nothing for a
+            // guest to talk to.
+            let disabled =
+                chv_controlplane_service::api::agent_admin::agent_admin_disabled_router();
+            (Some((disabled.clone(), disabled)), None)
+        }
     };
 
     let router = chv_controlplane_service::api::router::admin_router_with_guest_agents(

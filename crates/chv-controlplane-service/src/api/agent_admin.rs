@@ -21,6 +21,12 @@
 //! - When guest ingestion is not configured, these routes answer
 //!   typed `guest_ingestion_disabled` errors, not empty lists that
 //!   would read as "no agents enrolled".
+//!
+//! Known limitation (documented, not papered over): these routes scope
+//! by the operator's auth tier only, matching the single-tenant BFF —
+//! any operator may act on any VM's agent. The security contract's
+//! cross-project isolation clause applies once the BFF grows
+//! multi-tenant authorization; wiring it here must not be forgotten.
 
 use crate::monitoring_agent::MonitoringAgentService;
 use axum::http::StatusCode;
@@ -66,13 +72,40 @@ pub fn agent_operator_router(
 }
 
 fn err(status: StatusCode, code: &str, message: impl std::fmt::Display) -> Response {
+    // The BFF client's error convention (`ui/src/lib/bff/client.ts`):
+    // top-level `message` + `code` — NOT the nested `{"error": {...}}`
+    // shape, which the UI would parse as UNKNOWN_ERROR.
     (
         status,
         Json(json!({
-            "error": { "code": code, "message": message.to_string() }
+            "message": message.to_string(),
+            "code": code,
         })),
     )
         .into_response()
+}
+
+/// The same paths as [`agent_viewer_router`] +
+/// [`agent_operator_router`], answering the typed
+/// `guest_ingestion_disabled` error when the deployment has not
+/// enabled `[monitoring.guest_ingestion]`. Mounted unconditionally:
+/// an unconfigured feature must surface as an honest "disabled"
+/// state in the UI, never a 404 that reads as a broken page.
+pub fn agent_admin_disabled_router() -> Router<chv_webui_bff::router::AppState> {
+    async fn disabled() -> Response {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "guest_ingestion_disabled",
+            "guest monitoring agent ingestion is not enabled on this manager \
+             ([monitoring.guest_ingestion] in the control-plane config)",
+        )
+    }
+    Router::new()
+        .route("/v1/monitoring/agents", post(disabled))
+        .route("/v1/monitoring/agents/claim", post(disabled))
+        .route("/v1/monitoring/agents/revoke", post(disabled))
+        .route("/v1/monitoring/agents/rotate", post(disabled))
+        .route("/v1/monitoring/agents/reset", post(disabled))
 }
 
 /// The security contract's wire-state vocabulary (plus the documented
@@ -156,16 +189,53 @@ async fn list_agents(
         .list_agents(req.vm_id.as_deref(), limit)
         .await
     {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(json!({
-                "schema_version": 1,
-                "agents": rows.iter().map(|r| agent_json(r, &st, now_ms)).collect::<Vec<_>>(),
-                "generated_at_ms": now_ms,
-                "truncated": rows.len() as u32 == limit,
-            })),
-        )
-            .into_response(),
+        Ok(rows) => {
+            let mut agents: Vec<serde_json::Value> =
+                rows.iter().map(|r| agent_json(r, &st, now_ms)).collect();
+            // The `enrolling` state (security contract vocabulary): a
+            // claim was issued for this VM but not yet redeemed — no
+            // agent row exists yet. Synthesize the inventory entry
+            // from the live claim so the operator sees the window
+            // between issuance and redemption instead of a bare
+            // "not enrolled". Only for vm-scoped queries: the global
+            // inventory lists agents, not pending claims.
+            let has_live_agent = rows.iter().any(|r| r.status != "revoked");
+            if !has_live_agent {
+                if let Some(vm_id) = req.vm_id.as_deref() {
+                    if let Ok(Some(claim)) =
+                        st.service.repo().find_live_claim_by_vm(vm_id, now_ms).await
+                    {
+                        agents.push(json!({
+                            "agent_id": null,
+                            "vm_id": claim.vm_id,
+                            "state": "enrolling",
+                            "install_id": null,
+                            "credential_epoch": null,
+                            "credential_expires_at_ms": null,
+                            "rotation_pending": false,
+                            "identity_conflict": false,
+                            "conflict_reason": null,
+                            "enrolled_at_ms": null,
+                            "last_seen_at_ms": null,
+                            "last_seen_age_seconds": null,
+                            "os": {"name": null, "version": null, "kernel_release": null},
+                            "claim_expires_at_ms": claim.expires_at_ms,
+                            "claim_issued_by": claim.issued_by,
+                        }));
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "schema_version": 1,
+                    "agents": agents,
+                    "generated_at_ms": now_ms,
+                    "truncated": rows.len() as u32 == limit,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",

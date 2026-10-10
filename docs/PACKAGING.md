@@ -98,7 +98,7 @@ The service runs as a dedicated `chv-monitor` system user (no capabilities,
 `ProtectSystem=strict`, `ReadWritePaths=/var/lib/chv-monitor` only) and is
 **disabled by default**: it needs `server_url` + `manager_ca_path` in
 `/etc/chv-monitor/agent.toml` and a one-time claim at
-`/etc/chv-monitor/claim` before `systemctl enable --now
+`/var/lib/chv-monitor/claim` (owner `chv-monitor`, 0600) before `systemctl enable --now
 chv-monitor-agent` does anything. See `docs/examples/monitor-agent.toml`
 and ADR-026 for the enrollment flow and the security contract.
 

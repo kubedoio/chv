@@ -82,17 +82,23 @@
 	async function run(action: 'rotate' | 'revoke' | 'reset') {
 		const current = agent;
 		if (!current || busy) return;
+		// The synthesized `enrolling` entry carries no agent identity;
+		// its only action is (re-)issuing a claim, which never routes here.
+		// Capture into a const: property narrowing does not survive the
+		// mutateWithRefresh closure below.
+		const agentId = current.agent_id;
+		if (!agentId) return;
 		busy = true;
 		try {
 			await mutateWithRefresh(
 				async () => {
 					if (action === 'rotate') {
-						return forceGuestAgentRotation(current.agent_id);
+						return forceGuestAgentRotation(agentId);
 					}
 					if (action === 'reset') {
-						return resetGuestAgentConflict(current.agent_id);
+						return resetGuestAgentConflict(agentId);
 					}
-					return revokeGuestAgent(current.agent_id);
+					return revokeGuestAgent(agentId);
 				},
 				{
 					skipRefresh: true,
@@ -137,6 +143,21 @@
 				<Button variant="primary" size="sm" onclick={onEnroll}>Enroll agent</Button>
 			{/if}
 		</div>
+	{:else if agent.state === 'enrolling'}
+		<div class="flex items-start justify-between gap-4">
+			<div>
+				<p class="text-sm text-[var(--shell-text)]">{stateView.label}</p>
+				<p class="text-sm text-[var(--shell-text-secondary)]">{stateView.description}</p>
+				<p class="text-xs text-[var(--shell-text-muted)] mt-1">
+					Claim expires in
+					{agent.claim_expires_at_ms ? guestAgentCredentialRemaining(agent.claim_expires_at_ms) : '—'}
+					{#if agent.claim_issued_by}· issued by {agent.claim_issued_by}{/if}
+				</p>
+			</div>
+			{#if onEnroll && actions.includes('enroll')}
+				<Button variant="secondary" size="sm" onclick={onEnroll}>Re-issue claim</Button>
+			{/if}
+		</div>
 	{:else}
 		<div class="flex items-start justify-between gap-4">
 			<div class="space-y-1 min-w-0">
@@ -159,8 +180,10 @@
 					<div>
 						<dt class="inline">Credential: </dt>
 						<dd class="inline text-[var(--shell-text-secondary)]">
-							epoch {agent.credential_epoch}, expires in
-							{guestAgentCredentialRemaining(agent.credential_expires_at_ms)}
+							epoch {agent.credential_epoch ?? '—'}, expires in
+							{agent.credential_expires_at_ms
+								? guestAgentCredentialRemaining(agent.credential_expires_at_ms)
+								: '—'}
 						</dd>
 					</div>
 					<div>

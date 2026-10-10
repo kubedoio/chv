@@ -85,7 +85,7 @@ impl Default for GuestIngestionLimits {
         Self {
             claim_ttl_ms: 600_000,
             enroll_attempts_per_minute: 10,
-            agent_batches_per_minute: 20,
+            agent_batches_per_minute: 12,
             rotation_grace_ms: 30 * 60 * 1000,
             credential_ttl_ms: 30 * 24 * 3600 * 1000,
             renewal_window_ms: 7 * 24 * 3600 * 1000,
@@ -263,6 +263,12 @@ pub struct GuestSampleJson {
 
 impl GuestSampleJson {
     fn to_raw(&self) -> Result<RawSample, &'static str> {
+        // Per-sample schema check (the envelope version is validated
+        // separately): a sample carrying a different version must be
+        // rejected, not silently reinterpreted.
+        if self.schema_version != 1 {
+            return Err("sample schema_version must be 1");
+        }
         let value = match &self.value {
             None => None,
             Some(serde_json::Value::Number(n)) => {
@@ -492,6 +498,11 @@ impl MonitoringAgentService {
     ) -> Result<EnrollOutcome, ControlPlaneServiceError> {
         // Rate limit per source IP before touching the claim (an
         // unknown-claim flood must not become a store scan flood).
+        // Per-IP, not per-VM: enrollment is a rare, operator-driven
+        // event, and the flood worth stopping is credential-stuffing
+        // shaped. Known trade-off: many agents enrolling through one
+        // NAT/proxy egress share this budget — stagger their first
+        // boots, or raise enroll_attempts_per_minute.
         let ip_key = remote_ip.unwrap_or("unknown").to_string();
         {
             let mut entry = self.enroll_rate.entry(ip_key).or_default();
@@ -504,6 +515,16 @@ impl MonitoringAgentService {
             if window.count > self.limits.enroll_attempts_per_minute {
                 return Ok(EnrollOutcome::RateLimited);
             }
+        }
+        // Evict stale per-IP windows so churning source addresses
+        // cannot grow `enroll_rate` without bound (per-agent maps are
+        // bounded by the agent count; per-IP is not). Amortized: only
+        // when the map is large, and only entries idle for a full
+        // window beyond the current one.
+        if self.enroll_rate.len() > 1024 {
+            let cutoff = now_ms as u64;
+            self.enroll_rate
+                .retain(|_, w| w.window_start_ms + 2 * RATE_WINDOW_MS > cutoff);
         }
 
         if install_id.is_empty() || install_id.len() > MAX_BOOT_ID_BYTES {
@@ -706,9 +727,27 @@ impl MonitoringAgentService {
                 retry_after_seconds: 1,
             });
         }
-
+        // Cancellation-safe guard: if the handler future is dropped
+        // before the await completes (listener shutdown, aborted
+        // connection), the entry is still released — otherwise one
+        // dropped request would 429 the agent forever.
+        struct InFlightGuard<'a> {
+            service: &'a MonitoringAgentService,
+            agent_id: String,
+        }
+        impl Drop for InFlightGuard<'_> {
+            fn drop(&mut self) {
+                self.service
+                    .in_flight
+                    .remove_if(&self.agent_id, |_, _| true);
+            }
+        }
+        let _guard = InFlightGuard {
+            service: self,
+            agent_id: peer.agent_id.clone(),
+        };
         let outcome = self.ingest_authenticated(&agent, envelope, now_ms).await;
-        self.in_flight.remove(&peer.agent_id);
+        drop(_guard);
         outcome
     }
 

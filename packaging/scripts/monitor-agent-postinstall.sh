@@ -34,7 +34,7 @@ fi
 
 echo "chv-monitor-agent: installed (disabled by default)." >&2
 echo "chv-monitor-agent: set server_url and manager_ca_path in /etc/chv-monitor/agent.toml," >&2
-echo "chv-monitor-agent: place a one-time claim at /etc/chv-monitor/claim, then:" >&2
+echo "chv-monitor-agent: place a one-time claim at /var/lib/chv-monitor/claim (owner chv-monitor, 0600), then:" >&2
 echo "chv-monitor-agent:   systemctl enable --now chv-monitor-agent" >&2
 
 exit 0

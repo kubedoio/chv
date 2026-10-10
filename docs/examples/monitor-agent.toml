@@ -26,10 +26,17 @@
 
 # One-time enrollment claim (single use, TTL-limited). Issued by an
 # operator in the WebUI (VM detail → metrics tab → Guest monitoring
-# agent → Enroll agent) or via chvctl. Write the token to this path
-# and start the service; the agent consumes it, deletes the file, and
-# stores its client credential at credential_path.
-claim_path = "/etc/chv-monitor/claim"
+# agent → Enroll agent) or via chvctl. As root in the guest:
+#
+#   install -o chv-monitor -g chv-monitor -m 0600 <claim-file> \
+#       /var/lib/chv-monitor/claim
+#
+# The claim lives in the state dir, not /etc: the shipped unit mounts
+# /etc read-only, and the agent deletes the claim file after
+# successful enrollment (server-side the token is single-use either
+# way). The agent then stores its client credential at
+# credential_path.
+claim_path = "/var/lib/chv-monitor/claim"
 
 # The client credential (certificate + private key, 0600, owner
 # chv-monitor). Written by the agent after enrollment/rotation; never
@@ -46,13 +53,15 @@ credential_path = "/var/lib/chv-monitor/credential.json"
 state_dir = "/var/lib/chv-monitor"
 spool_dir = "/var/lib/chv-monitor/spool"
 
-# Collection interval. 30s matches the manager's rate-limit default
-# (agent_batches_per_minute = 20) with headroom for replay bursts.
-interval_seconds = 30
+# Collection interval. 15 s is the component spec's `resources`
+# profile default; the manager's per-agent ceiling (one batch per
+# 5 s = agent_batches_per_minute = 12) still leaves headroom for
+# spool replay bursts (throttled, oldest-first — never dropped).
+interval_seconds = 15
 
 # Outage budget: batches that cannot be delivered are spooled to disk
 # (bounded count, age-pruned) and replayed oldest-first on recovery.
-# 500 batches × 30s ≈ 4 hours of outage at the default interval.
+# 500 batches × 15 s ≈ 2 hours of outage at the default interval.
 max_spool_batches = 500
 spool_max_age_seconds = 604800
 

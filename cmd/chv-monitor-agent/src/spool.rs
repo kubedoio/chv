@@ -85,14 +85,18 @@ impl Spool {
 
     /// Append one batch. When the spool is full, the OLDEST entries
     /// are dropped — losing the stalest data first is the only honest
-    /// choice under a bounded outage budget.
+    /// choice under a bounded outage budget. The entry is written via
+    /// tmp+rename so a torn write (ENOSPC, crash) can never leave a
+    /// half-written entry that would poison every later drain.
     pub fn push(&mut self, entry: SpoolEntry) -> Result<(), SpoolError> {
         self.prune_age()?;
         self.enforce_bound(1)?;
         let path = self.entry_path(self.next_counter);
         self.next_counter += 1;
         let bytes = serde_json::to_vec(&entry)?;
-        std::fs::write(path, bytes)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
         self.enforce_bound(0)?;
         Ok(())
     }
@@ -180,6 +184,16 @@ impl Spool {
     }
 
     fn prune_age(&self) -> Result<(), SpoolError> {
+        // Sweep torn-write leftovers first: a crashed push can leave
+        // a `.json.tmp` that no drain ever reads (sorted_paths only
+        // yields `.json`), so remove it explicitly.
+        for path in std::fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "tmp").unwrap_or(false))
+        {
+            let _ = std::fs::remove_file(path);
+        }
         if self.max_age_seconds == 0 {
             return Ok(());
         }

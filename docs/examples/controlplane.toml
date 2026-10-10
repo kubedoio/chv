@@ -60,7 +60,7 @@ renewal_window_days = 7
 rotation_grace_minutes = 30
 claim_ttl_seconds = 600
 enroll_attempts_per_minute = 10
-agent_batches_per_minute = 20
+agent_batches_per_minute = 12
 offline_after_seconds = 90
 enrollment_grace_seconds = 600
 

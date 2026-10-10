@@ -25,8 +25,9 @@ nothing about VM lifecycle.
    base URL, always `https://`) and `manager_ca_path` (the PEM trust
    anchor for the manager's TLS certificate).
 2. Ask an operator for a one-time claim (WebUI: VM detail → metrics
-   tab → Guest monitoring agent → Enroll agent) and write the token
-   to `/etc/chv-monitor/claim`.
+   tab → Guest monitoring agent → Enroll agent) and place it as root:
+   `install -o chv-monitor -g chv-monitor -m 0600 <claim>
+   /var/lib/chv-monitor/claim`.
 3. `systemctl enable --now chv-monitor-agent`
 
 The service is disabled by default: it refuses to start until

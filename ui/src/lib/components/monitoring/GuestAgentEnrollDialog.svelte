@@ -85,8 +85,9 @@
 		<div class="space-y-4">
 			<p class="text-sm text-[var(--shell-text-secondary)]">
 				Install <code class="text-xs">chv-monitor-agent</code> in
-				{vmName ?? vmId}, write the claim token to
-				<code class="text-xs">/etc/chv-monitor/claim</code>, and start the service. The agent
+				{vmName ?? vmId}, place the claim token at
+				<code class="text-xs">/var/lib/chv-monitor/claim</code> (owner
+				<code class="text-xs">chv-monitor</code>, mode 0600), and start the service. The agent
 				enrolls over mutual TLS on its next run.
 			</p>
 			<div
@@ -108,8 +109,8 @@
 			</div>
 			<p class="text-xs text-[var(--shell-text-muted)]">
 				The token expires
-				{new Date(claim.expires_at_ms).toLocaleString()} and is single-use. If it is lost,
-				revoke and re-enroll.
+				{new Date(claim.expires_at_ms).toLocaleString()} and is single-use. If it is lost or
+				expires unused, simply issue a new one.
 			</p>
 		</div>
 	{/if}

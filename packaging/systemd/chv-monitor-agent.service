@@ -17,9 +17,9 @@ KillMode=mixed
 TimeoutStopSec=10
 
 # The agent's only writable surface is its state directory (spool,
-# credential, sequence counters). Everything else is read-only —
-# including /etc/chv-monitor, where the operator places the one-time
-# claim (read once, deleted by the agent after successful enrollment).
+# credential, sequence counters, and the operator-placed one-time
+# claim). Everything else is read-only — including /etc/chv-monitor,
+# which holds only the config and the manager CA.
 StateDirectory=chv-monitor
 StateDirectoryMode=0700
 LogsDirectory=chv-monitor

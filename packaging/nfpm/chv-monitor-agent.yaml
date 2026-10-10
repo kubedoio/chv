@@ -23,7 +23,10 @@ overrides:
     depends:
       - libc6
   rpm:
-    depends: []
+    # glibc is effectively always present, but declaring it keeps the
+    # dependency honest (the binary links it) and lets rpm verify it.
+    depends:
+      - glibc
 contents:
   - src: target/release/chv-monitor-agent
     dst: /usr/bin/chv-monitor-agent

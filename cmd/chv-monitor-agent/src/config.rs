@@ -33,7 +33,12 @@ pub struct AgentConfig {
 }
 
 fn default_claim_path() -> PathBuf {
-    PathBuf::from("/etc/chv-monitor/claim")
+    // Inside the agent's state dir, not /etc: the shipped systemd unit
+    // mounts /etc read-only (ProtectSystem=strict), so a claim placed
+    // there could never be deleted after consumption. The operator
+    // places it with: install -o chv-monitor -g chv-monitor -m 0600
+    // <claim> /var/lib/chv-monitor/claim
+    PathBuf::from("/var/lib/chv-monitor/claim")
 }
 fn default_credential_path() -> PathBuf {
     PathBuf::from("/var/lib/chv-monitor/credential.json")
@@ -45,7 +50,9 @@ fn default_spool_dir() -> PathBuf {
     PathBuf::from("/var/lib/chv-monitor/spool")
 }
 fn default_interval_seconds() -> u64 {
-    30
+    // The component spec's `resources` profile default (15 s), within
+    // the ingestion contract's one-batch-per-5-seconds ceiling.
+    15
 }
 fn default_max_spool_batches() -> usize {
     500
@@ -108,7 +115,7 @@ mod tests {
             "server_url = \"https://manager.example:8443\"\nmanager_ca_path = \"/etc/chv-monitor/ca.pem\"\n",
         )
         .unwrap();
-        assert_eq!(c.interval_seconds, 30);
+        assert_eq!(c.interval_seconds, 15);
         assert_eq!(c.max_spool_batches, 500);
         assert_eq!(c.state_dir, PathBuf::from("/var/lib/chv-monitor"));
         assert_eq!(c.spool_dir, PathBuf::from("/var/lib/chv-monitor/spool"));
@@ -159,6 +166,6 @@ mod tests {
             config.spool_dir,
             PathBuf::from("/var/lib/chv-monitor/spool")
         );
-        assert_eq!(config.interval_seconds, 30);
+        assert_eq!(config.interval_seconds, 15);
     }
 }

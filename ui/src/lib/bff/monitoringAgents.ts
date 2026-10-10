@@ -37,19 +37,27 @@ export interface GuestAgentOs {
 }
 
 export interface GuestAgentInventoryItem {
-	agent_id: string;
+	/** Null on the synthesized `enrolling` entry (claim issued, not yet redeemed). */
+	agent_id: string | null;
 	vm_id: string;
 	state: GuestAgentState;
-	install_id: string;
-	credential_epoch: number;
-	credential_expires_at_ms: number;
+	/** Null on the `enrolling` entry — no install exists yet. */
+	install_id: string | null;
+	/** Null on the `enrolling` entry — no credential exists yet. */
+	credential_epoch: number | null;
+	credential_expires_at_ms: number | null;
 	rotation_pending: boolean;
 	identity_conflict: boolean;
 	conflict_reason: string | null;
-	enrolled_at_ms: number;
+	/** Null on the `enrolling` entry — nothing has enrolled yet. */
+	enrolled_at_ms: number | null;
 	last_seen_at_ms: number | null;
 	last_seen_age_seconds: number | null;
 	os: GuestAgentOs;
+	/** Present only on the `enrolling` entry: the live claim's expiry. */
+	claim_expires_at_ms?: number | null;
+	/** Present only on the `enrolling` entry: who issued the claim. */
+	claim_issued_by?: string | null;
 }
 
 export interface GuestAgentInventoryResponse {

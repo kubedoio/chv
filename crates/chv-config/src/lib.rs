@@ -855,6 +855,33 @@ impl MonitoringGuestIngestConfig {
             && self.agent_ca_cert_path.is_some()
             && self.agent_ca_key_path.is_some()
     }
+
+    /// Contract ceilings that configuration must not raise (the
+    /// security contract caps claim expiry at 10 minutes; the
+    /// ingestion contract caps guest send frequency at one batch per
+    /// 5 seconds). Violations are boot errors — loud, never silent.
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_CLAIM_TTL_SECONDS: u32 = 600;
+        const MAX_AGENT_BATCHES_PER_MINUTE: u32 = 12;
+        if self.claim_ttl_seconds == 0 || self.claim_ttl_seconds > MAX_CLAIM_TTL_SECONDS {
+            return Err(format!(
+                "monitoring.guest_ingestion.claim_ttl_seconds must be 1..={MAX_CLAIM_TTL_SECONDS} \
+                 (the security contract caps claim expiry at 10 minutes), got {}",
+                self.claim_ttl_seconds
+            ));
+        }
+        if self.agent_batches_per_minute == 0
+            || self.agent_batches_per_minute > MAX_AGENT_BATCHES_PER_MINUTE
+        {
+            return Err(format!(
+                "monitoring.guest_ingestion.agent_batches_per_minute must be \
+                 1..={MAX_AGENT_BATCHES_PER_MINUTE} (the ingestion contract caps guest send \
+                 frequency at one batch per 5 seconds), got {}",
+                self.agent_batches_per_minute
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn default_guest_credential_ttl_days() -> u32 {
@@ -873,7 +900,9 @@ fn default_guest_enroll_attempts_per_minute() -> u32 {
     10
 }
 fn default_guest_agent_batches_per_minute() -> u32 {
-    20
+    // The ingestion contract's ceiling: max guest send frequency of
+    // one batch per 5 seconds (= 12/minute).
+    12
 }
 fn default_guest_offline_after_seconds() -> u32 {
     90

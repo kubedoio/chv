@@ -61,7 +61,10 @@ impl StoredCredential {
         }
     }
 
-    /// Persist with owner-only permissions (best effort on non-unix).
+    /// Persist with owner-only permissions from the moment the file
+    /// exists (created with mode 0600 — never a umask-default file
+    /// that is later tightened; the private key must not be readable
+    /// by anyone else even transiently).
     pub fn store(&self, path: &Path) -> Result<(), CredentialError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -69,8 +72,18 @@ impl StoredCredential {
         let json = serde_json::to_vec_pretty(self)?;
         #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(path, &json)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            std::io::Write::write_all(&mut file, &json)?;
+            // New files are created 0600 above; this tighten only
+            // matters for a pre-existing file written by an older
+            // agent (write-then-chmod) that this store overwrites.
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
         #[cfg(not(unix))]
