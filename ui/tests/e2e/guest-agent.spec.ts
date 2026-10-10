@@ -92,6 +92,42 @@ test('states the unenrolled case honestly and offers enrollment', async ({ page 
 	await expect(card.getByRole('button', { name: 'Enroll agent' })).toBeVisible();
 });
 
+test('renders the enrolling state for an unredeemed claim (synthesized entry)', async ({ page }) => {
+	// The backend synthesizes this entry from the live claim row: no
+	// agent identity yet, so the identity fields are null.
+	await mockApiResponse(page, '**/v1/monitoring/agents', {
+		schema_version: 1,
+		agents: [
+			agentRow({
+				agent_id: null,
+				state: 'enrolling',
+				install_id: null,
+				credential_epoch: null,
+				credential_expires_at_ms: null,
+				enrolled_at_ms: null,
+				last_seen_at_ms: null,
+				last_seen_age_seconds: null,
+				os: { name: null, version: null, kernel_release: null },
+				claim_expires_at_ms: Date.now() + 9 * 60_000,
+				claim_issued_by: 'admin'
+			})
+		],
+		generated_at_ms: Date.now(),
+		truncated: false
+	});
+	await page.reload();
+
+	const card = page.locator('section', { hasText: 'Guest monitoring agent' });
+	await expect(card.getByText('Enrolling')).toBeVisible();
+	await expect(card.getByText(/waiting for redemption/i)).toBeVisible();
+	await expect(card.getByText(/Claim expires in/i)).toBeVisible();
+	// A claim-only entry offers re-issuance, never lifecycle actions on
+	// an agent that does not exist yet.
+	await expect(card.getByRole('button', { name: 'Re-issue claim' })).toBeVisible();
+	await expect(card.getByRole('button', { name: 'Revoke' })).toHaveCount(0);
+	await expect(card.getByRole('button', { name: 'Force rotation' })).toHaveCount(0);
+});
+
 test('renders the identity_conflict extension with a reset action', async ({ page }) => {
 	await mockApiResponse(page, '**/v1/monitoring/agents', {
 		schema_version: 1,
