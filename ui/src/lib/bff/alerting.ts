@@ -269,7 +269,7 @@ export async function updateRule(
 export async function deleteRule(
 	body: { rule_id: string; expected_revision: number },
 	token?: string
-): Promise<{ deleted: true }> {
+): Promise<{ deleted: true; retired_incidents: number }> {
 	return bffFetch(BFFEndpoints.monitoringAlertRuleDelete, {
 		method: 'POST',
 		body: JSON.stringify(body),

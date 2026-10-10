@@ -66,7 +66,7 @@
 		if (!isEdit || !originalDimensions) return '';
 		const keys = Object.keys(originalDimensions);
 		if (keys.length < 2) return '';
-		return `This rule matches ${keys.length} dimensions (${keys.join(', ')}). That form cannot be saved through this dialog; leave the fields untouched to keep it unchanged, or edit them to replace the match with the single key shown.`;
+		return `This rule matches ${keys.length} dimensions (${keys.join(', ')}). That form cannot be saved through this dialog — untouched it round-trips verbatim and fails loudly on save; edit the fields to replace the match with the single key shown, or cancel to leave the rule untouched.`;
 	});
 
 	function applyTemplate(template: RuleTemplate) {

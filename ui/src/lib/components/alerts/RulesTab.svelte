@@ -131,7 +131,11 @@
 	}
 
 	async function removeRule(rule: AlertRule) {
-		if (!window.confirm(`Delete rule "${rule.name}"? Its incidents stay as history.`)) {
+		if (
+			!window.confirm(
+				`Delete rule "${rule.name}"? Its firing incidents will be resolved (with a final notification); never-fired pending incidents are deleted.`
+			)
+		) {
 			return;
 		}
 		const ruleId = rule.rule_id;

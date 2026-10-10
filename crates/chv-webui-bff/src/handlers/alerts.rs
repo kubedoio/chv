@@ -578,7 +578,9 @@ async fn retire_incident(
 ) -> Result<usize, BffError> {
     if incident.status == chv_controlplane_store::INCIDENT_STATUS_FIRING {
         let notify = resolved_notify_events(state, incident, reason, now);
-        state
+        // `false` = a racing pass (or the backstop sweep) already
+        // resolved it: count only what this request actually did.
+        let resolved = state
             .alert_repo
             .resolve_incident(
                 &incident.alert_id,
@@ -588,7 +590,7 @@ async fn retire_incident(
                 &notify,
             )
             .await?;
-        Ok(1)
+        Ok(usize::from(resolved))
     } else {
         state.alert_repo.clear_pending(&incident.alert_id).await?;
         Ok(0)

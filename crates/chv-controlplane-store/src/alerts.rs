@@ -207,6 +207,26 @@ pub struct IncidentOpenInput {
 }
 
 impl AlertRepository {
+    /// Active (pending or firing) monitoring incidents, most recent
+    /// first — the orphan sweep's input (it filters by live dedup
+    /// keys in Rust; SQLite has no array binding). Bounded by
+    /// `limit`: a fleet with more active incidents than the bound
+    /// simply sweeps in batches across ticks.
+    pub async fn list_active_monitoring(&self, limit: i64) -> Result<Vec<IncidentRow>, StoreError> {
+        let rows: Vec<IncidentRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM alerts
+            WHERE source = 'monitoring' AND status IN ('pending','firing')
+            ORDER BY last_occurrence_ms DESC, alert_id
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// The active (pending or firing) incident for a dedup key, if
     /// any. The partial unique index keeps this unambiguous.
     pub async fn find_active_incident(

@@ -723,6 +723,18 @@ const RATE_MAX_POINTS: usize = 240;
 /// belt-and-braces bound on per-tick work.
 const MAX_ENABLED_RULES_PER_TICK: i64 = 500;
 
+/// Grace before the orphan sweep may retire an incident: a rule
+/// created (and fired) between the sweep's rule listing and its key
+/// filter must never be mistaken for an orphan by a stale snapshot.
+/// Two-ish ticks of headroom; ghosts from the mutation crash window
+/// simply sweep a tick later.
+const ORPHAN_SWEEP_GRACE_MS: i64 = 60_000;
+/// Active incidents examined per sweep pass.
+const ORPHAN_SWEEP_MAX_INCIDENTS: i64 = 1_000;
+/// The transition reason recorded when the backstop sweep retires
+/// an incident no rule produces anymore.
+const ORPHAN_SWEEP_REASON: &str = "rule removed or retargeted (backstop sweep)";
+
 impl AlertEvaluatorWorker {
     pub fn new(
         rules: chv_controlplane_store::AlertRuleRepository,
@@ -781,7 +793,150 @@ impl AlertEvaluatorWorker {
                 );
             }
         }
+        // Backstop: retire active incidents no current rule produces
+        // (the residue of a crash in the window between a rule
+        // mutation and its retirement). A sweep failure degrades to
+        // next tick — it never fails the pass.
+        if let Err(e) = self.sweep_orphaned_incidents(now_ms).await {
+            tracing::warn!(error = %e, "alert evaluation: orphan sweep failed");
+        }
         rules.len()
+    }
+
+    /// Backstop for the rule-retire paths: the BFF retires a rule's
+    /// active incidents when it deletes the rule (or edits its
+    /// dimension match), but a crash in the window between the
+    /// mutation commit and the retirement would leave a
+    /// permanently-firing ghost — the rule that could recover it is
+    /// gone. This sweep retires any active incident whose dedup key
+    /// no current rule produces. It is idempotent and runs every
+    /// pass; incidents younger than the grace window are left alone
+    /// so a rule created mid-sweep is never mistaken for an orphan
+    /// by a stale key snapshot.
+    async fn sweep_orphaned_incidents(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), chv_controlplane_store::StoreError> {
+        // The COMPLETE key set — every rule, enabled or disabled (a
+        // disabled rule's incidents hold by design and must never be
+        // swept). Paged: correctness requires the full set.
+        let mut live_keys = std::collections::HashSet::new();
+        let mut offset = 0i64;
+        loop {
+            let (rules, total) = self.rules.list(false, None, 500, offset).await?;
+            let page = rules.len() as i64;
+            live_keys.extend(rules.iter().map(dedup_key));
+            offset += page;
+            if page == 0 || offset >= total {
+                break;
+            }
+        }
+        let active = self
+            .alerts
+            .list_active_monitoring(ORPHAN_SWEEP_MAX_INCIDENTS)
+            .await?;
+        let cutoff = now_ms.saturating_sub(ORPHAN_SWEEP_GRACE_MS);
+        for incident in &active {
+            let orphan = incident
+                .dedup_key
+                .as_ref()
+                .map(|key| !live_keys.contains(key))
+                .unwrap_or(true);
+            if !orphan {
+                continue;
+            }
+            // A fresh incident may belong to a rule the key snapshot
+            // predates; leave it for a later tick.
+            if incident.last_occurrence_ms.unwrap_or(0) > cutoff {
+                continue;
+            }
+            if incident.status == chv_controlplane_store::INCIDENT_STATUS_FIRING {
+                let notify = self.retire_notify_events(incident, now_ms);
+                self.alerts
+                    .resolve_incident(
+                        &incident.alert_id,
+                        now_ms,
+                        ORPHAN_SWEEP_REASON,
+                        incident.last_observed.as_deref(),
+                        &notify,
+                    )
+                    .await?;
+            } else {
+                self.alerts.clear_pending(&incident.alert_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolved-notification events for a swept incident, one per
+    /// configured channel — the same envelope shape the BFF's
+    /// rule-retire path renders. Silence (an overlay) suppresses
+    /// delivery, never the transition.
+    fn retire_notify_events(
+        &self,
+        incident: &chv_controlplane_store::IncidentRow,
+        now_ms: i64,
+    ) -> Vec<chv_controlplane_store::NotificationEventInput> {
+        if !self.channels.any() {
+            return Vec::new();
+        }
+        if incident
+            .silenced_until_ms
+            .is_some_and(|until| until > now_ms)
+        {
+            return Vec::new();
+        }
+        let target_kind = incident.resource_kind.clone().unwrap_or_default();
+        let target_id = incident.resource_id.clone().unwrap_or_default();
+        let mut summary = format!("{} — {}", incident.message, ORPHAN_SWEEP_REASON);
+        // The outbox validation caps summaries at 512 bytes; cut at
+        // a UTF-8 char boundary with headroom.
+        if summary.len() > 480 {
+            let mut end = 480;
+            while !summary.is_char_boundary(end) {
+                end -= 1;
+            }
+            summary.truncate(end);
+        }
+        let resource_url = format!("/{}s/{}", target_kind, target_id);
+        let channels = [
+            (
+                self.channels.webhook,
+                chv_controlplane_store::CHANNEL_WEBHOOK,
+            ),
+            (self.channels.slack, chv_controlplane_store::CHANNEL_SLACK),
+        ];
+        channels
+            .iter()
+            .filter(|(configured, _)| *configured)
+            .map(|(_, channel)| {
+                let event_id = uuid::Uuid::new_v4().to_string();
+                let payload = chv_monitoring_core::notifications::render_envelope(
+                    &event_id,
+                    &incident.alert_id,
+                    chv_controlplane_store::EVENT_TYPE_RESOLVED,
+                    &incident.severity,
+                    &target_kind,
+                    &target_id,
+                    &summary,
+                    now_ms,
+                    &resource_url,
+                );
+                chv_controlplane_store::NotificationEventInput {
+                    event_id,
+                    alert_id: incident.alert_id.clone(),
+                    incident_key: incident.dedup_key.clone().unwrap_or_default(),
+                    event_type: chv_controlplane_store::EVENT_TYPE_RESOLVED.to_string(),
+                    severity: incident.severity.clone(),
+                    target_kind: target_kind.clone(),
+                    target_id: target_id.clone(),
+                    summary: summary.clone(),
+                    occurred_at_ms: now_ms,
+                    payload,
+                    channel: channel.to_string(),
+                }
+            })
+            .collect()
     }
 
     async fn evaluate_rule(
@@ -2838,6 +2993,106 @@ mod worker_tests {
             active_incident(&f, &dedup_key(&rule)).await.is_none(),
             "the old dedup key's stale snapshot must not open"
         );
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_retires_incidents_of_deleted_rules() {
+        // The BFF retires a deleted rule's incidents, but a crash in
+        // the window between the delete commit and the retirement
+        // would leave a permanently-firing ghost. The evaluator's
+        // backstop sweep retires any active incident whose dedup key
+        // no current rule produces — after a grace window so a rule
+        // created mid-sweep is never mistaken for an orphan.
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+        f.seed_cpu(BASE_MS as u64 - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("firing");
+        assert_eq!(incident.status, "firing");
+
+        // The crash simulation: the rule is deleted with no retire.
+        f.rules
+            .delete(&rule.rule_id, rule.revision)
+            .await
+            .expect("delete");
+
+        // Within the grace window the sweep must not touch it: a
+        // fresh incident may belong to a rule the sweep's key
+        // snapshot predates.
+        f.worker.evaluation_pass(BASE_MS + 30_000).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("still firing within grace");
+        assert_eq!(incident.status, "firing");
+
+        // After the grace window the sweep retires it: resolved with
+        // the honest reason and its resolved notification.
+        let now = BASE_MS + 120_000;
+        f.worker.evaluation_pass(now).await;
+        let resolved = f
+            .alerts
+            .get_incident(&incident.alert_id)
+            .await
+            .expect("row");
+        assert_eq!(resolved.status, "resolved");
+        let transitions = f
+            .alerts
+            .list_transitions(&incident.alert_id, 10)
+            .await
+            .expect("transitions");
+        let last = transitions.last().expect("transition");
+        assert_eq!(last.to_state, "resolved");
+        assert_eq!(last.reason, "rule removed or retargeted (backstop sweep)");
+        assert_eq!(outbox_count(&f, "resolved").await, 1);
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_never_retires_a_disabled_rules_incidents() {
+        // Disabling a rule holds its incidents (they resume when it
+        // is re-enabled) — the sweep must treat disabled rules' keys
+        // as live.
+        let f = fixture(EvaluatorChannels {
+            webhook: false,
+            slack: false,
+        })
+        .await;
+        let rule = f.rules.create(&cpu_rule(0, 60, 0.9)).await.expect("rule");
+        f.seed_cpu(BASE_MS as u64 - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        assert!(
+            active_incident(&f, &dedup_key(&rule)).await.is_some(),
+            "firing"
+        );
+
+        let disabled = f
+            .rules
+            .update(&RuleUpdateInput {
+                rule_id: rule.rule_id.clone(),
+                expected_revision: rule.revision,
+                name: rule.name.clone(),
+                enabled: Some(false),
+                spec: rule.spec.clone(),
+                severity: rule.severity.clone(),
+                for_seconds: rule.for_seconds,
+                recovery_seconds: rule.recovery_seconds,
+                missing_data: rule.missing_data,
+                updated_by: "test".into(),
+                now_ms: BASE_MS,
+            })
+            .await
+            .expect("disable");
+
+        f.worker.evaluation_pass(BASE_MS + 120_000).await;
+        let incident = active_incident(&f, &dedup_key(&disabled))
+            .await
+            .expect("a disabled rule's incident holds");
+        assert_eq!(incident.status, "firing");
     }
 
     #[tokio::test]
