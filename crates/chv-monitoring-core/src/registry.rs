@@ -17,11 +17,12 @@
 //! - Guest-agent and check metrics appear here so the registry is the
 //!   complete v1 allowlist. The G3 baseline guest collectors produce
 //!   `vm.memory.guest_available_bytes`, `vm.guest.cpu.utilization_ratio`,
-//!   `vm.guest.load1` and `vm.guest.uptime_seconds`; the fs/service/
-//!   process/check families remain without a producer until G4.
+//!   `vm.guest.load1` and `vm.guest.uptime_seconds`; the G4 collectors
+//!   (prompt 04) produce the fs/service/process/net/check families.
 //! - `check.status` is a typed state (`ok`/`warning`/`critical`/`unknown`),
-//!   never a float; its value modelling arrives with the guest-agent
-//!   implementation. No PR-1 producer exists.
+//!   never a float. On the wire the sample value is the integer state
+//!   code: `0` = `ok`, `1` = `warning`, `2` = `critical`, `3` =
+//!   `unknown`. The manager rejects any other encoding.
 
 use crate::model::{MetricKind, Source, Unit};
 
@@ -240,6 +241,20 @@ pub static REGISTRY: &[MetricDef] = &[
         dimensions: &["mount_id"],
     },
     MetricDef {
+        id: "vm.guest.fs.inodes_utilization_ratio",
+        kind: Gauge,
+        unit: Ratio,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["mount_id"],
+    },
+    MetricDef {
+        id: "vm.guest.fs.read_only",
+        kind: State,
+        unit: Boolean,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["mount_id"],
+    },
+    MetricDef {
         id: "vm.guest.service.up",
         kind: State,
         unit: Boolean,
@@ -250,6 +265,20 @@ pub static REGISTRY: &[MetricDef] = &[
         id: "vm.guest.process.count",
         kind: Gauge,
         unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["process_selector"],
+    },
+    MetricDef {
+        id: "vm.guest.process.cpu_utilization_ratio",
+        kind: Gauge,
+        unit: Ratio,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["process_selector"],
+    },
+    MetricDef {
+        id: "vm.guest.process.rss_bytes",
+        kind: Gauge,
+        unit: Bytes,
         allowed_sources: GUEST_ONLY,
         dimensions: &["process_selector"],
     },
@@ -282,6 +311,55 @@ pub static REGISTRY: &[MetricDef] = &[
         dimensions: &["interface_id"],
     },
     MetricDef {
+        id: "vm.guest.net.tx_errors_total",
+        kind: Counter,
+        unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.rx_drops_total",
+        kind: Counter,
+        unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.tx_drops_total",
+        kind: Counter,
+        unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.rx_bytes_total",
+        kind: Counter,
+        unit: Bytes,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.tx_bytes_total",
+        kind: Counter,
+        unit: Bytes,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.link_up",
+        kind: State,
+        unit: Boolean,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &["interface_id"],
+    },
+    MetricDef {
+        id: "vm.guest.net.tcp_established",
+        kind: Gauge,
+        unit: Count,
+        allowed_sources: GUEST_ONLY,
+        dimensions: &[],
+    },
+    MetricDef {
         id: "check.duration_seconds",
         kind: Gauge,
         unit: Seconds,
@@ -309,6 +387,26 @@ pub static REGISTRY: &[MetricDef] = &[
 /// must be rejected everywhere (sampling, ingestion, query).
 pub fn lookup(metric_id: &str) -> Option<&'static MetricDef> {
     REGISTRY.iter().find(|d| d.id == metric_id)
+}
+
+/// Metric-specific server-side staleness threshold override
+/// (query/alerts contract v1: "`stale` is decided server-side from
+/// metric-specific thresholds"). Metrics on the guest agent's
+/// 60-second collection cadence (agent spec collector profiles
+/// `filesystems`, `services`, `http_tcp_checks`, `plugins` — i.e. the
+/// `vm.guest.fs.*`, `vm.guest.service.*` and `check.*` families) use
+/// 3× that cadence, so one missed collection does not read as stale.
+/// `None` means no override: the caller applies its target-kind
+/// default.
+pub fn stale_after_ms(metric_id: &str) -> Option<u64> {
+    if metric_id.starts_with("vm.guest.fs.")
+        || metric_id.starts_with("vm.guest.service.")
+        || metric_id.starts_with("check.")
+    {
+        Some(180_000)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +447,115 @@ mod tests {
             assert_eq!(def.kind, Gauge, "{id}");
             assert_eq!(def.allowed_sources, GUEST_ONLY, "{id}");
             assert!(def.dimensions.is_empty(), "{id}");
+        }
+    }
+
+    #[test]
+    fn g4_collector_families_resolve() {
+        // The prompt-04 collectors (filesystems, network, processes,
+        // services, checks) emit these families; each carries exactly
+        // one dimension from the closed set and only guest_agent may
+        // produce them.
+        let cases: &[(&str, MetricKind, Unit, &[&str])] = &[
+            ("vm.guest.fs.available_bytes", Gauge, Bytes, &["mount_id"]),
+            ("vm.guest.fs.total_bytes", Gauge, Bytes, &["mount_id"]),
+            (
+                "vm.guest.fs.inodes_utilization_ratio",
+                Gauge,
+                Ratio,
+                &["mount_id"],
+            ),
+            ("vm.guest.fs.read_only", State, Boolean, &["mount_id"]),
+            ("vm.guest.service.up", State, Boolean, &["service_key"]),
+            (
+                "vm.guest.process.count",
+                Gauge,
+                Count,
+                &["process_selector"],
+            ),
+            (
+                "vm.guest.process.cpu_utilization_ratio",
+                Gauge,
+                Ratio,
+                &["process_selector"],
+            ),
+            (
+                "vm.guest.process.rss_bytes",
+                Gauge,
+                Bytes,
+                &["process_selector"],
+            ),
+            (
+                "vm.guest.net.rx_errors_total",
+                Counter,
+                Count,
+                &["interface_id"],
+            ),
+            (
+                "vm.guest.net.tx_errors_total",
+                Counter,
+                Count,
+                &["interface_id"],
+            ),
+            (
+                "vm.guest.net.rx_drops_total",
+                Counter,
+                Count,
+                &["interface_id"],
+            ),
+            (
+                "vm.guest.net.tx_drops_total",
+                Counter,
+                Count,
+                &["interface_id"],
+            ),
+            (
+                "vm.guest.net.rx_bytes_total",
+                Counter,
+                Bytes,
+                &["interface_id"],
+            ),
+            (
+                "vm.guest.net.tx_bytes_total",
+                Counter,
+                Bytes,
+                &["interface_id"],
+            ),
+            ("vm.guest.net.link_up", State, Boolean, &["interface_id"]),
+            ("vm.guest.net.tcp_established", Gauge, Count, &[]),
+            ("check.duration_seconds", Gauge, Seconds, &["check_id"]),
+            ("check.status", State, Count, &["check_id"]),
+        ];
+        for (id, kind, unit, dims) in cases {
+            let def = lookup(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(def.kind, *kind, "{id}");
+            assert_eq!(def.unit, *unit, "{id}");
+            assert_eq!(def.allowed_sources, GUEST_ONLY, "{id}");
+            assert_eq!(def.dimensions, *dims, "{id}");
+        }
+    }
+
+    #[test]
+    fn staleness_overrides_cover_sixty_second_cadence_families() {
+        // 60-second collection cadence families get a 180-second
+        // staleness window; everything else uses the caller's
+        // target-kind default.
+        for id in [
+            "vm.guest.fs.available_bytes",
+            "vm.guest.fs.read_only",
+            "vm.guest.service.up",
+            "check.status",
+            "check.duration_seconds",
+        ] {
+            assert_eq!(stale_after_ms(id), Some(180_000), "{id}");
+        }
+        for id in [
+            "vm.guest.cpu.utilization_ratio",
+            "vm.guest.net.rx_bytes_total",
+            "vm.guest.process.count",
+            "node.cpu.load1",
+        ] {
+            assert_eq!(stale_after_ms(id), None, "{id}");
         }
     }
 

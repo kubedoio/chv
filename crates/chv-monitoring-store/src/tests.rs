@@ -461,6 +461,72 @@ async fn current_reports_latest_with_staleness() {
 }
 
 #[tokio::test]
+async fn current_applies_metric_specific_staleness_thresholds() {
+    let (_dir, s) = store().await;
+    // A 60-second cadence family (vm.guest.fs.*) and a 15-second
+    // family (vm.guest.cpu.utilization_ratio), both observed 100
+    // seconds ago: the fs sample stays fresh under its 180-second
+    // metric-specific window while the 15-second family is stale
+    // under the default non-node threshold.
+    let fs = SampleBuilder::new(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.guest.fs.available_bytes",
+        Source::GuestAgent,
+        T0,
+    )
+    .unwrap()
+    .dimension("mount_id", "ext4:/")
+    .unwrap()
+    .value(SampleValue::Integer(1_000))
+    .build()
+    .unwrap();
+    let cpu = SampleBuilder::new(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.guest.cpu.utilization_ratio",
+        Source::GuestAgent,
+        T0,
+    )
+    .unwrap()
+    .value(SampleValue::Float(0.5))
+    .build()
+    .unwrap();
+    s.ingest_node_batch("vm-1", &batch("boot-1", 0, vec![fs, cpu]), T0)
+        .await
+        .unwrap();
+
+    let current = s
+        .query_current(&TargetKind::Vm, "vm-1", &[], None, T0 + 100_000)
+        .await
+        .unwrap();
+    let fs = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.fs.available_bytes")
+        .unwrap();
+    assert!(!fs.stale, "100s-old fs sample is fresh (180s window)");
+    let cpu = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.cpu.utilization_ratio")
+        .unwrap();
+    assert!(
+        cpu.stale,
+        "100s-old 15s-family sample is stale (90s default)"
+    );
+
+    // The fs window is finite too.
+    let current = s
+        .query_current(&TargetKind::Vm, "vm-1", &[], None, T0 + 200_000)
+        .await
+        .unwrap();
+    let fs = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.fs.available_bytes")
+        .unwrap();
+    assert!(fs.stale, "200s-old fs sample is stale");
+}
+
+#[tokio::test]
 async fn current_survives_retention_eviction_as_stale() {
     let (_dir, s) = store().await;
     s.ingest_node_batch("node-1", &batch("b", 0, vec![node_gauge(T0, 0.5)]), T0)

@@ -89,7 +89,7 @@ Multi-source metrics (for example `vm.cpu.cores_used` from `vmm` and `vm_cgroup`
 
 Defaults: at most 8 metric IDs, one target for detailed history, 1000 points/series hard ceiling, 30 days detailed query and 180 days aggregated view; configured pagination for fleet lists, and no more than 100 targets in one overview. The server selects or validates resolution based on requested period, retention tier and point cap. It rejects an excessive range with `400 invalid_range` or `413 query_too_large`. Time inputs are integer epoch milliseconds. Client-clock time is not trusted. User permissions are checked **before** reading the target or presenting metric existence.
 
-`latest` includes `observed_at_ms`, `received_at_ms`, `source`, `quality`, `age_seconds`, `unit`, and `value` only when valid. `stale` is decided server-side from metric-specific thresholds and boot/incarnation state.
+`latest` includes `observed_at_ms`, `received_at_ms`, `source`, `quality`, `age_seconds`, `unit`, and `value` only when valid. `stale` is decided server-side from metric-specific thresholds and boot/incarnation state. Defaults: target-kind thresholds are 60 s (node) and 90 s (other targets); metric families on the guest agent's 60-second collection cadence (`vm.guest.fs.*`, `vm.guest.service.*`, `check.*`) use a 180 s window so a single missed collection does not read as stale.
 
 ## Alert rule API
 
