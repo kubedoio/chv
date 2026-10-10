@@ -21,7 +21,7 @@ This contract defines typed measurements from `chv-agent`, provider daemons, and
 | `kind` | enum | `gauge`, `counter`, `state` |
 | `unit` | enum | `ratio`, `cores`, `bytes`, `bytes_per_second`, `seconds`, `count`, `operations`, `celsius`, `boolean` |
 | `observed_at_ms` | int64 | Source observation time in Unix milliseconds |
-| `value` | typed value | Finite f64 for ratios/gauges; signed/unsigned integer for exact counters |
+| `value` | typed value | Finite f64 for ratios/gauges; unsigned integer for exact counters and byte-precise gauges (filesystem and memory sizes stay exact — the store keeps integer and real columns typed, never a float grab-bag) |
 | `quality` | enum | `valid`, `insufficient_samples`, `unsupported`, `unavailable`, `invalid`, `stale` |
 | `dimensions` | map | Bounded name/value pairs from registered dimensions |
 | `boot_id` | string | Required for counter series from a restartable source |
