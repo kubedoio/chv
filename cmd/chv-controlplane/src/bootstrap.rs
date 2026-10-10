@@ -379,11 +379,159 @@ pub async fn build_service(
 
     let convergence_metrics = chv_controlplane_service::convergence_metrics::new_shared();
 
-    let router = chv_controlplane_service::api::router::admin_router(
+    // Guest monitoring agent ingestion (ADR-026, campaign #602 G3):
+    // an explicit deployment decision, never a side effect. Enabling
+    // it requires `[http_tls]` — the guest route must never ride a
+    // plain-HTTP listener exposed to the VM network — and the
+    // dedicated agent CA. Anything missing is a boot error, not a
+    // silent degradation the operator discovers mid-enrollment.
+    let guest_ingest = &config.monitoring.guest_ingestion;
+    if guest_ingest.enabled {
+        if let Err(reason) = guest_ingest.validate() {
+            return Err(ControlPlaneServiceError::Internal(reason));
+        }
+        if config.http_tls.is_none() {
+            return Err(ControlPlaneServiceError::Internal(
+                "monitoring.guest_ingestion.enabled requires [http_tls]: guest ingestion must \
+                 be served over TLS, never the plain-HTTP listener"
+                    .to_string(),
+            ));
+        }
+        if guest_ingest.agent_ca_cert_path.is_none() || guest_ingest.agent_ca_key_path.is_none() {
+            return Err(ControlPlaneServiceError::Internal(
+                "monitoring.guest_ingestion.enabled requires agent_ca_cert_path and \
+                 agent_ca_key_path (a CA dedicated to guest monitoring agents)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let guest_agent_service = if guest_ingest.is_ready(config.http_tls.is_some()) {
+        let ca_cert_pem = tokio::fs::read_to_string(
+            guest_ingest
+                .agent_ca_cert_path
+                .as_ref()
+                .expect("checked above"),
+        )
+        .await
+        .map_err(|e| {
+            ControlPlaneServiceError::Internal(format!(
+                "failed to read guest agent CA certificate: {e}"
+            ))
+        })?;
+        let ca_key_pem = tokio::fs::read_to_string(
+            guest_ingest
+                .agent_ca_key_path
+                .as_ref()
+                .expect("checked above"),
+        )
+        .await
+        .map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to read guest agent CA key: {e}"))
+        })?;
+        let issuer = Arc::new(
+            chv_controlplane_service::monitoring_agent::AgentCertificateIssuer::new(
+                &ca_cert_pem,
+                &ca_key_pem,
+            )?,
+        );
+        let limits = chv_controlplane_service::monitoring_agent::GuestIngestionLimits {
+            claim_ttl_ms: guest_ingest.claim_ttl_seconds as i64 * 1000,
+            enroll_attempts_per_minute: guest_ingest.enroll_attempts_per_minute,
+            agent_batches_per_minute: guest_ingest.agent_batches_per_minute,
+            rotation_grace_ms: guest_ingest.rotation_grace_minutes as i64 * 60_000,
+            credential_ttl_ms: guest_ingest.credential_ttl_days as i64 * 24 * 3600 * 1000,
+            renewal_window_ms: guest_ingest.renewal_window_days as i64 * 24 * 3600 * 1000,
+        };
+        let agent_repo = chv_controlplane_store::MonitoringAgentRepository::new(pool.clone());
+        Some(Arc::new(
+            chv_controlplane_service::monitoring_agent::MonitoringAgentService::new(
+                agent_repo,
+                issuer,
+                monitoring_store.clone(),
+                monitoring_health.clone(),
+                event_repo.clone(),
+                limits,
+                guest_ingest.public_base_url.clone(),
+            ),
+        ))
+    } else {
+        None
+    };
+
+    let (agent_browser, agent_ingest_router) = match &guest_agent_service {
+        Some(service) => {
+            let admin_state = Arc::new(
+                chv_controlplane_service::api::agent_admin::AgentAdminState {
+                    service: service.clone(),
+                    offline_after_ms: guest_ingest.offline_after_seconds as i64 * 1000,
+                    enrollment_grace_ms: guest_ingest.enrollment_grace_seconds as i64 * 1000,
+                    renewal_window_ms: guest_ingest.renewal_window_days as i64 * 24 * 3600 * 1000,
+                },
+            );
+            let viewer = chv_controlplane_service::api::agent_admin::agent_viewer_router(
+                admin_state.clone(),
+            );
+            let operator =
+                chv_controlplane_service::api::agent_admin::agent_operator_router(admin_state);
+            let ingest = chv_controlplane_service::api::agent_routes::agent_router(service.clone());
+            (Some((viewer, operator)), Some(ingest))
+        }
+        None => {
+            // Guest ingestion not configured: the browser routes still
+            // exist and answer the typed `guest_ingestion_disabled`
+            // error (honest "off", never a 404); the agent-auth
+            // ingest routes stay unmounted entirely — nothing for a
+            // guest to talk to.
+            let (viewer, operator) =
+                chv_controlplane_service::api::agent_admin::agent_admin_disabled_routers();
+            (Some((viewer, operator)), None)
+        }
+    };
+
+    let router = chv_controlplane_service::api::router::admin_router_with_guest_agents(
         bff_state,
         convergence_metrics.clone(),
         config.webui.clone(),
+        agent_browser,
+        agent_ingest_router,
     );
+
+    // HTTPS on the HTTP listener when [http_tls] is configured. The
+    // client CA for optional agent-certificate verification is the
+    // guest agent CA (only present when guest ingestion is enabled);
+    // without it this is an ordinary TLS listener for browser traffic.
+    let https_config = match &config.http_tls {
+        Some(tls_conf) => {
+            let server_cert_pem = tokio::fs::read_to_string(&tls_conf.server_cert_path)
+                .await
+                .map_err(|e| {
+                    ControlPlaneServiceError::Internal(format!(
+                        "failed to read http_tls server certificate: {e}"
+                    ))
+                })?;
+            let server_key_pem = tokio::fs::read_to_string(&tls_conf.server_key_path)
+                .await
+                .map_err(|e| {
+                    ControlPlaneServiceError::Internal(format!(
+                        "failed to read http_tls server key: {e}"
+                    ))
+                })?;
+            let client_ca_pem = guest_agent_service
+                .as_ref()
+                .map(|s| s.issuer().ca_pem().to_string());
+            Some(
+                chv_controlplane_service::api::tls::build_https_config(
+                    &server_cert_pem,
+                    &server_key_pem,
+                    client_ca_pem.as_deref(),
+                )
+                .map_err(ControlPlaneServiceError::Internal)?,
+            )
+        }
+        None => None,
+    };
+
     let http_listener = tokio::net::TcpListener::bind(config.http_bind)
         .await
         .map_err(|e| {
@@ -391,14 +539,27 @@ pub async fn build_service(
         })?;
     let (http_shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(());
     let http_join_handle = tokio::spawn(async move {
-        axum::serve(
-            http_listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = http_shutdown_rx.changed().await;
-        })
-        .await
+        match https_config {
+            Some(tls) => {
+                chv_controlplane_service::api::tls::serve_tls(
+                    http_listener,
+                    tls,
+                    router,
+                    http_shutdown_rx,
+                )
+                .await
+            }
+            None => {
+                axum::serve(
+                    http_listener,
+                    router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(async move {
+                    let _ = http_shutdown_rx.changed().await;
+                })
+                .await
+            }
+        }
     });
 
     let cert_issuer = if let (Some(ca_cert_path), Some(ca_key_path)) =

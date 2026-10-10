@@ -27,7 +27,9 @@ mod reconcile;
 mod server;
 mod telemetry;
 
+pub mod monitoring_agent;
 pub mod monitoring_ingest;
+pub mod monitoring_validate;
 
 pub use monitoring_ingest::{
     run_monitoring_maintenance, MonitoringIngestImplementation, MonitoringIngestService,
@@ -68,6 +70,9 @@ mod tests;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod monitoring_agent_tests;
 
 #[cfg(test)]
 mod monitoring_ingest_tests;

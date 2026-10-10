@@ -55,22 +55,27 @@ for img in $IMAGES; do
             source /smoke-common.sh
 
             info 'Installing packages...'
-            # Install all CHV packages at once; rpm resolves inter-package dependencies
-            rpm -ivh /packages/chv-controlplane-*.rpm /packages/chv-node-*.rpm /packages/chvctl-*.rpm
+            # Install all CHV packages at once; rpm resolves inter-package dependencies.
+            # The guest monitoring agent installs standalone (no
+            # host-package dependency) — installing it here proves that.
+            rpm -ivh /packages/chv-controlplane-*.rpm /packages/chv-node-*.rpm /packages/chvctl-*.rpm /packages/chv-monitor-agent-*.rpm
 
             verify_install_state rpm
             verify_version_output
+            verify_guest_agent_install_state
 
             info 'Removing packages...'
             # Remove in reverse dependency order
-            rpm -ev chv-node chv-controlplane chvctl || true
+            rpm -ev chv-monitor-agent chv-node chv-controlplane chvctl || true
 
             verify_remove_state
+            verify_guest_agent_removed_state
 
             info 'Reinstalling packages...'
-            rpm -ivh /packages/chv-controlplane-*.rpm /packages/chv-node-*.rpm /packages/chvctl-*.rpm
+            rpm -ivh /packages/chv-controlplane-*.rpm /packages/chv-node-*.rpm /packages/chvctl-*.rpm /packages/chv-monitor-agent-*.rpm
 
             verify_reinstall_state
+            verify_guest_agent_install_state
             smoke_summary
         "; then
         pass "Smoke test passed for ${img}"

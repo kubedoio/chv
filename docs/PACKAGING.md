@@ -9,6 +9,7 @@ CHV is distributed as three packages to allow flexible deployment:
 | `chvctl` | CLI tool for operators | `chvctl` |
 | `chv-controlplane` | Control plane (API, Web UI, scheduler) | `chv-controlplane` |
 | `chv-node` | Node services (agent, storage, networking) | `chv-agent`, `chv-stord`, `chv-nwd` |
+| `chv-monitor-agent` | Optional in-guest monitoring agent (ADR-026) | `chv-monitor-agent` |
 
 This split lets you run the control plane on dedicated management hosts while
 scaling nodes independently.
@@ -16,6 +17,11 @@ scaling nodes independently.
 `chvctl` is a separate package; it is not part of `chv-node`. The `chv-node`
 package depends on `chv-controlplane`. On `.deb` it also depends on
 `wireguard-tools`; on `.rpm` that dependency is a recommendation.
+
+`chv-monitor-agent` is a **guest** package: it installs inside VMs, shares
+nothing with the three host packages, and is never pulled in by them
+(ADR-026 — installing the agent is an explicit per-VM operator decision,
+and a VM without it is fully usable).
 
 ## File Layout
 
@@ -75,6 +81,26 @@ package depends on `chv-controlplane`. On `.deb` it also depends on
 
 The postinstall script also creates `/var/lib/chv`, `/var/log/chv`, and
 `/run/chv` with the ownership described below.
+
+### `chv-monitor-agent`
+
+```
+/usr/bin/chv-monitor-agent
+/lib/systemd/system/chv-monitor-agent.service
+/usr/lib/tmpfiles.d/chv-monitor-agent.conf
+/usr/share/chv-monitor-agent/README.md
+/etc/chv-monitor/agent.toml          (config|noreplace)
+/var/lib/chv-monitor/                (0700, created by postinstall)
+/var/lib/chv-monitor/spool/          (0700)
+```
+
+The service runs as a dedicated `chv-monitor` system user (no capabilities,
+`ProtectSystem=strict`, `ReadWritePaths=/var/lib/chv-monitor` only) and is
+**disabled by default**: it needs `server_url` + `manager_ca_path` in
+`/etc/chv-monitor/agent.toml` and a one-time claim at
+`/var/lib/chv-monitor/claim` (owner `chv-monitor`, 0600) before `systemctl enable --now
+chv-monitor-agent` does anything. See `docs/examples/monitor-agent.toml`
+and ADR-026 for the enrollment flow and the security contract.
 
 ## Post-install behavior
 

@@ -55,6 +55,28 @@ const MONITORING_OVERVIEW = JSON.stringify({
 	targets: [],
 	generated_at_ms: 0
 });
+// Guest monitoring agent administration (ADR-026 G3): an empty but
+// honest inventory — "no agents enrolled", never a shape the UI would
+// misread as data. The operator actions answer with their contract
+// shapes so flows can be walked end-to-end.
+const MONITORING_AGENTS = JSON.stringify({
+	schema_version: 1,
+	agents: [],
+	generated_at_ms: 0,
+	truncated: false
+});
+const MONITORING_AGENT_CLAIM = JSON.stringify({
+	schema_version: 1,
+	vm_id: 'vm-1',
+	claim_token: 'chvm_mock_claim_token_not_a_real_secret',
+	expires_at_ms: Date.now() + 600_000,
+	server_url: 'https://manager.example:8443',
+	ca_fingerprint: '00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff'
+});
+const MONITORING_AGENT_ACTION = JSON.stringify({
+	schema_version: 1,
+	agent_id: 'agent-1'
+});
 
 const server = http.createServer((req, res) => {
 	res.setHeader('Content-Type', 'application/json');
@@ -73,6 +95,16 @@ const server = http.createServer((req, res) => {
 		res.end(MONITORING_CURRENT);
 	} else if (path === '/v1/monitoring/overview') {
 		res.end(MONITORING_OVERVIEW);
+	} else if (path === '/v1/monitoring/agents') {
+		res.end(MONITORING_AGENTS);
+	} else if (path === '/v1/monitoring/agents/claim') {
+		res.end(MONITORING_AGENT_CLAIM);
+	} else if (
+		path === '/v1/monitoring/agents/revoke' ||
+		path === '/v1/monitoring/agents/rotate' ||
+		path === '/v1/monitoring/agents/reset'
+	) {
+		res.end(MONITORING_AGENT_ACTION);
 	} else {
 		res.end(EMPTY_LIST);
 	}

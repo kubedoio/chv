@@ -115,6 +115,7 @@ CHV is distributed as `.deb` and `.rpm` packages. Choose the guide for your dist
 | Debian, Ubuntu | [`docs/install/debian-ubuntu.md`](./docs/install/debian-ubuntu.md) |
 | RHEL, Rocky Linux, AlmaLinux | [`docs/install/rhel-rocky-alma.md`](./docs/install/rhel-rocky-alma.md) |
 | Other / Tarball | [`docs/install/from-github-release.md`](./docs/install/from-github-release.md) |
+| In-guest monitoring agent (optional) | [`docs/install/guest-monitor-agent.md`](./docs/install/guest-monitor-agent.md) |
 
 Quick install (Debian/Ubuntu):
 

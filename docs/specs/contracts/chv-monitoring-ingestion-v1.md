@@ -57,6 +57,8 @@ The manager's default deployment binds loopback (`127.0.0.1`) and TLS is termina
 
 This JSON is illustrative v1 guest wire format. `install_id` identifies the installing image (cloned-image detection per the [security contract](chv-monitor-agent-security-plugins-v1.md)); it is authenticated metadata, not part of the deduplication key. The normative protobuf implementation MUST preserve type and optional-field semantics, especially integer counter precision. For values above `2^53 - 1`, guest JSON MUST encode exact integers as decimal strings.
 
+The guest envelope may carry an optional `os` object with read-only guest OS identity metadata on a privacy allowlist: `name`, `version`, `kernel_release` (each bounded to 64 bytes, UTF-8, sanitized). It is registry/inventory metadata — never a metric, never an authorization input, and never extended with hostname-adjacent, user, or workload fields. The manager updates its agent record's OS fields from the envelope; absent fields leave the record unchanged.
+
 ## Limits (initial defaults, validated before release)
 
 - Max compressed/uncompressed request: 256 KiB uncompressed; compressed uploads disabled until decompression bombs are tested.

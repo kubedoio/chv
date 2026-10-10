@@ -1,3 +1,5 @@
+pub mod agent_admin;
+pub mod agent_routes;
 pub mod auth;
 pub mod bootstrap;
 pub mod health;
@@ -6,3 +8,4 @@ pub mod nodes;
 pub mod operations;
 pub mod router;
 pub mod stub;
+pub mod tls;

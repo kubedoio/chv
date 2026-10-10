@@ -1,0 +1,75 @@
+# chv-monitor-agent — optional in-guest monitoring agent (ADR-026)
+#
+# This file is the reference configuration for the guest-side agent
+# (`chv-monitor-agent`, package chv-monitor-agent). The agent is
+# OPTIONAL: a VM without it is fully usable; installing it adds
+# read-only guest telemetry (CPU, memory, load, uptime, OS identity)
+# and nothing else. It can never mutate VM state, run commands, or
+# open inbound ports — it makes outbound HTTPS calls to the manager
+# exactly as configured below.
+#
+# The agent refuses to start until server_url and manager_ca_path are
+# set: it never guesses a manager and never speaks monitoring over
+# plain HTTP.
+
+# Base URL of the CHV control plane. Always https:// — the agent
+# validates the manager's TLS certificate against manager_ca_path
+# before presenting any credential.
+# server_url = "https://manager.example.internal:8443"
+
+# PEM trust anchor for the manager's TLS server certificate: either
+# the server certificate itself or the CA that signed it (the
+# `[http_tls]` server material on the manager side). Copy it from the
+# manager host; the fingerprint shown at claim issuance can be used to
+# verify the copy.
+# manager_ca_path = "/etc/chv-monitor/manager-ca.pem"
+
+# One-time enrollment claim (single use, TTL-limited). Issued by an
+# operator in the WebUI (VM detail → metrics tab → Guest monitoring
+# agent → Enroll agent) or via chvctl. As root in the guest:
+#
+#   install -o chv-monitor -g chv-monitor -m 0600 <claim-file> \
+#       /var/lib/chv-monitor/claim
+#
+# The claim lives in the state dir, not /etc: the shipped unit mounts
+# /etc read-only, and the agent deletes the claim file after
+# successful enrollment (server-side the token is single-use either
+# way). The agent then stores its client credential at
+# credential_path.
+claim_path = "/var/lib/chv-monitor/claim"
+
+# The client credential (certificate + private key, 0600, owner
+# chv-monitor). Written by the agent after enrollment/rotation; never
+# hand-edit. Deleting it reverts the agent to unenrolled (a fresh
+# claim is then required).
+credential_path = "/var/lib/chv-monitor/credential.json"
+
+# Durable state: install identity, per-boot sequence counters, and
+# the batch spool. Deleting state_dir while keeping credential_path
+# re-randomizes the install identity — the manager flags that as an
+# identity conflict (cloned-image signal) and blocks reporting until
+# an operator resets it. Do not put this on ephemeral storage unless
+# that is exactly what you want.
+state_dir = "/var/lib/chv-monitor"
+spool_dir = "/var/lib/chv-monitor/spool"
+
+# Collection interval. 15 s is the component spec's `resources`
+# profile default; the manager's per-agent ceiling (one batch per
+# 5 s = agent_batches_per_minute = 12) still leaves headroom for
+# spool replay bursts (throttled, oldest-first on the wire).
+interval_seconds = 15
+
+# Outage budget: batches that cannot be delivered are spooled to disk
+# (bounded count, age-pruned) and replayed oldest-first on recovery.
+# Two bounds apply, the tighter one wins:
+#   - locally, max_spool_batches × interval (500 × 15 s ≈ 2 hours on
+#     disk);
+#   - server-side, the ingestion contract's staleness cap: the manager
+#     accepts samples up to 5 minutes old (live raw ingestion only),
+#     so batches older than that are honestly discarded as stale on
+#     replay — the effective recovery window for an outage is ~5
+#     minutes of data, never silently re-stamped or backdated.
+max_spool_batches = 500
+spool_max_age_seconds = 604800
+
+log_level = "info"

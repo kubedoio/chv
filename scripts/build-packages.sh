@@ -126,6 +126,10 @@ sed 's|/usr/local/bin/chv-stord|/usr/bin/chv-stord|g; s|/usr/local/bin/chv-nwd|/
 
 cp docs/examples/stord.toml "${TMPDIR}/configs/stord.toml"
 cp docs/examples/nwd.toml "${TMPDIR}/configs/nwd.toml"
+# Guest agent config (ADR-026): packaged paths already match the
+# example; it passes through unchanged. The example doubles as the
+# operator documentation for every field.
+cp docs/examples/monitor-agent.toml "${TMPDIR}/configs/monitor-agent.toml"
 
 # Determine version
 version_extra_args() {

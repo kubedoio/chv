@@ -13,6 +13,13 @@ The following binaries are built from this repository and included in packages:
 | `chv-agent` | `cmd/chv-agent` | Daemon | `chv-node` |
 | `chv-stord` | `cmd/chv-stord` | Daemon | `chv-node` |
 | `chv-nwd` | `cmd/chv-nwd` | Daemon | `chv-node` |
+| `chv-monitor-agent` | `cmd/chv-monitor-agent` | Guest daemon | `chv-monitor-agent` |
+
+The `chv-monitor-agent` package is a **guest** package (ADR-026): it
+installs inside VMs, never on CHV hosts, and has no dependency on (and
+is never pulled in by) the three host packages. Its contract lives in
+[`docs/PACKAGING.md`](../PACKAGING.md#chv-monitor-agent) and
+`docs/specs/adr/026-optional-monitor-agent-and-guest-identity.md`.
 
 ## Package Split
 

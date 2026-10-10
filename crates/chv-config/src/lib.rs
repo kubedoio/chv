@@ -767,6 +767,148 @@ pub struct MonitoringConfig {
     /// (rate cap; the agent's 15 s cadence needs 4).
     #[serde(default = "default_monitoring_batches_per_minute")]
     pub batches_per_minute: u32,
+    /// Optional guest agent ingestion (ADR-026, G3). Off by default:
+    /// enabling it is an explicit deployment decision that also
+    /// requires `[http_tls]` (the guest route MUST NOT be served on a
+    /// plain-HTTP listener exposed to the VM network).
+    #[serde(default)]
+    pub guest_ingestion: MonitoringGuestIngestConfig,
+}
+
+/// Guest monitoring agent ingestion configuration
+/// (`[monitoring.guest_ingestion]`). Every default follows the agent
+/// security / ingestion contracts; the ceilings there are not raised
+/// by configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MonitoringGuestIngestConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The base URL guest agents use to reach this manager, e.g.
+    /// `https://manager.example.org:8080`. Shown in enrollment
+    /// instructions; must be reachable from the VM network over TLS.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+    /// Dedicated CA for guest monitoring agent certificates. Signs the
+    /// agent CSRs at claim redemption and verifies client
+    /// certificates on the HTTPS listener. Use a CA separate from the
+    /// node-enrollment CA: agent certificates carry no node identity.
+    #[serde(default)]
+    pub agent_ca_cert_path: Option<PathBuf>,
+    #[serde(default)]
+    pub agent_ca_key_path: Option<PathBuf>,
+    /// Agent certificate lifetime (security contract: short-lived
+    /// credentials with rotation and revocation).
+    #[serde(default = "default_guest_credential_ttl_days")]
+    pub credential_ttl_days: u32,
+    /// The agent must rotate once its credential enters this window.
+    #[serde(default = "default_guest_renewal_window_days")]
+    pub renewal_window_days: u32,
+    /// How long the previous credential still authenticates after a
+    /// rotation (in-flight batch retry tolerance).
+    #[serde(default = "default_guest_rotation_grace_minutes")]
+    pub rotation_grace_minutes: u32,
+    /// Enrollment claim TTL (contract ceiling: 10 minutes).
+    #[serde(default = "default_guest_claim_ttl_seconds")]
+    pub claim_ttl_seconds: u32,
+    /// Claim redemption attempts accepted per source IP per minute.
+    #[serde(default = "default_guest_enroll_attempts_per_minute")]
+    pub enroll_attempts_per_minute: u32,
+    /// Guest batches accepted per agent per minute (the agent's 15 s
+    /// cadence needs 4).
+    #[serde(default = "default_guest_agent_batches_per_minute")]
+    pub agent_batches_per_minute: u32,
+    /// An agent is reported `offline` after this long without
+    /// authenticated contact.
+    #[serde(default = "default_guest_offline_after_seconds")]
+    pub offline_after_seconds: u32,
+    /// Fresh enrollment shows `active` for this long without a batch
+    /// before flipping to `offline`.
+    #[serde(default = "default_guest_enrollment_grace_seconds")]
+    pub enrollment_grace_seconds: u32,
+}
+
+impl Default for MonitoringGuestIngestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            public_base_url: None,
+            agent_ca_cert_path: None,
+            agent_ca_key_path: None,
+            credential_ttl_days: default_guest_credential_ttl_days(),
+            renewal_window_days: default_guest_renewal_window_days(),
+            rotation_grace_minutes: default_guest_rotation_grace_minutes(),
+            claim_ttl_seconds: default_guest_claim_ttl_seconds(),
+            enroll_attempts_per_minute: default_guest_enroll_attempts_per_minute(),
+            agent_batches_per_minute: default_guest_agent_batches_per_minute(),
+            offline_after_seconds: default_guest_offline_after_seconds(),
+            enrollment_grace_seconds: default_guest_enrollment_grace_seconds(),
+        }
+    }
+}
+
+impl MonitoringGuestIngestConfig {
+    /// Whether the manager can serve guest ingestion: enabled, TLS on
+    /// the HTTP listener, and the agent CA provisioned.
+    pub fn is_ready(&self, http_tls_configured: bool) -> bool {
+        self.enabled
+            && http_tls_configured
+            && self.agent_ca_cert_path.is_some()
+            && self.agent_ca_key_path.is_some()
+    }
+
+    /// Contract ceilings that configuration must not raise (the
+    /// security contract caps claim expiry at 10 minutes; the
+    /// ingestion contract caps guest send frequency at one batch per
+    /// 5 seconds). Violations are boot errors — loud, never silent.
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_CLAIM_TTL_SECONDS: u32 = 600;
+        const MAX_AGENT_BATCHES_PER_MINUTE: u32 = 12;
+        if self.claim_ttl_seconds == 0 || self.claim_ttl_seconds > MAX_CLAIM_TTL_SECONDS {
+            return Err(format!(
+                "monitoring.guest_ingestion.claim_ttl_seconds must be 1..={MAX_CLAIM_TTL_SECONDS} \
+                 (the security contract caps claim expiry at 10 minutes), got {}",
+                self.claim_ttl_seconds
+            ));
+        }
+        if self.agent_batches_per_minute == 0
+            || self.agent_batches_per_minute > MAX_AGENT_BATCHES_PER_MINUTE
+        {
+            return Err(format!(
+                "monitoring.guest_ingestion.agent_batches_per_minute must be \
+                 1..={MAX_AGENT_BATCHES_PER_MINUTE} (the ingestion contract caps guest send \
+                 frequency at one batch per 5 seconds), got {}",
+                self.agent_batches_per_minute
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_guest_credential_ttl_days() -> u32 {
+    30
+}
+fn default_guest_renewal_window_days() -> u32 {
+    7
+}
+fn default_guest_rotation_grace_minutes() -> u32 {
+    30
+}
+fn default_guest_claim_ttl_seconds() -> u32 {
+    600
+}
+fn default_guest_enroll_attempts_per_minute() -> u32 {
+    10
+}
+fn default_guest_agent_batches_per_minute() -> u32 {
+    // The ingestion contract's ceiling: max guest send frequency of
+    // one batch per 5 seconds (= 12/minute).
+    12
+}
+fn default_guest_offline_after_seconds() -> u32 {
+    90
+}
+fn default_guest_enrollment_grace_seconds() -> u32 {
+    600
 }
 
 impl Default for MonitoringConfig {
@@ -784,6 +926,7 @@ impl Default for MonitoringConfig {
             min_headroom_mib: default_monitoring_min_headroom_mib(),
             max_db_gib: default_monitoring_max_db_gib(),
             batches_per_minute: default_monitoring_batches_per_minute(),
+            guest_ingestion: MonitoringGuestIngestConfig::default(),
         }
     }
 }
@@ -872,6 +1015,23 @@ pub struct ControlPlaneConfig {
     /// and never aborts control-plane startup.
     #[serde(default)]
     pub monitoring: MonitoringConfig,
+    /// Optional TLS on the HTTP (BFF + guest ingestion) listener
+    /// (`[http_tls]`). When set, the listener serves HTTPS and may
+    /// verify guest monitoring agent client certificates; when unset
+    /// the listener is plain HTTP exactly as before, and guest
+    /// ingestion stays disabled (the guest route requires TLS).
+    #[serde(default)]
+    pub http_tls: Option<HttpTlsConfig>,
+}
+
+/// TLS configuration for the manager's HTTP listener (BFF + guest
+/// monitoring agent routes). Server identity only; client-certificate
+/// verification for guest agents uses the dedicated agent CA from
+/// `[monitoring.guest_ingestion]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HttpTlsConfig {
+    pub server_cert_path: PathBuf,
+    pub server_key_path: PathBuf,
 }
 
 fn default_jwt_secret() -> String {
@@ -927,6 +1087,7 @@ impl Default for ControlPlaneConfig {
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
             monitoring: MonitoringConfig::default(),
+            http_tls: None,
             agent_socket_pattern: default_agent_socket_pattern(),
             agent_runtime_dir: default_agent_runtime_dir(),
             kernel_path: default_kernel_path(),
@@ -984,6 +1145,25 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn example_controlplane_toml_parses_with_guest_ingestion_sections() {
+        // Drift guard for docs/examples/controlplane.toml: the shipped
+        // example must stay loadable as the real control-plane config
+        // (guest ingestion + http_tls sections included, ADR-026).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/controlplane.toml"
+        );
+        let config = load_controlplane_config(Some(std::path::Path::new(path)))
+            .expect("docs/examples/controlplane.toml must parse");
+        let guest = &config.monitoring.guest_ingestion;
+        // The example documents the disabled-by-default contract.
+        assert!(!guest.enabled);
+        assert_eq!(guest.credential_ttl_days, 30);
+        assert!(guest.agent_ca_cert_path.is_some());
+        assert!(config.http_tls.is_some(), "example documents [http_tls]");
+    }
 
     #[test]
     fn watchdog_section_parses_with_defaults_and_overrides() {

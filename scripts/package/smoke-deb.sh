@@ -59,24 +59,29 @@ for img in $IMAGES; do
             apt-get update -qq >/dev/null 2>&1
             apt-get install -y -qq procps >/dev/null 2>&1 || true
 
-            # Install all CHV packages at once
-            dpkg -i /packages/chv-controlplane_*.deb /packages/chv-node_*.deb /packages/chvctl_*.deb || true
+            # Install all CHV packages at once. The guest monitoring
+            # agent installs standalone (no host-package dependency) —
+            # installing it here proves that independence.
+            dpkg -i /packages/chv-controlplane_*.deb /packages/chv-node_*.deb /packages/chvctl_*.deb /packages/chv-monitor-agent_*.deb || true
             apt-get install -f -y -qq >/dev/null 2>&1
 
             verify_install_state deb
             verify_version_output
+            verify_guest_agent_install_state
 
             info 'Removing packages...'
-            dpkg -r chv-node chv-controlplane chvctl || true
+            dpkg -r chv-monitor-agent chv-node chv-controlplane chvctl || true
             apt-get autoremove -y -qq >/dev/null 2>&1 || true
 
             verify_remove_state
+            verify_guest_agent_removed_state
 
             info 'Reinstalling packages...'
-            dpkg -i /packages/chv-controlplane_*.deb /packages/chv-node_*.deb /packages/chvctl_*.deb || true
+            dpkg -i /packages/chv-controlplane_*.deb /packages/chv-node_*.deb /packages/chvctl_*.deb /packages/chv-monitor-agent_*.deb || true
             apt-get install -f -y -qq >/dev/null 2>&1
 
             verify_reinstall_state
+            verify_guest_agent_install_state
             smoke_summary
         "; then
         pass "Smoke test passed for ${img}"

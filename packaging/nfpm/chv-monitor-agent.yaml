@@ -1,0 +1,49 @@
+name: chv-monitor-agent
+arch: ${ARCH}
+platform: linux
+version: "${PACKAGE_VERSION}"
+section: admin
+priority: optional
+maintainer: Kubedo <engineering@kubedo.io>
+description: |
+  CHV optional in-guest monitoring agent (ADR-026). Read-only /proc
+  collectors (CPU, memory, load, uptime, OS identity), one-time claim
+  enrollment over mutual TLS, bounded disk spool, credential rotation.
+  Runs inside VMs; a VM without it is fully usable. Never installs
+  with or depends on the CHV node/control-plane packages.
+homepage: https://github.com/kubedoio/chv
+license: MIT
+# Deliberately NO dependency on chv-controlplane / chv-node: this is a
+# guest package. The agent is optional per-VM software whose absence
+# changes nothing about VM lifecycle or usability (G3 gate).
+depends:
+  - libc6
+overrides:
+  deb:
+    depends:
+      - libc6
+  rpm:
+    # glibc is effectively always present, but declaring it keeps the
+    # dependency honest (the binary links it) and lets rpm verify it.
+    depends:
+      - glibc
+contents:
+  - src: target/release/chv-monitor-agent
+    dst: /usr/bin/chv-monitor-agent
+  - src: packaging/systemd/chv-monitor-agent.service
+    dst: /lib/systemd/system/chv-monitor-agent.service
+  - src: packaging/tmpfiles/chv-monitor-agent.conf
+    dst: /usr/lib/tmpfiles.d/chv-monitor-agent.conf
+  - src: ${TMPDIR}/configs/monitor-agent.toml
+    dst: /etc/chv-monitor/agent.toml
+    type: config|noreplace
+  # Lives under /usr/share (not /usr/share/doc): doc-minimized server
+  # images ship a dpkg path-exclude=/usr/share/doc/* (same reasoning
+  # as chv-controlplane's bundled assets).
+  - src: packaging/monitor-agent/README.md
+    dst: /usr/share/chv-monitor-agent/README.md
+  # The claim file is NOT packaged: it is operator-provided, one-time,
+  # and single-use. Documented in the example config and README.
+scripts:
+  postinstall: packaging/scripts/monitor-agent-postinstall.sh
+  preremove: packaging/scripts/monitor-agent-preremove.sh

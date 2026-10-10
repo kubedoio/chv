@@ -40,6 +40,7 @@ TEXT_SUFFIXES = {".rs", ".toml", ".proto", ".yaml", ".yml", ".json", ".sh", ".se
 ALLOWED_PACKAGED_SERVICES = {
     "chv-agent.service",
     "chv-controlplane.service",
+    "chv-monitor-agent.service",
     "chv-nwd.service",
     "chv-stord.service",
 }
