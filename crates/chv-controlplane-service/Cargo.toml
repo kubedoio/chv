@@ -38,6 +38,12 @@ metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
 chrono = "0.4"
+# HMAC-SHA256 webhook payload signing (notification dispatcher). 0.12
+# matches the version already resolved in Cargo.lock via transitive
+# users (jsonwebtoken/sqlx), and sha2 is pinned workspace-wide at 0.10
+# for the same digest family.
+hmac = "0.12"
+sha2 = { workspace = true }
 cron = "0.17"
 dashmap = { workspace = true }
 metrics = { workspace = true }
