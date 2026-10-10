@@ -35,32 +35,11 @@ use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Envelope schema version (contract `chv-monitoring-query-alerts-v1`).
-const SCHEMA_VERSION: i64 = 1;
-
 /// First backoff step: 5 seconds.
 const BACKOFF_BASE_SECS: u64 = 5;
 
 /// Backoff ceiling: 1 hour.
 const BACKOFF_CAP_SECS: u64 = 60 * 60;
-
-/// The contract's versioned webhook envelope. Serialization order is
-/// the declaration order, which matches the contract example exactly;
-/// the field set is closed, which is the structural redaction
-/// guarantee (nothing beyond these fields can ever be emitted).
-#[derive(Serialize)]
-struct Envelope<'a> {
-    schema_version: i64,
-    event_id: &'a str,
-    incident_id: &'a str,
-    event_type: &'a str,
-    severity: &'a str,
-    target_kind: &'a str,
-    target_id: &'a str,
-    summary: &'a str,
-    occurred_at_ms: i64,
-    resource_url: &'a str,
-}
 
 /// Slack incoming-webhook payload: a single `text` field, nothing else.
 #[derive(Serialize)]
@@ -136,36 +115,11 @@ pub fn classify(status: Option<u16>) -> DeliveryClass {
 /// contract fields exist, so no caller data beyond these parameters
 /// can leak into the payload. Callers validate inputs; this function
 /// only renders.
-// The flat parameter list is fixed by the PR-6 interface contract;
-// grouping them would drift the shared signature.
-#[allow(clippy::too_many_arguments)]
-pub fn render_envelope(
-    event_id: &str,
-    incident_id: &str,
-    event_type: &str,
-    severity: &str,
-    target_kind: &str,
-    target_id: &str,
-    summary: &str,
-    occurred_at_ms: i64,
-    resource_url: &str,
-) -> String {
-    let envelope = Envelope {
-        schema_version: SCHEMA_VERSION,
-        event_id,
-        incident_id,
-        event_type,
-        severity,
-        target_kind,
-        target_id,
-        summary,
-        occurred_at_ms,
-        resource_url,
-    };
-    // All fields are strings or integers, so serialization cannot
-    // fail (no map keys, no NaN, no invalid UTF-8 in `&str`).
-    serde_json::to_string(&envelope).expect("envelope serialization is infallible")
-}
+///
+/// The definition lives in `chv-monitoring-core::notifications` (the
+/// BFF's delivery-test endpoint renders the same byte-identical
+/// envelope); re-exported here for the dispatcher's callers.
+pub use chv_monitoring_core::notifications::render_envelope;
 
 /// Render the Slack incoming-webhook payload: a single human-readable
 /// line wrapped as `{"text": "..."}`.
@@ -176,6 +130,424 @@ pub fn render_envelope(
 pub fn render_slack(event_type: &str, severity: &str, summary: &str, resource_url: &str) -> String {
     let text = format!("[{event_type}] {summary} ({severity}) — {resource_url}");
     serde_json::to_string(&SlackText { text }).expect("slack payload serialization is infallible")
+}
+
+// ---------------------------------------------------------------------------
+// Worker: claim/sign/POST/mark/retry/dead-letter over the durable
+// `notification_outbox`. The outbox gives at-least-once delivery with
+// idempotent enqueue; this loop adds bounded retries with capped
+// exponential backoff (plus jitter) and dead-lettering.
+// ---------------------------------------------------------------------------
+
+/// Claim lease: how long a claimed-but-unfinished event stays
+/// unclaimable. Must cover one full claimed batch's worst-case
+/// duration (max_batch sequential POSTs at the request timeout).
+const CLAIM_LEASE_MS: i64 = 300_000;
+
+/// Request timeout for one delivery attempt.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Jitter fraction applied to the backoff delay (±20%).
+const BACKOFF_JITTER_FRACTION: f64 = 0.2;
+
+/// A transport failure (no HTTP response: connect, timeout, TLS).
+#[derive(Debug)]
+pub struct TransportError(pub String);
+
+/// Seam for tests (the NetBox worker's client-factory pattern): one
+/// authenticated POST, returning the HTTP status on response.
+#[async_trait::async_trait]
+pub trait NotificationTransport: Send + Sync {
+    async fn post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        signature: Option<&str>,
+    ) -> Result<u16, TransportError>;
+}
+
+/// Production transport: hardened reqwest client (HTTPS-only, no
+/// redirects, bounded timeouts, optional operator CA bundle).
+pub struct ReqwestTransport {
+    client: reqwest::Client,
+}
+
+impl ReqwestTransport {
+    /// Build the hardened client. `ca_pem` adds an operator-supplied
+    /// CA for internal destinations on top of the system roots.
+    pub fn new(ca_pem: Option<&str>) -> Result<Self, String> {
+        let mut builder = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(DELIVERY_TIMEOUT)
+            .connect_timeout(Duration::from_secs(5));
+        if let Some(pem) = ca_pem {
+            let certificate = reqwest::tls::Certificate::from_pem(pem.as_bytes()).map_err(|e| {
+                format!("webhook_ca_path is not a valid PEM certificate bundle: {e}")
+            })?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("failed to build notification client: {e}"))?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationTransport for ReqwestTransport {
+    async fn post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        signature: Option<&str>,
+    ) -> Result<u16, TransportError> {
+        let mut request = self
+            .client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(body);
+        if let Some(signature) = signature {
+            request = request.header("x-chv-signature", signature);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| TransportError(e.to_string()))?;
+        Ok(response.status().as_u16())
+    }
+}
+
+/// Dispatcher settings, flattened from
+/// `[monitoring.notifications]` by the bootstrap.
+#[derive(Clone)]
+pub struct DispatcherSettings {
+    pub webhook_url: Option<String>,
+    /// The HMAC secret. Never logged, never placed in a payload.
+    pub signing_secret: String,
+    pub slack_webhook_url: Option<String>,
+    pub max_attempts: u32,
+    pub max_batch: i64,
+}
+
+/// Background worker delivering outbox events to the configured
+/// destinations.
+#[derive(Clone)]
+pub struct NotificationDispatcher {
+    outbox: chv_controlplane_store::NotificationOutboxRepository,
+    events: chv_controlplane_store::EventRepository,
+    transport: std::sync::Arc<dyn NotificationTransport>,
+    settings: DispatcherSettings,
+}
+
+impl NotificationDispatcher {
+    pub fn new(
+        outbox: chv_controlplane_store::NotificationOutboxRepository,
+        events: chv_controlplane_store::EventRepository,
+        settings: DispatcherSettings,
+        ca_pem: Option<&str>,
+    ) -> Result<Self, String> {
+        Ok(Self::with_transport(
+            outbox,
+            events,
+            settings,
+            std::sync::Arc::new(ReqwestTransport::new(ca_pem)?),
+        ))
+    }
+
+    /// Test seam: inject a fake transport.
+    pub fn with_transport(
+        outbox: chv_controlplane_store::NotificationOutboxRepository,
+        events: chv_controlplane_store::EventRepository,
+        settings: DispatcherSettings,
+        transport: std::sync::Arc<dyn NotificationTransport>,
+    ) -> Self {
+        Self {
+            outbox,
+            events,
+            transport,
+            settings,
+        }
+    }
+
+    /// Run until shutdown, one bounded dispatch pass per tick.
+    pub async fn run(&self, interval: Duration, mut shutdown: tokio::sync::watch::Receiver<()>) {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = ticker.tick() => {}
+            }
+            let now_ms = chrono_now_ms();
+            if let Err(e) = self.dispatch_pass(now_ms).await {
+                tracing::warn!(error = %e, "notification dispatch pass failed");
+            }
+        }
+    }
+
+    /// One bounded pass: claim due events, deliver each, and record
+    /// the outcome. Failures of individual deliveries never fail the
+    /// pass (they schedule retries); only store errors do.
+    pub async fn dispatch_pass(
+        &self,
+        now_ms: i64,
+    ) -> Result<usize, chv_controlplane_store::StoreError> {
+        let claimed = self
+            .outbox
+            .claim_due(now_ms, CLAIM_LEASE_MS, self.settings.max_batch)
+            .await?;
+        for event in &claimed {
+            if let Err(e) = self.deliver(event, now_ms).await {
+                tracing::warn!(
+                    event_id = %event.event_id,
+                    error = %e,
+                    "notification delivery bookkeeping failed"
+                );
+            }
+        }
+        Ok(claimed.len())
+    }
+
+    async fn deliver(
+        &self,
+        event: &chv_controlplane_store::OutboxEventRow,
+        now_ms: i64,
+    ) -> Result<(), chv_controlplane_store::StoreError> {
+        let (url, body, signature) = match event.channel.as_str() {
+            chv_controlplane_store::CHANNEL_WEBHOOK => {
+                let Some(url) = self.settings.webhook_url.clone() else {
+                    // The operator removed the destination after the
+                    // event was enqueued: dead-letter honestly.
+                    return self
+                        .dead_letter(
+                            event,
+                            now_ms,
+                            "webhook destination removed from configuration",
+                        )
+                        .await;
+                };
+                let body = event.payload.clone().into_bytes();
+                let signature = sign_payload(self.settings.signing_secret.as_bytes(), &body);
+                (url, body, Some(signature))
+            }
+            chv_controlplane_store::CHANNEL_SLACK => {
+                let Some(url) = self.settings.slack_webhook_url.clone() else {
+                    return self
+                        .dead_letter(
+                            event,
+                            now_ms,
+                            "slack destination removed from configuration",
+                        )
+                        .await;
+                };
+                let resource_url = format!("/{}s/{}", event.target_kind, event.target_id);
+                let body = render_slack(
+                    &event.event_type,
+                    &event.severity,
+                    &event.summary,
+                    &resource_url,
+                )
+                .into_bytes();
+                // Slack's incoming-webhook URL is its own credential;
+                // our HMAC header would be meaningless there.
+                (url, body, None)
+            }
+            other => {
+                return self
+                    .dead_letter(event, now_ms, &format!("unknown channel {other:?}"))
+                    .await;
+            }
+        };
+
+        let outcome = self.transport.post(&url, body, signature.as_deref()).await;
+        match outcome {
+            Ok(status) => match classify(Some(status)) {
+                DeliveryClass::Delivered => {
+                    self.outbox
+                        .mark_delivered(&event.event_id, now_ms, &format!("{status}"))
+                        .await?;
+                    tracing::info!(
+                        event_id = %event.event_id,
+                        status,
+                        "notification delivered"
+                    );
+                }
+                DeliveryClass::Retryable => {
+                    self.retry_or_dead(event, now_ms, &format!("{status}"))
+                        .await?;
+                }
+                DeliveryClass::Permanent => {
+                    self.dead_letter(event, now_ms, &format!("http {status}"))
+                        .await?;
+                }
+            },
+            Err(e) => {
+                self.retry_or_dead(event, now_ms, &format!("transport: {}", e.0))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn retry_or_dead(
+        &self,
+        event: &chv_controlplane_store::OutboxEventRow,
+        now_ms: i64,
+        note: &str,
+    ) -> Result<(), chv_controlplane_store::StoreError> {
+        let attempts = event.attempts.max(0) as u32;
+        if attempts >= self.settings.max_attempts {
+            return self.dead_letter(event, now_ms, note).await;
+        }
+        let backoff = backoff_delay(attempts + 1);
+        let jitter = jitter_ms(backoff);
+        let next_attempt_at_ms = now_ms + backoff.as_millis() as i64 + jitter;
+        self.outbox
+            .schedule_retry(&event.event_id, next_attempt_at_ms, now_ms, note)
+            .await?;
+        tracing::warn!(
+            event_id = %event.event_id,
+            attempts,
+            note,
+            "notification delivery failed; retry scheduled"
+        );
+        Ok(())
+    }
+
+    /// Dead-letter an event, audit it durably, and (once — never for
+    /// a `delivery_failed` event itself, no recursion) enqueue a
+    /// `delivery_failed` notification so the outage is visible to
+    /// whoever eventually receives the surviving channel.
+    async fn dead_letter(
+        &self,
+        event: &chv_controlplane_store::OutboxEventRow,
+        now_ms: i64,
+        note: &str,
+    ) -> Result<(), chv_controlplane_store::StoreError> {
+        self.outbox
+            .dead_letter(&event.event_id, now_ms, note)
+            .await?;
+        tracing::error!(
+            event_id = %event.event_id,
+            alert_id = %event.alert_id,
+            note,
+            "notification dead-lettered"
+        );
+        self.audit_dead_letter(event, now_ms, note).await;
+        if event.event_type != chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED {
+            let failure_event_id = uuid::Uuid::new_v4().to_string();
+            let summary = format!(
+                "notification delivery failed permanently: {}",
+                truncate_for_summary(note)
+            );
+            let payload = render_envelope(
+                &failure_event_id,
+                &event.alert_id,
+                chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED,
+                &event.severity,
+                &event.target_kind,
+                &event.target_id,
+                &summary,
+                event.occurred_at_ms,
+                &format!("/{}s/{}", event.target_kind, event.target_id),
+            );
+            // Best-effort: the outbox insert is idempotent by event
+            // id, so a crash between dead-letter and enqueue simply
+            // loses this courtesy event, never duplicates it.
+            let _ = self
+                .outbox
+                .enqueue(&chv_controlplane_store::NotificationEventInput {
+                    event_id: failure_event_id,
+                    alert_id: event.alert_id.clone(),
+                    incident_key: event.incident_key.clone(),
+                    event_type: chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED.to_string(),
+                    severity: event.severity.clone(),
+                    target_kind: event.target_kind.clone(),
+                    target_id: event.target_id.clone(),
+                    summary,
+                    occurred_at_ms: now_ms,
+                    payload,
+                    channel: event.channel.clone(),
+                })
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Best-effort durable audit trail (mirrors the monitoring-agent
+    /// audit helper; a failure here never blocks delivery bookkeeping).
+    async fn audit_dead_letter(
+        &self,
+        event: &chv_controlplane_store::OutboxEventRow,
+        now_ms: i64,
+        note: &str,
+    ) {
+        use chv_controlplane_store::EventAppendInput;
+        use chv_controlplane_types::domain::{ActorId, EventSeverity, EventType};
+        let input = EventAppendInput {
+            occurred_unix_ms: now_ms,
+            event_type: EventType::Audit,
+            severity: EventSeverity::Warning,
+            resource_kind: None,
+            resource_id: None,
+            node_id: None,
+            operation_id: None,
+            actor_id: ActorId::new("system:notification-dispatcher").ok(),
+            requested_by: Some("system:notification-dispatcher".to_string()),
+            correlation_id: Some(event.event_id.clone()),
+            message: format!(
+                "notification {} for incident {} dead-lettered: {}",
+                event.event_type, event.incident_key, note
+            ),
+            details: Some(
+                serde_json::json!({
+                    "event": "monitoring.notification.dead_letter",
+                    "channel": event.channel,
+                    "attempts": event.attempts,
+                })
+                .to_string(),
+            ),
+        };
+        if let Err(e) = self.events.append(&input).await {
+            tracing::warn!(error = %e, "notification dead-letter audit append failed");
+        }
+    }
+}
+
+/// Wall-clock epoch milliseconds (the worker's clock; tests inject
+/// times via [`NotificationDispatcher::dispatch_pass`]).
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// ±20% jitter on a backoff delay, in milliseconds. The magnitude
+/// never exceeds 20% of the backoff, so the net delay (backoff +
+/// jitter) always stays positive.
+fn jitter_ms(backoff: Duration) -> i64 {
+    use rand::RngExt;
+    let base = backoff.as_millis() as f64;
+    let spread = base * BACKOFF_JITTER_FRACTION;
+    // random() is [0,1): map to [-1,1) and scale.
+    let drawn: f64 = (rand::rng().random::<f64>() * 2.0 - 1.0) * spread;
+    drawn as i64
+}
+
+/// Bound a note before it enters a summary (summaries are capped at
+/// 512 bytes by the outbox validation).
+fn truncate_for_summary(note: &str) -> String {
+    const MAX: usize = 400;
+    if note.len() <= MAX {
+        return note.to_string();
+    }
+    let mut cut = MAX;
+    while cut > 0 && !note.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &note[..cut])
 }
 
 #[cfg(test)]
@@ -495,5 +867,300 @@ mod tests {
             object["text"],
             serde_json::json!("[test] say \"hi\" </b> (info) — /nodes/n1")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Worker tests: the transport seam fakes HTTP; an in-memory store
+    // pool carries the real outbox.
+    // -----------------------------------------------------------------
+
+    use chv_controlplane_store::{NotificationEventInput, NotificationOutboxRepository};
+
+    struct FakeTransport {
+        /// (url, body, signature) per call.
+        calls: std::sync::Mutex<Vec<RecordedCall>>,
+        /// Statuses to return per call (None = transport error).
+        script: std::sync::Mutex<Vec<Option<u16>>>,
+    }
+
+    type RecordedCall = (String, Vec<u8>, Option<String>);
+
+    impl FakeTransport {
+        fn new(script: Vec<Option<u16>>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                script: std::sync::Mutex::new(script),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NotificationTransport for FakeTransport {
+        async fn post(
+            &self,
+            url: &str,
+            body: Vec<u8>,
+            signature: Option<&str>,
+        ) -> Result<u16, TransportError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body, signature.map(str::to_string)));
+            let mut script = self.script.lock().unwrap();
+            match script.len() {
+                0 => Err(TransportError("script exhausted".into())),
+                _ => match script.remove(0) {
+                    Some(status) => Ok(status),
+                    None => Err(TransportError("simulated timeout".into())),
+                },
+            }
+        }
+    }
+
+    fn dispatcher_settings() -> DispatcherSettings {
+        DispatcherSettings {
+            webhook_url: Some("https://alerts.example.internal/hook".into()),
+            signing_secret: "0123456789abcdef0123456789abcdef".into(),
+            slack_webhook_url: None,
+            max_attempts: 3,
+            max_batch: 10,
+        }
+    }
+
+    async fn test_dispatcher(
+        script: Vec<Option<u16>>,
+    ) -> (
+        NotificationDispatcher,
+        NotificationOutboxRepository,
+        chv_controlplane_store::EventRepository,
+        std::sync::Arc<FakeTransport>,
+    ) {
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let events = chv_controlplane_store::EventRepository::new(pool.clone());
+        let transport = std::sync::Arc::new(FakeTransport::new(script));
+        let dispatcher = NotificationDispatcher::with_transport(
+            outbox.clone(),
+            events.clone(),
+            dispatcher_settings(),
+            transport.clone(),
+        );
+        (dispatcher, outbox, events, transport)
+    }
+
+    fn firing_event(event_id: &str, occurred_at_ms: i64) -> NotificationEventInput {
+        NotificationEventInput {
+            event_id: event_id.into(),
+            alert_id: "alert-1".into(),
+            incident_key: "rule-1:vm:vm-1:-".into(),
+            event_type: chv_controlplane_store::EVENT_TYPE_FIRING.into(),
+            severity: "warning".into(),
+            target_kind: "vm".into(),
+            target_id: "vm-1".into(),
+            summary: "VM CPU pressure firing".into(),
+            occurred_at_ms,
+            payload: render_envelope(
+                event_id,
+                "alert-1",
+                chv_controlplane_store::EVENT_TYPE_FIRING,
+                "warning",
+                "vm",
+                "vm-1",
+                "VM CPU pressure firing",
+                occurred_at_ms,
+                "/vms/vm-1",
+            ),
+            channel: chv_controlplane_store::CHANNEL_WEBHOOK.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delivered_event_carries_signature_and_marks_delivered() {
+        let (dispatcher, outbox, _events, transport) = test_dispatcher(vec![Some(200)]).await;
+        outbox
+            .enqueue(&firing_event("evt-deliver", 1_000))
+            .await
+            .expect("enqueue");
+
+        let claimed = dispatcher.dispatch_pass(2_000).await.expect("pass");
+        assert_eq!(claimed, 1);
+
+        let calls: Vec<RecordedCall> = transport.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://alerts.example.internal/hook");
+        // The signature matches the exact body bytes sent.
+        let expected = sign_payload("0123456789abcdef0123456789abcdef".as_bytes(), &calls[0].1);
+        assert_eq!(calls[0].2.as_deref(), Some(expected.as_str()));
+
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert_eq!(rows[0].status, "delivered");
+        assert_eq!(rows[0].attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_schedules_backoff_then_recovers() {
+        // Timeout, then 503, then success.
+        let (dispatcher, outbox, _events, _transport) =
+            test_dispatcher(vec![None, Some(503), Some(204)]).await;
+        outbox
+            .enqueue(&firing_event("evt-retry", 1_000))
+            .await
+            .expect("enqueue");
+
+        let claimed = dispatcher.dispatch_pass(2_000).await.expect("pass 1");
+        assert_eq!(claimed, 1);
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].attempts, 1);
+        // Backoff for attempt 2 is 10s (5s * 2^1) plus bounded jitter.
+        let next = rows[0].next_attempt_at_ms;
+        assert!(
+            next >= 2_000 + 10_000 - 2_000,
+            "next attempt too early: {next}"
+        );
+        assert!(
+            next <= 2_000 + 10_000 + 2_000,
+            "next attempt too late: {next}"
+        );
+
+        // Not due before the backoff elapses.
+        let claimed = dispatcher.dispatch_pass(5_000).await.expect("pass early");
+        assert_eq!(claimed, 0);
+
+        // Due after backoff: second failure, then recovery. The final
+        // pass sits well beyond the latest possible jittered retry
+        // time (backoff 20s ± 20%).
+        dispatcher.dispatch_pass(20_000).await.expect("pass 2");
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].attempts, 2);
+
+        dispatcher.dispatch_pass(100_000).await.expect("pass 3");
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert_eq!(rows[0].status, "delivered");
+        assert_eq!(rows[0].attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_dead_letter_with_failure_notice() {
+        // max_attempts = 3: three transport failures exhaust it.
+        let (dispatcher, outbox, _events, _transport) =
+            test_dispatcher(vec![None, None, None]).await;
+        outbox
+            .enqueue(&firing_event("evt-dead", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass 1");
+        dispatcher.dispatch_pass(60_000).await.expect("pass 2");
+        dispatcher.dispatch_pass(200_000).await.expect("pass 3");
+
+        let rows = outbox.list_recent(10).await.expect("list");
+        let dead = rows
+            .iter()
+            .find(|r| r.event_id == "evt-dead")
+            .expect("dead row");
+        assert_eq!(dead.status, "dead");
+        assert_eq!(dead.attempts, 3);
+
+        // A delivery_failed courtesy event was enqueued for the same
+        // incident (and is itself deliverable).
+        let failure = rows
+            .iter()
+            .find(|r| r.event_type == chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED)
+            .expect("delivery_failed event");
+        assert_eq!(failure.alert_id, "alert-1");
+        assert_eq!(failure.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn permanent_failure_dead_letters_immediately_without_retry() {
+        let (dispatcher, outbox, _events, transport) = test_dispatcher(vec![Some(404)]).await;
+        outbox
+            .enqueue(&firing_event("evt-404", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass");
+        // Exactly one attempt: 404 is permanent.
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        let rows = outbox.list_recent(10).await.expect("list");
+        let dead = rows.iter().find(|r| r.event_id == "evt-404").expect("row");
+        assert_eq!(dead.status, "dead");
+        assert_eq!(dead.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn delivery_failed_events_do_not_recurse_on_their_own_dead_letter() {
+        // The courtesy event itself fails permanently: it must
+        // dead-letter without enqueuing another delivery_failed.
+        let (dispatcher, outbox, _events, transport) =
+            test_dispatcher(vec![Some(404), Some(410)]).await;
+        outbox
+            .enqueue(&firing_event("evt-once", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass 1");
+        let rows = outbox.list_recent(10).await.expect("list");
+        let failure_id = rows
+            .iter()
+            .find(|r| r.event_type == chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED)
+            .expect("courtesy event enqueued")
+            .event_id
+            .clone();
+
+        dispatcher.dispatch_pass(60_000).await.expect("pass 2");
+        let rows = outbox.list_recent(10).await.expect("list");
+        // Exactly one delivery_failed row exists (the courtesy event,
+        // now dead), and the transport saw exactly two attempts.
+        let failures = rows
+            .iter()
+            .filter(|r| r.event_type == chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED)
+            .count();
+        assert_eq!(failures, 1);
+        let failure = rows.iter().find(|r| r.event_id == failure_id).expect("row");
+        assert_eq!(failure.status, "dead");
+        assert_eq!(transport.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn slack_channel_renders_text_and_never_signs() {
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let events = chv_controlplane_store::EventRepository::new(pool.clone());
+        let transport = std::sync::Arc::new(FakeTransport::new(vec![Some(200)]));
+        let settings = DispatcherSettings {
+            webhook_url: None,
+            signing_secret: "0123456789abcdef0123456789abcdef".into(),
+            slack_webhook_url: Some("https://hooks.slack.com/services/T/B/X".into()),
+            max_attempts: 3,
+            max_batch: 10,
+        };
+        let dispatcher = NotificationDispatcher::with_transport(
+            outbox.clone(),
+            events,
+            settings,
+            transport.clone(),
+        );
+
+        let mut event = firing_event("evt-slack", 1_000);
+        event.channel = chv_controlplane_store::CHANNEL_SLACK.into();
+        outbox.enqueue(&event).await.expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass");
+        let calls: Vec<RecordedCall> = transport.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://hooks.slack.com/services/T/B/X");
+        // Slack posts are unsigned: the HMAC header would be
+        // meaningless against Slack's own URL credential.
+        assert_eq!(calls[0].2, None);
+        let body: Value = serde_json::from_slice(&calls[0].1).expect("slack body");
+        assert_eq!(
+            body["text"],
+            "[firing] VM CPU pressure firing (warning) — /vms/vm-1"
+        );
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert_eq!(rows[0].status, "delivered");
     }
 }

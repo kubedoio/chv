@@ -52,6 +52,7 @@ pub mod cgroup;
 pub mod delta;
 pub mod model;
 pub mod node_os;
+pub mod notifications;
 pub mod proc_net;
 pub mod process_probe;
 pub mod registry;
