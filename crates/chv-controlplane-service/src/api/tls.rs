@@ -15,7 +15,8 @@
 //! the node-enrollment CA.
 
 use axum::Router;
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use std::io;
@@ -42,16 +43,24 @@ pub fn build_https_config(
     server_key_pem: &str,
     client_ca_pem: Option<&str>,
 ) -> Result<Arc<rustls::ServerConfig>, String> {
+    // rustls-pki-types' folded-in PEM parser (the rustls-pemfile
+    // successor, retired from this repo in #235): slice iterators
+    // over the in-memory PEM.
     let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut server_cert_pem.as_bytes())
+        CertificateDer::pem_slice_iter(server_cert_pem.as_bytes())
             .collect::<Result<_, _>>()
             .map_err(|e| format!("failed to parse server certificate PEM: {e}"))?;
     if certs.is_empty() {
         return Err("server certificate PEM contains no certificates".to_string());
     }
-    let key = rustls_pemfile::private_key(&mut server_key_pem.as_bytes())
-        .map_err(|e| format!("failed to parse server key PEM: {e}"))?
-        .ok_or_else(|| "server key PEM contains no private key".to_string())?;
+    // `from_pem_slice` reports a missing key as `Error::NoItemsFound`
+    // (the old rustls-pemfile API returned `Ok(None)` for that case).
+    let key = PrivateKeyDer::from_pem_slice(server_key_pem.as_bytes()).map_err(|e| match e {
+        rustls::pki_types::pem::Error::NoItemsFound => {
+            "server key PEM contains no private key".to_string()
+        }
+        e => format!("failed to parse server key PEM: {e}"),
+    })?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ServerConfig::builder_with_provider(provider)
@@ -61,9 +70,10 @@ pub fn build_https_config(
     let config = match client_ca_pem {
         Some(ca_pem) => {
             let mut roots = RootCertStore::empty();
-            let cas: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut ca_pem.as_bytes())
-                .collect::<Result<_, _>>()
-                .map_err(|e| format!("failed to parse agent CA PEM: {e}"))?;
+            let cas: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_slice_iter(ca_pem.as_bytes())
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("failed to parse agent CA PEM: {e}"))?;
             if cas.is_empty() {
                 return Err("agent CA PEM contains no certificates".to_string());
             }

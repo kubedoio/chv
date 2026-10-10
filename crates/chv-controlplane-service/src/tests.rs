@@ -148,6 +148,94 @@ async fn test_ready_endpoint() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// Regression (CI webui container smoke, G3 round 1): the guest-agent
+/// browser pair must merge into the full admin router in BOTH arms.
+/// The disabled pair originally carried all five paths in one router
+/// passed as both viewer and operator — axum panics with
+/// `Overlapping method route` at build time, i.e. a control plane that
+/// cannot boot on a default (guest-ingestion-unconfigured) install.
+/// No other test boots the full router with the pair mounted, which is
+/// exactly how this escaped the local suites.
+#[tokio::test]
+async fn admin_router_builds_with_guest_agent_pair_in_both_arms() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+
+    // --- Disabled arm (the default install / converged-container shape).
+    let (viewer, operator) = crate::api::agent_admin::agent_admin_disabled_routers();
+    let app = crate::api::router::admin_router_with_guest_agents(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
+        Some((viewer, operator)),
+        None,
+    );
+    // Building the router already proves no overlap; assert the honest
+    // typed 503 through the real viewer middleware + CSRF layer too.
+    let token = test_admin_token();
+    let response = app
+        .oneshot(
+            axum::http::Request::post("/v1/monitoring/agents")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["code"], "guest_ingestion_disabled");
+
+    // --- Enabled arm: the real viewer/operator pair (disjoint paths by
+    // construction) must merge into the same outer router too.
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "chv-test-agent-ca");
+    let ca_cert = params.self_signed(&ca_key).unwrap();
+    let issuer = Arc::new(
+        crate::monitoring_agent::AgentCertificateIssuer::new(
+            &ca_cert.pem(),
+            &ca_key.serialize_pem(),
+        )
+        .unwrap(),
+    );
+    let service = Arc::new(crate::monitoring_agent::MonitoringAgentService::new(
+        chv_controlplane_store::MonitoringAgentRepository::new(test_db.pool.clone()),
+        issuer,
+        None,
+        chv_monitoring_store::MonitoringHealth::new(),
+        chv_controlplane_store::EventRepository::new(test_db.pool.clone()),
+        Default::default(),
+        None,
+    ));
+    let admin_state = Arc::new(crate::api::agent_admin::AgentAdminState {
+        service,
+        offline_after_ms: 300_000,
+        enrollment_grace_ms: 600_000,
+        renewal_window_ms: 86_400_000,
+    });
+    let _ = crate::api::router::admin_router_with_guest_agents(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+        chv_config::WebUiConfig::default(),
+        Some((
+            crate::api::agent_admin::agent_viewer_router(admin_state.clone()),
+            crate::api::agent_admin::agent_operator_router(admin_state),
+        )),
+        None,
+    );
+}
+
 #[tokio::test]
 async fn test_deep_health_endpoint() {
     use axum::http::StatusCode;

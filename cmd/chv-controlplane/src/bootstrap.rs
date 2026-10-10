@@ -483,9 +483,9 @@ pub async fn build_service(
             // error (honest "off", never a 404); the agent-auth
             // ingest routes stay unmounted entirely — nothing for a
             // guest to talk to.
-            let disabled =
-                chv_controlplane_service::api::agent_admin::agent_admin_disabled_router();
-            (Some((disabled.clone(), disabled)), None)
+            let (viewer, operator) =
+                chv_controlplane_service::api::agent_admin::agent_admin_disabled_routers();
+            (Some((viewer, operator)), None)
         }
     };
 

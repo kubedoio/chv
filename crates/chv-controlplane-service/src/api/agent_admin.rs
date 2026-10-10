@@ -91,7 +91,17 @@ fn err(status: StatusCode, code: &str, message: impl std::fmt::Display) -> Respo
 /// enabled `[monitoring.guest_ingestion]`. Mounted unconditionally:
 /// an unconfigured feature must surface as an honest "disabled"
 /// state in the UI, never a 404 that reads as a broken page.
-pub fn agent_admin_disabled_router() -> Router<chv_webui_bff::router::AppState> {
+///
+/// Returns the same disjoint (viewer, operator) pair shape as the
+/// enabled arm: the two routers are merged into the same outer router
+/// (`admin_router_with_guest_agents`), so a router carrying both the
+/// inventory path and the action paths in one piece would double-mount
+/// them — axum panics at build time (`Overlapping method route`), which
+/// is exactly a control-plane that cannot boot.
+pub fn agent_admin_disabled_routers() -> (
+    Router<chv_webui_bff::router::AppState>,
+    Router<chv_webui_bff::router::AppState>,
+) {
     async fn disabled() -> Response {
         err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -100,12 +110,13 @@ pub fn agent_admin_disabled_router() -> Router<chv_webui_bff::router::AppState> 
              ([monitoring.guest_ingestion] in the control-plane config)",
         )
     }
-    Router::new()
-        .route("/v1/monitoring/agents", post(disabled))
+    let viewer = Router::new().route("/v1/monitoring/agents", post(disabled));
+    let operator = Router::new()
         .route("/v1/monitoring/agents/claim", post(disabled))
         .route("/v1/monitoring/agents/revoke", post(disabled))
         .route("/v1/monitoring/agents/rotate", post(disabled))
-        .route("/v1/monitoring/agents/reset", post(disabled))
+        .route("/v1/monitoring/agents/reset", post(disabled));
+    (viewer, operator)
 }
 
 /// The security contract's wire-state vocabulary (plus the documented

@@ -50,7 +50,6 @@ uuid = { workspace = true }
 time = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rustls-pemfile = "2"
 
 [features]
 dev = []

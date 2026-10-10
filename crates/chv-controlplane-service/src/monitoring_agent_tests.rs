@@ -673,13 +673,12 @@ async fn tls_post(
         .unwrap();
     let config = match client_identity {
         Some((cert_pem, key_pem)) => {
+            use rustls::pki_types::pem::PemObject;
             let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut cert_pem.as_bytes())
+                rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
                     .collect::<Result<_, _>>()
                     .unwrap();
-            let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-                .unwrap()
-                .unwrap();
+            let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).unwrap();
             builder
                 .with_root_certificates(roots)
                 .with_client_auth_cert(certs, key)
