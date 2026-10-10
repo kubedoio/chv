@@ -99,14 +99,17 @@ pub(crate) fn classify_interface(name: &str, phys_names: &[String]) -> &'static 
         return "loopback";
     }
     // Virtual names split by type: bridge-type prefixes vs
-    // veth/overlay prefixes.
+    // veth/overlay prefixes. The token is `virt` — the
+    // interface_id class vocabulary in the metrics contract
+    // (`phys | virt | bridge | loopback | other`), which the UI's
+    // class-label map follows.
     const BRIDGE_PREFIXES: &[&str] = &["br-", "br", "virbr", "tap", "vbr"];
     const VIRTUAL_PREFIXES: &[&str] = &["veth", "docker", "flannel", "cni", "cali"];
     if BRIDGE_PREFIXES.iter().any(|p| name.starts_with(p)) {
         return "bridge";
     }
     if VIRTUAL_PREFIXES.iter().any(|p| name.starts_with(p)) {
-        return "virtual";
+        return "virt";
     }
     if phys_names.iter().any(|n| n == name) {
         return "phys";
@@ -242,11 +245,11 @@ mod tests {
         assert_eq!(classify_interface("virbr0", &phys), "bridge");
         assert_eq!(classify_interface("tap0", &phys), "bridge");
         assert_eq!(classify_interface("vbr0", &phys), "bridge");
-        assert_eq!(classify_interface("veth0", &phys), "virtual");
-        assert_eq!(classify_interface("docker0", &phys), "virtual");
-        assert_eq!(classify_interface("cni0", &phys), "virtual");
-        assert_eq!(classify_interface("cali1234abcd", &phys), "virtual");
-        assert_eq!(classify_interface("flannel.1", &phys), "virtual");
+        assert_eq!(classify_interface("veth0", &phys), "virt");
+        assert_eq!(classify_interface("docker0", &phys), "virt");
+        assert_eq!(classify_interface("cni0", &phys), "virt");
+        assert_eq!(classify_interface("cali1234abcd", &phys), "virt");
+        assert_eq!(classify_interface("flannel.1", &phys), "virt");
         assert_eq!(classify_interface("eno1", &phys), "phys");
         assert_eq!(classify_interface("wlan0", &phys), "other");
     }

@@ -218,16 +218,22 @@ impl PluginManifest {
         }
         for check in &self.checks {
             // These become record check ids — bound them so a
-            // malicious manifest cannot mint unbounded inventory, and
+            // malicious manifest cannot mint unbounded inventory,
             // require the contract's `plugin:` namespace so record
             // identity is unambiguous (the engine uses them verbatim
-            // and never re-prefixes).
+            // and never re-prefixes), and pin them to the
+            // manager-side check-id charset: an id outside
+            // [A-Za-z0-9._:/@-] is a whole-batch rejection on the
+            // manager (the G4 instance-unit lesson), so the agent
+            // must refuse such a manifest at load instead of
+            // poisoning every envelope it touches.
             if check.is_empty()
                 || check.len() > MAX_PLUGIN_ID_BYTES
-                || check.bytes().any(|b| b < 0x20 || b == 0x7f)
+                || !check.bytes().all(in_check_id_charset)
             {
                 return Err(PluginManifestError::Invalid(format!(
-                    "check id {check:?} must be 1..={MAX_PLUGIN_ID_BYTES} printable bytes"
+                    "check id {check:?} must be 1..={MAX_PLUGIN_ID_BYTES} bytes of \
+                     [A-Za-z0-9._:/@-] (the manager's check-id charset)"
                 )));
             }
             if !check.starts_with("plugin:") {
@@ -391,11 +397,14 @@ impl PluginEngine {
                 Err(e) => {
                     // The manifest was never accepted, so its
                     // self-asserted plugin_id carries no weight —
-                    // the record id falls back to the file stem.
+                    // the record id falls back to a sanitized file
+                    // stem (never raw filename bytes: a stem outside
+                    // the manager's check-id charset would poison
+                    // the whole batch).
                     let stem = file_stem_string(&path);
                     tracing::warn!(manifest = %stem, error = %e, "plugin manifest rejected");
                     outcomes.push(unknown_outcome(
-                        &format!("plugin:{stem}"),
+                        &synthesized_record_id(&stem),
                         format!("plugin manifest invalid: {e}"),
                         now_ms,
                         Instant::now(),
@@ -799,6 +808,45 @@ fn unknown_outcome(check_id: &str, summary: String, now_ms: i64, started: Instan
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
+}
+
+/// The manager-side check-id charset (ingestion contract v1):
+/// [A-Za-z0-9._:/@-]. A record id outside it is a whole-batch
+/// rejection — the G4 instance-unit lesson — so every agent-side
+/// record-id source must stay inside it.
+fn in_check_id_charset(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-' | b'@')
+}
+
+/// A record id synthesized for a manifest rejected before its
+/// declared ids could be trusted. The stem is arbitrary
+/// operator-side filename bytes and must not poison the batch:
+/// charset-violating bytes map deterministically to `_`, and the
+/// stem truncates to keep `plugin:` + stem inside the 128-byte
+/// check-id cap. A stem that sanitizes to nothing falls back to
+/// `unknown`.
+fn synthesized_record_id(stem: &str) -> String {
+    const PREFIX: &str = "plugin:";
+    const MAX_STEM: usize = MAX_PLUGIN_ID_BYTES - PREFIX.len();
+    let sanitized: String = stem
+        .bytes()
+        .take(MAX_STEM)
+        .map(|b| {
+            if in_check_id_charset(b) {
+                b as char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!(
+        "{PREFIX}{}",
+        if sanitized.is_empty() {
+            "unknown".to_string()
+        } else {
+            sanitized
+        }
+    )
 }
 
 fn file_stem_string(path: &Path) -> String {
@@ -1558,6 +1606,21 @@ mod tests {
             |v| v["checks"] = serde_json::json!(["unprefixed.check"]),
             "plugin:",
         );
+        // Check ids are record ids: the manager whole-batch-rejects
+        // anything outside its check-id charset, so the agent must
+        // refuse such a manifest at load instead of poisoning every
+        // envelope it touches (the G4 instance-unit lesson).
+        assert_invalid(
+            |v| v["checks"] = serde_json::json!(["plugin:bad id"]),
+            "check-id charset",
+        );
+        assert_invalid(
+            |v| v["checks"] = serde_json::json!(["plugin:bad#id"]),
+            "check-id charset",
+        );
+        // The instance-unit token stays valid — the manager charset
+        // carries @.
+        validated(|v| v["checks"] = serde_json::json!(["plugin:ok@id"])).unwrap();
 
         // The exact contract ceilings are accepted.
         validated(|v| {
@@ -1582,5 +1645,25 @@ mod tests {
         // deny_unknown_fields: an extra key is a parse failure.
         let extra = text.replace("}", r#", "evil": true}"#);
         assert!(serde_json::from_str::<PluginManifest>(&extra).is_err());
+    }
+
+    #[test]
+    fn synthesized_record_ids_stay_in_the_manager_charset() {
+        // A rejected manifest's record id comes from its FILE NAME —
+        // arbitrary operator-side bytes. Raw stems would poison the
+        // whole batch on the manager (check-id charset,
+        // whole-batch rejection); the synthesized id must sanitize.
+        assert_eq!(synthesized_record_id("ok-plugin"), "plugin:ok-plugin");
+        assert_eq!(synthesized_record_id("bad id"), "plugin:bad_id");
+        assert_eq!(synthesized_record_id("bad#id"), "plugin:bad_id");
+        // Multibyte UTF-8 maps per byte, deterministically.
+        assert_eq!(synthesized_record_id("café"), "plugin:caf__");
+        assert_eq!(synthesized_record_id("!!!"), "plugin:___");
+        assert_eq!(synthesized_record_id(""), "plugin:unknown");
+        // Length: `plugin:` + truncated stem never exceeds the
+        // 128-byte check-id cap.
+        let id = synthesized_record_id(&"a".repeat(300));
+        assert_eq!(id.len(), MAX_PLUGIN_ID_BYTES);
+        assert!(id.bytes().all(in_check_id_charset));
     }
 }

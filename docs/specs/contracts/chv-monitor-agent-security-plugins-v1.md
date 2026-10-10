@@ -93,7 +93,7 @@ The host transport maps the trusted live VMM process to its authorized guest CID
 
 ## Authorization and privacy
 
-Manager API enforces project and role checks for enrollment, deletion and data views. Different projects cannot query one another's guest processes, filenames, service names, filesystem layouts, or plugins. Guest inventory defaults to minimal fields. A user may disable sensitive collector families. Logs, webhooks, and Prometheus export must redact secrets and sensitive field values.
+Manager API enforces role checks for enrollment (operator-tier claim issuance), deletion and data views. **v1 boundary, recorded precisely:** CHV v1 has a single fleet scope — roles are fleet-wide, VM reads (including every monitoring data view: `current`, `history`, `overview`, `checks`) are visible to the Viewer role, and per-resource ownership gates mutations, console access and enrollment claim issuance. This means a Viewer can read guest check inventory (service names, summaries, filesystem layouts) of any VM in the fleet — the exposure operators accept by granting the Viewer role. The project-isolation requirement is the multi-tenancy target state: once CHV gains project-scoped authorization, different projects must not query one another's guest processes, filenames, service names, filesystem layouts, or plugins. Guest inventory defaults to minimal fields. A user may disable sensitive collector families. Logs, webhooks, and Prometheus export must redact secrets and sensitive field values.
 
 ## Required negative tests
 
