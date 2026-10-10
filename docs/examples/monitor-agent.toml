@@ -56,12 +56,19 @@ spool_dir = "/var/lib/chv-monitor/spool"
 # Collection interval. 15 s is the component spec's `resources`
 # profile default; the manager's per-agent ceiling (one batch per
 # 5 s = agent_batches_per_minute = 12) still leaves headroom for
-# spool replay bursts (throttled, oldest-first — never dropped).
+# spool replay bursts (throttled, oldest-first on the wire).
 interval_seconds = 15
 
 # Outage budget: batches that cannot be delivered are spooled to disk
 # (bounded count, age-pruned) and replayed oldest-first on recovery.
-# 500 batches × 15 s ≈ 2 hours of outage at the default interval.
+# Two bounds apply, the tighter one wins:
+#   - locally, max_spool_batches × interval (500 × 15 s ≈ 2 hours on
+#     disk);
+#   - server-side, the ingestion contract's staleness cap: the manager
+#     accepts samples up to 5 minutes old (live raw ingestion only),
+#     so batches older than that are honestly discarded as stale on
+#     replay — the effective recovery window for an outage is ~5
+#     minutes of data, never silently re-stamped or backdated.
 max_spool_batches = 500
 spool_max_age_seconds = 604800
 

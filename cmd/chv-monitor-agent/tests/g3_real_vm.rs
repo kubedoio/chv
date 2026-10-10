@@ -445,23 +445,34 @@ async fn enrich_seed(vm_dir: &Path, manager: &Manager, deb: &Path, claim_token: 
 
     let iso = vm_dir.join("seed.iso");
     let iso_new = vm_dir.join("seed.iso.new");
-    let output = tokio::process::Command::new("genisoimage")
-        .arg("-output")
-        .arg(&iso_new)
-        .arg("-volid")
-        .arg("cidata")
-        .arg("-joliet")
-        .arg("-rock")
-        .arg(seed_dir.join("user-data"))
-        .arg(seed_dir.join("meta-data"))
-        .arg(seed_dir.join("network-config"))
-        .arg(seed_dir.join("chv-monitor-agent.deb"))
-        .arg(seed_dir.join("agent.toml"))
-        .arg(seed_dir.join("manager-ca.pem"))
-        .arg(seed_dir.join("claim"))
-        .output()
-        .await
-        .expect("run genisoimage for the enriched seed");
+    // PATH first, then the canonical install location — the same
+    // resolution the production seed builder performs.
+    let command = |binary: &str| {
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .arg("-output")
+            .arg(&iso_new)
+            .arg("-volid")
+            .arg("cidata")
+            .arg("-joliet")
+            .arg("-rock")
+            .arg(seed_dir.join("user-data"))
+            .arg(seed_dir.join("meta-data"))
+            .arg(seed_dir.join("network-config"))
+            .arg(seed_dir.join("chv-monitor-agent.deb"))
+            .arg(seed_dir.join("agent.toml"))
+            .arg(seed_dir.join("manager-ca.pem"))
+            .arg(seed_dir.join("claim"));
+        command
+    };
+    let output = match command("genisoimage").output().await {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => command("/usr/bin/genisoimage")
+            .output()
+            .await
+            .expect("run genisoimage for the enriched seed"),
+        Err(e) => panic!("failed to run genisoimage: {e}"),
+    };
     assert!(
         output.status.success(),
         "genisoimage failed: {}",
@@ -636,7 +647,7 @@ async fn g3_real_vm_guest_agent_enrolls_collects_and_revokes() {
             // inside the returned async block — a &mut capture cannot
             // escape into the future).
             poll_count += 1;
-            if poll_count % 30 == 0 {
+            if poll_count.is_multiple_of(30) {
                 checkpoint(&format!(
                     "still waiting for enrollment (poll {poll_count}); guest console tail:"
                 ));
@@ -689,9 +700,15 @@ async fn g3_real_vm_guest_agent_enrolls_collects_and_revokes() {
     // the guest agent must spool on disk and drain on reconnect. The
     // sequence high-water is the durable proof (point counts collapse
     // under query bucketing; the registry high-water does not lie).
-    let pre_outage = manager.active_agent().await.unwrap().last_sequence.unwrap();
     manager.stop_listener().await;
     checkpoint("manager outage begins");
+    // Baseline AFTER a short settle: a batch already in flight when
+    // the listener stopped may still commit in the first moment of
+    // the outage — that is not "ingestion while down". The baseline
+    // is taken once the stop has observably settled, and both the
+    // freeze and the drain assertions use it.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let pre_outage = manager.active_agent().await.unwrap().last_sequence.unwrap();
     tokio::time::sleep(Duration::from_secs(12)).await;
     let during_outage = manager.active_agent().await.unwrap().last_sequence.unwrap();
     assert_eq!(
@@ -755,10 +772,13 @@ async fn g3_real_vm_guest_agent_enrolls_collects_and_revokes() {
     );
     checkpoint("revocation blocks reporting, liveness frozen");
 
-    // Success path cleanup: graceful VM stop + delete, then the Drop
-    // guard removes the topology (and dumps nothing — no failure).
+    // Success path cleanup: graceful VM stop + delete. The VMM is gone
+    // by now, so release the guard's vm_dir reference — its Drop must
+    // neither SIGKILL a possibly-recycled PID nor dump diagnostics
+    // (dump_diagnostics runs whenever vm_dir is still set).
     let _ = runtime.stop_vm(VM_ID, false, None).await;
     let _ = runtime.delete_vm(VM_ID, None).await;
+    cleanup.vm_dir = None;
     checkpoint("vm stopped and deleted");
 }
 

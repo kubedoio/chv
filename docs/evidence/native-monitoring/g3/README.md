@@ -59,9 +59,9 @@ CHV_G3_AGENT_DEB=dist/packages/chv-monitor-agent_0.3.0_amd64.deb \
 cargo test -p chv-monitor-agent --test g3_real_vm -- --nocapture
 ```
 
-Result: **1 passed in 107.31s** (CI skips this test — no KVM; the run
-above is the real-host record on the final branch state; verbatim
-observations below).
+Result: **1 passed in 123.01s** (CI skips this test — no KVM; the run
+above is the real-host record on the final branch state, re-run after
+the review-round-2 fixes; verbatim observations below).
 
 ### 2. In-process lifecycle depth (identical manager/TLS code)
 
@@ -84,29 +84,44 @@ preservation across removal.
 
 ```text
 g3 checkpoint: network up (bridge + tap)
-g3 checkpoint: manager listening on https://192.168.62.1:40991
+g3 checkpoint: manager listening on https://192.168.62.1:44807
 g3 checkpoint: creating vm (production adapter, seed built)
 g3 checkpoint: seed enriched with the agent package and inputs
-g3 checkpoint: guest executing (vmm cpu ticks +57)
+g3 checkpoint: guest executing (vmm cpu ticks +58)
 g3 checkpoint: vm booted; waiting for cloud-init to install and the agent to enroll
+g3 checkpoint: still waiting for enrollment (poll 30); guest console tail:
+[...] cloud-init[670]: Cloud-init v. 26.1-0ubuntu1~24.04.1 running 'modules:config' at Sat, 10 Oct 2026 10:33:54 +0000. Up 14.04 seconds.
+[...] cloud-init[780]: Cloud-init v. 26.1-0ubuntu1~24.04.1 running 'modules:final' at Sat, 10 Oct 2026 10:34:30 +0000. Up 49.40 seconds.
+[...] cloud-init[780]: Selecting previously unselected package chv-monitor-agent.
+[...] cloud-init[780]: Unpacking chv-monitor-agent (0.3.0) ...
+[...] cloud-init[780]: Setting up chv-monitor-agent (0.3.0) ...
+[...] cloud-init[780]: chv-monitor-agent: installed (disabled by default).
+[...] cloud-init[780]: chv-monitor-agent: place a one-time claim at /var/lib/chv-monitor/claim (owner chv-monitor, 0600), then:
+[...] cloud-init[780]: Created symlink /etc/systemd/system/multi-user.target.wants/chv-monitor-agent.service → /usr/lib/systemd/system/chv-monitor-agent.service.
+[  OK  ] Started chv-monitor-agent.service - CHV Guest Monitoring Agent.
+[...] cloud-init[780]: Cloud-init v. 26.1-0ubuntu1~24.04.1 finished at Sat, 10 Oct 2026 10:34:31 +0000. Datasource DataSourceNoCloud [seed=/dev/vdb].  Up 50.64 seconds
 g3 checkpoint: agent enrolled
 g3 checkpoint: vm.guest.load1: 1 valid points
 g3 checkpoint: vm.guest.uptime_seconds: 1 valid points
 g3 checkpoint: vm.guest.cpu.utilization_ratio: 1 valid points
-g3 checkpoint: vm.memory.guest_available_bytes: 1 valid points
+g3 checkpoint: vm.memory.guest_available_bytes: 2 valid points
 g3 checkpoint: manager outage begins
 g3 checkpoint: manager back; waiting for the spool to drain
-g3 checkpoint: spool drained: sequence 2 -> 5
+g3 checkpoint: spool drained: sequence 2 -> 6
 g3 checkpoint: agent revoked; waiting for the block to settle
 g3 checkpoint: revocation blocks reporting, liveness frozen
 g3 checkpoint: vm stopped and deleted
 ```
 
+(The `[...]` lines are the rig's periodic guest-console dump — the
+real in-guest systemd/cloud-init log, not test narration.)
+
 Reading the observations:
 
 - **Enrollment**: firmware boot → kernel → cloud-init → `dpkg -i` →
   systemd start → claim redemption over mutual TLS through the bridge,
-  all inside ~90 s of `vm.boot`. The registry row for the VM is
+  with cloud-init finishing at Up 50.64 s and the agent enrolled right
+  behind it. The registry row for the VM is
   `active`, bound to exactly this VM (`vm_id` match is asserted, not
   assumed), and the OS identity on the row (`os_name` "Ubuntu",
   `os_kernel_release` present) came from inside the guest via the
@@ -116,11 +131,12 @@ Reading the observations:
   `vm.memory.guest_available_bytes` (the guest-collected memory,
   separately labeled from host-accounted VM memory) all have valid
   points in the manager's bounded history for this VM.
-- **Outage durability**: with the listener down 12 s (2+ collection
-  intervals at the rig's 5 s), the registry's sequence high-water froze
-  at 2 — no ingestion while the manager is away. After the listener
-  returned, the high-water advanced to 5: the spooled batches drained
-  oldest-first through the same enrolled credential.
+- **Outage durability**: with the listener down ~15 s (3 s settle
+  baseline + a 12 s freeze observation, spanning 2+ collection
+  intervals at the rig's 5 s), the registry's sequence high-water
+  froze at 2 — no ingestion while the manager is away. After the
+  listener returned, the high-water advanced to 6: the spooled
+  batches drained oldest-first through the same enrolled credential.
 - **Revocation**: after the operator revoke, `status` is `revoked` and
   both `last_seen_at_ms` and `last_sequence` are frozen across a 30 s
   observation window straddling multiple collection ticks — the agent
@@ -178,10 +194,11 @@ vocabulary).
   plugins and checks** are G4 (prompt 04) scope — not faked here.
 - **vsock transport** is prompt 06 scope; this gate's guest path is
   outbound HTTPS over the bridge, as designed for v1.
-- The fixed settle windows (12 s outage, 15 s revocation settle) are
-  sized against the rig's 5 s collection interval with margin; the
-  assertions they feed (frozen high-water, frozen liveness) are
-  idempotent re-reads, not timing races.
+- The fixed settle windows (3 s outage baseline settle, 12 s freeze
+  observation, 15 s revocation settle) are sized against the rig's
+  5 s collection interval with margin; the assertions they feed
+  (frozen high-water, frozen liveness) are idempotent re-reads, not
+  timing races.
 
 ## Gate verdict
 

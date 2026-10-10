@@ -97,7 +97,7 @@ systemd unit. Nothing runs yet.
    sudo systemctl enable --now chv-monitor-agent
    ```
 
-The agent enrolls on its next tick (30 s by default), the claim file
+The agent enrolls on its next tick (15 s by default), the claim file
 is deleted, and the VM's metrics tab starts showing guest telemetry
 alongside the host-side series.
 
@@ -130,7 +130,10 @@ alongside the host-side series.
   channel. No operator action.
 - **Manager outages** are expected: the agent spools batches to disk
   (bounded, age-pruned) and replays them oldest-first when the
-  manager returns.
+  manager returns. The ingestion contract keeps history *live*: the
+  manager accepts samples up to 5 minutes old, so an outage longer
+  than that recovers roughly the last 5 minutes of data — older
+  spooled batches are discarded as stale, never silently re-stamped.
 - **Removal**: `sudo apt remove chv-monitor-agent` (or `dnf remove`)
   stops the service and preserves `/var/lib/chv-monitor` (credential,
   spool, counters). Deleting that directory re-randomizes the install
