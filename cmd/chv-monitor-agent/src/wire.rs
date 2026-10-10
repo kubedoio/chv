@@ -53,6 +53,28 @@ pub struct EnvelopeJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<OsJson>,
     pub samples: Vec<SampleJson>,
+    /// Check records (ingestion contract v1 "checks" array): the
+    /// latest-status inventory; the numeric series travel as
+    /// `check.status` / `check.duration_seconds` samples in the same
+    /// batch. Older spooled envelopes carry no field — deserialization
+    /// defaults it empty.
+    #[serde(default)]
+    pub checks: Vec<CheckJson>,
+}
+
+/// One check record on the guest wire. The status is the contract's
+/// string vocabulary (`ok` / `warning` / `critical` / `unknown`);
+/// the manager validates and rejects anything else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckJson {
+    pub schema_version: i32,
+    pub check_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_key: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub observed_at_ms: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

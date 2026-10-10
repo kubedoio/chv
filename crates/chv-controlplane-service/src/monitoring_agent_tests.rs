@@ -9,7 +9,7 @@
 //! does) plus one full TLS round trip against a real rustls listener.
 
 use crate::monitoring_agent::{
-    AgentCertificateIssuer, AgentPeerCredential, EnrollOutcome, GuestBatchEnvelope,
+    AgentCertificateIssuer, AgentPeerCredential, EnrollOutcome, GuestBatchEnvelope, GuestCheckJson,
     GuestIngestOutcome, GuestOsMetadata, GuestSampleJson, MonitoringAgentService, RotateOutcome,
 };
 use chv_controlplane_store::test_util::TestDb;
@@ -164,6 +164,7 @@ impl Fixture {
                 kernel_release: Some("6.8.0-42-generic".into()),
             }),
             samples: vec![sample(&self.vm_id, now_ms)],
+            checks: vec![],
         }
     }
 }
@@ -183,6 +184,17 @@ fn sample(vm_id: &str, now_ms: i64) -> GuestSampleJson {
         dimensions: BTreeMap::new(),
         boot_id: "boot-1".into(),
         identity_epoch: "agent-credential-generation-1".into(),
+    }
+}
+
+fn check(now_ms: i64) -> GuestCheckJson {
+    GuestCheckJson {
+        schema_version: 1,
+        check_id: "service:nginx.service".into(),
+        service_key: Some("nginx.service".into()),
+        status: "ok".into(),
+        summary: Some("active (running)".into()),
+        observed_at_ms: now_ms - 500,
     }
 }
 
@@ -265,6 +277,176 @@ async fn enrolled_agent_ingests_dedups_and_records_state() {
         .await
         .unwrap();
     assert!(!series.is_empty(), "guest sample must be queryable");
+}
+
+/// A batch carrying valid check records stores them in the check
+/// inventory (latest-record-per-check, agent-attributed), queryable
+/// through the store; a replayed Duplicate does not re-record; and a
+/// delayed older observation does not regress a newer one.
+#[tokio::test]
+async fn checks_ingest_records_inventory_without_regressing() {
+    let fx = Fixture::new().await;
+    let now = 100_000i64;
+
+    // Batch 1: one sample + one check, accepted — the check lands in
+    // the inventory attributed to the bare agent id.
+    let mut envelope = fx.envelope(1, now);
+    envelope.checks = vec![check(now)];
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::Accepted { samples, .. } => assert_eq!(samples, 1),
+        other => panic!("expected accepted, got {other:?}"),
+    }
+    let stored = fx
+        .store
+        .query_checks(
+            &chv_monitoring_core::model::TargetKind::Vm,
+            &fx.vm_id,
+            now as u64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].check_id, "service:nginx.service");
+    assert_eq!(
+        stored[0].status,
+        chv_monitoring_core::model::CheckStatus::Ok
+    );
+    assert_eq!(stored[0].agent_id, fx.agent_id);
+    assert_eq!(stored[0].received_at_ms, now as u64);
+    let first_observed = stored[0].observed_at_ms;
+
+    // Duplicate replay of the same batch key: the check inventory is
+    // NOT re-recorded (receipt time unchanged).
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now + 1_000)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::Duplicate { .. } => {}
+        other => panic!("expected duplicate, got {other:?}"),
+    }
+    let stored = fx
+        .store
+        .query_checks(
+            &chv_monitoring_core::model::TargetKind::Vm,
+            &fx.vm_id,
+            now as u64 + 1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].received_at_ms, now as u64,
+        "a duplicate must not re-record the inventory"
+    );
+
+    // Batch 2 (new sequence) carries a NEWER observation with a worse
+    // status: the inventory moves forward.
+    let mut envelope = fx.envelope(2, now + 60_000);
+    let mut newer = check(now + 60_000);
+    newer.status = "critical".into();
+    envelope.checks = vec![newer];
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now + 60_000)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::Accepted { .. } => {}
+        other => panic!("expected accepted, got {other:?}"),
+    }
+
+    // Batch 3: a delayed batch whose check observation is OLDER than
+    // the stored one (still inside the 5-minute window, so it passes
+    // validation) with a rosier status — the inventory must keep the
+    // newer record.
+    let mut envelope = fx.envelope(3, now + 120_000);
+    let mut older = check((first_observed + 10_000) as i64);
+    older.status = "ok".into();
+    envelope.checks = vec![older];
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now + 120_000)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::Accepted { .. } => {}
+        other => panic!("expected accepted, got {other:?}"),
+    }
+    let stored = fx
+        .store
+        .query_checks(
+            &chv_monitoring_core::model::TargetKind::Vm,
+            &fx.vm_id,
+            (now + 120_000) as u64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].status,
+        chv_monitoring_core::model::CheckStatus::Critical,
+        "an older observation must not regress the inventory"
+    );
+    assert_eq!(stored[0].observed_at_ms, (now + 60_000 - 500) as u64);
+}
+
+/// One invalid check record rejects the WHOLE batch — the samples are
+/// not stored either (ingestion v1: never ACK an ambiguous subset).
+#[tokio::test]
+async fn invalid_check_rejects_the_whole_batch() {
+    let fx = Fixture::new().await;
+    let now = 100_000i64;
+
+    let mut envelope = fx.envelope(1, now);
+    let mut bad = check(now);
+    bad.check_id = "http:local:8080".into();
+    bad.summary = Some("control\u{1}character".into());
+    envelope.checks = vec![check(now), bad];
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::InvalidBatch(detail) => {
+            assert!(detail.contains("control"), "{detail}")
+        }
+        other => panic!("expected invalid batch, got {other:?}"),
+    }
+
+    // Nothing was stored: no samples, no checks.
+    assert_eq!(fx.store.raw_sample_count().await.unwrap(), 0);
+    let stored = fx
+        .store
+        .query_checks(
+            &chv_monitoring_core::model::TargetKind::Vm,
+            &fx.vm_id,
+            now as u64,
+        )
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "{stored:?}");
+
+    // The same batch key may then be retried with a valid body and is
+    // accepted (the rejection left no dedup proof behind).
+    let mut envelope = fx.envelope(1, now);
+    envelope.checks = vec![check(now)];
+    match fx
+        .service
+        .ingest_batch(&fx.peer(), &envelope, now + 1_000)
+        .await
+        .unwrap()
+    {
+        GuestIngestOutcome::Accepted { .. } => {}
+        other => panic!("expected accepted after retry, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -622,6 +804,7 @@ async fn unavailable_store_is_typed_degradation() {
         sent_at_ms: 100_000,
         os: None,
         samples: vec![sample(&vm_id, 100_000)],
+        checks: vec![],
     };
     envelope.samples[0].target_id = vm_id.clone();
     match service
@@ -869,6 +1052,14 @@ fn wire_envelope(envelope: &GuestBatchEnvelope) -> serde_json::Value {
             "dimensions": s.dimensions,
             "boot_id": s.boot_id,
             "identity_epoch": s.identity_epoch,
+        })).collect::<Vec<_>>(),
+        "checks": envelope.checks.iter().map(|c| serde_json::json!({
+            "schema_version": c.schema_version,
+            "check_id": c.check_id,
+            "service_key": c.service_key,
+            "status": c.status,
+            "summary": c.summary,
+            "observed_at_ms": c.observed_at_ms,
         })).collect::<Vec<_>>(),
     })
 }

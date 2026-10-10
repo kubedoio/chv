@@ -99,6 +99,7 @@ export const BFFEndpoints = {
 	monitoringOverview: '/v1/monitoring/overview',
 	monitoringCurrent: '/v1/monitoring/current',
 	monitoringHistory: '/v1/monitoring/history',
+	monitoringChecks: '/v1/monitoring/checks',
 	monitoringHealth: '/v1/monitoring/health',
 	// Guest monitoring agent administration (ADR-026, #602 G3).
 	monitoringAgents: '/v1/monitoring/agents',

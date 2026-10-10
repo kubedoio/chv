@@ -2,9 +2,10 @@ use crate::config::MonitoringStoreConfig;
 use crate::error::IngestOutcome;
 use crate::ingest::NodeBatch;
 use crate::query::Resolution;
-use crate::MonitoringStore;
+use crate::{MonitoringStore, StoredCheck};
 use chv_monitoring_core::model::{
-    MetricKind, SampleBuilder, SampleQuality, SampleValue, Source, TargetKind, Unit,
+    CheckRecord, CheckStatus, MetricKind, SampleBuilder, SampleQuality, SampleValue, Source,
+    TargetKind, Unit,
 };
 use sqlx::Row;
 use std::path::PathBuf;
@@ -103,6 +104,16 @@ fn batch(boot: &str, sequence: u64, samples: Vec<chv_monitoring_core::model::Sam
         sequence,
         sent_at_ms: T0,
         samples,
+    }
+}
+
+fn check(check_id: &str, status: CheckStatus, observed_ms: u64) -> CheckRecord {
+    CheckRecord {
+        check_id: check_id.to_string(),
+        service_key: Some("nginx.service".to_string()),
+        status,
+        summary: Some("active (running)".to_string()),
+        observed_at_ms: observed_ms,
     }
 }
 
@@ -458,6 +469,72 @@ async fn current_reports_latest_with_staleness() {
         .find(|c| c.metric_id == "node.cpu.capacity_ratio")
         .unwrap();
     assert!(cpu.stale, "2-minute-old node sample is stale");
+}
+
+#[tokio::test]
+async fn current_applies_metric_specific_staleness_thresholds() {
+    let (_dir, s) = store().await;
+    // A 60-second cadence family (vm.guest.fs.*) and a 15-second
+    // family (vm.guest.cpu.utilization_ratio), both observed 100
+    // seconds ago: the fs sample stays fresh under its 180-second
+    // metric-specific window while the 15-second family is stale
+    // under the default non-node threshold.
+    let fs = SampleBuilder::new(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.guest.fs.available_bytes",
+        Source::GuestAgent,
+        T0,
+    )
+    .unwrap()
+    .dimension("mount_id", "ext4:/")
+    .unwrap()
+    .value(SampleValue::Integer(1_000))
+    .build()
+    .unwrap();
+    let cpu = SampleBuilder::new(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.guest.cpu.utilization_ratio",
+        Source::GuestAgent,
+        T0,
+    )
+    .unwrap()
+    .value(SampleValue::Float(0.5))
+    .build()
+    .unwrap();
+    s.ingest_node_batch("vm-1", &batch("boot-1", 0, vec![fs, cpu]), T0)
+        .await
+        .unwrap();
+
+    let current = s
+        .query_current(&TargetKind::Vm, "vm-1", &[], None, T0 + 100_000)
+        .await
+        .unwrap();
+    let fs = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.fs.available_bytes")
+        .unwrap();
+    assert!(!fs.stale, "100s-old fs sample is fresh (180s window)");
+    let cpu = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.cpu.utilization_ratio")
+        .unwrap();
+    assert!(
+        cpu.stale,
+        "100s-old 15s-family sample is stale (90s default)"
+    );
+
+    // The fs window is finite too.
+    let current = s
+        .query_current(&TargetKind::Vm, "vm-1", &[], None, T0 + 200_000)
+        .await
+        .unwrap();
+    let fs = current
+        .iter()
+        .find(|c| c.metric_id == "vm.guest.fs.available_bytes")
+        .unwrap();
+    assert!(fs.stale, "200s-old fs sample is stale");
 }
 
 #[tokio::test]
@@ -871,4 +948,183 @@ async fn later_send_time_alone_is_a_duplicate_not_a_conflict() {
         matches!(second, IngestOutcome::Duplicate { .. }),
         "identical samples at a later send time: {second:?}"
     );
+}
+
+// -- check inventory -------------------------------------------------------
+
+/// The inventory holds exactly the LATEST record per check_id: a
+/// newer observation replaces the row, and re-recording the same
+/// observation is idempotent.
+#[tokio::test]
+async fn check_inventory_upserts_latest_per_check() {
+    let (_dir, s) = store().await;
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[
+            check("service:nginx.service", CheckStatus::Ok, T0),
+            check("http:local:8080", CheckStatus::Warning, T0),
+        ],
+        T0 + 1_000,
+    )
+    .await
+    .unwrap();
+
+    // A later batch flips one status and introduces a new check.
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[
+            check("service:nginx.service", CheckStatus::Critical, T0 + 60_000),
+            check("plugin:example.http-health", CheckStatus::Ok, T0 + 60_000),
+        ],
+        T0 + 61_000,
+    )
+    .await
+    .unwrap();
+
+    let stored = s
+        .query_checks(&TargetKind::Vm, "vm-1", T0 + 61_000)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 3, "one row per check_id: {stored:?}");
+    let nginx = stored
+        .iter()
+        .find(|c| c.check_id == "service:nginx.service")
+        .unwrap();
+    assert_eq!(nginx.status, CheckStatus::Critical);
+    assert_eq!(nginx.observed_at_ms, T0 + 60_000);
+    assert_eq!(nginx.agent_id, "agent:a1");
+    // The untouched check keeps its previous record.
+    let http = stored
+        .iter()
+        .find(|c| c.check_id == "http:local:8080")
+        .unwrap();
+    assert_eq!(http.status, CheckStatus::Warning);
+    assert_eq!(http.observed_at_ms, T0);
+
+    // Re-recording the same observation is idempotent (equal
+    // observed_at_ms refreshes receipt metadata only).
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[check(
+            "service:nginx.service",
+            CheckStatus::Critical,
+            T0 + 60_000,
+        )],
+        T0 + 62_000,
+    )
+    .await
+    .unwrap();
+    let stored = s
+        .query_checks(&TargetKind::Vm, "vm-1", T0 + 62_000)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 3);
+    let nginx = stored
+        .iter()
+        .find(|c| c.check_id == "service:nginx.service")
+        .unwrap();
+    assert_eq!(nginx.status, CheckStatus::Critical);
+    assert_eq!(nginx.received_at_ms, T0 + 62_000);
+}
+
+/// Rows only move forward: a delayed batch with an OLDER
+/// observed_at_ms must not regress a newer inventory record.
+#[tokio::test]
+async fn older_check_batch_does_not_regress_the_inventory() {
+    let (_dir, s) = store().await;
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[check(
+            "service:nginx.service",
+            CheckStatus::Critical,
+            T0 + 120_000,
+        )],
+        T0 + 121_000,
+    )
+    .await
+    .unwrap();
+
+    // A delayed batch (e.g. reordered delivery) carrying an older
+    // observation with a rosier status: the inventory must keep the
+    // newer record.
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[check("service:nginx.service", CheckStatus::Ok, T0 + 60_000)],
+        T0 + 122_000,
+    )
+    .await
+    .unwrap();
+
+    let stored = s
+        .query_checks(&TargetKind::Vm, "vm-1", T0 + 122_000)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, CheckStatus::Critical, "newer record wins");
+    assert_eq!(stored[0].observed_at_ms, T0 + 120_000);
+    assert_eq!(stored[0].received_at_ms, T0 + 121_000);
+}
+
+/// Query marks staleness with the registry's `check.*` window (60 s
+/// cadence → 180 s): one missed collection is not stale; three are.
+#[tokio::test]
+async fn check_query_reports_staleness_and_empty_targets() {
+    let (_dir, s) = store().await;
+    s.record_checks(
+        "agent:a1",
+        &TargetKind::Vm,
+        "vm-1",
+        &[
+            check("service:nginx.service", CheckStatus::Ok, T0),
+            check("http:local:8080", CheckStatus::Ok, T0 + 120_000),
+        ],
+        T0 + 1_000,
+    )
+    .await
+    .unwrap();
+
+    // 150 s after the first observation (30 s after the second):
+    // both inside the 180 s window.
+    let stored = s
+        .query_checks(&TargetKind::Vm, "vm-1", T0 + 150_000)
+        .await
+        .unwrap();
+    assert!(
+        stored.iter().all(|c| !c.stale),
+        "inside 180s window: {stored:?}"
+    );
+
+    // 181 s after the T0 observation: that check is stale; the 120 s
+    // one (61 s old) is not.
+    let stored = s
+        .query_checks(&TargetKind::Vm, "vm-1", T0 + 181_000)
+        .await
+        .unwrap();
+    let nginx = stored
+        .iter()
+        .find(|c| c.check_id == "service:nginx.service")
+        .unwrap();
+    assert!(nginx.stale, "181s-old check is stale");
+    let http = stored
+        .iter()
+        .find(|c| c.check_id == "http:local:8080")
+        .unwrap();
+    assert!(!http.stale, "61s-old check is fresh");
+
+    // A target with no recorded checks: honest absence, empty vec.
+    let empty = s.query_checks(&TargetKind::Vm, "vm-404", T0).await.unwrap();
+    assert_eq!(empty, Vec::<StoredCheck>::new());
+    // ...and kind separation holds (a VM's checks are not a node's).
+    let empty = s.query_checks(&TargetKind::Node, "vm-1", T0).await.unwrap();
+    assert!(empty.is_empty());
 }

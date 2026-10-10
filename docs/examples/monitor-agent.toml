@@ -73,3 +73,56 @@ max_spool_batches = 500
 spool_max_age_seconds = 604800
 
 log_level = "info"
+
+# --- Guest collector families (G4; defaults shown) ----------------------
+# Read-only families default ON; the privacy-sensitive process
+# family is opt-in. Per-family cadence follows the component spec:
+# resources/network every tick (15 s), processes 30 s, filesystems
+# 60 s — the interval above scales the tick, not the profiles.
+[collectors]
+filesystems = true
+network = true
+services = true
+processes = false
+
+# Process selectors (require processes = true): stable executable
+# names matched against /proc/<pid>/status Name only — never command
+# lines, environments or per-PID labels. Bounded to 8 selectors.
+# process_selectors = ["nginx", "postgres"]
+
+# --- systemd service checks --------------------------------------------
+# Explicit units to check (bounded to 32) plus opt-in bounded
+# discovery of running services. Inventory stays minimal by
+# default: with no units configured and discovery off, the services
+# family collects nothing.
+[services]
+configured = []
+discover = false
+# configured = ["nginx.service", "postgresql.service"]
+# discover = true
+
+# --- Declarative local HTTP/TCP checks (empty by default) ---------------
+# LOCAL opt-in: every endpoint must be a loopback address — the agent
+# never probes remote hosts with these checks (remote endpoints are
+# plugin territory, under the root-owned allowlist). Cloud metadata
+# addresses (169.254.169.254) are rejected at config load and again
+# at runtime after name resolution. Bounded to 16 checks total.
+#
+# [[checks.http]]
+# label = "app-health"
+# url = "http://127.0.0.1:8080/health"
+#
+# [[checks.tcp]]
+# label = "ssh"
+# host = "127.0.0.1"
+# port = 22
+
+# --- Opt-in local plugins (security/plugins contract v1) ----------------
+# Disabled by default and constrained when enabled: manifests and
+# executables are root-owned in the allowlist directory, digests are
+# pinned and re-verified before every run, execution is shell-free,
+# non-root, time- and output-bounded. The manager can never enable,
+# configure or supply plugins — enablement is a local decision.
+[plugins]
+enabled = false
+directory = "/etc/chv-monitor/plugins.d"

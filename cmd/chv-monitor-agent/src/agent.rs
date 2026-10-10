@@ -12,17 +12,19 @@
 //!   is imminent; the old credential keeps working through the
 //!   manager's grace window while rotation is retried.
 
+use crate::checks::{CheckOutcome, LocalChecks, ServiceChecks};
 use crate::client::{ClientError, ManagerClient};
 use crate::config::AgentConfig;
 use crate::credential::StoredCredential;
+use crate::plugins::PluginEngine;
 use crate::spool::{DrainResult, DrainSummary, Spool, SpoolEntry};
 use crate::state::AgentState;
 use crate::wire::{
-    EnvelopeJson, OsJson, SampleJson, QUALITY_VALID, SCHEMA_VERSION, SOURCE_GUEST_AGENT,
+    CheckJson, EnvelopeJson, OsJson, SampleJson, QUALITY_VALID, SCHEMA_VERSION, SOURCE_GUEST_AGENT,
     TARGET_KIND_VM,
 };
-use chv_monitor_collectors::{CollectedSample, GuestCollectors};
-use std::collections::BTreeMap;
+use chv_monitor_collectors::{CollectedSample, GuestCollectors, SampleValue};
+use std::collections::{BTreeMap, HashMap};
 
 /// Rotate when the credential expires within this horizon, even if
 /// the manager has not flagged renewal yet (covers agents that were
@@ -61,6 +63,21 @@ pub enum TickOutcome {
 pub struct Agent {
     config: AgentConfig,
     collectors: GuestCollectors,
+    /// Per-family collection cadence (component spec profiles):
+    /// baseline resources + network ride every tick (15 s default);
+    /// filesystems, checks (60 s) and processes (30 s) are time-gated
+    /// so one interval setting cannot starve or flood a family.
+    cadence: FamilyCadence,
+    /// The check engines (G4): systemd services, declarative local
+    /// http/tcp, and the opt-in plugin sandbox (constructed only when
+    /// `[plugins] enabled` — disabled means no engine, no directory
+    /// scan, nothing executed).
+    service_checks: ServiceChecks,
+    local_checks: LocalChecks,
+    plugin_engine: Option<PluginEngine>,
+    /// Per-plugin last-run stamps for interval due-ness (caller-owned
+    /// by the engine's contract; agent restart simply re-runs).
+    plugin_last_run: HashMap<String, i64>,
     state: AgentState,
     spool: Spool,
     credential: Option<StoredCredential>,
@@ -70,6 +87,38 @@ pub struct Agent {
     /// Set when the manager answered 401 — suppresses ingestion until
     /// a fresh claim re-enrolls (or the manager clears the conflict).
     unauthorized: bool,
+}
+
+/// Time-gated family scheduling. `due` is true on the first tick and
+/// again after the family's interval has elapsed — a pure decision
+/// over the last-collection timestamp, unit-tested without a clock.
+#[derive(Debug, Default)]
+struct FamilyCadence {
+    last_filesystems_ms: Option<i64>,
+    last_processes_ms: Option<i64>,
+    last_checks_ms: Option<i64>,
+}
+
+/// Component spec profile intervals.
+const FILESYSTEMS_INTERVAL_MS: i64 = 60_000;
+const PROCESSES_INTERVAL_MS: i64 = 30_000;
+/// The checks family (systemd services, local http/tcp, plugins)
+/// rides the same 60 s profile as the service discovery it serves.
+const CHECKS_INTERVAL_MS: i64 = 60_000;
+
+impl FamilyCadence {
+    fn filesystems_due(&self, now_ms: i64) -> bool {
+        self.last_filesystems_ms
+            .is_none_or(|last| now_ms - last >= FILESYSTEMS_INTERVAL_MS)
+    }
+    fn processes_due(&self, now_ms: i64) -> bool {
+        self.last_processes_ms
+            .is_none_or(|last| now_ms - last >= PROCESSES_INTERVAL_MS)
+    }
+    fn checks_due(&self, now_ms: i64) -> bool {
+        self.last_checks_ms
+            .is_none_or(|last| now_ms - last >= CHECKS_INTERVAL_MS)
+    }
 }
 
 impl Agent {
@@ -97,9 +146,31 @@ impl Agent {
         };
         let enroll_client = ManagerClient::new(&config.server_url, &manager_ca_pem, None)
             .map_err(|e| AgentError::ManagerCa(e.to_string()))?;
+        // Collector opt-ins come from config (validated at load).
+        let mut collectors = GuestCollectors::new();
+        if config.collectors.filesystems {
+            collectors = collectors.enable_filesystems();
+        }
+        if config.collectors.network {
+            collectors = collectors.enable_network();
+        }
+        if config.collectors.processes {
+            collectors = collectors.enable_processes(config.collectors.process_selectors.clone());
+        }
+        // The plugin engine exists only when explicitly enabled: a
+        // disabled config never touches the allowlist directory.
+        let plugin_engine = config
+            .plugins
+            .enabled
+            .then(|| PluginEngine::new(config.plugins.directory.clone()));
         Ok(Self {
             config,
-            collectors: GuestCollectors::new(),
+            collectors,
+            cadence: FamilyCadence::default(),
+            service_checks: ServiceChecks::new(),
+            local_checks: LocalChecks::new(),
+            plugin_engine,
+            plugin_last_run: HashMap::new(),
             state,
             spool,
             credential,
@@ -135,7 +206,7 @@ impl Agent {
         }
 
         let now_ms = chrono_like_now_ms();
-        let envelope = self.build_envelope(&credential, now_ms);
+        let envelope = self.build_envelope(&credential, now_ms).await;
         let samples = envelope.samples.len();
         if let Err(e) = self.spool.push(SpoolEntry {
             agent_id: envelope.agent_id.clone(),
@@ -315,8 +386,59 @@ impl Agent {
         }
     }
 
-    fn build_envelope(&mut self, credential: &StoredCredential, now_ms: i64) -> EnvelopeJson {
-        let collected = self.collectors.collect();
+    async fn build_envelope(&mut self, credential: &StoredCredential, now_ms: i64) -> EnvelopeJson {
+        // Baseline (resources profile) rides every tick; the G4
+        // families follow their profile cadence. Everything collected
+        // in one cycle forms one batch, bounded by the family budgets
+        // (worst case stays under the contract's 512 samples).
+        let mut collected = self.collectors.collect();
+        if self.cadence.filesystems_due(now_ms) {
+            collected.extend(self.collectors.collect_filesystems());
+            self.cadence.last_filesystems_ms = Some(now_ms);
+        }
+        // The network profile is 15 s — the default tick — so it
+        // rides every tick rather than its own gate.
+        collected.extend(self.collectors.collect_network());
+        if self.cadence.processes_due(now_ms) {
+            collected.extend(self.collectors.collect_processes(now_ms.unsigned_abs()));
+            self.cadence.last_processes_ms = Some(now_ms);
+        }
+        // The checks family (60 s profile): systemd services,
+        // declarative local http/tcp and due plugins. The outcomes
+        // become the envelope's checks array AND the check.status /
+        // check.duration_seconds samples (dimensioned by check_id);
+        // service outcomes additionally justify their
+        // vm.guest.service.up samples. The agent is the authoritative
+        // timekeeper — durations are engine-measured, never trusted
+        // from check output. Worst case stays inside the ingest
+        // contract's 512-sample batch ceiling (see the budget note on
+        // the collectors' bound constants).
+        let mut checks_json: Vec<CheckJson> = Vec::new();
+        if self.cadence.checks_due(now_ms) {
+            self.cadence.last_checks_ms = Some(now_ms);
+            let mut outcomes: Vec<CheckOutcome> = Vec::new();
+            if self.config.collectors.services {
+                let services = self
+                    .service_checks
+                    .run(
+                        &self.config.services.configured,
+                        self.config.services.discover,
+                        now_ms,
+                    )
+                    .await;
+                collected.extend(services.service_up_samples);
+                outcomes.extend(services.outcomes);
+            }
+            if !self.config.checks.http.is_empty() || !self.config.checks.tcp.is_empty() {
+                outcomes.extend(self.local_checks.run(&self.config.checks, now_ms).await);
+            }
+            if let Some(engine) = &self.plugin_engine {
+                outcomes.extend(engine.run_due(now_ms, &mut self.plugin_last_run).await);
+            }
+            let (records, samples) = outcomes_to_wire(outcomes);
+            checks_json = records;
+            collected.extend(samples);
+        }
         let os = self.collectors.os_identity();
         let boot_id = {
             let b = self.collectors.boot_id();
@@ -354,8 +476,52 @@ impl Agent {
                 kernel_release: os.kernel_release,
             }),
             samples,
+            // The 60 s checks family's records (empty when no checks
+            // are configured or the family is between cadence ticks).
+            checks: checks_json,
         }
     }
+}
+
+/// Map check-engine outcomes to their envelope forms: the records
+/// for the `checks` array plus the `check.status` (typed integer
+/// state, never a float) and `check.duration_seconds` samples, each
+/// dimensioned by `check_id`. Pure — unit-tested without engines.
+/// The agent is the authoritative timekeeper: durations here are the
+/// engine-measured values, never a check's own claim.
+fn outcomes_to_wire(outcomes: Vec<CheckOutcome>) -> (Vec<CheckJson>, Vec<CollectedSample>) {
+    let mut records = Vec::with_capacity(outcomes.len());
+    let mut samples = Vec::with_capacity(outcomes.len() * 2);
+    let mut seen = std::collections::HashSet::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        // The manager whole-batch-rejects a duplicate check_id —
+        // one misconfigured allowlist (two plugins claiming the
+        // same id, or a rejected manifest's sanitized stem
+        // colliding with a declared id) must not discard the
+        // entire envelope's telemetry. The first outcome wins
+        // (the merge order is deterministic: services, local
+        // checks, plugins); the duplicate degrades to a warn,
+        // never a poison.
+        if !seen.insert(outcome.check.check_id.clone()) {
+            tracing::warn!(
+                check_id = %outcome.check.check_id,
+                "duplicate check id across engines; keeping the first outcome"
+            );
+            continue;
+        }
+        samples.push(CollectedSample {
+            metric_id: "check.status",
+            value: SampleValue::Integer(outcome.status().code()),
+            dimension: Some(("check_id", outcome.check.check_id.clone())),
+        });
+        samples.push(CollectedSample {
+            metric_id: "check.duration_seconds",
+            value: SampleValue::Float(outcome.duration_ms as f64 / 1000.0),
+            dimension: Some(("check_id", outcome.check.check_id.clone())),
+        });
+        records.push(outcome.check);
+    }
+    (records, samples)
 }
 
 /// Map a transport result to the spool's drain decision. Pure
@@ -413,8 +579,28 @@ fn build_samples(
         .iter()
         .filter_map(|s| {
             let def = chv_monitoring_core::registry::lookup(s.metric_id)?;
-            if !s.value.is_finite() {
-                return None;
+            let value = match s.value {
+                SampleValue::Float(v) => {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    serde_json::json!(v)
+                }
+                SampleValue::Integer(v) => {
+                    // Contract: exact integers above the JavaScript
+                    // safe range (2^53 - 1) travel as decimal strings
+                    // — the manager parses them back exactly, and a
+                    // JSON number would lose precision in any JS hop.
+                    if v > (1u64 << 53) - 1 {
+                        serde_json::json!(v.to_string())
+                    } else {
+                        serde_json::json!(v)
+                    }
+                }
+            };
+            let mut dimensions = BTreeMap::new();
+            if let Some((key, dim)) = &s.dimension {
+                dimensions.insert(key.to_string(), dim.clone());
             }
             Some(SampleJson {
                 schema_version: SCHEMA_VERSION,
@@ -425,9 +611,9 @@ fn build_samples(
                 kind: def.kind.as_str().to_string(),
                 unit: def.unit.as_str().to_string(),
                 observed_at_ms: now_ms,
-                value: serde_json::json!(s.value),
+                value,
                 quality: QUALITY_VALID.to_string(),
-                dimensions: BTreeMap::new(),
+                dimensions,
                 boot_id: boot_id.to_string(),
                 identity_epoch: identity_epoch.to_string(),
             })
@@ -470,4 +656,177 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         src = s.source();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chv_monitor_collectors::SampleValue;
+
+    #[test]
+    fn family_cadence_gates_sixty_and_thirty_second_families() {
+        let mut c = FamilyCadence::default();
+        // First tick: everything due.
+        assert!(c.filesystems_due(1_000));
+        assert!(c.processes_due(1_000));
+        c.last_filesystems_ms = Some(1_000);
+        c.last_processes_ms = Some(1_000);
+        // +15 s: neither due yet.
+        assert!(!c.filesystems_due(16_000));
+        assert!(!c.processes_due(16_000));
+        // +30 s: processes due, filesystems not.
+        assert!(!c.filesystems_due(31_000));
+        assert!(c.processes_due(31_000));
+        // +60 s: both due.
+        assert!(c.filesystems_due(61_000));
+        assert!(c.processes_due(61_000));
+        // A backwards clock never re-arms a family.
+        c.last_filesystems_ms = Some(100_000);
+        assert!(!c.filesystems_due(61_000));
+    }
+
+    #[test]
+    fn family_cadence_gates_the_sixty_second_checks_family() {
+        let mut c = FamilyCadence::default();
+        assert!(c.checks_due(1_000), "first tick: checks due");
+        c.last_checks_ms = Some(1_000);
+        assert!(!c.checks_due(16_000), "+15 s: not due");
+        assert!(!c.checks_due(60_000), "+59 s: not due");
+        assert!(c.checks_due(61_000), "+60 s: due");
+        c.last_checks_ms = Some(100_000);
+        assert!(!c.checks_due(61_000), "backwards clock never re-arms");
+    }
+
+    #[test]
+    fn outcomes_to_wire_maps_records_and_typed_state_samples() {
+        use crate::checks::CheckOutcome;
+        use crate::wire::CheckJson;
+        use chv_monitoring_core::model::CheckStatus;
+
+        let outcome = |check_id: &str, status: CheckStatus, duration_ms: u64| CheckOutcome {
+            check: CheckJson {
+                schema_version: 1,
+                check_id: check_id.to_string(),
+                service_key: Some("nginx.service".to_string()),
+                status: status.as_str().to_string(),
+                summary: Some("active (running)".to_string()),
+                observed_at_ms: 1_000,
+            },
+            duration_ms,
+        };
+        let (records, samples) = outcomes_to_wire(vec![
+            outcome("service:nginx.service", CheckStatus::Ok, 42),
+            outcome("http:app", CheckStatus::Critical, 5_100),
+        ]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].check_id, "service:nginx.service");
+        // One status + one duration sample per record, dimensioned by
+        // check_id, statuses as TYPED INTEGER state codes (never
+        // floats), durations as engine-measured seconds.
+        assert_eq!(samples.len(), 4);
+        let status = samples
+            .iter()
+            .find(|s| {
+                s.metric_id == "check.status"
+                    && s.dimension.as_ref().map(|d| d.1.as_str()) == Some("http:app")
+            })
+            .expect("http:app status sample");
+        assert_eq!(status.value, SampleValue::Integer(2), "critical = code 2");
+        let duration = samples
+            .iter()
+            .find(|s| {
+                s.metric_id == "check.duration_seconds"
+                    && s.dimension.as_ref().map(|d| d.1.as_str()) == Some("http:app")
+            })
+            .expect("http:app duration sample");
+        match duration.value {
+            SampleValue::Float(v) => assert!((v - 5.1).abs() < 1e-9, "5100 ms -> 5.1 s"),
+            other => panic!("duration must be a float, got {other:?}"),
+        }
+        // Empty outcomes: empty wire forms (no fabricated samples).
+        let (records, samples) = outcomes_to_wire(Vec::new());
+        assert!(records.is_empty());
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn outcomes_to_wire_dedupes_colliding_check_ids() {
+        use crate::checks::CheckOutcome;
+        use crate::wire::CheckJson;
+        use chv_monitoring_core::model::CheckStatus;
+
+        let outcome = |check_id: &str| CheckOutcome {
+            check: CheckJson {
+                schema_version: 1,
+                check_id: check_id.to_string(),
+                service_key: None,
+                status: CheckStatus::Ok.as_str().to_string(),
+                summary: None,
+                observed_at_ms: 1_000,
+            },
+            duration_ms: 10,
+        };
+        // Review-round-2 lesson: the manager whole-batch-rejects a
+        // duplicate check_id, and the merge order is deterministic
+        // (services, local checks, plugins) — a misconfigured
+        // allowlist (two plugins claiming one id, a rejected
+        // manifest's sanitized stem colliding with a declared id)
+        // must degrade to ONE outcome, never poison the envelope.
+        let (records, samples) = outcomes_to_wire(vec![
+            outcome("service:ssh.service"),
+            outcome("plugin:colliding"),
+            outcome("plugin:colliding"),
+        ]);
+        assert_eq!(records.len(), 2, "first outcome wins, duplicate drops");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.check_id == "plugin:colliding")
+                .count(),
+            1
+        );
+        // Exactly one status + one duration sample per surviving id
+        // (the duplicate's samples drop with its record).
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|s| s.dimension.as_ref().map(|d| d.1.as_str()) == Some("plugin:colliding"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn build_samples_encodes_big_integers_as_decimal_strings() {
+        // Contract: integers above the JS-safe range (2^53 - 1)
+        // travel as decimal strings; smaller ones stay JSON numbers.
+        let collected = vec![
+            CollectedSample {
+                metric_id: "vm.guest.net.rx_bytes_total",
+                value: SampleValue::Integer((1u64 << 53) - 1),
+                dimension: Some(("interface_id", "phys:eth0".to_string())),
+            },
+            CollectedSample {
+                metric_id: "vm.guest.net.tx_bytes_total",
+                value: SampleValue::Integer(1u64 << 53),
+                dimension: Some(("interface_id", "phys:eth0".to_string())),
+            },
+        ];
+        let out = build_samples(&collected, "vm-1", "boot", "epoch-1", 1_000);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].value, serde_json::json!((1u64 << 53) - 1));
+        assert_eq!(
+            out[1].value,
+            serde_json::json!((1u64 << 53).to_string()),
+            "2^53 must encode as a decimal string"
+        );
+        assert_eq!(
+            out[0].dimensions.get("interface_id").map(String::as_str),
+            Some("phys:eth0")
+        );
+        // Kind/unit resolve from the registry, never hard-coded.
+        assert_eq!(out[0].kind, "counter");
+        assert_eq!(out[0].unit, "bytes");
+    }
 }

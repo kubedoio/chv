@@ -1017,10 +1017,12 @@ dependencies = [
  "chv-monitoring-core",
  "chv-monitoring-store",
  "chv-observability",
+ "libc",
  "rcgen",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
@@ -1034,6 +1036,9 @@ dependencies = [
 [[package]]
 name = "chv-monitor-collectors"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "chv-monitoring-core"

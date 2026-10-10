@@ -29,7 +29,9 @@ use chv_controlplane_store::{
     DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, TopologyRepository,
 };
-use chv_monitoring_core::model::{SampleBuilder, SampleQuality, SampleValue, Source, TargetKind};
+use chv_monitoring_core::model::{
+    CheckRecord, CheckStatus, SampleBuilder, SampleQuality, SampleValue, Source, TargetKind,
+};
 use chv_monitoring_store::{
     IngestOutcome, MonitoringHealth, MonitoringStore, MonitoringStoreConfig, NodeBatch,
 };
@@ -346,6 +348,15 @@ async fn monitoring_routes_require_authentication() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/checks",
+        None,
+        Some(json!({"target_kind": "vm", "target_id": "vm-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -393,6 +404,10 @@ async fn degraded_monitoring_is_a_typed_503_never_node_failure() {
         (
             "/v1/monitoring/overview",
             json!({"target_kind": "node", "target_ids": ["node-1"]}),
+        ),
+        (
+            "/v1/monitoring/checks",
+            json!({"target_kind": "vm", "target_id": "vm-1"}),
         ),
     ] {
         let (status, body_out) = request(&state, "POST", path, Some(&token), Some(body)).await;
@@ -634,4 +649,103 @@ async fn overview_enumerates_targets_and_enforces_the_cap() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "QUERY_TOO_LARGE");
+}
+
+/// The checks inventory route: viewer-tier read of the
+/// latest-record-per-check inventory, seeded through the store's own
+/// `record_checks` (the guest ingest path that writes it is covered
+/// by the controlplane-service tests). The typed status serializes as
+/// its string form and staleness is decided server-side.
+#[tokio::test]
+async fn checks_route_serves_the_latest_record_per_check() {
+    let (_dir, store) = seeded_store().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    store
+        .record_checks(
+            "agent:a-1",
+            &TargetKind::Vm,
+            "vm-1",
+            &[
+                CheckRecord {
+                    check_id: "service:nginx.service".to_string(),
+                    service_key: Some("nginx.service".to_string()),
+                    status: CheckStatus::Warning,
+                    summary: Some("active (running)".to_string()),
+                    observed_at_ms: now - 30_000,
+                },
+                CheckRecord {
+                    check_id: "http:local:8080".to_string(),
+                    service_key: None,
+                    status: CheckStatus::Ok,
+                    summary: None,
+                    observed_at_ms: now - 30_000,
+                },
+            ],
+            now,
+        )
+        .await
+        .expect("seed check inventory");
+
+    let state = build_state(Some(store)).await;
+    let token = seed_jwt_as(&state, "viewer").await;
+
+    // Viewer role suffices (the role check happens before the target
+    // is read); the response carries the full inventory shape.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/checks",
+        Some(&token),
+        Some(json!({"target_kind": "vm", "target_id": "vm-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["target_kind"], "vm");
+    assert_eq!(body["target_id"], "vm-1");
+    let checks = body["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    let nginx = checks
+        .iter()
+        .find(|c| c["check_id"] == "service:nginx.service")
+        .unwrap();
+    assert_eq!(nginx["status"], "warning", "typed state as its string form");
+    assert_eq!(nginx["service_key"], "nginx.service");
+    assert_eq!(nginx["summary"], "active (running)");
+    assert_eq!(nginx["agent_id"], "agent:a-1");
+    assert_eq!(nginx["received_at_ms"], json!(now));
+    assert_eq!(
+        nginx["stale"], false,
+        "30s-old check is fresh (180s window)"
+    );
+
+    // A target with no recorded checks: honest absence, empty list.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/checks",
+        Some(&token),
+        Some(json!({"target_kind": "vm", "target_id": "vm-404"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["checks"].as_array().unwrap().len(), 0);
+
+    // Only vm and node carry check inventory in v1 — other parseable
+    // kinds are a typed 400, as is a non-parsing kind.
+    for kind in ["volume", "datacenter"] {
+        let (status, body) = request(
+            &state,
+            "POST",
+            "/v1/monitoring/checks",
+            Some(&token),
+            Some(json!({"target_kind": kind, "target_id": "x-1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "kind: {kind}");
+        assert_eq!(body["code"], "INVALID_TARGET_KIND", "kind: {kind}");
+    }
 }

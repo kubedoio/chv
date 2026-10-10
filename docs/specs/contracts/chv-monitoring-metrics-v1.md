@@ -21,7 +21,7 @@ This contract defines typed measurements from `chv-agent`, provider daemons, and
 | `kind` | enum | `gauge`, `counter`, `state` |
 | `unit` | enum | `ratio`, `cores`, `bytes`, `bytes_per_second`, `seconds`, `count`, `operations`, `celsius`, `boolean` |
 | `observed_at_ms` | int64 | Source observation time in Unix milliseconds |
-| `value` | typed value | Finite f64 for ratios/gauges; signed/unsigned integer for exact counters |
+| `value` | typed value | Finite f64 for ratios/gauges; unsigned integer for exact counters and byte-precise gauges (filesystem and memory sizes stay exact — the store keeps integer and real columns typed, never a float grab-bag) |
 | `quality` | enum | `valid`, `insufficient_samples`, `unsupported`, `unavailable`, `invalid`, `stale` |
 | `dimensions` | map | Bounded name/value pairs from registered dimensions |
 | `boot_id` | string | Required for counter series from a restartable source |
@@ -53,14 +53,23 @@ For `quality != valid`, `value` MUST be absent. Do not encode missing as `0` or 
 | `vm.memory.guest_available_bytes` | gauge bytes | guest_agent | Memory available inside guest OS |
 | `vm.guest.cpu.utilization_ratio` | gauge ratio | guest_agent | Guest OS CPU busy fraction from `/proc/stat` deltas, computed in-guest over the same boot; first observation after guest boot has no rate and must be absent (`insufficient_samples`), never zero |
 | `vm.guest.load1` | gauge count | guest_agent | Guest OS 1-minute load average |
-| `vm.guest.uptime_seconds` | gauge seconds | guest_agent | Guest OS seconds since boot || `vm.block.read_bytes_total`, `write_bytes_total` | counter bytes | vmm, storage_provider | Per-VM virtual block bytes when attributable |
+| `vm.guest.uptime_seconds` | gauge seconds | guest_agent | Guest OS seconds since boot |
+| `vm.block.read_bytes_total`, `write_bytes_total` | counter bytes | vmm, storage_provider | Per-VM virtual block bytes when attributable |
 | `vm.net.rx_bytes_total`, `tx_bytes_total` | counter bytes | vmm, network_provider | Per-VM virtual NIC bytes when attributable |
 | `vm.guest.fs.available_bytes`, `total_bytes` | gauge bytes | guest_agent | Guest filesystem data keyed by mount |
+| `vm.guest.fs.inodes_utilization_ratio` | gauge ratio | guest_agent | Inode allocation fraction per mount (`1 − free/total`); absent when the filesystem reports no inode count, never zero |
+| `vm.guest.fs.read_only` | state boolean | guest_agent | Mount is read-only (`1`) or writable (`0`) per mount options |
 | `vm.guest.service.up` | state boolean | guest_agent | Configured/discovered service known running |
 | `vm.guest.process.count` | gauge count | guest_agent | Count for approved process selector |
-| `vm.guest.net.rx_errors_total` | counter count | guest_agent | Guest interface error counter |
+| `vm.guest.process.cpu_utilization_ratio` | gauge ratio | guest_agent | Aggregate CPU busy fraction across processes matching an approved selector (sum of `utime+stime` deltas over wall clock × CPUs); first observation after boot is absent, never zero |
+| `vm.guest.process.rss_bytes` | gauge bytes | guest_agent | Sum of resident memory across matched processes |
+| `vm.guest.net.rx_errors_total`, `tx_errors_total` | counter count | guest_agent | Guest interface receive/transmit error counters |
+| `vm.guest.net.rx_drops_total`, `tx_drops_total` | counter count | guest_agent | Guest interface receive/transmit drop counters |
+| `vm.guest.net.rx_bytes_total`, `tx_bytes_total` | counter bytes | guest_agent | Guest interface byte counters |
+| `vm.guest.net.link_up` | state boolean | guest_agent | Interface operational state up (`1`) or not (`0`) |
+| `vm.guest.net.tcp_established` | gauge count | guest_agent | Guest TCP connections in ESTABLISHED state from `/proc/net/snmp` |
 | `check.duration_seconds` | gauge seconds | guest_agent | Bounded local check runtime |
-| `check.status` | state enum | guest_agent | `ok`, `warning`, `critical`, `unknown` as state, not float |
+| `check.status` | state enum | guest_agent | `ok`, `warning`, `critical`, `unknown` as a typed state, not a float. The wire sample value is the integer state code: `0`=ok, `1`=warning, `2`=critical, `3`=unknown; the manager rejects any other encoding |
 | `monitoring.agent.last_seen_age_seconds` | gauge seconds | derived | Manager-computed age of last authenticated report |
 
 Canonical IDs use `.` within CHV storage APIs. Prometheus export uses a separately maintained `chv_*` underscore name registry. Do not generate unlimited Prometheus label combinations by naively promoting all dimensions.
@@ -74,11 +83,14 @@ Canonical IDs use `.` within CHV storage APIs. Prometheus export uses a separate
 - Unit conversion belongs to UI/query formatting. Never change metric unit depending on value magnitude.
 - Guest available memory differs from VMM backing memory; show both with distinct labels.
 - Guest reported `check.status` is not VMM observed status. It must not transition a VM state machine.
+- `state` metrics with `boolean` unit carry the integer `0` or `1` — a measured false/true, never a proxy for absence. An unobserved state is an absent sample per the quality rules.
 - Unknown or unsupported metrics appear as absent/unsupported, not successful with zero.
 
 ## Dimension allowlist and limits
 
 Allowed dimensions include `interface_id`, `block_device_id`, `mount_id`, `service_key`, `process_selector`, `window`, `direction`, and `check_id`. Each registry entry declares allowed dimensions. Default max 4 dimensions/sample, 64 bytes per key and 128 bytes per value, 128 discovered check objects per agent. Enforce a per-target series limit and a global cap. Never accept arbitrary `tenant`, `project`, `vm_id`, `pid`, `command_line`, `token`, or `secret` as a label. Target IDs are indexed storage keys, not public Prometheus labels by default.
+
+Registered dimension values are short bounded identity strings, never free-form labels. Conventions: `mount_id` is `{fstype}:{mountpoint}` (for example `ext4:/`); `interface_id` is `{class}:{name}` where class is `phys`, `virt`, `bridge`, `loopback` or `other`; `service_key` is the normalized systemd unit name (for example `nginx.service`); `process_selector` is the configured selector string; `check_id` is a namespaced check identifier (for example `service:nginx.service`, `http:local:8080`, `plugin:example.http-health`). Values must be printable (no control characters) and rejected — not truncated — when out of bounds.
 
 ## Example v1 sample
 

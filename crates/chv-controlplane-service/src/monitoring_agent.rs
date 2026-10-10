@@ -27,8 +27,8 @@
 
 use crate::error::ControlPlaneServiceError;
 use crate::monitoring_validate::{
-    validate_sample, RawSample, RawValue, SampleRejection, MAX_BOOT_ID_BYTES,
-    MAX_SAMPLES_PER_BATCH, OUTCOME_BATCH_TOO_LARGE,
+    validate_checks, validate_sample, RawCheck, RawSample, RawValue, SampleRejection,
+    MAX_BOOT_ID_BYTES, MAX_SAMPLES_PER_BATCH, OUTCOME_BATCH_TOO_LARGE,
 };
 use chv_common::sha256_hex_bytes;
 use chv_controlplane_store::{
@@ -36,7 +36,7 @@ use chv_controlplane_store::{
     EventRepository, MonitoringAgentRepository, MonitoringAgentRow, RecordBatchOutcome,
 };
 use chv_controlplane_types::domain::{ActorId, EventSeverity, EventType, ResourceId, ResourceKind};
-use chv_monitoring_core::model::Sample;
+use chv_monitoring_core::model::{Sample, TargetKind};
 use chv_monitoring_store::{IngestOutcome, MonitoringHealth, MonitoringStore, NodeBatch};
 use dashmap::DashMap;
 use serde::Deserialize;
@@ -210,6 +210,8 @@ fn pem_der_sha256(pem: &str) -> Option<String> {
 /// authenticated metadata: the identity is the TLS credential, and
 /// `install_id` is compared against the enrollment record
 /// (cloned-image detection) — neither is an authorization input.
+/// `checks` is optional on the wire (`serde(default)`), so older
+/// agents — and batches with no discovered checks — parse unchanged.
 #[derive(Debug, Deserialize)]
 pub struct GuestBatchEnvelope {
     pub schema_version: i32,
@@ -223,6 +225,8 @@ pub struct GuestBatchEnvelope {
     pub os: Option<GuestOsMetadata>,
     #[serde(default)]
     pub samples: Vec<GuestSampleJson>,
+    #[serde(default)]
+    pub checks: Vec<GuestCheckJson>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +307,43 @@ impl GuestSampleJson {
             dimensions: self.dimensions.clone(),
             boot_id: self.boot_id.clone(),
             identity_epoch: self.identity_epoch.clone(),
+        })
+    }
+}
+
+/// One check record in the guest wire form (agent spec §"Check
+/// records"; ingestion contract v1's `checks` array). Mapped into the
+/// transport-neutral [`RawCheck`] and validated by the shared
+/// `validate_checks` — the guest wire gets no guest-specific
+/// leniency.
+#[derive(Debug, Deserialize)]
+pub struct GuestCheckJson {
+    #[serde(default)]
+    pub schema_version: i32,
+    pub check_id: String,
+    #[serde(default)]
+    pub service_key: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub observed_at_ms: i64,
+}
+
+impl GuestCheckJson {
+    fn to_raw(&self) -> Result<RawCheck, &'static str> {
+        // Per-record schema check (the envelope version is validated
+        // separately): a check carrying a different version must be
+        // rejected, not silently reinterpreted.
+        if self.schema_version != 1 {
+            return Err("check schema_version must be 1");
+        }
+        Ok(RawCheck {
+            schema_version: self.schema_version,
+            check_id: self.check_id.clone(),
+            service_key: self.service_key.clone(),
+            status: self.status.clone(),
+            summary: self.summary.clone(),
+            observed_at_ms: self.observed_at_ms,
         })
     }
 }
@@ -813,6 +854,36 @@ impl MonitoringAgentService {
             }
         }
 
+        // 6b. Check records: same untrusted-boundary validation, same
+        //     whole-batch semantics — one invalid check rejects the
+        //     samples too (ingestion v1: "reject the entire batch; do
+        //     not ACK an ambiguous subset"), so this runs BEFORE the
+        //     samples transaction and a rejected batch stores nothing.
+        let mut raw_checks: Vec<RawCheck> = Vec::with_capacity(envelope.checks.len());
+        for c in &envelope.checks {
+            let raw = match c.to_raw() {
+                Ok(raw) => raw,
+                Err(detail) => {
+                    self.health.update(|s| s.rejected_batches += 1);
+                    return Ok(GuestIngestOutcome::InvalidBatch(detail.to_string()));
+                }
+            };
+            raw_checks.push(raw);
+        }
+        let check_records = match validate_checks(&raw_checks, now_ms) {
+            Ok(records) => records,
+            Err(SampleRejection { outcome, detail }) => {
+                self.health.update(|s| s.rejected_batches += 1);
+                return Ok(match outcome {
+                    OUTCOME_BATCH_TOO_LARGE => GuestIngestOutcome::BatchTooLarge(detail),
+                    crate::monitoring_validate::OUTCOME_UNSUPPORTED_METRIC => {
+                        GuestIngestOutcome::UnsupportedMetric(detail)
+                    }
+                    _ => GuestIngestOutcome::InvalidBatch(detail),
+                });
+            }
+        };
+
         // 7. Durable ingestion through the shared store machinery
         //    (dedup by sender+boot_id+sequence, high-water mark,
         //    series caps, transactional commit).
@@ -838,7 +909,39 @@ impl MonitoringAgentService {
 
         match outcome {
             IngestOutcome::Accepted { samples } => {
-                // 8. Registry bookkeeping: last-seen, boot/sequence,
+                // 8. Check inventory, recorded only on Accepted: the
+                //    dedup/watermark gate has already decided this
+                //    batch, so a Duplicate must NOT re-record. Honest
+                //    tradeoff: checks commit in a SECOND transaction
+                //    after the samples transaction, so a crash between
+                //    the two lags the check inventory by one batch
+                //    (refreshed on the next); samples remain the
+                //    authoritative telemetry.
+                if !check_records.is_empty() {
+                    if let Err(e) = store
+                        .record_checks(
+                            // The inventory's agent attribution is the
+                            // bare agent id (the BFF exposes this
+                            // column as `agent_id`); the samples path's
+                            // `sender_key` prefix form is an internal
+                            // dedup key, not a display identity.
+                            &agent.agent_id,
+                            &TargetKind::Vm,
+                            &agent.vm_id,
+                            &check_records,
+                            now_ms as u64,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "guest monitoring check recording failed");
+                        self.health
+                            .degrade(format!("guest check recording failure: {e}"));
+                        self.health.update(|h| h.unavailable_batches += 1);
+                        return Ok(GuestIngestOutcome::IngestionUnavailable);
+                    }
+                }
+
+                // 9. Registry bookkeeping: last-seen, boot/sequence,
                 //    OS metadata, cloned-image install check.
                 let os = AgentOsMetadata {
                     name: sanitize_os_field(envelope.os.as_ref().and_then(|o| o.name.as_deref())),

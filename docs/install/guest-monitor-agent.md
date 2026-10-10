@@ -101,6 +101,53 @@ The agent enrolls on its next tick (15 s by default), the claim file
 is deleted, and the VM's metrics tab starts showing guest telemetry
 alongside the host-side series.
 
+## 4. What the agent collects
+
+The default configuration is deliberately conservative: read-only
+guest telemetry, nothing opt-in left implicit. Everything below is
+configured in `/etc/chv-monitor/agent.toml` (see
+[`docs/examples/monitor-agent.toml`](../examples/monitor-agent.toml)
+for every field and its default).
+
+| Family | Default | Cadence | What |
+|---|---|---|---|
+| Resources (CPU, load, memory, uptime, OS identity) | on | 15 s | `/proc` gauges |
+| Network | on | 15 s | per-interface byte/error/drop counters, link state, TCP established |
+| Filesystems | on | 60 s | per-mount size/available/inodes/read-only |
+| Services (systemd) | on | 60 s | only what you configure or discover |
+| Processes | **off** | 30 s | only selectors you list |
+| Local HTTP/TCP checks | **off** | 60 s | loopback endpoints you list |
+| Plugins | **off** | 60 s | root-installed executables you pin |
+
+Privacy rules worth knowing:
+
+- Process selectors match the kernel-reported executable name
+  (`/proc/<pid>/status` `Name:`) only. The agent never reads command
+  lines, environments, or per-PID labels, and a selector that matches
+  nothing reports a measured `0` — absence is never fabricated.
+- Service checks need explicit opt-in: list units under
+  `[services] configured` (bounded to 32), and/or set
+  `discover = true` for bounded discovery of running services. With
+  neither, the services family reports nothing.
+- A service that is `not-found` on the guest reports **unknown**
+  ("not installed"), a stopped/failed service reports **critical**,
+  and a query failure reports **unknown** ("not queried") — three
+  distinct honest states, never conflated with healthy.
+
+Local checks are **local**: every declarative HTTP/TCP endpoint must
+be a loopback address. The agent rejects remote hosts, cloud
+metadata addresses (`169.254.169.254`) and non-loopback names at
+config load, and re-verifies the resolved address at runtime —
+checking remote endpoints is plugin territory, under the root-owned
+allowlist (see
+[`docs/examples/plugins/README.md`](../examples/plugins/README.md)).
+
+The VM's metrics tab in the WebUI shows the result: guest
+filesystems, checks and process inventory cards alongside the guest
+agent card and the metric charts. Check statuses (`ok`, `warning`,
+`critical`, `unknown`) are reported by the guest agent — they are
+monitoring telemetry, never VM lifecycle state.
+
 ## Security notes — read before automating
 
 - **Claim distribution.** A claim is single-use and short-lived, but

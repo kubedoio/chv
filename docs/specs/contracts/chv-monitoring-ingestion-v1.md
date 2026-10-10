@@ -51,13 +51,35 @@ The manager's default deployment binds loopback (`127.0.0.1`) and TLS is termina
       "identity_epoch": "agent-credential-generation-1"
     }
   ],
-  "checks": []
+  "checks": [
+    {
+      "schema_version": 1,
+      "check_id": "service:nginx.service",
+      "service_key": "nginx.service",
+      "status": "ok",
+      "summary": "active (running)",
+      "observed_at_ms": 1791575999000
+    }
+  ]
 }
 ```
 
 This JSON is illustrative v1 guest wire format. `install_id` identifies the installing image (cloned-image detection per the [security contract](chv-monitor-agent-security-plugins-v1.md)); it is authenticated metadata, not part of the deduplication key. The normative protobuf implementation MUST preserve type and optional-field semantics, especially integer counter precision. For values above `2^53 - 1`, guest JSON MUST encode exact integers as decimal strings.
 
 The guest envelope may carry an optional `os` object with read-only guest OS identity metadata on a privacy allowlist: `name`, `version`, `kernel_release` (each bounded to 64 bytes, UTF-8, sanitized). It is registry/inventory metadata — never a metric, never an authorization input, and never extended with hostname-adjacent, user, or workload fields. The manager updates its agent record's OS fields from the envelope; absent fields leave the record unchanged.
+
+The `checks` array carries check records (agent spec "Check records"; the metrics contract's `check.*` families). Each check object has exactly these fields:
+
+| Field | Rules |
+|---|---|
+| `schema_version` | Exactly `1` |
+| `check_id` | Stable namespaced identifier, ≤ 128 bytes, charset `[A-Za-z0-9._:/@-]` — for example `service:nginx.service`, `service:user@1000.service` (systemd instance units), `http:local:8080`, `plugin:example.http-health` |
+| `service_key` | Optional; same rules as `check_id` (the systemd unit name for service checks) |
+| `status` | One of `ok`, `warning`, `critical`, `unknown` — `unknown` is never conflated with healthy |
+| `summary` | Optional, ≤ 256 bytes, printable (the manager rejects control characters); plain text, never rendered as HTML |
+| `observed_at_ms` | Same past-age and future-skew bounds as samples |
+
+Check records carry no values: a check's numeric time series travel as regular samples (`check.status`, `check.duration_seconds`, dimensioned by `check_id`) in the same batch; the check record itself is latest-status inventory. `check_id` must be unique within a batch. Checks follow the same whole-batch rejection semantics as samples — one invalid check record rejects the batch — and are recorded only when the batch is accepted (a duplicate replay does not re-record). The manager keeps the latest record per `(target, check_id)` as inventory; a delayed older batch never regresses a newer record. Check inventory staleness uses the query contract's 180-second window for the 60-second collection cadence.
 
 ## Limits (initial defaults, validated before release)
 

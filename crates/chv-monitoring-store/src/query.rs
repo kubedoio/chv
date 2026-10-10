@@ -412,7 +412,7 @@ impl MonitoringStore {
         .fetch_all(&self.pool)
         .await?;
         let dimension_sets = self.load_dimension_sets().await?;
-        let threshold = stale_after_ms(target_kind);
+        let default_threshold = stale_after_ms(target_kind);
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let metric_id: String = row.get("metric_id");
@@ -458,6 +458,11 @@ impl MonitoringStore {
                 .get(&dimensions_hash)
                 .cloned()
                 .unwrap_or_default();
+            // Metric-specific override first (query/alerts contract:
+            // "stale is decided server-side from metric-specific
+            // thresholds"), then the target-kind default.
+            let threshold = chv_monitoring_core::registry::stale_after_ms(&metric_id)
+                .unwrap_or(default_threshold);
             let stale = now_ms.saturating_sub(last_observed.unsigned_abs()) > threshold;
 
             let sample = match latest {

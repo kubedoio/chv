@@ -16,6 +16,7 @@ use chv_controlplane_store::{EventRepository, MonitoringAgentRepository};
 use chv_monitor_agent::config::AgentConfig;
 use chv_monitor_agent::credential::StoredCredential;
 use chv_monitor_agent::{Agent, TickOutcome};
+use chv_monitoring_core::model::CheckStatus;
 use chv_monitoring_store::{MonitoringHealth, MonitoringStore, MonitoringStoreConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -376,6 +377,191 @@ async fn renewal_due_drives_rotation() {
 
     // The rotated credential keeps delivering.
     assert!(matches!(agent.tick().await, TickOutcome::Delivered { .. }));
+}
+
+/// G4 end-to-end on this host (no VM needed): the collector families,
+/// the systemd service checks with REAL discovery, and declarative
+/// local http/tcp checks all ride one envelope through the real TLS
+/// ingest path into the store — checks recorded, samples queryable.
+/// This is the regression net for the G4 real-VM lesson: real systemd
+/// hosts run INSTANCE units (`user@1000.service`, …) whose `@` must
+/// be valid in check identifiers, or every batch carrying a
+/// discovered instance unit is rejected whole and the store starves.
+#[tokio::test]
+async fn g4_families_checks_and_discovery_flow_end_to_end() {
+    init_test_logging();
+    let manager = Manager::new().await;
+
+    // Local endpoints for the declarative checks: one tiny HTTP 200
+    // responder and one bare TCP acceptor.
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_port = tcp_listener.local_addr().unwrap().port();
+    let http_server = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = http_listener.accept().await else {
+                return;
+            };
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut sock,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+            )
+            .await;
+        }
+    });
+    let tcp_server = tokio::spawn(async move {
+        loop {
+            let Ok((_sock, _)) = tcp_listener.accept().await else {
+                return;
+            };
+        }
+    });
+
+    let ad = AgentDir::new(&manager);
+    // The G4 config shape (the rig's, minus VM-specific fixtures):
+    // every family on, selectors, discovery, one http + one tcp check.
+    let base = std::fs::read_to_string(&ad.config_path).unwrap();
+    std::fs::write(
+        &ad.config_path,
+        format!(
+            r#"{base}
+[collectors]
+filesystems = true
+network = true
+services = true
+processes = true
+process_selectors = ["systemd"]
+
+[services]
+configured = ["ssh.service"]
+discover = true
+
+[[checks.http]]
+label = "local"
+url = "http://127.0.0.1:{http_port}/"
+
+[[checks.tcp]]
+label = "local"
+host = "127.0.0.1"
+port = {tcp_port}
+"#
+        ),
+    )
+    .unwrap();
+    ad.place_claim(&manager).await;
+
+    let mut agent = ad.start();
+    assert_eq!(agent.tick().await, TickOutcome::Enrolled);
+    // First delivery carries fs/net/process samples, the service
+    // checks (configured + REAL discovered units of this host) and
+    // the local http/tcp check records.
+    let outcome = agent.tick().await;
+    assert!(
+        matches!(outcome, TickOutcome::Delivered { .. }),
+        "the G4 envelope must be accepted whole: {outcome:?}"
+    );
+    // Counters (rx/tx bytes, errors, drops) only become valid points
+    // as same-epoch deltas across bucket boundaries — a second
+    // delivery, spaced like a production cadence tick, gives each
+    // series observations in distinct buckets (the query below uses
+    // the rig's 1000-point raw shape: 3.6 s buckets over an hour).
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(matches!(agent.tick().await, TickOutcome::Delivered { .. }));
+    assert_eq!(agent.spool_len(), 0, "nothing may be left spooled");
+
+    let vm_id = manager.vm_id.clone();
+    let store = manager.store.clone();
+    let points_for = |metric: &'static str| {
+        let store = store.clone();
+        let vm_id = vm_id.clone();
+        async move {
+            let now = now_ms() as u64;
+            // A tight window keeps the raw bucketing (range/max_points)
+            // fine-grained enough that cadence-spaced counter points
+            // land in distinct buckets — the same property the rig's
+            // long evidence timeline provides naturally.
+            store
+                .query_history(
+                    &chv_monitoring_core::model::TargetKind::Vm,
+                    &vm_id,
+                    &[metric.to_string()],
+                    None,
+                    now.saturating_sub(60_000),
+                    now,
+                    1000,
+                    chv_monitoring_store::Resolution::Raw,
+                )
+                .await
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    s.points
+                        .iter()
+                        .filter(|p| p.quality == chv_monitoring_core::model::SampleQuality::Valid)
+                        .count()
+                })
+                .sum::<usize>()
+        }
+    };
+    for metric in [
+        "vm.guest.fs.available_bytes",
+        "vm.guest.net.rx_bytes_total",
+        "vm.guest.process.count",
+        "vm.guest.service.up",
+        "check.status",
+        "check.duration_seconds",
+    ] {
+        assert!(
+            points_for(metric).await > 0,
+            "valid {metric} points must be queryable through the store"
+        );
+    }
+
+    // The check inventory: the configured unit, the local checks, and
+    // whatever this host's discovery found — all accepted (the @ fix).
+    let checks = manager
+        .store
+        .query_checks(
+            &chv_monitoring_core::model::TargetKind::Vm,
+            &manager.vm_id,
+            now_ms() as u64,
+        )
+        .await
+        .unwrap();
+    assert!(
+        checks.iter().any(|c| c.check_id == "service:ssh.service"),
+        "the configured service check must be recorded: {checks:?}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.check_id == "http:local" && c.status == CheckStatus::Ok),
+        "the local http check must be recorded ok: {checks:?}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.check_id == "tcp:local" && c.status == CheckStatus::Ok),
+        "the local tcp check must be recorded ok: {checks:?}"
+    );
+    let instance_units = checks.iter().filter(|c| c.check_id.contains('@')).count();
+    if instance_units > 0 {
+        // This host runs instance units (a normal systemd host does):
+        // they must have been accepted, not rejected whole-batch —
+        // the presence of any delivered sample above already proves
+        // it; this records their inventory explicitly.
+        assert!(
+            checks
+                .iter()
+                .filter(|c| c.check_id.contains('@'))
+                .all(|c| c.check_id.starts_with("service:")),
+            "instance-unit check ids stay in the service namespace"
+        );
+    }
+
+    http_server.abort();
+    tcp_server.abort();
 }
 
 #[tokio::test]
