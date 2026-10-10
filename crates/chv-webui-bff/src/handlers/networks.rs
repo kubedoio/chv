@@ -74,7 +74,7 @@ pub async fn list_networks(
         LEFT JOIN (
             SELECT resource_id, COUNT(*) AS alerts
             FROM alerts
-            WHERE status != 'resolved' AND resource_kind = 'network'
+            WHERE status IN ('open','firing') AND resource_kind = 'network'
             GROUP BY resource_id
         ) alert_counts ON n.network_id = alert_counts.resource_id
         WHERE (nds.desired_status IS NULL OR nds.desired_status != 'Deleting')
@@ -162,7 +162,7 @@ pub async fn get_network(
         LEFT JOIN (
             SELECT resource_id, COUNT(*) AS alerts
             FROM alerts
-            WHERE status != 'resolved' AND resource_kind = 'network'
+            WHERE status IN ('open','firing') AND resource_kind = 'network'
             GROUP BY resource_id
         ) alert_counts ON n.network_id = alert_counts.resource_id
         WHERE n.network_id = ?

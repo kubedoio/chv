@@ -298,7 +298,7 @@ async fn open_incident(state: &AppState, dedup_key: &str) -> String {
             Some("0.95 (x)"),
             1_100_000,
             1_200_000,
-            None,
+            &[],
         )
         .await
         .expect("promote");

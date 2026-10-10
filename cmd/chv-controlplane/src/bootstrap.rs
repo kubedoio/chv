@@ -1,6 +1,8 @@
 use chv_config::{ControlPlaneConfig, ControlPlaneTlsConfig};
 use chv_controlplane_service::{
+    alert_evaluator::{AlertEvaluatorWorker, EvaluatorChannels},
     compat::{CompatibilityMatrix, Component},
+    notification_dispatcher::{DispatcherSettings, NotificationDispatcher},
     validate_security_mode, ControlPlaneComponents, ControlPlaneMutationService,
     ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
     EnrollmentServiceImplementation, InventoryServiceImplementation,
@@ -8,9 +10,10 @@ use chv_controlplane_service::{
     ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
-    connect_pool, run_migrations, AlertRepository, BackupRepository, BootstrapTokenRepository,
-    ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, VtepRepository,
+    connect_pool, run_migrations, AlertRepository, AlertRuleRepository, BackupRepository,
+    BootstrapTokenRepository, ControlPlaneStoreConfig, DesiredStateRepository, EventRepository,
+    NodeRepository, NotificationOutboxRepository, ObservedStateRepository, OperationRepository,
+    VtepRepository,
 };
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -347,6 +350,13 @@ pub async fn build_service(
         operation_repo: operation_repo.clone(),
         event_repo: event_repo.clone(),
         alert_repo: alert_repo.clone(),
+        // Native alerting surface (ADR-027, #602 PR-6): repositories
+        // plus config-derived scalars. Booleans only — the signing
+        // secret never crosses into the BFF.
+        alert_rules: Arc::new(AlertRuleRepository::new(pool.clone())),
+        notification_outbox: Arc::new(NotificationOutboxRepository::new(pool.clone())),
+        alerting_max_rules: config.monitoring.alerting.max_rules as i64,
+        notifications_configured: config.monitoring.notifications.has_destination(),
         desired_state_repo: desired_state_repo.clone(),
         observed_state_repo: observed_state_repo.clone(),
         backup_repo: backup_repo.clone(),
@@ -378,6 +388,23 @@ pub async fn build_service(
     };
 
     let convergence_metrics = chv_controlplane_service::convergence_metrics::new_shared();
+
+    // Native alerting (ADR-027, campaign #602 PR-6): validation is
+    // fail-loud at boot, the same contract as guest ingestion — a
+    // misconfigured alerting/notifications section is an operator
+    // error the operator must see at startup, never a silent
+    // never-firing (or never-delivering) degradation discovered
+    // mid-incident.
+    if let Err(reason) = config.monitoring.alerting.validate() {
+        return Err(ControlPlaneServiceError::Internal(format!(
+            "invalid [monitoring.alerting]: {reason}"
+        )));
+    }
+    if let Err(reason) = config.monitoring.notifications.validate() {
+        return Err(ControlPlaneServiceError::Internal(format!(
+            "invalid [monitoring.notifications]: {reason}"
+        )));
+    }
 
     // Guest monitoring agent ingestion (ADR-026, campaign #602 G3):
     // an explicit deployment decision, never a side effect. Enabling
@@ -741,6 +768,93 @@ pub async fn build_service(
     let netbox_projection_worker_handle =
         tokio::spawn(netbox_projection_worker.run(shutdown_rx.clone()));
 
+    // Native alerting workers (ADR-027, #602 PR-6).
+    //
+    // The evaluator runs only when alerting is enabled AND the
+    // monitoring store is up: without stored samples every condition
+    // reads as Missing, and an availability rule would fire on the
+    // degradation itself. Degrading alerting (never the control
+    // plane) is the honest behavior; the dispatcher below still runs
+    // so events already enqueued before the degradation deliver.
+    let alerting_config = &config.monitoring.alerting;
+    let notifications_config = &config.monitoring.notifications;
+    let alert_evaluator_handle = if alerting_config.enabled {
+        match monitoring_store.as_ref() {
+            Some(store) => {
+                let evaluator = AlertEvaluatorWorker::new(
+                    AlertRuleRepository::new(pool.clone()),
+                    AlertRepository::new(pool.clone()),
+                    store.clone(),
+                    EvaluatorChannels {
+                        webhook: notifications_config.webhook_url.is_some(),
+                        slack: notifications_config.slack_webhook_url.is_some(),
+                    },
+                );
+                let interval =
+                    std::time::Duration::from_secs(alerting_config.evaluation_interval_secs);
+                let shutdown = shutdown_rx.clone();
+                tokio::spawn(async move { evaluator.run(interval, shutdown).await })
+            }
+            None => {
+                tracing::warn!(
+                    "monitoring.alerting is enabled but the monitoring store is unavailable; \
+                     alert evaluation is degraded until it recovers (VM lifecycle and \
+                     incident reads are unaffected)"
+                );
+                tokio::spawn(async {})
+            }
+        }
+    } else {
+        tracing::debug!("monitoring.alerting disabled by configuration; evaluator not started");
+        tokio::spawn(async {})
+    };
+
+    // The dispatcher runs whenever a destination is configured —
+    // independently of the evaluator, so pending outbox events from
+    // before a monitoring degradation still deliver.
+    let notification_dispatcher_handle = if notifications_config.has_destination() {
+        // A configured CA bundle is an operator contract: unreadable
+        // or invalid PEM is a boot error, not a silent system-roots
+        // fallback that would fail every TLS handshake later.
+        let ca_pem = match &notifications_config.webhook_ca_path {
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(pem) => Some(pem),
+                Err(e) => {
+                    return Err(ControlPlaneServiceError::Internal(format!(
+                        "cannot read monitoring.notifications.webhook_ca_path {}: {e}",
+                        path.display()
+                    )));
+                }
+            },
+            None => None,
+        };
+        let dispatcher = NotificationDispatcher::new(
+            NotificationOutboxRepository::new(pool.clone()),
+            event_repo.clone(),
+            DispatcherSettings {
+                webhook_url: notifications_config.webhook_url.clone(),
+                signing_secret: notifications_config
+                    .webhook_signing_secret
+                    .as_str()
+                    .to_string(),
+                slack_webhook_url: notifications_config.slack_webhook_url.clone(),
+                max_attempts: notifications_config.max_attempts,
+                max_batch: notifications_config.max_batch as i64,
+            },
+            ca_pem.as_deref(),
+        )
+        .map_err(ControlPlaneServiceError::Internal)?;
+        let interval = std::time::Duration::from_secs(notifications_config.dispatch_interval_secs);
+        let shutdown = shutdown_rx.clone();
+        tokio::spawn(async move { dispatcher.run(interval, shutdown).await })
+    } else {
+        tracing::debug!(
+            "no notification destination configured; dispatcher not started (the UI is \
+             always a channel)"
+        );
+        tokio::spawn(async {})
+    };
+
     let migration_reaper = chv_controlplane_service::MigrationReaper::new(
         pool.clone(),
         node_client_pool.clone(),
@@ -766,6 +880,8 @@ pub async fn build_service(
             netbox_projection_worker_handle,
             reaper_handle,
             monitoring_worker_handle,
+            alert_evaluator_handle,
+            notification_dispatcher_handle,
         ],
     ))
 }
