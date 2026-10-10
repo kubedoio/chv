@@ -142,7 +142,16 @@ pub struct ProcPaths {
     pub os_release: String,
     pub kernel_release: String,
     pub boot_id: String,
-    /// `/proc/self/mounts` (G4 filesystem family).
+    /// PID 1's mounts file (G4 filesystem family) — the init mount
+    /// namespace, not the agent's own. The agent's systemd unit
+    /// sandboxes it into a private mount namespace (`ProtectSystem=strict`
+    /// remounts `/` read-only there, `PrivateTmp` adds a `/tmp` that
+    /// does not exist system-wide), so `/proc/self/mounts` would
+    /// misreport the guest's filesystems. `/proc/1/mounts` is the
+    /// live, unsandboxed truth — world-readable by default; on
+    /// hidepid-hardened guests the family degrades to an honest
+    /// absence. Mounts made after the agent started still reach the
+    /// family's statvfs step through the unit's slave propagation.
     pub mounts: String,
     /// `/proc/net/dev` (G4 network family).
     pub net_dev: String,
@@ -169,7 +178,7 @@ impl Default for ProcPaths {
             os_release: "/etc/os-release".into(),
             kernel_release: "/proc/sys/kernel/osrelease".into(),
             boot_id: "/proc/sys/kernel/random/boot_id".into(),
-            mounts: "/proc/self/mounts".into(),
+            mounts: "/proc/1/mounts".into(),
             net_dev: "/proc/net/dev".into(),
             net_snmp: "/proc/net/snmp".into(),
             sys_class_net: "/sys/class/net".into(),
@@ -535,6 +544,17 @@ mod tests {
         assert!(c.collect_filesystems().is_empty());
         assert!(c.collect_network().is_empty());
         assert!(c.collect_processes(1_000).is_empty());
+    }
+
+    #[test]
+    fn filesystems_default_source_is_the_init_mount_namespace() {
+        // G4 real-VM lesson (found by the evidence rig): the agent's
+        // systemd unit sandboxes it with ProtectSystem=strict, which
+        // remounts / read-only IN THE AGENT'S OWN mount namespace —
+        // /proc/self/mounts reported the guest's writable root as
+        // read-only. The family must read PID 1's mounts: the live,
+        // unsandboxed view of the filesystems it reports on.
+        assert_eq!(ProcPaths::default().mounts, "/proc/1/mounts");
     }
 
     #[test]

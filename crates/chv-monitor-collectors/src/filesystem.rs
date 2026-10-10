@@ -1,4 +1,6 @@
-//! `/proc/self/mounts` + `statvfs` filesystem family (G4).
+//! PID 1's mounts (`/proc/1/mounts`, the init mount namespace — see
+//! `ProcPaths::mounts` for why not `/proc/self/mounts`) + `statvfs`
+//! filesystem family (G4).
 //!
 //! Discovery is a pure parse of the mounts file (kernel-provided,
 //! one mount per line: device, mountpoint, fstype, options...).
@@ -44,7 +46,8 @@ pub(crate) struct MountEntry {
     pub read_only: bool,
 }
 
-/// Pure parse of `/proc/self/mounts` contents: real filesystems
+/// Pure parse of a mounts-table file's contents (the default source
+/// is `/proc/1/mounts`): real filesystems
 /// only, bounded to 24 mounts. Malformed lines are skipped.
 pub(crate) fn parse_mounts(mounts: &str) -> Vec<MountEntry> {
     let mut out = Vec::new();
