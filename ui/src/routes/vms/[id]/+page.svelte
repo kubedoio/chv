@@ -21,6 +21,9 @@
 	import VmMetricsTab from '#lib/components/vms/VmMetricsTab.svelte';
 	import TargetMonitoringPanel from '#lib/components/monitoring/TargetMonitoringPanel.svelte';
 	import GuestAgentCard from '#lib/components/monitoring/GuestAgentCard.svelte';
+	import GuestFilesystemsCard from '#lib/components/monitoring/GuestFilesystemsCard.svelte';
+	import GuestChecksCard from '#lib/components/monitoring/GuestChecksCard.svelte';
+	import GuestProcessesCard from '#lib/components/monitoring/GuestProcessesCard.svelte';
 	import GuestAgentEnrollDialog from '#lib/components/monitoring/GuestAgentEnrollDialog.svelte';
 	import VmTasksTab from '#lib/components/vms/VmTasksTab.svelte';
 	import VmBootLogTab from '#lib/components/vms/VmBootLogTab.svelte';
@@ -269,6 +272,9 @@
 						vmName={detail.summary.name}
 						onEnroll={() => (agentEnrollOpen = true)}
 					/>
+					<GuestFilesystemsCard vmId={detail.summary.vm_id} />
+					<GuestChecksCard vmId={detail.summary.vm_id} />
+					<GuestProcessesCard vmId={detail.summary.vm_id} />
 					<TargetMonitoringPanel
 						targetKind="vm"
 						targetId={detail.summary.vm_id}

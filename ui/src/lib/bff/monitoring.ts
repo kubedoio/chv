@@ -179,6 +179,49 @@ export async function fetchMonitoringCurrent(
 	});
 }
 
+/** Status of one guest check; `unknown` is never treated as healthy. */
+export type MonitoringCheckStatus = 'ok' | 'warning' | 'critical' | 'unknown';
+
+/** One guest-reported check result (query/alerts contract v1, #602 G4). */
+export interface MonitoringCheck {
+	/** Namespaced id: `service:<unit>`, `http:<label>`, `tcp:<label>`, `plugin:<id>`. */
+	check_id: string;
+	/** The systemd unit for service checks; JSON null otherwise. */
+	service_key: string | null;
+	status: MonitoringCheckStatus;
+	/** Untrusted guest-side string; render as plain text only. */
+	summary: string | null;
+	observed_at_ms: number | null;
+	received_at_ms: number | null;
+	agent_id: string | null;
+	/** True when the record predates the server-side staleness window. */
+	stale: boolean;
+}
+
+export interface MonitoringChecksResponse {
+	schema_version: number;
+	target_kind: string;
+	target_id: string;
+	generated_at_ms: number;
+	/** Empty when no checks are configured — a valid state, not an error. */
+	checks: MonitoringCheck[];
+}
+
+export async function fetchMonitoringChecks(
+	targetKind: 'node' | 'vm',
+	targetId: string,
+	token?: string
+): Promise<MonitoringChecksResponse> {
+	return bffFetch<MonitoringChecksResponse>(BFFEndpoints.monitoringChecks, {
+		method: 'POST',
+		body: JSON.stringify({
+			target_kind: targetKind,
+			target_id: targetId
+		}),
+		token
+	});
+}
+
 export async function fetchMonitoringHistory(
 	targetKind: 'node' | 'vm',
 	targetId: string,
