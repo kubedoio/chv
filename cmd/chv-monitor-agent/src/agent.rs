@@ -492,7 +492,23 @@ impl Agent {
 fn outcomes_to_wire(outcomes: Vec<CheckOutcome>) -> (Vec<CheckJson>, Vec<CollectedSample>) {
     let mut records = Vec::with_capacity(outcomes.len());
     let mut samples = Vec::with_capacity(outcomes.len() * 2);
+    let mut seen = std::collections::HashSet::with_capacity(outcomes.len());
     for outcome in outcomes {
+        // The manager whole-batch-rejects a duplicate check_id —
+        // one misconfigured allowlist (two plugins claiming the
+        // same id, or a rejected manifest's sanitized stem
+        // colliding with a declared id) must not discard the
+        // entire envelope's telemetry. The first outcome wins
+        // (the merge order is deterministic: services, local
+        // checks, plugins); the duplicate degrades to a warn,
+        // never a poison.
+        if !seen.insert(outcome.check.check_id.clone()) {
+            tracing::warn!(
+                check_id = %outcome.check.check_id,
+                "duplicate check id across engines; keeping the first outcome"
+            );
+            continue;
+        }
         samples.push(CollectedSample {
             metric_id: "check.status",
             value: SampleValue::Integer(outcome.status().code()),
@@ -731,6 +747,54 @@ mod tests {
         let (records, samples) = outcomes_to_wire(Vec::new());
         assert!(records.is_empty());
         assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn outcomes_to_wire_dedupes_colliding_check_ids() {
+        use crate::checks::CheckOutcome;
+        use crate::wire::CheckJson;
+        use chv_monitoring_core::model::CheckStatus;
+
+        let outcome = |check_id: &str| CheckOutcome {
+            check: CheckJson {
+                schema_version: 1,
+                check_id: check_id.to_string(),
+                service_key: None,
+                status: CheckStatus::Ok.as_str().to_string(),
+                summary: None,
+                observed_at_ms: 1_000,
+            },
+            duration_ms: 10,
+        };
+        // Review-round-2 lesson: the manager whole-batch-rejects a
+        // duplicate check_id, and the merge order is deterministic
+        // (services, local checks, plugins) — a misconfigured
+        // allowlist (two plugins claiming one id, a rejected
+        // manifest's sanitized stem colliding with a declared id)
+        // must degrade to ONE outcome, never poison the envelope.
+        let (records, samples) = outcomes_to_wire(vec![
+            outcome("service:ssh.service"),
+            outcome("plugin:colliding"),
+            outcome("plugin:colliding"),
+        ]);
+        assert_eq!(records.len(), 2, "first outcome wins, duplicate drops");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.check_id == "plugin:colliding")
+                .count(),
+            1
+        );
+        // Exactly one status + one duration sample per surviving id
+        // (the duplicate's samples drop with its record).
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|s| s.dimension.as_ref().map(|d| d.1.as_str()) == Some("plugin:colliding"))
+                .count(),
+            2
+        );
     }
 
     #[test]

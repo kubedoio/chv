@@ -64,7 +64,10 @@ guest state directly):
   local enable + restart: `plugin:g4-http-health` reports ok; a
   rogue replacement executable degrades the check **without ever
   running** (a never-ran marker proves non-execution); at the end
-  the allowlist directory is byte-identical and root-owned.
+  the allowlist stays root-owned with the manifest byte-identical
+  (the rig's tamper left the rogue executable in place — the
+  assertions pin ownership, file count and the manifest digest,
+  never a restored directory).
 
 ```sh
 CHV_G1_VMM_BINARY=/tmp/opencode/g0b/cloud-hypervisor \
@@ -173,8 +176,10 @@ Reading the observations:
   restart, `plugin:g4-http-health` reports ok; the rogue
   replacement executable degrades the check to unknown **without
   ever being executed** (a never-ran marker inside the guest proves
-  non-execution); the allowlist directory ends the session
-  byte-identical and root-owned.
+  non-execution); the allowlist ends the session root-owned with
+  the manifest byte-identical and the rig's rogue executable still
+  in place — the assertions pin ownership, file count and the
+  manifest digest, exactly what the tamper scenario claims.
 - **Teardown**: graceful `stop_vm` + `delete_vm`, bridge and tap
   removed, no leaked VMM process.
 
@@ -216,7 +221,7 @@ every scenario, but predated the review-round-1 fixes — the fourth
 | G4 requirement | Evidence |
 |---|---|
 | Check inventory and trend charts reflect real OS behavior | The recorded run: service stop/start flips `service:` and `http:` checks ok → critical → ok with `tcp:ssh` as the control; not-installed is `unknown` with no `service.up` sample; fs fill/recovery and inode exhaustion move the fs series; process start/exit moves selector counts; NIC counters advance; `check.status` history accumulates across the transitions — and the two real-OS catches above are themselves evidence the gate discriminates |
-| Arbitrary code deployment from the manager impossible | No plugin field/route/table exists in the ingest protocol (structural); the recorded run ends with the allowlist directory byte-identical and root-owned after a full session of active manager ingestion |
+| Arbitrary code deployment from the manager impossible | No plugin field/route/table exists in the ingest protocol (structural); the recorded run ends with the allowlist root-owned and the manifest byte-identical across the full session of active manager ingestion (the executable present at the end is the rig's own tampered replacement — never restored, never run) |
 | Plugin execution disabled by default and constrained when enabled | Files present + `enabled = false` → zero plugin checks; explicit local enable → pinned plugin ok; rogue executable → degraded without execution (never-ran marker); module tests pin every constraint (digest mismatch, symlink escape, ownership, kill, caps) |
 
 ## Honest absences and findings (reported, not faked)

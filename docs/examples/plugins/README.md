@@ -24,8 +24,10 @@ either direction.
 
 ## How the agent runs a plugin
 
-- **No shell.** The executable is exec'd directly with an empty
-  environment. No command interpolation exists anywhere on the path.
+- **No shell.** The executable is exec'd directly with a minimal
+  fixed environment — a pinned `PATH` and `LANG=C.UTF-8` only (the
+  shebang-resolution minimum), never the agent's own environment.
+  No command interpolation exists anywhere on the path.
 - **Non-root.** The agent already runs as the dedicated `chv-monitor`
   user (hardened unit: `NoNewPrivileges`, `ProtectSystem=strict`,
   `ProtectHome`); plugins inherit that. A plugin needing privilege
