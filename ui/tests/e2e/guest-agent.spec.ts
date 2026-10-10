@@ -67,7 +67,11 @@ test('renders an active agent with lifecycle actions', async ({ page }) => {
 	await page.reload();
 
 	const card = page.locator('section', { hasText: 'Guest monitoring agent' });
-	await expect(card.getByText('Active')).toBeVisible();
+	// Anchored, case-sensitive: the status line renders as a compound
+	// ("Active · Ubuntu 24.04…"), and the G4 checks card renders
+	// systemd summaries like "active (running)" in the same section —
+	// plain substring matching resolves both and breaks strict mode.
+	await expect(card.getByText(/^Active\b/)).toBeVisible();
 	await expect(card.getByText(/Ubuntu 24\.04/)).toBeVisible();
 	await expect(card.getByText(/6\.8\.0-42-generic/)).toBeVisible();
 	await expect(card.getByText(/epoch 3/)).toBeVisible();
