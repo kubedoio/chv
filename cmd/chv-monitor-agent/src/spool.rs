@@ -259,6 +259,7 @@ mod tests {
                     boot_id: "b".into(),
                     identity_epoch: "agent-credential-generation-1".into(),
                 }],
+                checks: Vec::new(),
             },
         }
     }

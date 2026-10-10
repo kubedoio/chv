@@ -14,9 +14,11 @@ pub(crate) const FS_INODES_UTILIZATION: &str = "vm.guest.fs.inodes_utilization_r
 pub(crate) const FS_READ_ONLY: &str = "vm.guest.fs.read_only";
 
 /// Discovery bound: a pathological mounts file (a container with
-/// hundreds of bind mounts) must not blow up the batch. The 65th
-/// mount is skipped.
-const MAX_MOUNTS: usize = 64;
+/// hundreds of bind mounts) must not blow up the batch. The 25th
+/// mount is skipped. 24 real mounts × 4 samples + the other
+/// families' worst case stay inside the ingestion contract's
+/// 512-samples-per-batch ceiling (see the agent's family budget).
+const MAX_MOUNTS: usize = 24;
 /// Dimension bound for `mount_id`. A mount whose id would exceed it
 /// is dropped whole — honest absence, never a mid-UTF-8 truncation.
 const MAX_MOUNT_ID_BYTES: usize = 128;
@@ -43,7 +45,7 @@ pub(crate) struct MountEntry {
 }
 
 /// Pure parse of `/proc/self/mounts` contents: real filesystems
-/// only, bounded to 64 mounts. Malformed lines are skipped.
+/// only, bounded to 24 mounts. Malformed lines are skipped.
 pub(crate) fn parse_mounts(mounts: &str) -> Vec<MountEntry> {
     let mut out = Vec::new();
     for line in mounts.lines() {
@@ -241,14 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn bounds_at_64_mounts() {
-        let text: String = (0..65)
+    fn bounds_at_24_mounts() {
+        let text: String = (0..25)
             .map(|i| format!("/dev/vd{i} /mnt{i} ext4 rw 0 0\n"))
             .collect();
-        assert_eq!(parse_mounts(&text).len(), 64, "65th mount is skipped");
+        assert_eq!(parse_mounts(&text).len(), 24, "25th mount is skipped");
         // Pseudo mounts do not consume the bound.
         let mixed = "proc /proc proc rw 0 0\n".to_string() + &text;
-        assert_eq!(parse_mounts(&mixed).len(), 64);
+        assert_eq!(parse_mounts(&mixed).len(), 24);
     }
 
     #[test]

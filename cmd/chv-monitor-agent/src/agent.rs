@@ -61,6 +61,11 @@ pub enum TickOutcome {
 pub struct Agent {
     config: AgentConfig,
     collectors: GuestCollectors,
+    /// Per-family collection cadence (component spec profiles):
+    /// baseline resources + network ride every tick (15 s default);
+    /// filesystems at 60 s and processes at 30 s are time-gated so
+    /// one interval setting cannot starve or flood a family.
+    cadence: FamilyCadence,
     state: AgentState,
     spool: Spool,
     credential: Option<StoredCredential>,
@@ -70,6 +75,30 @@ pub struct Agent {
     /// Set when the manager answered 401 — suppresses ingestion until
     /// a fresh claim re-enrolls (or the manager clears the conflict).
     unauthorized: bool,
+}
+
+/// Time-gated family scheduling. `due` is true on the first tick and
+/// again after the family's interval has elapsed — a pure decision
+/// over the last-collection timestamp, unit-tested without a clock.
+#[derive(Debug, Default)]
+struct FamilyCadence {
+    last_filesystems_ms: Option<i64>,
+    last_processes_ms: Option<i64>,
+}
+
+/// Component spec profile intervals.
+const FILESYSTEMS_INTERVAL_MS: i64 = 60_000;
+const PROCESSES_INTERVAL_MS: i64 = 30_000;
+
+impl FamilyCadence {
+    fn filesystems_due(&self, now_ms: i64) -> bool {
+        self.last_filesystems_ms
+            .is_none_or(|last| now_ms - last >= FILESYSTEMS_INTERVAL_MS)
+    }
+    fn processes_due(&self, now_ms: i64) -> bool {
+        self.last_processes_ms
+            .is_none_or(|last| now_ms - last >= PROCESSES_INTERVAL_MS)
+    }
 }
 
 impl Agent {
@@ -97,9 +126,21 @@ impl Agent {
         };
         let enroll_client = ManagerClient::new(&config.server_url, &manager_ca_pem, None)
             .map_err(|e| AgentError::ManagerCa(e.to_string()))?;
+        // Collector opt-ins come from config (validated at load).
+        let mut collectors = GuestCollectors::new();
+        if config.collectors.filesystems {
+            collectors = collectors.enable_filesystems();
+        }
+        if config.collectors.network {
+            collectors = collectors.enable_network();
+        }
+        if config.collectors.processes {
+            collectors = collectors.enable_processes(config.collectors.process_selectors.clone());
+        }
         Ok(Self {
             config,
-            collectors: GuestCollectors::new(),
+            collectors,
+            cadence: FamilyCadence::default(),
             state,
             spool,
             credential,
@@ -316,7 +357,22 @@ impl Agent {
     }
 
     fn build_envelope(&mut self, credential: &StoredCredential, now_ms: i64) -> EnvelopeJson {
-        let collected = self.collectors.collect();
+        // Baseline (resources profile) rides every tick; the G4
+        // families follow their profile cadence. Everything collected
+        // in one cycle forms one batch, bounded by the family budgets
+        // (worst case stays under the contract's 512 samples).
+        let mut collected = self.collectors.collect();
+        if self.cadence.filesystems_due(now_ms) {
+            collected.extend(self.collectors.collect_filesystems());
+            self.cadence.last_filesystems_ms = Some(now_ms);
+        }
+        // The network profile is 15 s — the default tick — so it
+        // rides every tick rather than its own gate.
+        collected.extend(self.collectors.collect_network());
+        if self.cadence.processes_due(now_ms) {
+            collected.extend(self.collectors.collect_processes(now_ms.unsigned_abs()));
+            self.cadence.last_processes_ms = Some(now_ms);
+        }
         let os = self.collectors.os_identity();
         let boot_id = {
             let b = self.collectors.boot_id();
@@ -354,6 +410,9 @@ impl Agent {
                 kernel_release: os.kernel_release,
             }),
             samples,
+            // The service/http/tcp/plugin check engines attach their
+            // records here (60 s cadence family).
+            checks: Vec::new(),
         }
     }
 }
@@ -496,6 +555,28 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 mod tests {
     use super::*;
     use chv_monitor_collectors::SampleValue;
+
+    #[test]
+    fn family_cadence_gates_sixty_and_thirty_second_families() {
+        let mut c = FamilyCadence::default();
+        // First tick: everything due.
+        assert!(c.filesystems_due(1_000));
+        assert!(c.processes_due(1_000));
+        c.last_filesystems_ms = Some(1_000);
+        c.last_processes_ms = Some(1_000);
+        // +15 s: neither due yet.
+        assert!(!c.filesystems_due(16_000));
+        assert!(!c.processes_due(16_000));
+        // +30 s: processes due, filesystems not.
+        assert!(!c.filesystems_due(31_000));
+        assert!(c.processes_due(31_000));
+        // +60 s: both due.
+        assert!(c.filesystems_due(61_000));
+        assert!(c.processes_due(61_000));
+        // A backwards clock never re-arms a family.
+        c.last_filesystems_ms = Some(100_000);
+        assert!(!c.filesystems_due(61_000));
+    }
 
     #[test]
     fn build_samples_encodes_big_integers_as_decimal_strings() {

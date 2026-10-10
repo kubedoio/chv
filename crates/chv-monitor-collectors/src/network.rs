@@ -13,9 +13,11 @@ pub(crate) const NET_LINK_UP: &str = "vm.guest.net.link_up";
 pub(crate) const NET_TCP_ESTABLISHED: &str = "vm.guest.net.tcp_established";
 
 /// Discovery bound: /proc/net/dev with more interfaces (a container
-/// with hundreds of veths) is truncated, not exploded. The 33rd
-/// interface is skipped.
-const MAX_INTERFACES: usize = 32;
+/// with hundreds of veths) is truncated, not exploded. The 9th
+/// interface is skipped. 8 interfaces × 7 samples + the other
+/// families' worst case stay inside the ingestion contract's
+/// 512-samples-per-batch ceiling (see the agent's family budget).
+const MAX_INTERFACES: usize = 8;
 const MAX_INTERFACE_ID_BYTES: usize = 128;
 
 /// One `/proc/net/dev` line — the fields this family emits. The
@@ -34,7 +36,7 @@ pub(crate) struct InterfaceStats {
 }
 
 /// Pure parse of `/proc/net/dev`: skip the two header lines, then
-/// `name: rx[8] tx[8]` per line, bounded to 32 interfaces.
+/// `name: rx[8] tx[8]` per line, bounded to 8 interfaces.
 /// Malformed lines are skipped.
 pub(crate) fn parse_net_dev(net_dev: &str) -> Vec<InterfaceStats> {
     let mut out = Vec::new();
@@ -211,12 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn bounds_at_32_interfaces() {
+    fn bounds_at_8_interfaces() {
         let mut text = String::from("h\nh\n");
-        for i in 0..33 {
+        for i in 0..9 {
             text.push_str(&format!("if{i}: 1 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n"));
         }
-        assert_eq!(parse_net_dev(&text).len(), 32, "33rd interface is skipped");
+        assert_eq!(parse_net_dev(&text).len(), 8, "9th interface is skipped");
     }
 
     #[test]
