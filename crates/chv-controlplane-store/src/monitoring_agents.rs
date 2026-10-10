@@ -333,7 +333,7 @@ impl MonitoringAgentRepository {
             });
         }
 
-        sqlx::query(
+        let insert = sqlx::query(
             "INSERT INTO monitoring_agents
                  (agent_id, vm_id, tenant_id, install_id, credential_epoch,
                   cert_serial, cert_fingerprint, cert_not_after_ms,
@@ -350,7 +350,35 @@ impl MonitoringAgentRepository {
         .bind(now_ms)
         .bind(enrolled_by)
         .execute(&self.pool)
-        .await?;
+        .await;
+
+        if let Err(err) = insert {
+            // Two distinct claims for the same VM redeemed concurrently:
+            // the pre-check above raced and the partial unique index on
+            // (vm_id) WHERE status = 'active' rejected the second insert.
+            // Map that to the documented Conflict (409) instead of a
+            // raw database error (500). The fail-closed behavior is
+            // identical — no second identity is ever created.
+            if let sqlx::Error::Database(ref db_err) = err {
+                if db_err.is_unique_violation() {
+                    let existing: Option<String> = sqlx::query_scalar(
+                        "SELECT agent_id FROM monitoring_agents
+                         WHERE vm_id = $1 AND status = 'active'",
+                    )
+                    .bind(vm_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    return Err(StoreError::Conflict {
+                        entity: "monitoring_agent",
+                        id: existing.unwrap_or_else(|| vm_id.to_string()),
+                        reason: "an active guest agent is already enrolled for this vm; revoke it before enrolling a replacement",
+                    });
+                }
+            }
+            return Err(err.into());
+        }
 
         self.find_agent(agent_id)
             .await?
@@ -745,6 +773,51 @@ mod tests {
         repo.enroll_agent("agent-2", "vm-b", "install-2", &credential("s2"), "op", 400)
             .await
             .expect("replacement enrolls after revoke");
+    }
+
+    #[tokio::test]
+    async fn concurrent_enrollment_for_one_vm_yields_exactly_one_winner() {
+        let pool = create_test_pool().await;
+        let repo = std::sync::Arc::new(MonitoringAgentRepository::new(pool.clone()));
+        seed_vm(&pool, "vm-race", Some("tenant-1")).await;
+
+        // Eight distinct identities enrolled concurrently for the same
+        // VM: exactly one may be created. Every loser must surface the
+        // documented Conflict — whether the pre-check SELECT caught it
+        // or the partial unique index rejected the raced INSERT — and
+        // never a raw database error (which would answer 500 instead
+        // of 409 on the concurrent double-claim path).
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..8 {
+            let repo = repo.clone();
+            set.spawn(async move {
+                repo.enroll_agent(
+                    &format!("agent-race-{i}"),
+                    "vm-race",
+                    &format!("install-race-{i}"),
+                    &credential(&format!("race-s{i}")),
+                    "claim",
+                    500,
+                )
+                .await
+            });
+        }
+        let mut winners = 0;
+        let mut losers = 0;
+        while let Some(joined) = set.join_next().await {
+            match joined.expect("enrollment task completes") {
+                Ok(_) => winners += 1,
+                Err(err) => {
+                    assert!(
+                        matches!(err, StoreError::Conflict { .. }),
+                        "raced loser must be the documented conflict, got: {err:?}"
+                    );
+                    losers += 1;
+                }
+            }
+        }
+        assert_eq!(winners, 1, "exactly one enrollment wins the race");
+        assert_eq!(losers, 7, "every other attempt is a conflict");
     }
 
     #[tokio::test]

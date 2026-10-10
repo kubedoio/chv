@@ -517,8 +517,7 @@ impl MonitoringAgentService {
             }
         }
         // Evict stale per-IP windows so churning source addresses
-        // cannot grow `enroll_rate` without bound (per-agent maps are
-        // bounded by the agent count; per-IP is not). Amortized: only
+        // cannot grow `enroll_rate` without bound. Amortized: only
         // when the map is large, and only entries idle for a full
         // window beyond the current one.
         if self.enroll_rate.len() > 1024 {
@@ -721,6 +720,15 @@ impl MonitoringAgentService {
                     retry_after_seconds: 10,
                 });
             }
+        }
+        // Evict stale per-agent rate windows: re-enrollment mints a new
+        // agent_id every time, so this map grows with the cumulative
+        // count of distinct ever-seen agents, not the live agent count.
+        // Same amortized bound as `enroll_rate` below.
+        if self.agent_rate.len() > 1024 {
+            let cutoff = now_ms as u64;
+            self.agent_rate
+                .retain(|_, w| w.window_start_ms + 2 * RATE_WINDOW_MS > cutoff);
         }
         if self.in_flight.insert(peer.agent_id.clone(), ()).is_some() {
             return Ok(GuestIngestOutcome::RateLimited {
