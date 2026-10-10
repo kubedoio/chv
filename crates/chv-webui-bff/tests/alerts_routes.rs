@@ -508,6 +508,90 @@ async fn rule_spec_validation_is_strict() {
 }
 
 #[tokio::test]
+async fn rules_can_be_created_disabled_and_updates_keep_the_state() {
+    // The create-from-template flow depends on this: templates never
+    // auto-enable, and a later partial update that omits `enabled`
+    // must not silently re-enable a disabled rule.
+    let state = build_state().await;
+    let operator = seed_jwt_as(&state, "operator").await;
+
+    let mut body = threshold_rule_body();
+    body["name"] = "From template".into();
+    body["enabled"] = false.into();
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/create",
+        Some(&operator),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rule"]["enabled"], false);
+    let rule_id = body["rule"]["rule_id"].as_str().unwrap().to_string();
+
+    // An update without `enabled` keeps the disabled state.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/update",
+        Some(&operator),
+        Some(json!({
+            "rule_id": rule_id,
+            "expected_revision": 1,
+            "name": "Reviewed template",
+            "target_kind": "node",
+            "target_id": "node-1",
+            "metric_id": "node.cpu.capacity_ratio",
+            "operator": "greater_than",
+            "threshold": 0.9,
+            "severity": "warning",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["rule"]["enabled"], false,
+        "omitting enabled keeps the disabled state"
+    );
+
+    // The disabled rule is excluded from the enabled-only listing.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules",
+        Some(&operator),
+        Some(json!({"enabled_only": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["total"], 0);
+
+    // Enabling is explicit.
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/v1/monitoring/alert-rules/update",
+        Some(&operator),
+        Some(json!({
+            "rule_id": rule_id,
+            "expected_revision": 2,
+            "name": "Reviewed template",
+            "target_kind": "node",
+            "target_id": "node-1",
+            "metric_id": "node.cpu.capacity_ratio",
+            "operator": "greater_than",
+            "threshold": 0.9,
+            "severity": "warning",
+            "enabled": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rule"]["enabled"], true);
+}
+
+#[tokio::test]
 async fn rule_ceiling_is_a_loud_conflict() {
     let state = build_state().await;
     let mut state = state;

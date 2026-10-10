@@ -587,6 +587,10 @@ fn validate_target(target_kind: &str, target_id: &str) -> Result<(), StoreError>
 
 pub struct RuleCreateInput {
     pub name: String,
+    /// Rules are created in the caller's chosen state. The UI's
+    /// create-from-template flow creates DISABLED rules (templates
+    /// never auto-enable); direct API creates default to enabled.
+    pub enabled: bool,
     pub target_kind: String,
     pub target_id: String,
     pub spec: AlertRuleSpec,
@@ -604,7 +608,9 @@ pub struct RuleUpdateInput {
     /// changes nothing and returns [`StoreError::StaleVersion`].
     pub expected_revision: i64,
     pub name: String,
-    pub enabled: bool,
+    /// `None` keeps the current enabled state (a partial update must
+    /// never silently re-enable a disabled rule).
+    pub enabled: Option<bool>,
     pub spec: AlertRuleSpec,
     pub severity: String,
     pub for_seconds: i64,
@@ -650,11 +656,12 @@ impl AlertRuleRepository {
                 severity, for_seconds, recovery_seconds, missing_data,
                 revision, created_by, created_at_ms, updated_at_ms
             )
-            VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $12)
             RETURNING *
             "#,
         )
         .bind(&input.name)
+        .bind(input.enabled)
         .bind(&input.target_kind)
         .bind(&input.target_id)
         .bind(input.spec.rule_type())
@@ -690,7 +697,7 @@ impl AlertRuleRepository {
         let row: Option<AlertRuleRow> = sqlx::query_as(
             r#"
             UPDATE alert_rules SET
-                name = $1, enabled = $2, rule_type = $3, spec = $4,
+                name = $1, enabled = COALESCE($2, enabled), rule_type = $3, spec = $4,
                 severity = $5, for_seconds = $6, recovery_seconds = $7,
                 missing_data = $8, revision = revision + 1, updated_at_ms = $9
             WHERE rule_id = $10 AND revision = $11
@@ -852,6 +859,7 @@ mod tests {
     fn create_input(spec: AlertRuleSpec, target_kind: &str, target_id: &str) -> RuleCreateInput {
         RuleCreateInput {
             name: "test rule".into(),
+            enabled: true,
             target_kind: target_kind.into(),
             target_id: target_id.into(),
             spec,
@@ -961,7 +969,7 @@ mod tests {
             rule_id: rule.rule_id.clone(),
             expected_revision: 1,
             name: "renamed".into(),
-            enabled: false,
+            enabled: Some(false),
             spec: AlertRuleSpec::Availability {
                 metric_id: "node.cpu.capacity_ratio".into(),
                 dimension_match: None,
@@ -1124,7 +1132,7 @@ mod tests {
             rule_id: c.rule_id.clone(),
             expected_revision: 1,
             name: "off".into(),
-            enabled: false,
+            enabled: Some(false),
             spec: threshold_spec(),
             severity: "warning".into(),
             for_seconds: 300,

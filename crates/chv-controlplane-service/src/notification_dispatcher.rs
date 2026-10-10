@@ -436,43 +436,83 @@ impl NotificationDispatcher {
         );
         self.audit_dead_letter(event, now_ms, note).await;
         if event.event_type != chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED {
-            let failure_event_id = uuid::Uuid::new_v4().to_string();
-            let summary = format!(
-                "notification delivery failed permanently: {}",
-                truncate_for_summary(note)
-            );
-            let payload = render_envelope(
-                &failure_event_id,
-                &event.alert_id,
-                chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED,
-                &event.severity,
-                &event.target_kind,
-                &event.target_id,
-                &summary,
-                event.occurred_at_ms,
-                &format!("/{}s/{}", event.target_kind, event.target_id),
-            );
-            // Best-effort: the outbox insert is idempotent by event
-            // id, so a crash between dead-letter and enqueue simply
-            // loses this courtesy event, never duplicates it.
-            let _ = self
-                .outbox
-                .enqueue(&chv_controlplane_store::NotificationEventInput {
-                    event_id: failure_event_id,
-                    alert_id: event.alert_id.clone(),
-                    incident_key: event.incident_key.clone(),
-                    event_type: chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED.to_string(),
-                    severity: event.severity.clone(),
-                    target_kind: event.target_kind.clone(),
-                    target_id: event.target_id.clone(),
-                    summary,
-                    occurred_at_ms: now_ms,
-                    payload,
-                    channel: event.channel.clone(),
-                })
-                .await;
+            // Route the courtesy notice to a channel that can still
+            // deliver it: prefer a channel other than the dead one
+            // (its destination may be gone or failing), fall back to
+            // the dead channel when it is the only configured one,
+            // and skip the enqueue entirely when no destination
+            // remains (the durable audit event still records the
+            // failure — a courtesy event nothing can deliver would
+            // just be a second dead letter).
+            match self.courtesy_channel(&event.channel) {
+                Some(channel) => {
+                    let failure_event_id = uuid::Uuid::new_v4().to_string();
+                    let summary = format!(
+                        "notification delivery failed permanently: {}",
+                        truncate_for_summary(note)
+                    );
+                    let payload = render_envelope(
+                        &failure_event_id,
+                        &event.alert_id,
+                        chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED,
+                        &event.severity,
+                        &event.target_kind,
+                        &event.target_id,
+                        &summary,
+                        event.occurred_at_ms,
+                        &format!("/{}s/{}", event.target_kind, event.target_id),
+                    );
+                    // Best-effort: the outbox insert is idempotent by
+                    // event id, so a crash between dead-letter and
+                    // enqueue simply loses this courtesy event, never
+                    // duplicates it.
+                    let _ = self
+                        .outbox
+                        .enqueue(&chv_controlplane_store::NotificationEventInput {
+                            event_id: failure_event_id,
+                            alert_id: event.alert_id.clone(),
+                            incident_key: event.incident_key.clone(),
+                            event_type: chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED
+                                .to_string(),
+                            severity: event.severity.clone(),
+                            target_kind: event.target_kind.clone(),
+                            target_id: event.target_id.clone(),
+                            summary,
+                            occurred_at_ms: now_ms,
+                            payload,
+                            channel,
+                        })
+                        .await;
+                }
+                None => {
+                    tracing::warn!(
+                        event_id = %event.event_id,
+                        "no configured destination can deliver the delivery_failed courtesy \
+                         event; it is recorded in the audit trail only"
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// The channel for a dead-letter courtesy event (see
+    /// [`Self::dead_letter`]): a configured channel other than the
+    /// dead one, else the dead one if still configured, else none.
+    fn courtesy_channel(&self, dead_channel: &str) -> Option<String> {
+        let is_configured = |channel: &str| match channel {
+            chv_controlplane_store::CHANNEL_WEBHOOK => self.settings.webhook_url.is_some(),
+            _ => self.settings.slack_webhook_url.is_some(),
+        };
+        [
+            chv_controlplane_store::CHANNEL_WEBHOOK,
+            chv_controlplane_store::CHANNEL_SLACK,
+        ]
+        .into_iter()
+        .filter(|channel| is_configured(channel))
+        .find(|channel| channel != &dead_channel)
+        .map(str::to_string)
+        .or_else(|| is_configured(dead_channel).then(|| dead_channel.to_string()))
     }
 
     /// Best-effort durable audit trail (mirrors the monitoring-agent
@@ -1088,6 +1128,74 @@ mod tests {
         let dead = rows.iter().find(|r| r.event_id == "evt-404").expect("row");
         assert_eq!(dead.status, "dead");
         assert_eq!(dead.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn dead_webhook_routes_courtesy_notice_to_surviving_slack() {
+        // Both channels configured; the webhook event dead-letters
+        // (404). The courtesy notice must ride the SURVIVING slack
+        // channel, not the dead webhook one.
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let events = chv_controlplane_store::EventRepository::new(pool.clone());
+        let transport = std::sync::Arc::new(FakeTransport::new(vec![Some(404)]));
+        let mut settings = dispatcher_settings();
+        settings.slack_webhook_url = Some("https://hooks.slack.example/T/B/X".into());
+        let dispatcher =
+            NotificationDispatcher::with_transport(outbox.clone(), events, settings, transport);
+        outbox
+            .enqueue(&firing_event("evt-dual", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass");
+        let rows = outbox.list_recent(10).await.expect("list");
+        let dead = rows.iter().find(|r| r.event_id == "evt-dual").expect("row");
+        assert_eq!(dead.status, "dead");
+        let failure = rows
+            .iter()
+            .find(|r| r.event_type == chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED)
+            .expect("courtesy event");
+        assert_eq!(
+            failure.channel, "slack",
+            "the courtesy notice rides the surviving channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_event_with_no_configured_destination_skips_the_courtesy_enqueue() {
+        // The dead event's channel destination is gone and nothing
+        // else is configured: no courtesy event is enqueued (it
+        // could only dead-letter too); the audit trail still records
+        // the failure.
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let outbox = NotificationOutboxRepository::new(pool.clone());
+        let events = chv_controlplane_store::EventRepository::new(pool.clone());
+        let transport = std::sync::Arc::new(FakeTransport::new(vec![]));
+        let mut settings = dispatcher_settings();
+        settings.webhook_url = None;
+        settings.slack_webhook_url = None;
+        let dispatcher =
+            NotificationDispatcher::with_transport(outbox.clone(), events, settings, transport);
+        // A WEBHOOK-channel event dead-letters on the "destination
+        // removed from configuration" path without any transport
+        // call.
+        outbox
+            .enqueue(&firing_event("evt-skip", 1_000))
+            .await
+            .expect("enqueue");
+
+        dispatcher.dispatch_pass(2_000).await.expect("pass");
+        let rows = outbox.list_recent(10).await.expect("list");
+        assert!(
+            rows.iter()
+                .all(|r| r.event_type != chv_controlplane_store::EVENT_TYPE_DELIVERY_FAILED),
+            "no courtesy event when no configured channel can deliver it: {rows:?}"
+        );
+        // The dead event itself is still recorded.
+        assert!(rows
+            .iter()
+            .any(|r| r.event_id == "evt-skip" && r.status == "dead"));
     }
 
     #[tokio::test]

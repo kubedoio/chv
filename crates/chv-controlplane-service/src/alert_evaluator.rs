@@ -672,6 +672,13 @@ pub struct AlertEvaluatorWorker {
 /// arrive on the agent cadence, so this is generous headroom).
 const RATE_MAX_POINTS: usize = 240;
 
+/// Enabled rules listed (and therefore evaluated) per tick. The
+/// create-time rule ceiling is bounded at 500 by
+/// `[monitoring.alerting].max_rules` validation (see chv-config), so
+/// this covers every possible rule population; it exists only as a
+/// belt-and-braces bound on per-tick work.
+const MAX_ENABLED_RULES_PER_TICK: i64 = 500;
+
 impl AlertEvaluatorWorker {
     pub fn new(
         rules: chv_controlplane_store::AlertRuleRepository,
@@ -714,7 +721,7 @@ impl AlertEvaluatorWorker {
     /// one bad rule (or a flaky monitoring query) never blocks the
     /// rest of the tick.
     pub async fn evaluation_pass(&self, now_ms: i64) -> usize {
-        let rules = match self.rules.list_enabled(RATE_MAX_POINTS as i64).await {
+        let rules = match self.rules.list_enabled(MAX_ENABLED_RULES_PER_TICK).await {
             Ok(rules) => rules,
             Err(e) => {
                 tracing::warn!(error = %e, "alert evaluation: rule listing failed");
@@ -2560,6 +2567,7 @@ mod worker_tests {
     fn cpu_rule(for_seconds: i64, recovery_seconds: i64, threshold: f64) -> RuleCreateInput {
         RuleCreateInput {
             name: "Node CPU pressure".into(),
+            enabled: true,
             target_kind: "node".into(),
             target_id: "node-1".into(),
             spec: AlertRuleSpec::Threshold {
@@ -2853,7 +2861,7 @@ mod worker_tests {
                 rule_id: rule.rule_id.clone(),
                 expected_revision: 1,
                 name: "Node CPU pressure".into(),
-                enabled: true,
+                enabled: Some(true),
                 spec: AlertRuleSpec::Threshold {
                     metric_id: "node.cpu.capacity_ratio".into(),
                     dimension_match: None,
@@ -2890,7 +2898,7 @@ mod worker_tests {
                 rule_id: rule.rule_id.clone(),
                 expected_revision: 1,
                 name: "Node CPU pressure".into(),
-                enabled: false,
+                enabled: Some(false),
                 spec: AlertRuleSpec::Threshold {
                     metric_id: "node.cpu.capacity_ratio".into(),
                     dimension_match: None,
@@ -2911,5 +2919,64 @@ mod worker_tests {
         let evaluated = f.worker.evaluation_pass(BASE_MS).await;
         assert_eq!(evaluated, 0, "disabled rules are skipped");
         assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn every_enabled_rule_evaluates_beyond_old_list_limits() {
+        // Regression: the pass once listed enabled rules with a
+        // history-points constant (240) as the limit, silently
+        // freezing rules 241+ out of evaluation. The create ceiling
+        // allows up to 500, so a pass must evaluate them all.
+        let f = fixture(EvaluatorChannels::default()).await;
+        for i in 0..260 {
+            let mut input = cpu_rule(600, 60, 0.9);
+            input.name = format!("rule {i:03}");
+            f.rules.create(&input).await.expect("rule create");
+        }
+        let evaluated = f.worker.evaluation_pass(BASE_MS).await;
+        assert_eq!(
+            evaluated, 260,
+            "all enabled rules evaluate regardless of position in the list"
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_created_disabled_do_not_evaluate() {
+        let f = fixture(EvaluatorChannels::default()).await;
+        let mut input = cpu_rule(0, 60, 0.9);
+        input.enabled = false;
+        let rule = f.rules.create(&input).await.expect("rule");
+        assert!(!rule.enabled, "create honors the enabled flag");
+
+        f.seed_cpu((BASE_MS as u64) - 30_000, 0.95).await;
+        let evaluated = f.worker.evaluation_pass(BASE_MS).await;
+        assert_eq!(evaluated, 0);
+        assert!(active_incident(&f, &dedup_key(&rule)).await.is_none());
+
+        // An update that omits `enabled` keeps the disabled state
+        // (a partial update must never silently re-enable).
+        f.rules
+            .update(&chv_controlplane_store::RuleUpdateInput {
+                rule_id: rule.rule_id.clone(),
+                expected_revision: 1,
+                name: "renamed".into(),
+                enabled: None,
+                spec: AlertRuleSpec::Threshold {
+                    metric_id: "node.cpu.capacity_ratio".into(),
+                    dimension_match: None,
+                    operator: ThresholdOperator::GreaterThan,
+                    threshold: 0.9,
+                },
+                severity: "warning".into(),
+                for_seconds: 0,
+                recovery_seconds: 60,
+                missing_data: MissingDataPolicy::Unknown,
+                updated_by: "test".into(),
+                now_ms: BASE_MS + 10_000,
+            })
+            .await
+            .expect("rename");
+        let evaluated = f.worker.evaluation_pass(BASE_MS).await;
+        assert_eq!(evaluated, 0, "omitting enabled keeps the rule disabled");
     }
 }

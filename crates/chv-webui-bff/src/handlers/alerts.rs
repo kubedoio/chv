@@ -413,6 +413,9 @@ pub async fn create_rule(
         .alert_rules
         .create(&chv_controlplane_store::RuleCreateInput {
             name: common.name,
+            // Honored: the UI's create-from-template flow relies on
+            // creating DISABLED rules (templates never auto-enable).
+            enabled: common.enabled.unwrap_or(true),
             target_kind: common.target_kind,
             target_id: common.target_id,
             spec,
@@ -472,7 +475,7 @@ pub async fn update_rule(
             rule_id: common.rule_id,
             expected_revision: common.expected_revision,
             name: common.name,
-            enabled: common.enabled.unwrap_or(true),
+            enabled: common.enabled,
             spec,
             severity: common.severity,
             for_seconds: common.for_seconds.unwrap_or(300),
