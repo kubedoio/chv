@@ -6,6 +6,7 @@
 		HardDrive,
 		Activity,
 		AlertCircle,
+		BellRing,
 		ShieldCheck,
 		Settings
 	} from 'lucide-svelte';
@@ -21,6 +22,7 @@
 		{ href: '/volumes', icon: HardDrive, label: 'Storage Pools' },
 		{ href: '/tasks', icon: Activity, label: 'Tasks' },
 		{ href: '/events', icon: AlertCircle, label: 'Events' },
+		{ href: '/alerts', icon: BellRing, label: 'Alerts' },
 		{ href: '/backup-jobs', icon: ShieldCheck, label: 'Backups' },
 		{ href: '/settings', icon: Settings, label: 'Settings' }
 	];
