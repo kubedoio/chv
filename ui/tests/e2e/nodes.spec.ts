@@ -17,7 +17,7 @@ test.describe('Node Management', () => {
 		await mockApiResponse(page, '**/v1/nodes/get', mockNodeDetail);
 		await page.getByRole('link', { name: 'hv-01' }).first().click();
 		await expect(page).toHaveURL(/nodes\/node-1/);
-		await expect(page.getByText('Compute Posture')).toBeVisible();
+		await expect(page.getByText('Node Overview')).toBeVisible();
 	});
 
 	test('filters node list by search query', async ({ page }) => {
