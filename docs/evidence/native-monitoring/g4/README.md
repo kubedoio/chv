@@ -9,8 +9,8 @@ kernel `6.8.0-142-generic`, real KVM, `cloud-hypervisor v53.0` static
 binary digest-verified against `scripts/install.sh`'s pin
 (`448af3d4e59b22c2…`), rust-hypervisor-fw `4a0a1e97…`, guest image
 `noble-qual-patched.img` `37f7c340…`. The guest package under test is
-`chv-monitor-agent_0.3.0_amd64.deb` (`76467369d129e758…`) built from
-the final branch state (both gate-catch fixes and the review-round-1
+`chv-monitor-agent_0.3.0_amd64.deb` (`68f4693f8eb3f413…`) built from
+the final branch state (both gate-catch fixes and both review rounds'
 fixes compiled in; byte-compared against
 `target/release/chv-monitor-agent` before the run). The
 manager runs in-process in the test binary — the real
@@ -77,7 +77,7 @@ CHV_G4_AGENT_DEB=$PWD/dist/packages/chv-monitor-agent_0.3.0_amd64.deb \
 cargo test -p chv-monitor-agent --test g4_real_vm -- --nocapture
 ```
 
-Result: **1 passed in 762.22s** (CI skips this test — no
+Result: **1 passed in 762.57s** (CI skips this test — no
 KVM; the run above is the real-host record on the final branch
 state; verbatim observations below).
 
@@ -106,10 +106,10 @@ delta in the unit/config surface is exercised by the rig itself
 
 ```text
 g4 checkpoint: network up (bridge + tap)
-g4 checkpoint: manager listening on https://192.168.63.1:37395
+g4 checkpoint: manager listening on https://192.168.63.1:34235
 g4 checkpoint: creating vm (production adapter, seed built)
 g4 checkpoint: seed enriched with the agent package, fixtures and ssh key
-g4 checkpoint: guest executing (vmm cpu ticks +58)
+g4 checkpoint: guest executing (vmm cpu ticks +54)
 g4 checkpoint: agent enrolled
 g4 checkpoint: ssh reachable
 g4 checkpoint: vm.guest.fs.available_bytes: 6 valid points
@@ -123,15 +123,15 @@ g4 checkpoint: vm.guest.net.tcp_established: 2 valid points
 g4 checkpoint: vm.guest.process.count: 2 valid points
 g4 checkpoint: vm.guest.process.rss_bytes: 2 valid points
 g4 checkpoint: vm.guest.process.cpu_utilization_ratio: 2 valid points
-g4 checkpoint: root mount: 750505984/2525810688 bytes available
+g4 checkpoint: root mount: 750485504/2525810688 bytes available
 g4 checkpoint: guest NIC rx counters advance
 g4 checkpoint: process selectors measure real processes
-g4 checkpoint: service checks in inventory: 22 (3 configured + discovered)
-g4 checkpoint: check.status: 25 valid points
-g4 checkpoint: check.duration_seconds: 25 valid points
+g4 checkpoint: service checks in inventory: 23 (3 configured + discovered)
+g4 checkpoint: check.status: 26 valid points
+g4 checkpoint: check.duration_seconds: 26 valid points
 g4 checkpoint: plugins disabled by default: files present, zero plugin checks
-g4 checkpoint: root available: 750505984 -> 540770304 after the 200 MB fill
-g4 checkpoint: root available recovered: 750465024 (baseline 750505984)
+g4 checkpoint: root available: 750485504 -> 540741632 after the 200 MB fill
+g4 checkpoint: root available recovered: 750448640 (baseline 750485504)
 g4 checkpoint: scratch tmpfs inode utilization: 0.025 -> 0.925 (36/40 inodes)
 g4 checkpoint: inode exhaustion observed on a scratch mount; series went stale after unmount
 g4 checkpoint: process exit observed: python3 selector measured 0
@@ -141,7 +141,7 @@ g4 checkpoint: plugin check reported ok after explicit enable
 g4 checkpoint: tampered plugin degraded without ever being executed
 g4 checkpoint: allowlist directory integrity intact end to end
 g4 checkpoint: vm stopped and deleted
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 762.22s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 762.57s
 ```
 
 Reading the observations:
@@ -151,23 +151,23 @@ Reading the observations:
   inode utilization, read-only), net (rx/tx counters as same-epoch
   deltas, error counters, TCP established), process (count, RSS,
   CPU utilization per selector).
-- **Root mount truth**: `ext4:/` reads 750505984 of 2525810688
+- **Root mount truth**: `ext4:/` reads 750485504 of 2525810688
   bytes available and — the init-namespace fix under test —
   **writable**, on a guest cloud-init had just written a package
   install onto.
 - **Fill/recovery**: the 200 MiB write drops root available by
-  209735680 bytes (within noise of 200 MiB exactly); removal
-  restores the baseline within 40 KiB.
+  209743872 bytes (within noise of 200 MiB exactly); removal
+  restores the baseline within 37 KiB.
 - **Inode exhaustion**: the scratch tmpfs (`nr_inodes=40`) reads
   0.025 → 0.925 as 36 files land — and the series goes **stale**
   after unmount (an honest absence, never a frozen value). The
   tmpfs appearing at all proves the unit's slave mount propagation
   carries later operator mounts to the agent's statvfs step.
-- **Real OS behavior**: 22 service checks in inventory (3 configured
+- **Real OS behavior**: 23 service checks in inventory (3 configured
   + discovered units, instance units among them — gate-catch #1's
   fix under live test); the real outage of `g4-http.service` flips
   `service:g4-http.service` and `http:app` and recovers both, with
-  `check.status` accumulating 25 trend points across the
+  `check.status` accumulating 26 trend points across the
   transitions; the python3 selector measures 0 after exit and
   recovers after restart; the guest NIC's rx counter advances
   between observations.
@@ -185,13 +185,14 @@ Reading the observations:
 
 ## The gate working as designed — two real-OS catches
 
-The recorded run is the **fourth** attempt, and the history is part
+The recorded run is the **fifth** attempt, and the history is part
 of the evidence. The first two failures were not rig bugs; they
 were the G4 gate ("check inventory reflects real OS behavior")
 catching contract and collector defects that no fixture-based test
 could catch. The third attempt validated both fixes and passed
-every scenario, but predated the review-round-1 fixes — the fourth
-(above) is the final branch state:
+every scenario; the fourth added the review-round-1 fixes to the
+package under test; the fifth (above) is the final branch state
+with both review rounds' fixes compiled in:
 
 1. **Systemd instance units starved the store** (`a5afd752`). The
    rig's own ssh login starts `user@1000.service`; bounded discovery
