@@ -53,7 +53,7 @@ The default service has a dedicated OS user, `NoNewPrivileges=true`, `ProtectSys
   "plugin_version": "1.0.0",
   "executable": "/etc/chv-monitor/plugins.d/http-health",
   "sha256": "<sha256-of-approved-binary>",
-  "checks": ["example.http-health"],
+  "checks": ["plugin:example.http-health"],
   "interval_seconds": 60,
   "timeout_seconds": 5,
   "max_output_bytes": 32768,
@@ -68,7 +68,7 @@ The local root administrator owns manifest and executable updates. The manager c
 ```json
 {
   "schema_version": 1,
-  "check_id": "example.http-health",
+  "check_id": "plugin:example.http-health",
   "status": "ok",
   "summary": "Endpoint responded",
   "metrics": [

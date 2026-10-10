@@ -26,7 +26,7 @@ URL = "http://127.0.0.1:8080/health"
 TIMEOUT_SECONDS = 3.0
 # ------------------------------------------------------------------------
 
-CHECK_ID = "example.http-health"
+CHECK_ID = "plugin:example.http-health"
 EXPECTED_STATUS = 200
 
 

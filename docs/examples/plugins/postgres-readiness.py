@@ -24,7 +24,7 @@ PORT = 5432
 PG_ISREADY = "/usr/bin/pg_isready"
 # ------------------------------------------------------------------------
 
-CHECK_ID = "example.postgres-readiness"
+CHECK_ID = "plugin:example.postgres-readiness"
 
 # pg_isready exit codes (upstream documented semantics).
 PG_ACCEPTING = 0

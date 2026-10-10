@@ -57,7 +57,7 @@ One `*.json` file per plugin in the allowlist directory
   "plugin_version": "1.0.0",
   "executable": "/etc/chv-monitor/plugins.d/http-health.py",
   "sha256": "<sha256 of the executable — compute at install, see below>",
-  "checks": ["example.http-health"],
+  "checks": ["plugin:example.http-health"],
   "interval_seconds": 60,
   "timeout_seconds": 5,
   "max_output_bytes": 32768,
@@ -85,7 +85,7 @@ A plugin prints one JSON object on stdout and exits `0`:
 ```json
 {
   "schema_version": 1,
-  "check_id": "example.http-health",
+  "check_id": "plugin:example.http-health",
   "status": "ok",
   "summary": "Endpoint responded",
   "metrics": [

@@ -25,7 +25,7 @@ PORT = 6379
 TIMEOUT_SECONDS = 3.0
 # ------------------------------------------------------------------------
 
-CHECK_ID = "example.redis-ping"
+CHECK_ID = "plugin:example.redis-ping"
 
 
 def main() -> int:
