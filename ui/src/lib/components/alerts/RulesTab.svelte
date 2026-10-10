@@ -68,9 +68,13 @@
 			await onReload();
 		} catch (err) {
 			if (err instanceof BFFError && err.status === 409) {
-				// Revision conflict: someone else changed the rule. Show the
-				// honest message and reload the current revision.
-				conflictNotice = 'Rule was modified by someone else — reloading the current revision.';
+				// 409 on update: revision conflict (someone else changed
+				// the rule) — reload the current revision. 409 on create:
+				// there is no revision yet; the only create-time conflict
+				// is the configured rule ceiling.
+				conflictNotice = editing
+					? 'Rule was modified by someone else — reloading the current revision.'
+					: 'Rule ceiling reached — delete unused rules or raise monitoring.alerting.max_rules.';
 				await onReload();
 				return;
 			}

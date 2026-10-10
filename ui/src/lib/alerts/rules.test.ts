@@ -124,6 +124,10 @@ describe('ruleSpecSummary', () => {
 	});
 
 	it('renders a group with its join operator', () => {
+		// Wire-faithful: nested group conditions carry NO rule_type
+		// (the store serializes specs untagged; rule_wire adds
+		// rule_type only at the top level) — the summary must
+		// shape-sniff the children.
 		const summary = ruleSpecSummary(
 			rule({
 				rule_type: 'group',
@@ -131,14 +135,15 @@ describe('ruleSpecSummary', () => {
 				conditions: [
 					rule({
 						rule_id: 'c1',
-						rule_type: 'threshold',
+						rule_type: undefined,
+						threshold: 8,
 						metric_id: 'node.cpu.load1',
-						operator: 'greater_than',
-						threshold: 8
+						operator: 'greater_than'
 					}),
 					rule({
 						rule_id: 'c2',
-						rule_type: 'check_status',
+						rule_type: undefined,
+						threshold: undefined,
 						check_id: 'service:nginx.service',
 						status_match: 'critical'
 					})
@@ -147,6 +152,35 @@ describe('ruleSpecSummary', () => {
 		);
 		expect(summary).toBe(
 			'node.cpu.load1 > 8 AND service:nginx.service is critical'
+		);
+	});
+
+	it('renders a group of rate and availability children', () => {
+		const summary = ruleSpecSummary(
+			rule({
+				rule_type: 'group',
+				op: 'or',
+				conditions: [
+					rule({
+						rule_id: 'r1',
+						rule_type: undefined,
+						threshold: undefined,
+						metric_id: 'vm.guest.net.rx_errors_total',
+						operator: 'greater_than',
+						threshold_per_second: 5,
+						window_seconds: 300
+					}),
+					rule({
+						rule_id: 'r2',
+						rule_type: undefined,
+						threshold: undefined,
+						metric_id: 'node.cpu.capacity_ratio'
+					})
+				]
+			})
+		);
+		expect(summary).toBe(
+			'vm.guest.net.rx_errors_total > 5/s over 300s OR no data: node.cpu.capacity_ratio'
 		);
 	});
 });

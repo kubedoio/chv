@@ -113,7 +113,23 @@ function dimensionSuffix(dimensionMatch?: Record<string, string>): string {
 }
 
 function conditionSummary(condition: AlertRule): string {
-	switch (condition.rule_type) {
+	// A group's nested conditions carry NO `rule_type` on the wire
+	// (the store serializes specs untagged; `rule_type` is derived
+	// and added only at the top level by rule_wire) — so shape-sniff
+	// the child instead of reading a field that is only present on
+	// top-level rules.
+	const kind =
+		condition.rule_type ??
+		(condition.threshold !== undefined
+			? 'threshold'
+			: condition.threshold_per_second !== undefined
+				? 'rate'
+				: condition.check_id !== undefined
+					? 'check_status'
+					: condition.conditions !== undefined
+						? 'group'
+						: 'availability');
+	switch (kind) {
 		case 'threshold':
 			return `${condition.metric_id ?? '?'} ${operatorSymbol(condition.operator)} ${formatThresholdValue(condition.threshold ?? 0)}${dimensionSuffix(condition.dimension_match)}`;
 		case 'rate':
@@ -127,7 +143,7 @@ function conditionSummary(condition: AlertRule): string {
 				.map((child) => conditionSummary(child))
 				.join(` ${(condition.op ?? 'and').toUpperCase()} `);
 		default:
-			return condition.rule_type;
+			return kind;
 	}
 }
 
