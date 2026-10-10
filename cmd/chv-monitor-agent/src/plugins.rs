@@ -1396,6 +1396,14 @@ mod tests {
 
     #[tokio::test]
     async fn interval_gating_skips_plugins_not_yet_due() {
+        // The scenario needs the manifest to LOAD (root-owned file):
+        // the interval gate stamps last_run_ms only for accepted
+        // manifests — a rejected one (the non-root default) reports
+        // unknown every cycle by design.
+        if !running_as_root() {
+            skip_acceptance("interval_gating_skips_plugins_not_yet_due");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let value = manifest_value(
             "test.missing",
