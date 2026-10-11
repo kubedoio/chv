@@ -43,6 +43,8 @@
 	// Advanced hypervisor overrides
 	let advancedOpen = $state(false);
 	let hvOverrides = $state<Record<string, boolean | string | undefined>>({});
+	// G5 vsock monitoring transport opt-in (create-time only)
+	let vsockEnabled = $state(false);
 
 	let submitting = $state(false);
 	let formError = $state('');
@@ -63,6 +65,7 @@
 		sshKey = '';
 		advancedOpen = false;
 		hvOverrides = {};
+		vsockEnabled = false;
 		formError = '';
 		nameError = '';
 	}
@@ -183,7 +186,8 @@
 			volume_size_gb: volumeSizeGb,
 			requested_by: 'webui',
 			...(cloudInitUserdata ? { cloud_init_userdata: cloudInitUserdata } : {}),
-			...(Object.keys(overrides).length > 0 ? { hypervisor_overrides: overrides } : {})
+			...(Object.keys(overrides).length > 0 ? { hypervisor_overrides: overrides } : {}),
+			...(vsockEnabled ? { vsock_enabled: true } : {})
 		};
 
 		try {
@@ -250,6 +254,7 @@
 			{loadingData}
 			bind:advancedOpen
 			bind:hvOverrides
+			bind:vsockEnabled
 			{submitting}
 			onNameBlur={validateName}
 			onImageLinkClick={() => (open = false)}
@@ -270,6 +275,7 @@
 			{vcpu}
 			{memoryMb}
 			{username}
+			{vsockEnabled}
 			overrideSummary={overrideSummary()}
 		/>
 	{/if}

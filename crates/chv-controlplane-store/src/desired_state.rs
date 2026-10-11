@@ -39,6 +39,7 @@ INSERT INTO vm_desired_state (
     image_ref,
     boot_mode,
     desired_power_state,
+    vsock_enabled,
     requested_at,
     updated_at
 )
@@ -54,8 +55,9 @@ VALUES (
     $9,
     $10,
     $11,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch')
+    COALESCE($12, 0),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $13 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $13 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -68,6 +70,7 @@ ON CONFLICT (vm_id) DO UPDATE SET
     image_ref = EXCLUDED.image_ref,
     boot_mode = EXCLUDED.boot_mode,
     desired_power_state = EXCLUDED.desired_power_state,
+    vsock_enabled = COALESCE($12, vm_desired_state.vsock_enabled),
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 WHERE vm_desired_state.desired_generation <= EXCLUDED.desired_generation
@@ -556,6 +559,7 @@ impl DesiredStateRepository {
             .bind(&input.image_ref)
             .bind(&input.boot_mode)
             .bind(&input.desired_power_state)
+            .bind(input.vsock_enabled)
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -1249,6 +1253,11 @@ pub struct VmDesiredStateInput {
     pub image_ref: Option<String>,
     pub boot_mode: Option<String>,
     pub desired_power_state: Option<String>,
+    /// G5 vsock device opt-in. `None` means "not specified": a fresh
+    /// insert defaults to 0 (off), and an update preserves the stored
+    /// value (the COALESCE in the upsert) so callers that do not carry
+    /// the field cannot silently strip a VM's device intent.
+    pub vsock_enabled: Option<bool>,
     pub requested_unix_ms: i64,
 }
 

@@ -118,6 +118,7 @@ impl TestCluster {
                 image_ref: Some("test-image:latest".to_string()),
                 boot_mode: None,
                 desired_power_state: Some("Running".to_string()),
+                vsock_enabled: None,
                 requested_unix_ms: 1000,
             })
             .await

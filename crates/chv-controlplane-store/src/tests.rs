@@ -362,6 +362,7 @@ async fn test_upsert_vm_rejects_stale_generation() {
         image_ref: Some("img".to_string()),
         boot_mode: None,
         desired_power_state: Some("on".to_string()),
+        vsock_enabled: None,
         requested_unix_ms: 1000,
     };
 
@@ -407,6 +408,7 @@ async fn test_upsert_vm_accepts_newer_generation() {
         image_ref: Some("img".to_string()),
         boot_mode: None,
         desired_power_state: Some("on".to_string()),
+        vsock_enabled: None,
         requested_unix_ms: 1000,
     };
 
@@ -449,6 +451,7 @@ async fn test_upsert_vm_accepts_same_generation_idempotent() {
         image_ref: Some("img".to_string()),
         boot_mode: None,
         desired_power_state: Some("on".to_string()),
+        vsock_enabled: None,
         requested_unix_ms: 1000,
     };
 
@@ -824,6 +827,7 @@ async fn test_set_vm_resources_stale_vs_not_found() {
         image_ref: Some("img".to_string()),
         boot_mode: None,
         desired_power_state: Some("on".to_string()),
+        vsock_enabled: None,
         requested_unix_ms: 1000,
     };
     repo.upsert_vm(&vm_input).await.unwrap();
@@ -1610,4 +1614,94 @@ async fn network_status_patch_refuses_to_journal_over_a_deleting_tombstone() {
         (2, Some("Deleting".into())),
         "the tombstone must survive the refused status patch byte-for-byte"
     );
+}
+
+#[tokio::test]
+async fn test_upsert_vm_vsock_opt_in_defaults_off_and_is_preserved_by_unspecified_updates() {
+    // G5 (0062): the vsock opt-in is additive — a fresh upsert without
+    // the field stores 0 (off, the pre-G5 meaning), Some(true) stores
+    // 1, and — the load-bearing rule — a LATER upsert that does not
+    // carry the field (the legacy gRPC fragment path, reconciliation
+    // rewrites) preserves the stored opt-in instead of silently
+    // stripping a VM's device intent.
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+
+    let base = VmDesiredStateInput {
+        vm_id: ResourceId::new("vm-vsock-carry").unwrap(),
+        node_id: None,
+        display_name: "vsock-carry".to_string(),
+        tenant_id: None,
+        placement_policy: None,
+        desired_generation: Generation::new(1),
+        desired_status: Some("Pending".to_string()),
+        requested_by: Some("test".to_string()),
+        updated_by: Some("test".to_string()),
+        target_node_id: None,
+        cpu_count: Some(2),
+        memory_bytes: Some(1024),
+        image_ref: Some("img".to_string()),
+        boot_mode: None,
+        desired_power_state: Some("Running".to_string()),
+        vsock_enabled: None,
+        requested_unix_ms: 1000,
+    };
+
+    // Fresh insert, unspecified: off.
+    repo.upsert_vm(&base).await.unwrap();
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT vsock_enabled FROM vm_desired_state WHERE vm_id = 'vm-vsock-carry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, Some(0));
+
+    // Opt-in at a newer generation.
+    let mut opted_in = base.clone();
+    opted_in.desired_generation = Generation::new(2);
+    opted_in.vsock_enabled = Some(true);
+    opted_in.requested_unix_ms = 2000;
+    repo.upsert_vm(&opted_in).await.unwrap();
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT vsock_enabled FROM vm_desired_state WHERE vm_id = 'vm-vsock-carry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, Some(1));
+
+    // An unrelated newer upsert that does not carry the field preserves
+    // the opt-in (COALESCE rule), never strips it.
+    let mut unrelated = base.clone();
+    unrelated.desired_generation = Generation::new(3);
+    unrelated.requested_unix_ms = 3000;
+    repo.upsert_vm(&unrelated).await.unwrap();
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT vsock_enabled FROM vm_desired_state WHERE vm_id = 'vm-vsock-carry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        Some(1),
+        "unspecified update must preserve the opt-in"
+    );
+
+    // An explicit false at a newer generation is honored (the opt-out
+    // is deliberate when a caller says so).
+    let mut opted_out = base.clone();
+    opted_out.desired_generation = Generation::new(4);
+    opted_out.vsock_enabled = Some(false);
+    opted_out.requested_unix_ms = 4000;
+    repo.upsert_vm(&opted_out).await.unwrap();
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT vsock_enabled FROM vm_desired_state WHERE vm_id = 'vm-vsock-carry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, Some(0));
 }

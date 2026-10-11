@@ -1806,6 +1806,7 @@ impl Orchestrator {
                 vds.image_ref,
                 vds.desired_power_state,
                 vds.cloud_init_userdata,
+                vds.vsock_enabled,
                 v.hv_cpu_nested,
                 v.hv_cpu_amx,
                 v.hv_cpu_kvm_hyperv,
@@ -2088,6 +2089,15 @@ impl Orchestrator {
             desired_state,
             cloud_init_userdata: vm_row.cloud_init_userdata,
             hypervisor_overrides: Some(overrides),
+            // G5 vsock opt-in: emitted ONLY when the VM was created with
+            // it — every other VM's spec JSON stays byte-shaped like a
+            // pre-G5 one (the agent's serde-tolerant parser treats
+            // absence as the opt-out). The spec carries the marker only;
+            // the node authority allocates the CID and socket path.
+            vsock: vm_row
+                .vsock_enabled
+                .unwrap_or(false)
+                .then_some(AgentVsockSpec { enabled: true }),
         };
 
         serde_json::to_string(&spec).map_err(|e| ChvError::Internal {
@@ -2214,6 +2224,8 @@ struct VmDesiredStateRow {
     image_ref: Option<String>,
     desired_power_state: Option<String>,
     cloud_init_userdata: Option<String>,
+    /// G5 vsock device opt-in (NOT NULL, 0 = off, from 0062).
+    vsock_enabled: Option<bool>,
     hv_cpu_nested: Option<bool>,
     hv_cpu_amx: Option<bool>,
     hv_cpu_kvm_hyperv: Option<bool>,
@@ -2273,6 +2285,17 @@ struct AgentVmSpec {
     cloud_init_userdata: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hypervisor_overrides: Option<HypervisorOverrides>,
+    /// G5 vsock device opt-in — serialized under the key the agent's
+    /// `VmSpec` parser reads (`vsock`, PR-7's additive field) and
+    /// OMITTED when the VM did not opt in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vsock: Option<AgentVsockSpec>,
+}
+
+/// The wire mirror of the agent-side `VsockSpec` opt-in marker.
+#[derive(serde::Serialize)]
+struct AgentVsockSpec {
+    enabled: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -2511,6 +2534,59 @@ mod tests {
             "an empty ruleset rides the spec AS-IS (#355 DP4): the Core executor's \
              attach path resolves it to the shared baseline + default-deny — the \
              pre-DP4 filter here is what left rule-less networks unfiltered"
+        );
+    }
+
+    /// G5 (prompt-06 task 2): the vsock opt-in rides the agent spec ONLY
+    /// when the VM was created with it, and carries ONLY the marker —
+    /// the CID and host socket path are node-authority runtime state,
+    /// never control-plane fields. A VM that did not opt in produces a
+    /// spec byte-shaped like a pre-G5 one (no vsock key at all).
+    #[tokio::test]
+    async fn build_agent_vm_spec_emits_the_vsock_opt_in_only_when_enabled() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_vm(&pool, "vm-vsock-on", "node-a").await;
+        seed_vm(&pool, "vm-vsock-off", "node-a").await;
+        sqlx::query("UPDATE vm_desired_state SET vsock_enabled = 1 WHERE vm_id = 'vm-vsock-on'")
+            .execute(&pool)
+            .await
+            .expect("opt the vm in");
+
+        let orchestrator = Orchestrator::new(
+            pool.clone(),
+            OperationRepository::new(pool.clone()),
+            String::new(),
+            "/kernel".to_string(),
+            String::new(),
+            NodeClientPool::new(),
+            crate::convergence_metrics::new_shared(),
+        );
+
+        let spec_json = orchestrator
+            .build_agent_vm_spec("vm-vsock-on")
+            .await
+            .expect("build agent vm spec (opted in)");
+        let spec: serde_json::Value = serde_json::from_str(&spec_json).expect("spec json");
+        assert_eq!(
+            spec["vsock"]["enabled"],
+            serde_json::json!(true),
+            "the opt-in must ride the spec: {spec}"
+        );
+        assert_eq!(
+            spec["vsock"].as_object().expect("vsock object").len(),
+            1,
+            "the spec carries ONLY the marker — no cid/socket (node state): {spec}"
+        );
+
+        let spec_json = orchestrator
+            .build_agent_vm_spec("vm-vsock-off")
+            .await
+            .expect("build agent vm spec (opted out)");
+        let spec: serde_json::Value = serde_json::from_str(&spec_json).expect("spec json");
+        assert!(
+            spec.get("vsock").is_none(),
+            "no opt-in, no key — the spec stays byte-shaped like a pre-G5 one: {spec}"
         );
     }
 

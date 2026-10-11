@@ -86,6 +86,7 @@ impl Fixture {
                 image_ref: None,
                 boot_mode: None,
                 desired_power_state: None,
+                vsock_enabled: None,
                 requested_unix_ms: 0,
             })
             .await

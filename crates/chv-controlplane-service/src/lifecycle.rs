@@ -725,6 +725,7 @@ impl LifecycleService for LifecycleServiceImplementation {
                     image_ref: spec.image_ref,
                     boot_mode: spec.boot_mode,
                     desired_power_state: Some("Created".into()),
+                    vsock_enabled: None,
                     requested_unix_ms: Self::now_ms(),
                 })
                 .await

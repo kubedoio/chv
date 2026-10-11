@@ -497,6 +497,19 @@ pub async fn create_vm(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
+    // G5 vsock device opt-in (prompt-06 task 2): strictly opt-in —
+    // absent means false, exactly the pre-G5 behavior (no device, no
+    // silent attach). The BFF carries the marker only; the node
+    // authority allocates the CID and host socket path at create.
+    // Strictly typed: a truthy string or number is a bad request, not a
+    // coercion.
+    let vsock_enabled = match payload.get("vsock_enabled") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| BffError::BadRequest("vsock_enabled must be a boolean".into()))?,
+    };
+
     // #379 PR 2 (BFF payload field): the boot volume's optional storage
     // class, validated against the DP3 stord `backend_type` vocabulary at
     // accept time — the one shared list
@@ -601,8 +614,8 @@ pub async fn create_vm(
     // Insert VM desired state
     sqlx::query(
         r#"
-        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, desired_power_state, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, cloud_init_userdata, requested_at, updated_at)
-        VALUES (?, 1, 'Pending', 'Running', ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, desired_power_state, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, cloud_init_userdata, vsock_enabled, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', 'Running', ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
@@ -612,6 +625,7 @@ pub async fn create_vm(
     .bind(memory_bytes)
     .bind(&image_ref)
     .bind(&cloud_init_userdata)
+    .bind(vsock_enabled)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
