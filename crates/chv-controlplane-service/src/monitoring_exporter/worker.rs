@@ -35,6 +35,12 @@ use crate::notification_dispatcher::backoff_delay;
 /// Push body limit per target per pass: the store's own
 /// `MAX_POINTS_PER_SERIES`.
 const MAX_POINTS_PER_SERIES: usize = 1000;
+/// Metric ids per `query_history` call: the store's own
+/// `MAX_METRIC_IDS_PER_QUERY`. The config allows up to 64 metric ids
+/// — the worker batches reads in chunks of this size and merges the
+/// series, so a large allowlist exports instead of being rejected by
+/// the store's query cap (pinned by test).
+const MAX_METRIC_IDS_PER_CALL: usize = chv_monitoring_store::query::MAX_METRIC_IDS_PER_QUERY;
 /// How many targets per kind one pass will walk (the store's
 /// `list_targets` LIMIT). 500-VM campaigns plus nodes fit; beyond
 /// this, targets are processed in later passes (list_targets is
@@ -351,36 +357,48 @@ impl MonitoringExporter {
                     continue;
                 }
 
-                let series = match self
-                    .store
-                    .query_history(
-                        kind,
-                        &target_id,
-                        &self.metric_ids,
-                        self.sources.as_deref(),
-                        *cursor,
-                        now,
-                        MAX_POINTS_PER_SERIES,
-                        Resolution::Auto,
-                    )
-                    .await
-                {
-                    Ok(series) => series,
-                    Err(error) => {
-                        // One target's query rejection never fails the
-                        // pass (the store's own caps are the
-                        // authority) and never advances the cursor:
-                        // the window is retried next pass, bounded by
-                        // the backfill clamp.
-                        tracing::warn!(
-                            target_kind = kind.as_str(),
-                            target_id = %target_id,
-                            error = ?error,
-                            "monitoring export query rejected"
-                        );
-                        continue;
+                // Bounded reads: the store caps metric ids per call
+                // (the config allows up to 64), so the allowlist is
+                // queried in chunks and the series merged — one
+                // logical window per target.
+                let mut series = Vec::new();
+                let mut query_failed = false;
+                for chunk in self.metric_ids.chunks(MAX_METRIC_IDS_PER_CALL) {
+                    match self
+                        .store
+                        .query_history(
+                            kind,
+                            &target_id,
+                            chunk,
+                            self.sources.as_deref(),
+                            *cursor,
+                            now,
+                            MAX_POINTS_PER_SERIES,
+                            Resolution::Auto,
+                        )
+                        .await
+                    {
+                        Ok(mut chunk_series) => series.append(&mut chunk_series),
+                        Err(error) => {
+                            // One target's query rejection never fails
+                            // the pass (the store's own caps are the
+                            // authority) and never advances the
+                            // cursor: the window is retried next pass,
+                            // bounded by the backfill clamp.
+                            tracing::warn!(
+                                target_kind = kind.as_str(),
+                                target_id = %target_id,
+                                error = ?error,
+                                "monitoring export query rejected"
+                            );
+                            query_failed = true;
+                            break;
+                        }
                     }
-                };
+                }
+                if query_failed {
+                    continue;
+                }
 
                 let export_series: Vec<ExportSeries> = series
                     .iter()

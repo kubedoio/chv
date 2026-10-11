@@ -143,7 +143,9 @@ async fn fixture(config: &MonitoringExportConfig) -> Fixture {
 }
 
 impl Fixture {
-    /// Ingest one gauge sample for a target.
+    /// Ingest one sample for a target. Counters are seeded with
+    /// integer values: the store's counter bucketing reads
+    /// `value_integer` (a float counter carries no delta).
     async fn seed(
         &self,
         kind: TargetKind,
@@ -153,9 +155,20 @@ impl Fixture {
         observed_at_ms: u64,
         value: f64,
     ) {
+        let is_counter = chv_monitoring_core::registry::lookup(metric_id)
+            .map(|d| d.kind == chv_monitoring_core::model::MetricKind::Counter)
+            .unwrap_or(false);
+        let value = if is_counter {
+            SampleValue::Integer(value as u64)
+        } else {
+            SampleValue::Float(value)
+        };
         let sample = SampleBuilder::new(kind, target_id, metric_id, source, observed_at_ms)
             .unwrap()
-            .value(SampleValue::Float(value))
+            .value(value)
+            // Counters require the epoch pair; gauges carry it
+            // harmlessly.
+            .epoch("boot-1", "identity-1")
             .build()
             .unwrap();
         let sequence = self.next_sequence.get();
@@ -390,6 +403,94 @@ async fn backlog_beyond_max_backfill_is_clamped() {
     let ts = pushed[0].4 as u64;
     assert!(ts <= now - 10_000 && ts > now - 10_000 - 60, "ts={ts}");
     assert_eq!(pushed[0].3, 0.9);
+}
+
+#[tokio::test]
+async fn counter_series_export_as_same_epoch_deltas() {
+    // Counters never export raw reads: the store emits same-epoch
+    // deltas (the query/alerts contract), so the exported series is
+    // the delta, and an isolated single counter point carries no
+    // value at all (nothing to subtract).
+    let mut f = fixture(&export_config(&["vm.net.rx_bytes_total"])).await;
+    let t0 = BASE_MS;
+    f.seed(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.net.rx_bytes_total",
+        Source::Vmm,
+        t0,
+        1024.0,
+    )
+    .await;
+    f.seed(
+        TargetKind::Vm,
+        "vm-1",
+        "vm.net.rx_bytes_total",
+        Source::Vmm,
+        t0 + 15_000,
+        2048.0,
+    )
+    .await;
+    let outcome = f.exporter.run_pass(t0 + 60_000).await;
+    assert_eq!(outcome, PassOutcome::Complete);
+    let pushed = f.transport.pushed();
+    assert_eq!(pushed.len(), 1, "exactly the delta point: {pushed:?}");
+    assert_eq!(pushed[0].0, "chv_vm_net_rx_bytes_total");
+    assert_eq!(pushed[0].3, 1024.0, "2048 - 1024, not the raw read");
+}
+
+#[tokio::test]
+async fn allowlists_beyond_the_store_query_cap_are_batched() {
+    // The config allows up to 64 metric ids but the store caps
+    // query_history at 8 metric ids per call — the worker must batch
+    // the reads and merge the series, or a 9-metric allowlist would
+    // be rejected by the store and export nothing, forever, silently
+    // retrying. Found by writing the g5b scale rig; pinned here.
+    let nine = [
+        "node.cpu.capacity_ratio",
+        "node.cpu.load1",
+        "node.cpu.load5",
+        "node.cpu.load15",
+        "node.memory.total_bytes",
+        "node.memory.available_bytes",
+        "node.swap.used_bytes",
+        "vm.cpu.cores_used",
+        "vm.memory.host_accounted_bytes",
+    ];
+    let mut f = fixture(&export_config(&nine)).await;
+    let t0 = BASE_MS;
+    // Seven node gauges on the node target, two vm gauges on the vm
+    // target (the registry binds metric families to target kinds).
+    for (i, metric) in nine.iter().take(7).enumerate() {
+        f.seed(
+            TargetKind::Node,
+            "node-1",
+            metric,
+            Source::NodeOs,
+            t0,
+            i as f64,
+        )
+        .await;
+    }
+    for (i, metric) in nine.iter().skip(7).enumerate() {
+        f.seed(TargetKind::Vm, "vm-1", metric, Source::Vmm, t0, i as f64)
+            .await;
+    }
+    let outcome = f.exporter.run_pass(t0 + 30_000).await;
+    assert_eq!(outcome, PassOutcome::Complete);
+    assert_eq!(
+        f.exporter.exported_samples(),
+        9,
+        "every metric of a >8-id allowlist must cross via chunked reads"
+    );
+    let pushed = f.transport.pushed();
+    assert_eq!(pushed.len(), 9);
+    assert!(pushed
+        .iter()
+        .any(|p| p.0 == "chv_node_swap_used_bytes" && p.3 == 6.0));
+    assert!(pushed
+        .iter()
+        .any(|p| p.0 == "chv_vm_memory_host_accounted_bytes" && p.3 == 1.0));
 }
 
 #[tokio::test]
