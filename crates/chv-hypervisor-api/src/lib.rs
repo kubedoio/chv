@@ -81,6 +81,24 @@ pub struct VmConfig {
     pub api_socket_path: PathBuf,
     pub cloud_init_userdata: Option<String>,
     pub hypervisor_overrides: Option<chv_common::hypervisor::HypervisorOverrides>,
+    /// Optional virtio-vsock device (G5 monitoring transport). Strictly
+    /// opt-in: `None` — the default — attaches no device and changes
+    /// nothing about the VM. The CID is node-scoped (unique among the
+    /// running VMs of one host) and assigned by the node authority, not
+    /// the control plane; the socket path is the host-side Unix socket
+    /// the VMM proxies guest connections to, owned by the node agent —
+    /// never a VMM API or control socket.
+    pub vsock: Option<VmVsockConfig>,
+}
+
+/// The virtio-vsock device contract (cloud-hypervisor `VsockConfig`:
+/// `cid` must be `>= 3`; `socket` is the host-side proxy path).
+#[derive(Debug, Clone)]
+pub struct VmVsockConfig {
+    /// Guest CID. `>= 3` (0–2 are reserved: null, hypervisor, host).
+    pub cid: u32,
+    /// Host-side Unix socket path (under the VM's runtime dir).
+    pub socket_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]

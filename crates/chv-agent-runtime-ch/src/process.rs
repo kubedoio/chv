@@ -1528,6 +1528,49 @@ impl ProcessCloudHypervisorAdapter {
                 });
             }
         }
+        if let Some(ref vsock) = config.vsock {
+            // The pinned cloud-hypervisor v53.0 contract: guest CIDs
+            // start at 3 (0–2 reserved); the socket must live in an
+            // existing parent directory (the VM runtime dir the node
+            // agent prepared). The path itself is created by the relay
+            // listener, not the VMM, so only the parent is checked.
+            if vsock.cid < 3 {
+                return Err(ChvError::InvalidArgument {
+                    field: "vsock.cid".to_string(),
+                    reason: format!(
+                        "vsock cid must be >= 3 (0-2 are reserved), got {}",
+                        vsock.cid
+                    ),
+                });
+            }
+            if vsock.socket_path.as_os_str().is_empty() {
+                return Err(ChvError::InvalidArgument {
+                    field: "vsock.socket_path".to_string(),
+                    reason: "vsock socket_path is empty".to_string(),
+                });
+            }
+            match vsock.socket_path.parent() {
+                None => {
+                    return Err(ChvError::InvalidArgument {
+                        field: "vsock.socket_path".to_string(),
+                        reason: format!(
+                            "vsock socket_path has no parent directory: {}",
+                            vsock.socket_path.display()
+                        ),
+                    });
+                }
+                Some(parent) if !parent.is_dir() => {
+                    return Err(ChvError::InvalidArgument {
+                        field: "vsock.socket_path".to_string(),
+                        reason: format!(
+                            "vsock socket_path parent directory does not exist: {}",
+                            parent.display()
+                        ),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
         Ok(())
     }
 }
@@ -1572,6 +1615,165 @@ fn build_cpus_config(config: &VmConfig) -> serde_json::Value {
         });
     }
     cpus
+}
+
+/// Build the `vm.create` REST payload (the exact JSON persisted as
+/// `vm-config.json` and replayed on VMM respawn). Pure so the device
+/// surface is unit-testable end to end.
+fn build_vm_create_payload(
+    config: &VmConfig,
+    seed_iso_path: Option<&std::path::Path>,
+    vm_runtime_dir: &std::path::Path,
+) -> serde_json::Value {
+    let mut disks_json = Vec::new();
+    for disk in &config.disks {
+        let mut disk_obj = serde_json::Map::new();
+        disk_obj.insert(
+            "path".into(),
+            serde_json::Value::from(disk.path.to_string_lossy().to_string()),
+        );
+        if disk.read_only {
+            disk_obj.insert("readonly".into(), serde_json::Value::from(true));
+        }
+        let image_type = if disk.path.extension().map(|e| e == "qcow2").unwrap_or(false) {
+            "Qcow2"
+        } else {
+            "Raw"
+        };
+        disk_obj.insert("image_type".into(), serde_json::Value::from(image_type));
+        disks_json.push(serde_json::Value::Object(disk_obj));
+    }
+    if let Some(seed_path) = seed_iso_path {
+        let mut disk_obj = serde_json::Map::new();
+        disk_obj.insert(
+            "path".into(),
+            serde_json::Value::from(seed_path.to_string_lossy().to_string()),
+        );
+        disk_obj.insert("readonly".into(), serde_json::Value::from(true));
+        disk_obj.insert("image_type".into(), serde_json::Value::from("Raw"));
+        disks_json.push(serde_json::Value::Object(disk_obj));
+    }
+
+    let mut net_json = Vec::new();
+    for nic in &config.nics {
+        if nic.tap_name.is_empty() {
+            warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
+            continue;
+        }
+        let mut net_obj = serde_json::Map::new();
+        net_obj.insert(
+            "mac".into(),
+            serde_json::Value::from(nic.mac_address.clone()),
+        );
+        net_obj.insert("tap".into(), serde_json::Value::from(nic.tap_name.clone()));
+        net_json.push(serde_json::Value::Object(net_obj));
+    }
+
+    let mut payload = serde_json::Map::new();
+    if let Some(ref fw) = config.firmware_path {
+        payload.insert(
+            "firmware".into(),
+            serde_json::Value::from(fw.to_string_lossy().to_string()),
+        );
+    } else {
+        payload.insert(
+            "kernel".into(),
+            serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()),
+        );
+    }
+
+    let hv = config.hypervisor_overrides.as_ref();
+
+    let cpus = build_cpus_config(config);
+
+    let mut memory = serde_json::json!({ "size": config.memory_bytes });
+    if let Some(v) = hv.and_then(|h| h.memory_mergeable) {
+        memory["mergeable"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.memory_hugepages) {
+        memory["hugepages"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.memory_shared) {
+        memory["shared"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.memory_prefault) {
+        memory["prefault"] = serde_json::json!(v);
+    }
+
+    // Serial transport: cloud-hypervisor v43 gates Pty-mode output
+    // until input arrives on the pty (vmm/src/serial_manager.rs starts
+    // the serial output gate closed and only an epoll input event on
+    // the pty master opens it), so a passive consumer — exactly what
+    // the agent's console capture is — receives nothing and console.log
+    // stays empty forever. Socket mode streams output to a connected
+    // unix-stream client with no gate, so it is the default transport
+    // (DEFAULT_SERIAL_MODE, shared with the control plane's global
+    // hypervisor settings); an explicit serial_mode tuning is still
+    // honored (with the Pty gate semantics that mode implies).
+    let serial_mode = hv
+        .and_then(|h| h.serial_mode.as_deref())
+        .unwrap_or(chv_common::hypervisor::DEFAULT_SERIAL_MODE);
+    let console_mode = hv.and_then(|h| h.console_mode.as_deref()).unwrap_or("Off");
+    let serial_socket_path = vm_runtime_dir.join("serial.sock");
+    let serial_json =
+        ProcessCloudHypervisorAdapter::serial_console_config(serial_mode, &serial_socket_path);
+
+    let mut vm_config_json = serde_json::json!({
+        "cpus": cpus,
+        "memory": memory,
+        "payload": payload,
+        "disks": disks_json,
+        "net": net_json,
+        "serial": serial_json,
+        "console": { "mode": console_mode },
+    });
+
+    if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv) {
+        vm_config_json["platform"] = serde_json::json!({ "kvm_hyperv": true });
+    }
+    if let Some(v) = hv.and_then(|h| h.iommu) {
+        vm_config_json["iommu"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.watchdog) {
+        vm_config_json["watchdog"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.pvpanic) {
+        vm_config_json["pvpanic"] = serde_json::json!(v);
+    }
+    if let Some(v) = hv.and_then(|h| h.landlock_enable) {
+        vm_config_json["landlock"] = serde_json::json!(v);
+    }
+    if let Some(ref src) = hv.and_then(|h| h.rng_src.as_ref()) {
+        vm_config_json["rng"] = serde_json::json!({ "src": src });
+    }
+    if let Some(ref tpm_type) = hv.and_then(|h| h.tpm_type.as_ref()) {
+        let tpm_socket = hv
+            .and_then(|h| h.tpm_socket_path.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                vm_runtime_dir
+                    .join("tpm.sock")
+                    .to_string_lossy()
+                    .to_string()
+            });
+        vm_config_json["tpm"] = serde_json::json!({
+            "type": tpm_type,
+            "socket": tpm_socket,
+        });
+    }
+    // The optional vsock device (G5 monitoring transport). Opt-in
+    // only: absent from the payload entirely when not configured —
+    // the VMM attaches no device and boot mode is untouched. The
+    // device rides `vm.create` (persisted into vm-config.json, so
+    // VMM respawn/adoption keeps it); hot-add/hot-remove are NOT
+    // supported in v1.
+    if let Some(ref vsock) = config.vsock {
+        vm_config_json["vsock"] = serde_json::json!({
+            "cid": vsock.cid,
+            "socket": vsock.socket_path.to_string_lossy(),
+        });
+    }
+    vm_config_json
 }
 
 /// The cloud-init NoCloud `meta-data` document. Both values are quoted so
@@ -3292,6 +3494,16 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         if let Some(vm_dir) = config.api_socket_path.parent() {
             let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
         }
+        // The vsock device socket has the same stale-file hazard: the
+        // VMM's vsock muxer binds it at device construction and unlinks
+        // it only on a clean shutdown (device Drop) — a SIGKILLed VMM
+        // leaves the file and the next `vm.create` bind would fail
+        // (cloud-hypervisor v53.0 does not pre-unlink). Best-effort for
+        // the same reason as serial.sock: the file can only exist when
+        // no live VMM owns it (ensure_no_live_vmm ran above).
+        if let Some(vsock) = &config.vsock {
+            let _ = tokio::fs::remove_file(&vsock.socket_path).await;
+        }
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
@@ -3348,143 +3560,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         // Build VM config JSON and create VM via REST API (supports multiple disks)
-        let mut disks_json = Vec::new();
-        for disk in &config.disks {
-            let mut disk_obj = serde_json::Map::new();
-            disk_obj.insert(
-                "path".into(),
-                serde_json::Value::from(disk.path.to_string_lossy().to_string()),
-            );
-            if disk.read_only {
-                disk_obj.insert("readonly".into(), serde_json::Value::from(true));
-            }
-            let image_type = if disk.path.extension().map(|e| e == "qcow2").unwrap_or(false) {
-                "Qcow2"
-            } else {
-                "Raw"
-            };
-            disk_obj.insert("image_type".into(), serde_json::Value::from(image_type));
-            disks_json.push(serde_json::Value::Object(disk_obj));
-        }
-        if let Some(ref seed_path) = seed_iso_path {
-            let mut disk_obj = serde_json::Map::new();
-            disk_obj.insert(
-                "path".into(),
-                serde_json::Value::from(seed_path.to_string_lossy().to_string()),
-            );
-            disk_obj.insert("readonly".into(), serde_json::Value::from(true));
-            disk_obj.insert("image_type".into(), serde_json::Value::from("Raw"));
-            disks_json.push(serde_json::Value::Object(disk_obj));
-        }
+        let vm_config_json =
+            build_vm_create_payload(config, seed_iso_path.as_deref(), vm_runtime_dir);
+        let body = vm_config_json.to_string();
 
-        let mut net_json = Vec::new();
-        for nic in &config.nics {
-            if nic.tap_name.is_empty() {
-                warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
-                continue;
-            }
-            let mut net_obj = serde_json::Map::new();
-            net_obj.insert(
-                "mac".into(),
-                serde_json::Value::from(nic.mac_address.clone()),
-            );
-            net_obj.insert("tap".into(), serde_json::Value::from(nic.tap_name.clone()));
-            net_json.push(serde_json::Value::Object(net_obj));
-        }
-
-        let mut payload = serde_json::Map::new();
-        if let Some(ref fw) = config.firmware_path {
-            payload.insert(
-                "firmware".into(),
-                serde_json::Value::from(fw.to_string_lossy().to_string()),
-            );
-        } else {
-            payload.insert(
-                "kernel".into(),
-                serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()),
-            );
-        }
-
+        // The serial transport decision is shared between the payload
+        // (above) and the console I/O acquisition (below) — recompute
+        // it here from the same sources.
         let hv = config.hypervisor_overrides.as_ref();
-
-        let cpus = build_cpus_config(config);
-
-        let mut memory = serde_json::json!({ "size": config.memory_bytes });
-        if let Some(v) = hv.and_then(|h| h.memory_mergeable) {
-            memory["mergeable"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.memory_hugepages) {
-            memory["hugepages"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.memory_shared) {
-            memory["shared"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.memory_prefault) {
-            memory["prefault"] = serde_json::json!(v);
-        }
-
-        // Serial transport: cloud-hypervisor v43 gates Pty-mode output
-        // until input arrives on the pty (vmm/src/serial_manager.rs starts
-        // the serial output gate closed and only an epoll input event on
-        // the pty master opens it), so a passive consumer — exactly what
-        // the agent's console capture is — receives nothing and console.log
-        // stays empty forever. Socket mode streams output to a connected
-        // unix-stream client with no gate, so it is the default transport
-        // (DEFAULT_SERIAL_MODE, shared with the control plane's global
-        // hypervisor settings); an explicit serial_mode tuning is still
-        // honored (with the Pty gate semantics that mode implies).
         let serial_mode = hv
             .and_then(|h| h.serial_mode.as_deref())
             .unwrap_or(chv_common::hypervisor::DEFAULT_SERIAL_MODE);
-        let console_mode = hv.and_then(|h| h.console_mode.as_deref()).unwrap_or("Off");
         let serial_socket_path = vm_runtime_dir.join("serial.sock");
-        let serial_json = Self::serial_console_config(serial_mode, &serial_socket_path);
-
-        let mut vm_config_json = serde_json::json!({
-            "cpus": cpus,
-            "memory": memory,
-            "payload": payload,
-            "disks": disks_json,
-            "net": net_json,
-            "serial": serial_json,
-            "console": { "mode": console_mode },
-        });
-
-        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv) {
-            vm_config_json["platform"] = serde_json::json!({ "kvm_hyperv": true });
-        }
-        if let Some(v) = hv.and_then(|h| h.iommu) {
-            vm_config_json["iommu"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.watchdog) {
-            vm_config_json["watchdog"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.pvpanic) {
-            vm_config_json["pvpanic"] = serde_json::json!(v);
-        }
-        if let Some(v) = hv.and_then(|h| h.landlock_enable) {
-            vm_config_json["landlock"] = serde_json::json!(v);
-        }
-        if let Some(ref src) = hv.and_then(|h| h.rng_src.as_ref()) {
-            vm_config_json["rng"] = serde_json::json!({ "src": src });
-        }
-        if let Some(ref tpm_type) = hv.and_then(|h| h.tpm_type.as_ref()) {
-            let tpm_socket = hv
-                .and_then(|h| h.tpm_socket_path.as_ref())
-                .cloned()
-                .unwrap_or_else(|| {
-                    vm_runtime_dir
-                        .join("tpm.sock")
-                        .to_string_lossy()
-                        .to_string()
-                });
-            vm_config_json["tpm"] = serde_json::json!({
-                "type": tpm_type,
-                "socket": tpm_socket,
-            });
-        }
-
-        let body = vm_config_json.to_string();
 
         info!(
             vm_id = %config.vm_id,
@@ -5467,6 +5554,7 @@ impl ProcessCloudHypervisorAdapter {
 #[cfg(test)]
 mod tests {
     use super::build_cpus_config;
+    use super::build_vm_create_payload;
     use super::cloud_init_meta_data;
     use super::parse_http_status;
     use super::ConsoleFanout;
@@ -5475,7 +5563,7 @@ mod tests {
     use super::SerialTransport;
     use super::VmProcess;
     use super::VmmChild;
-    use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig};
+    use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig, VmVsockConfig};
     use chv_common::hypervisor::HypervisorOverrides;
     use chv_errors::ChvError;
     use std::os::fd::{AsRawFd, OwnedFd};
@@ -9073,6 +9161,7 @@ mod tests {
             api_socket_path: live_api_socket.clone(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = adapter.ensure_no_live_vmm(&cfg).await.unwrap_err();
         match &err {
@@ -9115,6 +9204,7 @@ mod tests {
             api_socket_path: anon_api_socket.clone(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = adapter.ensure_no_live_vmm(&cfg_anon).await.unwrap_err();
         match &err {
@@ -9146,6 +9236,7 @@ mod tests {
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = adapter.validate_vm_config(&cfg).unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
@@ -9176,7 +9267,146 @@ mod tests {
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
+        adapter.validate_vm_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn vm_create_payload_carries_vsock_when_configured() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let cfg = VmConfig {
+            vm_id: "vm-vsock".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: PathBuf::from("/tmp/kernel"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-vsock/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+            vsock: Some(VmVsockConfig {
+                cid: 1077,
+                socket_path: dir.path().join("vms/vm-vsock/vsock.sock"),
+            }),
+        };
+        let payload =
+            build_vm_create_payload(&cfg, None, dir.path().join("vms/vm-vsock").as_path());
+        assert_eq!(payload["vsock"]["cid"], serde_json::json!(1077));
+        assert_eq!(
+            payload["vsock"]["socket"],
+            serde_json::json!(dir
+                .path()
+                .join("vms/vm-vsock/vsock.sock")
+                .to_string_lossy()
+                .to_string())
+        );
+        // Only the pinned v53.0 VsockConfig fields we own: no iommu or
+        // pci knobs are emitted (defaults apply).
+        assert_eq!(
+            payload["vsock"].as_object().unwrap().len(),
+            2,
+            "the vsock object carries exactly cid + socket"
+        );
+    }
+
+    #[test]
+    fn vm_create_payload_omits_vsock_when_not_configured() {
+        // No silent attach: without the opt-in the payload has no vsock
+        // key at all — the VMM attaches no device and boot mode is
+        // untouched.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let cfg = VmConfig {
+            vm_id: "vm-plain".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: PathBuf::from("/tmp/kernel"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-plain/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+            vsock: None,
+        };
+        let payload =
+            build_vm_create_payload(&cfg, None, dir.path().join("vms/vm-plain").as_path());
+        assert!(
+            payload.get("vsock").is_none(),
+            "vsock must be absent from the payload when not configured"
+        );
+    }
+
+    #[test]
+    fn validate_vm_config_enforces_vsock_rules() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let chv_bin = dir.path().join("cloud-hypervisor");
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&chv_bin, b"#!/bin/true").unwrap();
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(chv_bin);
+        let vm_dir = dir.path().join("vms/vm-1");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        let base = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: kernel.clone(),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: vm_dir.join("vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+            vsock: None,
+        };
+
+        // Reserved CID (0-2): rejected — our API layer is the only
+        // enforcement (cloud-hypervisor v53.0 does not validate cids).
+        let mut cfg = base.clone();
+        cfg.vsock = Some(VmVsockConfig {
+            cid: 2,
+            socket_path: vm_dir.join("vsock.sock"),
+        });
+        let err = adapter.validate_vm_config(&cfg).unwrap_err();
+        assert!(
+            matches!(&err, ChvError::InvalidArgument { field, .. } if field == "vsock.cid"),
+            "cid 2 must be rejected, got {err:?}"
+        );
+
+        // Empty socket path: rejected.
+        let mut cfg = base.clone();
+        cfg.vsock = Some(VmVsockConfig {
+            cid: 1077,
+            socket_path: PathBuf::new(),
+        });
+        let err = adapter.validate_vm_config(&cfg).unwrap_err();
+        assert!(
+            matches!(&err, ChvError::InvalidArgument { field, .. } if field == "vsock.socket_path"),
+            "empty socket path must be rejected, got {err:?}"
+        );
+
+        // Parent directory missing (the relay listener must already
+        // exist in a prepared runtime dir): rejected.
+        let mut cfg = base.clone();
+        cfg.vsock = Some(VmVsockConfig {
+            cid: 1077,
+            socket_path: dir.path().join("vms/vm-1/nested/missing/vsock.sock"),
+        });
+        let err = adapter.validate_vm_config(&cfg).unwrap_err();
+        assert!(
+            matches!(&err, ChvError::InvalidArgument { field, .. } if field == "vsock.socket_path"),
+            "missing parent dir must be rejected, got {err:?}"
+        );
+
+        // Valid device: passes.
+        let mut cfg = base;
+        cfg.vsock = Some(VmVsockConfig {
+            cid: 1077,
+            socket_path: vm_dir.join("vsock.sock"),
+        });
         adapter.validate_vm_config(&cfg).unwrap();
     }
 
@@ -9196,6 +9426,7 @@ mod tests {
                 cpu_nested: Some(true),
                 ..Default::default()
             }),
+            vsock: None,
         };
 
         let cpus = build_cpus_config(&cfg);

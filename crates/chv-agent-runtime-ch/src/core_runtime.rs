@@ -366,6 +366,7 @@ impl CloudHypervisorCoreRuntime {
             api_socket_path: vm_api_socket(&vm_dir),
             cloud_init_userdata: definition.cloud_init_userdata.clone(),
             hypervisor_overrides: definition.hypervisor_tuning.as_ref().map(tuning_to_legacy),
+            vsock: None,
         };
 
         if let Err(e) = self.adapter.create_vm(&config, Some(op_id)).await {

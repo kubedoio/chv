@@ -1001,6 +1001,7 @@ mod tests {
             api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         rt.create_vm("vm-1", "1", &config, Some("op-1"))
             .await

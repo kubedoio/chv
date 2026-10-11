@@ -1345,6 +1345,7 @@ async fn prepare_vm_resources(
         api_socket_path: vm_dir.join("vm.sock"),
         cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
         hypervisor_overrides: vm_spec.hypervisor_overrides.clone(),
+        vsock: None,
     })
 }
 
@@ -3503,6 +3504,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-orphan/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-orphan", "1", &config, None)
@@ -3542,6 +3544,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-drain-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-drain-1", "1", &config1, None)
@@ -3560,6 +3563,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-drain-2/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-drain-2", "1", &config2, None)
@@ -3655,6 +3659,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-already/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-already", "1", &config, None)
@@ -3720,6 +3725,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.stop_vm("vm-1", false, None).await.unwrap();
@@ -4203,6 +4209,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-flip/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-flip", "1", &config, None)
@@ -4252,6 +4259,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-1", "1", &config, None)
@@ -4353,6 +4361,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-bad/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-bad", "1", &config, None)
