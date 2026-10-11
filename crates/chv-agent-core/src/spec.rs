@@ -26,6 +26,25 @@ pub struct VmSpec {
     pub cloud_init_userdata: Option<String>,
     #[serde(default)]
     pub hypervisor_overrides: Option<HypervisorOverrides>,
+    /// G5 vsock monitoring-transport opt-in (prompt-06 task 2). Absent —
+    /// every pre-G5 spec — or `None` attaches no device; the field is
+    /// purely additive (serde-tolerant model, no `deny_unknown_fields`).
+    /// The spec carries the OPT-IN only: the CID and host socket path are
+    /// node-authority runtime state, deliberately NOT control-plane
+    /// fields (see ADR-026 and the vsock contract).
+    #[serde(default)]
+    pub vsock: Option<VsockSpec>,
+}
+
+/// The vsock device opt-in carried in a [`VmSpec`]. Mirrored by the Core
+/// authority as `cellhv_core_types::VsockDeviceSpec` (the
+/// `legacy_core_adapter` conversion is pinned by a parity test).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct VsockSpec {
+    /// Must be `true`: `vsock: None` is the opt-out form, and
+    /// `Some({ enabled: false })` is rejected by [`VmSpec::validate`]
+    /// as a confusing double negative.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -158,6 +177,16 @@ impl VmSpec {
                 });
             }
         }
+        if let Some(ref vsock) = self.vsock {
+            if !vsock.enabled {
+                return Err(ChvError::InvalidArgument {
+                    field: "vsock.enabled".to_string(),
+                    reason: "vsock.enabled cannot be false — omit vsock entirely to \
+                             opt out (the device is strictly opt-in)"
+                        .to_string(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -200,6 +229,55 @@ mod tests {
         assert_eq!(spec.nics.len(), 1);
         assert_eq!(spec.nics[0].mac_address, "aa:bb:cc:dd:ee:ff");
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn vm_spec_vsock_is_additive_and_parse_stable() {
+        // G5 back-compat pin: the vsock field is purely additive — a
+        // pre-G5 spec JSON (no vsock key) deserializes with vsock: None
+        // and its meaning is EXACTLY unchanged (no device, no silent
+        // attach); a spec carrying the field parses to the opt-in form.
+        let pre_g5 = r#"{
+            "name": "test-vm",
+            "cpus": 1,
+            "memory_bytes": 1073741824,
+            "kernel_path": "/var/lib/chv/vmlinux",
+            "disks": [],
+            "nics": []
+        }"#;
+        let parsed = VmSpec::from_json(pre_g5).unwrap();
+        assert_eq!(parsed.vsock, None);
+        assert!(parsed.validate().is_ok());
+
+        let with_vsock = r#"{
+            "name": "test-vm",
+            "cpus": 1,
+            "memory_bytes": 1073741824,
+            "kernel_path": "/var/lib/chv/vmlinux",
+            "disks": [],
+            "nics": [],
+            "vsock": { "enabled": true }
+        }"#;
+        let parsed = VmSpec::from_json(with_vsock).unwrap();
+        assert_eq!(parsed.vsock, Some(VsockSpec { enabled: true }));
+        assert!(parsed.validate().is_ok());
+
+        // The confusing double negative is rejected at the boundary.
+        let disabled = r#"{
+            "name": "test-vm",
+            "cpus": 1,
+            "memory_bytes": 1073741824,
+            "kernel_path": "/var/lib/chv/vmlinux",
+            "disks": [],
+            "nics": [],
+            "vsock": { "enabled": false }
+        }"#;
+        let parsed = VmSpec::from_json(disabled).unwrap();
+        let err = parsed.validate().unwrap_err();
+        assert!(
+            matches!(&err, ChvError::InvalidArgument { field, .. } if field == "vsock.enabled"),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -299,6 +377,7 @@ mod tests {
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -321,6 +400,7 @@ mod tests {
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -351,6 +431,7 @@ mod tests {
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         let err = spec.validate().unwrap_err();
         match err {

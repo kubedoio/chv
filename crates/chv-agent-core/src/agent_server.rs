@@ -1247,6 +1247,18 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }
 
         let vm_dir = vm_runtime_dir(&self.runtime_dir, &vm.vm_id);
+        // G5 vsock device (legacy direct-RPC path): same node-authority
+        // semantics as the reconciler and the Core runtime — strictly
+        // opt-in, durable monotonic node-scoped CID, device socket
+        // under the VM's runtime dir, fail closed.
+        let vsock = match vm_spec.vsock {
+            Some(_) => Some(
+                chv_hypervisor_api::prepare_vm_vsock_device(&self.runtime_dir, &vm_dir).map_err(
+                    |e| Status::internal(format!("vsock device preparation failed: {e}")),
+                )?,
+            ),
+            None => None,
+        };
         let config = VmConfig {
             vm_id: vm.vm_id.clone(),
             cpus: vm_spec.cpus,
@@ -1258,7 +1270,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             api_socket_path: vm_dir.join("vm.sock"),
             cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
             hypervisor_overrides: vm_spec.hypervisor_overrides.clone(),
-            vsock: None,
+            vsock,
         };
         self.vm_runtime
             .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))

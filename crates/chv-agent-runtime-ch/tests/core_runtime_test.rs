@@ -55,6 +55,7 @@ fn definition(vm_id: &str, nvols: usize, nnics: usize) -> VmDefinition {
         resource_version: ResourceVersion::new(1).expect("version"),
         cloud_init_userdata: None,
         hypervisor_tuning: None,
+        vsock: None,
     }
 }
 
@@ -453,6 +454,91 @@ async fn create_vm_carries_provisioning_hints_addressing_and_tuning() {
         .expect("tuning must reach the hypervisor config");
     assert_eq!(overrides.cpu_nested, Some(true));
     assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
+}
+
+#[tokio::test]
+async fn create_vm_threads_the_vsock_device_opt_in() {
+    let h = harness(None);
+
+    // Opt-in: the device is prepared with a node-scoped, durable,
+    // monotonic CID and the VM runtime-dir socket path.
+    let vm_id = "vm-vsock";
+    let mut def = definition(vm_id, 1, 1);
+    def.vsock = Some(cellhv_core_types::VsockDeviceSpec { enabled: true });
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-vsock",
+            envelope(MutationCommand::CreateVm { definition: def }),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    {
+        let vms = h.adapter.vms.lock().expect("vms lock");
+        let config = vms.get(vm_id).expect("vm must be present");
+        let vsock = config.vsock.as_ref().expect("device must be attached");
+        assert_eq!(vsock.cid, 1000, "fresh node: first CID is the floor");
+        assert_eq!(
+            vsock.socket_path,
+            vm_dir_path(&h, vm_id).join("vsock.sock"),
+            "device socket lives in the VM runtime dir"
+        );
+    }
+    // The cursor is durable node state: it records the last allocation.
+    assert_eq!(
+        std::fs::read_to_string(h.runtime_dir.join("vsock-cid-cursor"))
+            .expect("cursor file")
+            .trim(),
+        "1000"
+    );
+
+    // A second opted-in VM gets a distinct, monotonic CID — node-scoped
+    // uniqueness by construction.
+    let vm_id2 = "vm-vsock-2";
+    let mut def2 = definition(vm_id2, 1, 1);
+    def2.vsock = Some(cellhv_core_types::VsockDeviceSpec { enabled: true });
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id2,
+            "op-create-vsock-2",
+            envelope(MutationCommand::CreateVm { definition: def2 }),
+        ))
+        .await;
+    assert!(result.is_ok(), "second create must succeed: {result:?}");
+    {
+        let vms = h.adapter.vms.lock().expect("vms lock");
+        let config = vms.get(vm_id2).expect("vm2 must be present");
+        assert_eq!(config.vsock.as_ref().expect("device 2").cid, 1001);
+    }
+
+    // No opt-in, no device — the default is and stays inert (no silent
+    // attach, boot mode untouched).
+    let vm_id3 = "vm-plain";
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id3,
+            "op-create-plain",
+            envelope(MutationCommand::CreateVm {
+                definition: definition(vm_id3, 1, 1),
+            }),
+        ))
+        .await;
+    assert!(result.is_ok(), "plain create must succeed: {result:?}");
+    {
+        let vms = h.adapter.vms.lock().expect("vms lock");
+        let config = vms.get(vm_id3).expect("vm3 must be present");
+        assert!(
+            config.vsock.is_none(),
+            "no device without the opt-in: {:?}",
+            config.vsock
+        );
+    }
 }
 
 #[tokio::test]

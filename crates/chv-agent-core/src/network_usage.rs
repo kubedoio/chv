@@ -139,6 +139,7 @@ mod tests {
             resource_version: cellhv_core_types::ResourceVersion::new(1).unwrap(),
             cloud_init_userdata: None,
             hypervisor_tuning: None,
+            vsock: None,
         }
     }
 

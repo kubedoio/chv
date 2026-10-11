@@ -1334,6 +1334,20 @@ async fn prepare_vm_resources(
         cache_guard.observe_vm_attachment(vm_id, &volume_ids, &nic_attachments);
     }
 
+    // G5 vsock device (legacy path): same node-authority semantics as
+    // the Core runtime — strictly opt-in, durable monotonic node-scoped
+    // CID, device socket under the VM's runtime dir, fail closed.
+    let vsock = match vm_spec.vsock {
+        Some(_) => Some(
+            chv_hypervisor_api::prepare_vm_vsock_device(runtime_dir, &vm_dir).map_err(|e| {
+                ChvError::Internal {
+                    reason: format!("vsock device preparation failed: {e}"),
+                }
+            })?,
+        ),
+        None => None,
+    };
+
     Ok(VmConfig {
         vm_id: vm_id.to_string(),
         cpus: vm_spec.cpus,
@@ -1345,7 +1359,7 @@ async fn prepare_vm_resources(
         api_socket_path: vm_dir.join("vm.sock"),
         cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
         hypervisor_overrides: vm_spec.hypervisor_overrides.clone(),
-        vsock: None,
+        vsock,
     })
 }
 

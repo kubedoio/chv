@@ -533,6 +533,7 @@ mod tests {
             resource_version: version(1),
             cloud_init_userdata: None,
             hypervisor_tuning: None,
+            vsock: None,
         }
     }
 

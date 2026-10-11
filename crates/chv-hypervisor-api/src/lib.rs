@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::os::fd::OwnedFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod resources;
 
@@ -99,6 +99,134 @@ pub struct VmVsockConfig {
     pub cid: u32,
     /// Host-side Unix socket path (under the VM's runtime dir).
     pub socket_path: PathBuf,
+}
+
+/// Node-side vsock device preparation shared by every authority path
+/// (the Core runtime, the legacy reconciler, and the legacy direct RPC):
+/// allocate a durable node-scoped CID from the node's cursor and derive
+/// the device socket path under the VM's runtime dir. The caller
+/// supplies the node runtime dir (cursor home, e.g.
+/// `/var/lib/chv/agent`) and the VM's runtime dir (device socket home).
+pub fn prepare_vm_vsock_device(
+    node_runtime_dir: &Path,
+    vm_dir: &Path,
+) -> std::io::Result<VmVsockConfig> {
+    let cid = allocate_vsock_cid(&node_runtime_dir.join("vsock-cid-cursor"))?;
+    Ok(VmVsockConfig {
+        cid,
+        socket_path: vm_dir.join("vsock.sock"),
+    })
+}
+
+/// The fixed guest→host port of the monitoring transport over vsock
+/// (the guest connects to CID 2 / `VMADDR_CID_HOST` on this port).
+///
+/// This is a cross-component contract constant: the pinned
+/// cloud-hypervisor v53.0 vsock muxer maps a guest connection to host
+/// port `P` onto the Unix socket path `"<device_socket>_<P>"`, so the
+/// node-side relay listener filename and the guest's dial target must
+/// agree exactly. It is deliberately NOT configurable in v1 — a
+/// guest-configured port the relay does not mirror would silently
+/// RST every connection. The value is mirrored as a constant in
+/// `cmd/chv-monitor-agent` (the guest crate cannot depend on this
+/// one); the g5 rig asserts both sides agree.
+pub const VSOCK_MONITOR_PORT: u32 = 1024;
+
+/// First CID the allocator hands out (above the reserved 0–2 and any
+/// well-known low CIDs, leaving headroom for manual/operator use).
+const VSOCK_CID_FLOOR: u32 = 1000;
+/// Last CID the allocator hands out; allocation fails loudly beyond it
+/// rather than wrapping into reuse.
+const VSOCK_CID_CEILING: u32 = 4_000_000_000;
+
+/// Durable, monotonic guest-CID allocation for one node (G5, prompt-06
+/// task 2: CID allocation, uniqueness, lifecycle and restart ownership
+/// must be explicit).
+///
+/// The pinned cloud-hypervisor v53.0 does NOT register guest CIDs with
+/// the host kernel and does not validate them — uniqueness is a CHV
+/// convention, not a kernel hazard (see ADR-026 and the vsock contract).
+/// The allocator still makes the convention explicit, durable and
+/// restart-stable:
+///
+/// - CIDs come from a persisted cursor file (durable node state, e.g.
+///   `/var/lib/chv/agent/vsock-cid-cursor`) and are strictly monotonic:
+///   no two `vm.create` calls on one node ever get the same CID, and
+///   CIDs are never recycled after a VM is deleted.
+/// - A VMM respawn keeps a VM's CID (it is persisted in the VM's
+///   `vm-config.json`); only a fresh create allocates.
+/// - A missing cursor file means a fresh node (allocation starts at the
+///   floor); a cursor that EXISTS but is malformed fails loudly —
+///   guessing could reuse a CID a running VM still carries in its
+///   `vm-config.json`. Recovery is explicit: restore the file to a
+///   value at or above every allocated CID.
+///
+/// The cursor is guarded by an exclusive `flock` so concurrent creates
+/// on one node cannot interleave the read-modify-write.
+pub fn allocate_vsock_cid(cursor_path: &Path) -> std::io::Result<u32> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if let Some(parent) = cursor_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cursor_path)?;
+    file.lock()?;
+    let outcome = (|| -> std::io::Result<u32> {
+        let mut buf = String::new();
+        let mut f = &file;
+        f.read_to_string(&mut buf)?;
+        // Decide from the content UNDER the lock (a pre-lock existence
+        // check races concurrent first allocations). Empty means no
+        // allocation has ever committed — either a fresh node, or a
+        // crash before the very first write — so starting at the floor
+        // is correct and re-use-free. Non-empty and unparseable means
+        // a torn write; guessing could reuse a CID a running VM still
+        // carries in its vm-config.json, so that fails loudly.
+        let last = if buf.trim().is_empty() {
+            VSOCK_CID_FLOOR - 1
+        } else {
+            match buf.trim().parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err(std::io::Error::other(format!(
+                        "vsock CID cursor at {} is malformed (content {:?}); refusing to \
+                         guess — restore it to a value at or above every allocated CID \
+                         (each VM's vm-config.json records its vsock cid)",
+                        cursor_path.display(),
+                        buf.trim()
+                    )));
+                }
+            }
+        };
+        let next = last
+            .checked_add(1)
+            .filter(|n| *n <= VSOCK_CID_CEILING)
+            .ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "vsock CID cursor at {} is exhausted (ceiling {}); the node cannot \
+                     allocate another vsock CID",
+                    cursor_path.display(),
+                    VSOCK_CID_CEILING
+                ))
+            })?;
+        // Commit order matters for crash safety: write the new value at
+        // offset 0, THEN truncate to its length. A crash between the two
+        // leaves a torn (unparseable) file, which the next allocation
+        // rejects loudly; a crash before the write leaves the previous
+        // value intact. The value is only returned after sync_all.
+        f.seek(SeekFrom::Start(0))?;
+        write!(f, "{next}")?;
+        f.set_len(next.to_string().len() as u64)?;
+        f.sync_all()?;
+        Ok(next)
+    })();
+    file.unlock()?;
+    outcome
 }
 
 #[derive(Debug, Clone)]
@@ -268,3 +396,74 @@ pub use resources::{
 // Relocated to chv-common (#356 N5) so nwd's derived-names teardown fallback
 // shares the definition; re-exported here so existing imports keep working.
 pub use chv_common::bridge_name_for_network;
+
+#[cfg(test)]
+mod vsock_tests {
+    use super::{allocate_vsock_cid, VSOCK_CID_FLOOR};
+
+    #[test]
+    fn vsock_cid_allocation_is_monotonic_and_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        // Fresh node: first allocation is the floor.
+        assert_eq!(allocate_vsock_cid(&cursor).unwrap(), VSOCK_CID_FLOOR);
+        // Strictly monotonic across calls, and persisted (new call, same file).
+        assert_eq!(allocate_vsock_cid(&cursor).unwrap(), VSOCK_CID_FLOOR + 1);
+        assert_eq!(allocate_vsock_cid(&cursor).unwrap(), VSOCK_CID_FLOOR + 2);
+        // The cursor file records the last allocated value.
+        assert_eq!(
+            std::fs::read_to_string(&cursor).unwrap().trim(),
+            (VSOCK_CID_FLOOR + 2).to_string()
+        );
+    }
+
+    #[test]
+    fn vsock_cid_allocation_starts_at_floor_for_existing_cursor_value() {
+        // A pre-seeded cursor (e.g. operator-restored after corruption)
+        // resumes above it — never below.
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        std::fs::write(&cursor, "5000").unwrap();
+        assert_eq!(allocate_vsock_cid(&cursor).unwrap(), 5001);
+    }
+
+    #[test]
+    fn vsock_cid_allocation_fails_loudly_on_malformed_cursor() {
+        // Guessing could reuse a CID a running VM still carries; the
+        // allocator must refuse, not reset.
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        std::fs::write(&cursor, "not-a-number").unwrap();
+        let err = allocate_vsock_cid(&cursor).unwrap_err();
+        assert!(err.to_string().contains("malformed"), "{err}");
+    }
+
+    #[test]
+    fn vsock_cid_allocation_fails_loudly_on_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        std::fs::write(&cursor, u32::MAX.to_string()).unwrap();
+        let err = allocate_vsock_cid(&cursor).unwrap_err();
+        assert!(err.to_string().contains("exhausted"), "{err}");
+    }
+
+    #[test]
+    fn vsock_cid_allocation_concurrent_calls_stay_monotonic() {
+        // The flock must serialize concurrent read-modify-write cycles:
+        // N parallel allocations yield N distinct, gap-free values.
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        let cursor = std::sync::Arc::new(cursor);
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let cursor = std::sync::Arc::clone(&cursor);
+            handles.push(std::thread::spawn(move || {
+                allocate_vsock_cid(&cursor).unwrap()
+            }));
+        }
+        let mut values: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        values.sort_unstable();
+        let expected: Vec<u32> = (VSOCK_CID_FLOOR..VSOCK_CID_FLOOR + 16).collect();
+        assert_eq!(values, expected);
+    }
+}

@@ -542,6 +542,21 @@ pub struct VmDefinition {
     /// boundary applies (pinned by a cross-boundary rule-parity test in
     /// chv-agent-core).
     pub hypervisor_tuning: Option<HypervisorTuning>,
+    /// G5 vsock monitoring-transport device opt-in, carried verbatim for
+    /// the runtime (the Core mirror of the legacy spec's `VsockSpec`).
+    /// The node authority owns the addressing (CID, socket path) at
+    /// create time — this definition carries only the opt-in. Absent ⇒
+    /// no device. Semantics are enforced by [`VmDefinition::validate`]
+    /// at every Core boundary, mirroring the legacy spec boundary's
+    /// check (pinned by the cross-boundary parity tests).
+    pub vsock: Option<VsockDeviceSpec>,
+}
+
+/// Core mirror of the vsock device opt-in (see [`VmDefinition::vsock`]).
+/// Present must be `enabled: true`; the opt-out form is `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsockDeviceSpec {
+    pub enabled: bool,
 }
 
 /// Core-owned mirror of the legacy hypervisor override surface. Every field
@@ -672,6 +687,8 @@ struct RawVmDefinition {
     cloud_init_userdata: Option<String>,
     #[serde(default)]
     hypervisor_tuning: Option<HypervisorTuning>,
+    #[serde(default)]
+    vsock: Option<VsockDeviceSpec>,
 }
 
 impl TryFrom<RawVmDefinition> for VmDefinition {
@@ -690,6 +707,7 @@ impl TryFrom<RawVmDefinition> for VmDefinition {
             resource_version: raw.resource_version,
             cloud_init_userdata: raw.cloud_init_userdata,
             hypervisor_tuning: raw.hypervisor_tuning,
+            vsock: raw.vsock,
         };
         value.validate()?;
         Ok(value)
@@ -724,6 +742,16 @@ impl VmDefinition {
         }
         if let Some(tuning) = &self.hypervisor_tuning {
             tuning.validate()?;
+        }
+        if let Some(vsock) = &self.vsock {
+            if !vsock.enabled {
+                return Err(ChvError::InvalidArgument {
+                    field: "vm.vsock.enabled".to_string(),
+                    reason: "vm.vsock.enabled cannot be false — omit vsock entirely to \
+                             opt out (the device is strictly opt-in)"
+                        .to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -1089,6 +1117,7 @@ mod tests {
             resource_version: ResourceVersion::new(1).unwrap(),
             cloud_init_userdata: None,
             hypervisor_tuning: None,
+            vsock: None,
         };
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: VmDefinition = serde_json::from_str(&encoded).unwrap();
@@ -1199,6 +1228,7 @@ mod tests {
                 rng_src: Some("/dev/hwrng".to_string()),
                 ..Default::default()
             }),
+            vsock: None,
         };
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: VmDefinition = serde_json::from_str(&encoded).unwrap();
@@ -1214,6 +1244,87 @@ mod tests {
             gateway: "10.200.0.1".to_string(),
         });
         assert!(empty_ip.validate().is_err());
+    }
+
+    #[test]
+    fn vm_definition_vsock_is_additive_and_validated() {
+        // G5 pin: the vsock opt-in is additive on the
+        // deny_unknown_fields + try_from surface — (i) a pre-G5
+        // definition JSON (no vsock key) deserializes with vsock: None,
+        // (ii) one carrying the field parses to the same value and
+        // survives a round trip, (iii) a None opt-in serializes WITHOUT
+        // the key (journals stay byte-shaped like pre-G5 ones), and
+        // (iv) the enabled:false double negative is rejected at the
+        // Core boundary (defense in depth: the legacy spec boundary
+        // rejects it first).
+        let pre = r#"{
+            "id": "vm-1",
+            "name": "test",
+            "boot": { "kernel": "kernel-ref" },
+            "compute": { "vcpus": 2, "memory_bytes": 1073741824 },
+            "storage": [],
+            "networks": [],
+            "requested_power_state": "stopped",
+            "observed_power_state": "unknown",
+            "resource_version": 1
+        }"#;
+        let decoded: VmDefinition = serde_json::from_str(pre).unwrap();
+        assert_eq!(decoded.vsock, None);
+        assert!(decoded.validate().is_ok());
+
+        let with = r#"{
+            "id": "vm-1",
+            "name": "test",
+            "boot": { "kernel": "kernel-ref" },
+            "compute": { "vcpus": 2, "memory_bytes": 1073741824 },
+            "storage": [],
+            "networks": [],
+            "requested_power_state": "stopped",
+            "observed_power_state": "unknown",
+            "resource_version": 1,
+            "vsock": { "enabled": true }
+        }"#;
+        let decoded: VmDefinition = serde_json::from_str(with).unwrap();
+        assert_eq!(decoded.vsock, Some(VsockDeviceSpec { enabled: true }));
+        assert!(decoded.validate().is_ok());
+        // Round trip keeps the opt-in; a None opt-in serializes as null —
+        // exactly the shape the sibling optional fields
+        // (cloud_init_userdata, hypervisor_tuning) already use, so
+        // re-serialized definitions stay consistent with pre-G5 journals.
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        let reparsed: VmDefinition = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, decoded);
+        let none_encoded = serde_json::to_string(&VmDefinition {
+            vsock: None,
+            ..decoded.clone()
+        })
+        .unwrap();
+        let none_reparsed: VmDefinition = serde_json::from_str(&none_encoded).unwrap();
+        assert_eq!(none_reparsed.vsock, None);
+
+        // The double negative is rejected at validation.
+        let mut disabled = decoded.clone();
+        disabled.vsock = Some(VsockDeviceSpec { enabled: false });
+        let err = disabled.validate().unwrap_err();
+        assert!(
+            matches!(&err, ChvError::InvalidArgument { field, .. } if field == "vm.vsock.enabled"),
+            "got {err:?}"
+        );
+        // And it cannot even enter through the serde boundary's
+        // validate-on-try_from path.
+        let disabled_json = r#"{
+            "id": "vm-1",
+            "name": "test",
+            "boot": { "kernel": "kernel-ref" },
+            "compute": { "vcpus": 2, "memory_bytes": 1073741824 },
+            "storage": [],
+            "networks": [],
+            "requested_power_state": "stopped",
+            "observed_power_state": "unknown",
+            "resource_version": 1,
+            "vsock": { "enabled": false }
+        }"#;
+        assert!(serde_json::from_str::<VmDefinition>(disabled_json).is_err());
     }
 
     #[test]
@@ -1343,6 +1454,7 @@ mod tests {
             resource_version: ResourceVersion::new(1).unwrap(),
             cloud_init_userdata: None,
             hypervisor_tuning: None,
+            vsock: None,
         };
         definition.hypervisor_tuning = Some(HypervisorTuning {
             serial_mode: Some("Hero".to_string()),

@@ -3753,6 +3753,7 @@ mod tests {
             resource_version: version(resource_version),
             cloud_init_userdata: None,
             hypervisor_tuning: None,
+            vsock: None,
         }
     }
     fn operation(id: &str, fingerprint: &str) -> Operation {
