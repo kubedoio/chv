@@ -94,9 +94,7 @@ impl Spool {
         let path = self.entry_path(self.next_counter);
         self.next_counter += 1;
         let bytes = serde_json::to_vec(&entry)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &path)?;
+        crate::fsutil::write_durable(&path, &bytes, 0o600)?;
         self.enforce_bound(0)?;
         Ok(())
     }
@@ -116,7 +114,22 @@ impl Spool {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e.into()),
             };
-            let entry: SpoolEntry = serde_json::from_slice(&bytes)?;
+            let entry: SpoolEntry = match serde_json::from_slice(&bytes) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    // An unparsable entry cannot be delivered, and
+                    // keeping it would wedge every later drain behind
+                    // a permanent parse error. Drop it — the data is
+                    // lost either way — and keep draining the rest.
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "spool: dropping an unparsable entry"
+                    );
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+            };
             match deliver(entry).await {
                 DrainResult::Delivered { renewal_due } => {
                     summary.delivered_any = true;
@@ -185,8 +198,9 @@ impl Spool {
 
     fn prune_age(&self) -> Result<(), SpoolError> {
         // Sweep torn-write leftovers first: a crashed push can leave
-        // a `.json.tmp` that no drain ever reads (sorted_paths only
-        // yields `.json`), so remove it explicitly.
+        // a `.tmp` (the durable-write staging name) that no drain
+        // ever reads (sorted_paths only yields `.json`), so remove it
+        // explicitly.
         for path in std::fs::read_dir(&self.dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())

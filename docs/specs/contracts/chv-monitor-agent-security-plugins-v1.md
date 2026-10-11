@@ -40,6 +40,8 @@ Client states use one wire vocabulary (below); the [ADR-026 identity state machi
 
 Stored private keys never appear in API responses after initial provisioning. Guest image clones must not retain active credentials; installers must detect copied machine identity or require an explicit reset.
 
+**Identity-file durability (decision):** the credential, the per-install state and spool entries are written tmp-file → fsync → rename → directory-fsync. A VM hard reset (power loss, host failure, or `vm.reboot`, which tears the machine down without an ACPI shutdown and so gives the guest no page-cache flush) must not be able to destroy or tear the enrolled identity — the one-time claim is already consumed, so a lost credential means monitoring loss until an explicit operator reset. A torn spool entry is dropped at drain time (warned, never wedging the replay).
+
 ## Privileges and packaging
 
 The default service has a dedicated OS user, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, controlled `ReadWritePaths`, reduced capabilities and network egress limited by deployment policy. Report unsupported privileged readings instead of running as root. Avoid reading other tenants' files, process environment, command lines, SSH keys, shell history, credentials, or application data. Package uninstall stops the service, removes software, and preserves data/credentials unless explicit purge is requested. Securely revoke manager credentials before or during purge when reachable.
