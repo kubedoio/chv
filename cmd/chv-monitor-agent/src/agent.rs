@@ -43,6 +43,8 @@ pub enum AgentError {
     Credential(#[from] crate::credential::CredentialError),
     #[error("manager CA: {0}")]
     ManagerCa(String),
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,6 +86,10 @@ pub struct Agent {
     client: Option<ManagerClient>,
     enroll_client: ManagerClient,
     manager_ca_pem: String,
+    /// G5: the vsock loopback forwarder, alive exactly as long as the
+    /// agent (`[transport] type = "vsock"`). `None` = plain TCP to the
+    /// management network.
+    transport: Option<crate::transport::VsockTransport>,
     /// Set when the manager answered 401 — suppresses ingestion until
     /// a fresh claim re-enrolls (or the manager clears the conflict).
     unauthorized: bool,
@@ -137,15 +143,42 @@ impl Agent {
             config.spool_max_age_seconds,
         )?;
         let credential = StoredCredential::load(&config.credential_path)?;
+        // G5: start the vsock forwarder FIRST when configured — every
+        // client built below redirects its dial onto it. Fail loudly:
+        // the operator asked for vsock, and silently falling back to
+        // the management network would be a wrong-network behavior.
+        // (The forwarder's own dial failures are per-connection and
+        // degrade to the client's normal retry/backoff.)
+        let transport = match config.transport.kind {
+            crate::config::TransportKind::Tcp => None,
+            crate::config::TransportKind::Vsock => {
+                Some(crate::transport::VsockTransport::spawn().map_err(|e| {
+                    AgentError::Transport(format!(
+                        "vsock transport failed to start (is the VM opted in with \
+                         vsock_enabled, and does the kernel provide AF_VSOCK?): {e}"
+                    ))
+                })?)
+            }
+        };
         let client = match &credential {
             Some(cred) => Some(
-                ManagerClient::new(&config.server_url, &manager_ca_pem, Some(cred))
-                    .map_err(|e| AgentError::ManagerCa(e.to_string()))?,
+                ManagerClient::new(
+                    &config.server_url,
+                    &manager_ca_pem,
+                    Some(cred),
+                    transport.as_ref(),
+                )
+                .map_err(|e| AgentError::ManagerCa(e.to_string()))?,
             ),
             None => None,
         };
-        let enroll_client = ManagerClient::new(&config.server_url, &manager_ca_pem, None)
-            .map_err(|e| AgentError::ManagerCa(e.to_string()))?;
+        let enroll_client = ManagerClient::new(
+            &config.server_url,
+            &manager_ca_pem,
+            None,
+            transport.as_ref(),
+        )
+        .map_err(|e| AgentError::ManagerCa(e.to_string()))?;
         // Collector opt-ins come from config (validated at load).
         let mut collectors = GuestCollectors::new();
         if config.collectors.filesystems {
@@ -177,6 +210,7 @@ impl Agent {
             client,
             enroll_client,
             manager_ca_pem,
+            transport,
             unauthorized: false,
         })
     }
@@ -313,6 +347,7 @@ impl Agent {
                         &self.config.server_url,
                         &self.manager_ca_pem,
                         Some(&credential),
+                        self.transport.as_ref(),
                     )
                     .expect("client rebuilt from a working config"),
                 );
@@ -359,8 +394,13 @@ impl Agent {
                 }
                 self.credential = Some(cred.clone());
                 self.client = Some(
-                    ManagerClient::new(&self.config.server_url, &self.manager_ca_pem, Some(&cred))
-                        .expect("client rebuilt from a working config"),
+                    ManagerClient::new(
+                        &self.config.server_url,
+                        &self.manager_ca_pem,
+                        Some(&cred),
+                        self.transport.as_ref(),
+                    )
+                    .expect("client rebuilt from a working config"),
                 );
                 tracing::info!(epoch = resp.credential_epoch, "credential rotated");
             }
@@ -528,7 +568,12 @@ fn outcomes_to_wire(outcomes: Vec<CheckOutcome>) -> (Vec<CheckJson>, Vec<Collect
 /// classification, extracted for clarity.
 fn classify(e: &ClientError, entry: &SpoolEntry) -> DrainResult {
     match e {
-        ClientError::Transport(_) | ClientError::Decode(_) => DrainResult::Retry,
+        // InvalidServerUrl can only surface at client construction,
+        // never from a request — classified as retry for
+        // exhaustiveness, not because it is expected here.
+        ClientError::Transport(_) | ClientError::Decode(_) | ClientError::InvalidServerUrl(_) => {
+            DrainResult::Retry
+        }
         ClientError::Api { status, code, .. } => match (*status, code.as_str()) {
             (409, "replay_conflict") | (409, "resync_required") => {
                 // The manager can never accept this batch; dropping it

@@ -35,7 +35,7 @@ ProtectKernelLogs=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_VSOCK
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
@@ -45,6 +45,11 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 # No capabilities, ever: the agent reads /proc and /etc, opens one
 # outbound TLS connection, and nothing else.
+#
+# G5: AF_VSOCK is granted for the optional vsock transport
+# ([transport] type = "vsock"): the agent's vsock socket needs no
+# device node (pure socket(2)), so PrivateDevices stays on. With the
+# default tcp transport the extra family is simply unused.
 CapabilityBoundingSet=
 AmbientCapabilities=
 

@@ -12,6 +12,7 @@ pub mod credential;
 pub mod plugins;
 pub mod spool;
 pub mod state;
+pub mod transport;
 pub mod wire;
 
 pub use agent::{Agent, AgentError, TickOutcome};

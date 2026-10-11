@@ -126,3 +126,22 @@ discover = false
 [plugins]
 enabled = false
 directory = "/etc/chv-monitor/plugins.d"
+
+# --- Manager transport (G5) ---------------------------------------------
+# How the agent reaches the manager. Default "tcp" dials the
+# management network exactly as before. "vsock" rides the VM's vsock
+# device instead: the node's chv-agent relay pipes the guest's TLS
+# bytes to the control plane, so the agent keeps the same server_url,
+# the same certificate validation (manager_ca_path) and the same
+# credentials — only the wire under the TLS session changes.
+#
+# Requirements for "vsock": the VM was created with the vsock
+# monitoring opt-in (vsock_enabled — a create-time decision, not
+# hot-pluggable), the guest kernel provides AF_VSOCK (the packaged
+# systemd unit already grants the family), and the monitor-agent
+# package is installed in the guest. The transport is not a trust
+# boundary: the vsock CID is never authentication (ADR-026), the
+# claim and client certificate remain the only credentials.
+#
+# [transport]
+# type = "vsock"
