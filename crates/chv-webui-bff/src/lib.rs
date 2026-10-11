@@ -15,7 +15,7 @@ pub use auth::BearerToken;
 pub use cache::BffCache;
 pub use error::BffError;
 pub use mutations::MutationService;
-pub use router::{bff_router, AppState};
+pub use router::{bff_router, AppState, NotificationChannels};
 // Re-exported so AppState consumers (tests, control-plane bootstrap)
 // can construct the monitoring health handle without depending on the
 // store crate directly.

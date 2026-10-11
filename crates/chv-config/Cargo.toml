@@ -12,6 +12,11 @@ thiserror = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
+# WHATWG URL parsing for webhook destination validation: reqwest's
+# HTTP stack parses URLs with this exact crate, so validating hosts
+# with it (canonicalizing integer/hex/mapped IPv6 forms) closes
+# parser-differential bypasses of the link-local rejection.
+url = "2.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }

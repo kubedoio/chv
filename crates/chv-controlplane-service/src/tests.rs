@@ -25,6 +25,7 @@ impl CertificateIssuer for MockCertIssuer {
 
 fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let pool_for_mutations = pool.clone();
+    let pool_for_alerting = pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
     let operation_repo = OperationRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
@@ -56,6 +57,17 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         operation_repo,
         event_repo,
         alert_repo,
+        alert_rules: std::sync::Arc::new(chv_controlplane_store::AlertRuleRepository::new(
+            pool_for_alerting.clone(),
+        )),
+        notification_outbox: std::sync::Arc::new(
+            chv_controlplane_store::NotificationOutboxRepository::new(pool_for_alerting),
+        ),
+        alerting_max_rules: 200,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo,
         observed_state_repo,
         backup_repo,

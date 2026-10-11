@@ -1,5 +1,6 @@
 import {
 	Activity,
+	BellRing,
 	Blocks,
 	Box,
 	HardDrive,
@@ -153,6 +154,19 @@ const pageDefinitions: PageDefinition[] = [
 		icon: Activity,
 		badges: [
 			{ label: 'Severity-aware', tone: 'warning' },
+			{ label: 'Operational', tone: 'healthy' }
+		]
+	},
+	{
+		href: '/alerts',
+		navLabel: 'Alerts',
+		title: 'Alerts',
+		eyebrow: 'Incident response',
+		description:
+			'Native alert rules, incident lifecycle with acknowledgment and silence, and notification delivery audit.',
+		icon: BellRing,
+		badges: [
+			{ label: 'State-aware', tone: 'warning' },
 			{ label: 'Operational', tone: 'healthy' }
 		]
 	},

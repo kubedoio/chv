@@ -25,9 +25,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chv_common::SystemClock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
-    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, TopologyRepository,
+    AlertRepository, AlertRuleRepository, ApplyRunRepository, BackupRepository,
+    DesiredStateRepository, DriftReportRepository, EventRepository, ImageRepository,
+    NetworkRepository, NodeRepository, NotificationOutboxRepository, ObservedStateRepository,
+    OperationRepository, TopologyRepository,
 };
 use chv_monitoring_core::model::{
     CheckRecord, CheckStatus, SampleBuilder, SampleQuality, SampleValue, Source, TargetKind,
@@ -157,6 +158,13 @@ async fn build_state(monitoring: Option<Arc<MonitoringStore>>) -> AppState {
         operation_repo: OperationRepository::new(pool.clone()),
         event_repo: EventRepository::new(pool.clone()),
         alert_repo: AlertRepository::new(pool.clone()),
+        alert_rules: std::sync::Arc::new(AlertRuleRepository::new(pool.clone())),
+        notification_outbox: std::sync::Arc::new(NotificationOutboxRepository::new(pool.clone())),
+        alerting_max_rules: 200,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo: DesiredStateRepository::new(pool.clone()),
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),

@@ -74,14 +74,15 @@ pub async fn get_overview(
         0
     });
 
-    let unresolved_alerts =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE status != 'resolved'")
-            .fetch_one(&state.pool)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "overview: failed to query unresolved_alerts");
-                0
-            });
+    let unresolved_alerts = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM alerts WHERE status IN ('open','firing')",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query unresolved_alerts");
+        0
+    });
 
     // #499: tombstoned networks are excluded from both counts (the
     // NULL-safe DP9 predicate) — the physical rows survive the delete
@@ -127,7 +128,7 @@ pub async fn get_overview(
             'Cluster' AS scope,
             severity
         FROM alerts
-        WHERE status != 'resolved'
+        WHERE status IN ('open','firing')
         ORDER BY opened_at DESC
         LIMIT 5
         "#,

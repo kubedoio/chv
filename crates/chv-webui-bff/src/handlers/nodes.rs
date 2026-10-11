@@ -74,7 +74,7 @@ pub async fn list_nodes(
         LEFT JOIN (
             SELECT node_id, COUNT(*) AS alerts
             FROM alerts
-            WHERE status != 'resolved'
+            WHERE status IN ('open','firing')
             GROUP BY node_id
         ) alert_counts ON n.node_id = alert_counts.node_id
         ORDER BY n.node_id
@@ -176,7 +176,7 @@ pub async fn get_node(
         LEFT JOIN (
             SELECT node_id, COUNT(*) AS alerts
             FROM alerts
-            WHERE status != 'resolved'
+            WHERE status IN ('open','firing')
             GROUP BY node_id
         ) alert_counts ON n.node_id = alert_counts.node_id
         WHERE n.node_id = $1

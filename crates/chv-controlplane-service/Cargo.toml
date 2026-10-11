@@ -38,6 +38,12 @@ metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
 chrono = "0.4"
+# HMAC-SHA256 webhook payload signing (notification dispatcher). 0.12
+# matches the version already resolved in Cargo.lock via transitive
+# users (jsonwebtoken/sqlx), and sha2 is pinned workspace-wide at 0.10
+# for the same digest family.
+hmac = "0.12"
+sha2 = { workspace = true }
 cron = "0.17"
 dashmap = { workspace = true }
 metrics = { workspace = true }
@@ -47,6 +53,12 @@ toml = { workspace = true }
 object_store = { workspace = true }
 x509-parser = { version = "0.18", features = ["verify"] }
 uuid = { workspace = true }
+# Notification dispatcher worker: hardened outbound HTTPS (HTTPS-only,
+# no redirects, optional operator CA bundle). Same reqwest line as
+# chv-netbox-adapter (rustls, JSON bodies); no multipart.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# Backoff jitter for notification retries.
+rand = { workspace = true }
 time = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }

@@ -1,3 +1,4 @@
+mod alert_rules;
 mod alerts;
 mod architectures;
 mod backups;
@@ -12,11 +13,22 @@ mod monitoring_agents;
 mod network_exposures;
 mod networks;
 mod nodes;
+mod notification_outbox;
 mod observed_state;
 mod operations;
 mod vtep;
 
-pub use alerts::{AlertCreateInput, AlertRepository};
+pub use alert_rules::{
+    AlertRule, AlertRuleRepository, AlertRuleRow, AlertRuleSpec, CheckStatusMatch, DimensionMatch,
+    GroupOp, MissingDataPolicy, RuleCreateInput, RuleUpdateInput, ThresholdOperator,
+    MAX_FOR_SECONDS, MAX_GROUP_CONDITIONS, MAX_ID_BYTES, MAX_NAME_BYTES, MAX_RATE_WINDOW_SECONDS,
+    MIN_RATE_WINDOW_SECONDS,
+};
+pub use alerts::{
+    dedup_key, AlertCreateInput, AlertRepository, IncidentListFilter, IncidentOpenInput,
+    IncidentRow, IncidentTransitionRow, ALERT_SOURCE_MONITORING, ALERT_TYPE_MONITORING_RULE,
+    INCIDENT_STATUS_FIRING, INCIDENT_STATUS_PENDING, INCIDENT_STATUS_RESOLVED,
+};
 pub use architectures::{
     is_active_run_conflict, ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput,
     DriftReportCreateInput, DriftReportRepository, InventorySnapshotCreateInput,
@@ -55,6 +67,11 @@ pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
     NodeSchedulingPatchInput, NodeStatePatchInput, NodeUpsertInput, NodeVersionInput,
     AUTHORITY_MODE_CORE_MANAGED, AUTHORITY_MODE_CORE_NATIVE, AUTHORITY_MODE_LEGACY,
+};
+pub use notification_outbox::{
+    enqueue_on_tx, NotificationEventInput, NotificationOutboxRepository, OutboxEventRow,
+    CHANNEL_SLACK, CHANNEL_WEBHOOK, EVENT_TYPE_ACKNOWLEDGED, EVENT_TYPE_DELIVERY_FAILED,
+    EVENT_TYPE_FIRING, EVENT_TYPE_RESOLVED, EVENT_TYPE_TEST,
 };
 pub use observed_state::{
     NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository, VmMetricsInput,

@@ -4,6 +4,7 @@
 	import { browser } from '$app/env';
 	import { slide, fade } from 'svelte/transition';
 	import {
+		BellRing,
 		Database,
 		LayoutGrid,
 		Image as ImageIcon,
@@ -39,6 +40,7 @@
 		{ id: 'global-images', label: 'Images', icon: ImageIcon, href: '/images' },
 		{ id: 'global-networks', label: 'Networks', icon: Network, href: '/networks' },
 		{ id: 'global-storage', label: 'Storage Pools', icon: HardDrive, href: '/volumes' },
+		{ id: 'global-alerts', label: 'Alerts', icon: BellRing, href: '/alerts' },
 		{ id: 'settings', label: 'Settings', icon: Settings, href: '/settings' },
 	];
 
