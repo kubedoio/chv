@@ -31,6 +31,9 @@ pub mod monitoring_agent;
 pub mod monitoring_ingest;
 pub mod monitoring_validate;
 
+pub mod alert_evaluator;
+pub mod notification_dispatcher;
+
 pub use monitoring_ingest::{
     run_monitoring_maintenance, MonitoringIngestImplementation, MonitoringIngestService,
 };

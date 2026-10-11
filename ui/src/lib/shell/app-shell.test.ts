@@ -14,6 +14,7 @@ describe('app shell definitions', () => {
 			'/images',
 			'/tasks',
 			'/events',
+			'/alerts',
 			'/backup-jobs',
 			'/settings'
 		]);

@@ -263,8 +263,8 @@ pub async fn list_events_for_vm(
             message AS summary,
             opened_at AS occurred_at,
             CASE
-                WHEN acknowledged_at IS NOT NULL THEN 'acknowledged'
                 WHEN resolved_at IS NOT NULL THEN 'resolved'
+                WHEN acknowledged_at IS NOT NULL THEN 'acknowledged'
                 ELSE 'open'
             END AS state
         FROM alerts a

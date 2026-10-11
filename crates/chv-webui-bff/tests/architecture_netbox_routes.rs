@@ -63,12 +63,12 @@ use chv_architecture_validate::model::{
 };
 use chv_common::SystemClock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunCreateInput, ApplyRunRepository, BackupRepository,
-    DesiredStateRepository, DriftReportRepository, EventRepository, ImageRepository,
-    NetboxProjectionConfigRepository, NetboxProjectionConfigUpsertInput,
-    NetboxProjectionRunRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-    OperationRepository, TopologyCreateInput, TopologyRepository, VersionCreateInput,
-    VersionRepository,
+    AlertRepository, AlertRuleRepository, ApplyRunCreateInput, ApplyRunRepository,
+    BackupRepository, DesiredStateRepository, DriftReportRepository, EventRepository,
+    ImageRepository, NetboxProjectionConfigRepository, NetboxProjectionConfigUpsertInput,
+    NetboxProjectionRunRepository, NetworkRepository, NodeRepository, NotificationOutboxRepository,
+    ObservedStateRepository, OperationRepository, TopologyCreateInput, TopologyRepository,
+    VersionCreateInput, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
     ArchitectureApplyRunId, ArchitectureId, ArchitectureStatus, ArchitectureVersionId,
@@ -203,6 +203,13 @@ async fn build_state() -> AppState {
         operation_repo: OperationRepository::new(pool.clone()),
         event_repo: EventRepository::new(pool.clone()),
         alert_repo: AlertRepository::new(pool.clone()),
+        alert_rules: std::sync::Arc::new(AlertRuleRepository::new(pool.clone())),
+        notification_outbox: std::sync::Arc::new(NotificationOutboxRepository::new(pool.clone())),
+        alerting_max_rules: 200,
+        notification_channels: chv_webui_bff::NotificationChannels {
+            webhook: false,
+            slack: false,
+        },
         desired_state_repo: DesiredStateRepository::new(pool.clone()),
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),

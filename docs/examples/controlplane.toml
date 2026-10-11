@@ -64,6 +64,43 @@ agent_batches_per_minute = 12
 offline_after_seconds = 90
 enrollment_grace_seconds = 600
 
+# Native alerting (ADR-027, G4 part 2). On by default but a strict
+# no-op until rules exist: the default install (zero rules) evaluates
+# nothing, opens no incidents and notifies nobody. The evaluator only
+# runs while the monitoring store is connected.
+[monitoring.alerting]
+enabled = true
+evaluation_interval_secs = 15
+# Ceiling on stored rules (per-target rules in v1); creating beyond
+# the ceiling fails loudly instead of silently overloading the tick.
+max_rules = 200
+
+# Outbound notifications (ADR-027, G4 part 2). Everything optional and
+# unset by default: with no destination configured, incidents are
+# visible in the UI only and no outbox events are enqueued.
+# Destinations come ONLY from this section — that is the allowlist;
+# alert rules and the UI can never direct a notification anywhere.
+# URLs must be https://, carry no credentials, and avoid link-local
+# addresses (cloud metadata services live there). Loopback and
+# private ranges are allowed on purpose: an internal receiver is a
+# legitimate operator-configured destination.
+#
+# When a destination is set, webhook_signing_secret is REQUIRED (>= 16
+# bytes); deliveries are signed HMAC-SHA256 (X-CHV-Signature: v1=…).
+# Rotate the secret by changing it here and restarting: receivers that
+# verify signatures should accept a brief overlap window of both
+# secrets.
+# webhook_url = "https://alerts.example.internal/hooks/chv"
+# webhook_signing_secret = "change-me-32-bytes-of-entropy-minimum"
+# slack_webhook_url = "https://hooks.slack.com/services/T000/B000/XXXX"
+# Optional PEM CA bundle for internal destinations (system roots
+# otherwise):
+# webhook_ca_path = "/etc/chv/certs/internal-webhook-ca.crt"
+[monitoring.notifications]
+max_attempts = 8
+dispatch_interval_secs = 5
+max_batch = 10
+
 [tls]
 # CA certificate and key used to issue node certificates during enrollment
 ca_cert_path = "/etc/chv/certs/ca.crt"

@@ -858,6 +858,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -923,16 +924,20 @@ dependencies = [
  "cron",
  "dashmap",
  "futures",
+ "hmac",
  "hyper-util",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
  "object_store",
+ "rand 0.10.3",
  "rcgen",
+ "reqwest 0.12.28",
  "rustls",
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
@@ -1017,6 +1022,7 @@ dependencies = [
  "chv-monitoring-core",
  "chv-monitoring-store",
  "chv-observability",
+ "hmac",
  "libc",
  "rcgen",
  "reqwest 0.12.28",
@@ -1276,6 +1282,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 

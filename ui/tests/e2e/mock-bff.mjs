@@ -317,6 +317,12 @@ const MONITORING_AGENT_ACTION = JSON.stringify({
 	schema_version: 1,
 	agent_id: 'agent-1'
 });
+// Native alerting (query/alerts contract v1, #602 PR-6): honest empty
+// surfaces — no incidents, no rules, no deliveries. Shapes are
+// byte-compatible with the BFF's incident/rule/delivery renderers.
+const ALERT_INCIDENTS = JSON.stringify({ incidents: [], total: 0 });
+const ALERT_RULES = JSON.stringify({ rules: [], total: 0 });
+const ALERT_DELIVERIES = JSON.stringify({ deliveries: [] });
 
 /** Read a JSON request body; an unparseable body reads as `{}`. */
 function readJsonBody(req) {
@@ -368,6 +374,12 @@ const server = http.createServer(async (req, res) => {
 		path === '/v1/monitoring/agents/reset'
 	) {
 		res.end(MONITORING_AGENT_ACTION);
+	} else if (path === '/v1/monitoring/alerts') {
+		res.end(ALERT_INCIDENTS);
+	} else if (path === '/v1/monitoring/alert-rules') {
+		res.end(ALERT_RULES);
+	} else if (path === '/v1/monitoring/notifications/deliveries') {
+		res.end(ALERT_DELIVERIES);
 	} else {
 		res.end(EMPTY_LIST);
 	}

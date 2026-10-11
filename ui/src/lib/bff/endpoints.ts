@@ -106,5 +106,16 @@ export const BFFEndpoints = {
 	monitoringAgentClaim: '/v1/monitoring/agents/claim',
 	monitoringAgentRevoke: '/v1/monitoring/agents/revoke',
 	monitoringAgentRotate: '/v1/monitoring/agents/rotate',
-	monitoringAgentReset: '/v1/monitoring/agents/reset'
+	monitoringAgentReset: '/v1/monitoring/agents/reset',
+	// Native alerting (query/alerts contract v1, #602 PR-6). All POST;
+	// reads are viewer-gated, rule/incident mutations operator-gated.
+	monitoringAlerts: '/v1/monitoring/alerts',
+	monitoringAlertDetail: '/v1/monitoring/alerts/detail',
+	monitoringAlertAcknowledge: '/v1/monitoring/alerts/acknowledge',
+	monitoringAlertSilence: '/v1/monitoring/alerts/silence',
+	monitoringAlertRules: '/v1/monitoring/alert-rules',
+	monitoringAlertRuleCreate: '/v1/monitoring/alert-rules/create',
+	monitoringAlertRuleUpdate: '/v1/monitoring/alert-rules/update',
+	monitoringAlertRuleDelete: '/v1/monitoring/alert-rules/delete',
+	monitoringAlertDeliveries: '/v1/monitoring/notifications/deliveries'
 } as const;

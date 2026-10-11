@@ -18,7 +18,7 @@ pub async fn list_clusters(
             (SELECT agent_version FROM nodes GROUP BY agent_version ORDER BY COUNT(*) DESC LIMIT 1) AS version,
             CASE WHEN COUNT(DISTINCT n.agent_version) > 1 THEN 1 ELSE 0 END AS version_skew,
             (SELECT COUNT(*) FROM operations WHERE status IN ('Pending', 'Accepted', 'Running')) AS active_tasks,
-            (SELECT COUNT(*) FROM alerts WHERE status != 'resolved') AS alerts
+            (SELECT COUNT(*) FROM alerts WHERE status IN ('open','firing')) AS alerts
         FROM nodes n
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
