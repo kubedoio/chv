@@ -434,9 +434,6 @@ mod tests {
         // IP-literal server_url would silently dial the management
         // network instead of the forwarder — the transport must refuse
         // to start rather than ship traffic over the wrong network.
-        // IP-literal server_url would silently dial the management
-        // network instead of the forwarder — the transport must refuse
-        // to start rather than ship traffic over the wrong network.
         let err = match VsockTransport::spawn("https://192.168.64.1:18443") {
             Err(e) => e,
             Ok(_) => panic!("vsock transport must reject an IP-literal server_url"),

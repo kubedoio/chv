@@ -3846,7 +3846,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // G5: start this VM's vsock monitoring relay (no-op without the
         // device, or when the node never wired a relay manager). After
         // this point the payload is persisted, so the relay gate can
-        // read it; binding is synchronous, so a vsock VM is never
+        // read it; the endpoint is bound before this returns (the file
+        // work runs on the blocking pool), so a vsock VM is never
         // running without its host-side endpoint.
         self.ensure_vsock_relay(&config.vm_id, Some(vm_runtime_dir))
             .await;

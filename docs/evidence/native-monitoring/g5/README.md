@@ -9,11 +9,14 @@
 static binary digest-verified against `scripts/install.sh`'s pin,
 rust-hypervisor-fw, guest image `noble-qual-patched.img` (qcow2). The
 guest package under test is `chv-monitor-agent_0.3.0_amd64.deb`
-(`66c73932cf2a55000e724d7953c13c0b5a1f347c05f74c936384d7f88210812e`,
-branch tip `f13fc634`)
-built from the final branch state with every gate-catch fix and every
-review fix (rounds 1–2) compiled in, byte-compared against
-`target/release/chv-monitor-agent` before the run. The manager runs in-process in the test binary — the real
+(`66c73932cf2a55000e724d7953c13c0b5a1f347c05f74c936384d7f88210812e`)
+built from the branch state at commit `f13fc634` (the tree the run
+tested) with every gate-catch fix and every review fix (rounds 1–2)
+compiled in, byte-compared against `target/release/chv-monitor-agent`
+at build time — before the run and re-verified after it. Commits
+after `f13fc634` are documentation and comment-only (the toolchain
+does not produce byte-identical release binaries across rebuild
+invocations, so byte-identity is asserted at build time). The manager runs in-process in the test binary — the real
 `chv-controlplane-service` HTTPS/TLS/ingest stack and the real
 `MonitoringStore`; the VM is driven through the production
 `ProcessCloudHypervisorAdapter` (real `vm.create`/`vm.boot`/`vm.reboot`/
