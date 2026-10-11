@@ -947,7 +947,12 @@ pub async fn build_service(
                 }
             }
         } else {
-            tracing::debug!("monitoring.export not enabled; exporter not started");
+            // Info, not debug: export is an opt-in egress surface, so
+            // the default install must positively confirm at the
+            // default log level that export was evaluated and
+            // declined — silence must never be ambiguous between
+            // "disabled by config" and "silently never wired".
+            tracing::info!("monitoring.export not enabled; exporter not started");
             tokio::spawn(async {})
         };
 
