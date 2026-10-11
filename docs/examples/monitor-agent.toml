@@ -135,13 +135,20 @@ directory = "/etc/chv-monitor/plugins.d"
 # the same certificate validation (manager_ca_path) and the same
 # credentials — only the wire under the TLS session changes.
 #
-# Requirements for "vsock": the VM was created with the vsock
-# monitoring opt-in (vsock_enabled — a create-time decision, not
-# hot-pluggable), the guest kernel provides AF_VSOCK (the packaged
-# systemd unit already grants the family), and the monitor-agent
-# package is installed in the guest. The transport is not a trust
-# boundary: the vsock CID is never authentication (ADR-026), the
-# claim and client certificate remain the only credentials.
+# Requirements for "vsock":
+#   - the VM was created with the vsock monitoring opt-in
+#     (vsock_enabled — a create-time decision, not hot-pluggable),
+#   - server_url uses a DNS NAME (not an IP literal: IP-literal URLs
+#     bypass the resolver redirect and vsock mode would silently not
+#     take effect) with an EXPLICIT UNPRIVILEGED PORT — the forwarder
+#     binds 127.0.0.1 at the URL's port, and a portless https URL
+#     means 443, which this non-root service cannot bind,
+#   - the guest kernel provides AF_VSOCK (the packaged systemd unit
+#     already grants the family) and the monitor-agent package is
+#     installed in the guest.
+# The transport is not a trust boundary: the vsock CID is never
+# authentication (ADR-026), the claim and client certificate remain
+# the only credentials.
 #
 # [transport]
 # type = "vsock"

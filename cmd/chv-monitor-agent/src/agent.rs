@@ -151,14 +151,17 @@ impl Agent {
         // degrade to the client's normal retry/backoff.)
         let transport = match config.transport.kind {
             crate::config::TransportKind::Tcp => None,
-            crate::config::TransportKind::Vsock => {
-                Some(crate::transport::VsockTransport::spawn().map_err(|e| {
+            crate::config::TransportKind::Vsock => Some(
+                crate::transport::VsockTransport::spawn(&config.server_url).map_err(|e| {
                     AgentError::Transport(format!(
-                        "vsock transport failed to start (is the VM opted in with \
-                         vsock_enabled, and does the kernel provide AF_VSOCK?): {e}"
+                        "vsock transport failed to start: {e}. The forwarder listens on \
+                         127.0.0.1:<server_url's port>: server_url must carry an explicit \
+                         unprivileged port (a portless https URL means 443, which this \
+                         non-root service cannot bind), and nothing else in the guest may \
+                         already hold that port"
                     ))
-                })?)
-            }
+                })?,
+            ),
         };
         let client = match &credential {
             Some(cred) => Some(

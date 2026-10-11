@@ -9,7 +9,11 @@
 //!   in (`vsock_enabled`); the guest agent opts into USING it with
 //!   `[transport] type = "vsock"`.
 //! - The transport is a local loopback forwarder: a TCP listener on
-//!   `127.0.0.1` whose connections are piped byte-for-byte into an
+//!   `127.0.0.1` at the `server_url`'s port (the HTTP client's
+//!   resolver override redirects the host to 127.0.0.1 but keeps the
+//!   URL's port, so the forwarder must own exactly that port — which
+//!   is why vsock mode requires an explicit unprivileged port in
+//!   `server_url`) whose connections are piped byte-for-byte into an
 //!   AF_VSOCK stream to the host (CID 2, [`VSOCK_MONITOR_PORT`]). The
 //!   HTTP client is redirected onto it with reqwest's `.resolve()`
 //!   override, so the DIAL goes to the forwarder while TLS SNI and
@@ -47,18 +51,34 @@ pub const VSOCK_MONITOR_PORT: u32 = 1024;
 /// on the host-side Unix socket the node's relay listens on.
 pub const VMADDR_CID_HOST: u32 = libc::VMADDR_CID_HOST;
 
+/// Extract the host and port the agent's `server_url` designates
+/// (defaulting to 443 for a portless https URL). The loopback
+/// forwarder MUST listen on exactly this port: the HTTP client's
+/// resolver override redirects the host to 127.0.0.1 but the dial
+/// keeps the URL's port, so the forwarder has to own it. An explicit
+/// unprivileged port in `server_url` is therefore a vsock-transport
+/// requirement (the agent runs as a non-root service and cannot bind
+/// 443 on 127.0.0.1).
+pub fn server_host_port(server_url: &str) -> Option<(String, u16)> {
+    let rest = server_url.strip_prefix("https://")?;
+    let authority = rest.split('/').next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (authority, 443),
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some((host.to_string(), port))
+    }
+}
+
 /// Extract the host component of the agent's `server_url` — the name
 /// the reqwest `.resolve()` override must match. The dial is redirected
 /// to the local forwarder; TLS SNI and certificate validation keep
 /// using this host (D1a: `server_url` keeps its TLS/SNI semantics).
 pub fn server_host(server_url: &str) -> Option<String> {
-    let rest = server_url.strip_prefix("https://")?;
-    let host = rest.split(':').next()?.split('/').next()?;
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
+    server_host_port(server_url).map(|(host, _)| host)
 }
 
 /// A connected AF_VSOCK stream. Readiness goes through `AsyncFd`
@@ -274,20 +294,33 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    /// Spawn the forwarder for the production path: accept on an
-    /// ephemeral `127.0.0.1` port and pipe each connection to the HOST
-    /// over vsock on the fixed monitoring port.
-    pub fn spawn() -> io::Result<Self> {
-        Self::spawn_to(VMADDR_CID_HOST, VSOCK_MONITOR_PORT)
+    /// Spawn the forwarder for the production path: accept on
+    /// `127.0.0.1:<server_url's port>` (the HTTP client's resolver
+    /// override redirects the host to 127.0.0.1 but keeps the URL's
+    /// port, so the forwarder must own exactly that port) and pipe
+    /// each connection to the HOST over vsock on the fixed monitoring
+    /// port.
+    pub fn spawn(server_url: &str) -> io::Result<Self> {
+        let port = server_host_port(server_url)
+            .map(|(_, port)| port)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("cannot extract host and port from {server_url:?}"),
+                )
+            })?;
+        Self::spawn_to(VMADDR_CID_HOST, VSOCK_MONITOR_PORT, port)
     }
 
-    /// Spawn the forwarder against an explicit CID/port. The production
-    /// path is [`Self::spawn`]; the local CID exists for tests that
-    /// prove the pipe against an in-kernel listener. Synchronous by
-    /// design: `Agent::start` is sync, and the listener must exist
-    /// before any client is built against it.
-    fn spawn_to(cid: u32, port: u32) -> io::Result<Self> {
-        let std_listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    /// Spawn the forwarder against an explicit CID/port, listening on
+    /// an explicit loopback port (0 = ephemeral). The production path
+    /// is [`Self::spawn`]; the local CID and ephemeral loopback port
+    /// exist for tests that prove the pipe against an in-kernel
+    /// listener. Synchronous by design: `Agent::start` is sync, and
+    /// the listener must exist before any client is built against it.
+    fn spawn_to(cid: u32, port: u32, listen_port: u16) -> io::Result<Self> {
+        let std_listener =
+            std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], listen_port)))?;
         std_listener.set_nonblocking(true)?;
         let loopback = std_listener.local_addr()?;
         let listener = tokio::net::TcpListener::from_std(std_listener)?;
@@ -333,6 +366,33 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
+    fn server_host_port_extracts_the_url_authority() {
+        // The forwarder must own the URL's port: the resolver override
+        // moves the host to 127.0.0.1 but the dial keeps it.
+        assert_eq!(
+            server_host_port("https://manager.chv.internal:8443"),
+            Some(("manager.chv.internal".to_string(), 8443))
+        );
+        // A portless https URL means 443 — which a non-root service
+        // cannot bind on 127.0.0.1, hence the documented requirement
+        // for an explicit unprivileged port in vsock mode.
+        assert_eq!(
+            server_host_port("https://manager.chv.internal"),
+            Some(("manager.chv.internal".to_string(), 443))
+        );
+        assert_eq!(server_host_port("http://manager.example"), None);
+        assert_eq!(server_host_port("https://"), None);
+        assert_eq!(server_host_port("https://mgr:invalid/"), None);
+    }
+
+    #[tokio::test]
+    async fn spawn_binds_the_server_url_port() {
+        let transport = VsockTransport::spawn("https://m.example:18443").unwrap();
+        assert_eq!(transport.loopback().port(), 18443);
+        assert_eq!(transport.loopback().ip().to_string(), "127.0.0.1");
+    }
+
+    #[test]
     fn server_host_extracts_the_url_host() {
         assert_eq!(
             server_host("https://manager.chv.internal:8443").as_deref(),
@@ -368,7 +428,7 @@ mod tests {
         // see EOF rather than a hang. 61024 is deliberately NOT the
         // contract port — a rig host listening on 1024 must not make
         // this test dial it.
-        let transport = VsockTransport::spawn_to(VMADDR_CID_HOST, 61024).unwrap();
+        let transport = VsockTransport::spawn_to(VMADDR_CID_HOST, 61024, 0).unwrap();
         let mut conn = tokio::net::TcpStream::connect(transport.loopback())
             .await
             .unwrap();
@@ -439,7 +499,7 @@ mod tests {
             }
         });
 
-        let transport = VsockTransport::spawn_to(libc::VMADDR_CID_LOCAL, port).unwrap();
+        let transport = VsockTransport::spawn_to(libc::VMADDR_CID_LOCAL, port, 0).unwrap();
         let mut conn = tokio::net::TcpStream::connect(transport.loopback())
             .await
             .unwrap();
