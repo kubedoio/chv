@@ -177,8 +177,12 @@ impl Drop for HostCleanup {
 /// Last ~40 lines of the guest console (progress visibility during
 /// the enrollment wait).
 fn dump_console_tail(vm_dir: &Path) {
-    match std::fs::read_to_string(vm_dir.join("console.log")) {
-        Ok(text) => {
+    // Lossy: the serial console routinely carries non-UTF-8 noise
+    // (pre-UEFI bytes, firmware logos) — a strict read made the panic
+    // dump itself fail ("unreadable"), losing the evidence.
+    match std::fs::read(vm_dir.join("console.log")) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
             let lines: Vec<&str> = text.lines().collect();
             let start = lines.len().saturating_sub(40);
             let _ = std::io::Write::write_fmt(
@@ -437,6 +441,21 @@ fn ssh(key_path: &Path, command: &str) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Wait until the guest's sshd accepts connections. Telemetry over
+/// vsock does NOT depend on the guest network, so a fresh boot can
+/// satisfy a telemetry wait before sshd is listening — phases that
+/// drive the guest over ssh must wait for ssh explicitly (run 8 of
+/// this rig lost exactly that race: first vsock point landed, the
+/// ssh restart was refused).
+async fn wait_for_ssh(ssh_key: &Path) {
+    wait_until(
+        "the guest sshd to accept connections",
+        Duration::from_secs(120),
+        || async { ssh_try(ssh_key, "true").is_some().then_some(()) },
+    )
+    .await;
 }
 
 /// Best-effort ssh (diagnostics only: no panic on failure).
@@ -983,7 +1002,19 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
         || async {
             let agent = manager.active_agent(VM_ID).await?;
             let n = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
-            (agent.agent_id == agent_id && n > points_after_pipe)
+            // The sequence gate makes the wait airtight against a
+            // stale store write: the manager persists batches with a
+            // delay, so a pre-restart envelope still in flight at the
+            // snapshot can land after it and bump `n` (and its
+            // sequence) by one. At most ONE envelope is ever in flight
+            // (the agent sends serially), so requiring the sequence to
+            // pass snapshot+1 forces at least one genuinely
+            // post-restart envelope.
+            (agent.agent_id == agent_id
+                && agent
+                    .last_sequence
+                    .is_some_and(|s| s > sequence_over_pipe + 1)
+                && n > points_after_pipe)
                 .then_some((agent.last_sequence, n))
         },
     )
@@ -1005,6 +1036,15 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
 
     // --- Phase 4: switch back to vsock ---
     let points_before_switch_back = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
+    // Snapshot the sequence AT the switch — the phase-2 value is stale
+    // by now (phase-3 traffic advanced it), and the wait's stale-write
+    // guard needs the current committed value (see the phase-3 note).
+    let sequence_before_switch_back = manager
+        .active_agent(VM_ID)
+        .await
+        .expect("agent before the switch back")
+        .last_sequence
+        .expect("sequence recorded over tcp");
     ssh(
         &ssh_key,
         "sudo sed -i 's/^type = \"tcp\"$/type = \"vsock\"/' /etc/chv-monitor/agent.toml \
@@ -1018,7 +1058,9 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
             let agent = manager.active_agent(VM_ID).await?;
             let n = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
             (agent.agent_id == agent_id
-                && agent.last_sequence.is_some_and(|s| s > sequence_over_pipe)
+                && agent
+                    .last_sequence
+                    .is_some_and(|s| s > sequence_before_switch_back + 1)
                 && n > points_before_switch_back)
                 .then_some((agent.last_sequence, n))
         },
@@ -1040,6 +1082,21 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
     .as_str());
 
     // --- Phase 5: reboot (same VMM, device re-attached) ---
+    // Snapshot the guest's boot id BEFORE the reboot: the wait below
+    // must prove the NEW OS booted, not merely that the point count
+    // rose. The manager persists batches with a delay, so a
+    // pre-reboot envelope in flight at the snapshot can land after the
+    // (instant, hard-reset) reboot returns and spuriously satisfy a
+    // bare count check while the guest is still dead — exactly the
+    // false pass run 9 caught on the stop/start wait. The kernel's
+    // boot id changes on every real boot and nothing else writes it,
+    // so a changed boot id is unfakeable by store delays.
+    let boot_before_reboot = manager
+        .active_agent(VM_ID)
+        .await
+        .expect("agent before the reboot")
+        .last_boot_id
+        .expect("boot id recorded");
     runtime.reboot_vm(VM_ID, None).await.expect("vm.reboot");
     let points_before_reboot = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
     wait_until_diag(
@@ -1050,7 +1107,10 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
         || async {
             let agent = manager.active_agent(VM_ID).await?;
             let n = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
-            (agent.agent_id == agent_id && n > points_before_reboot).then_some(n)
+            (agent.agent_id == agent_id
+                && agent.last_boot_id.as_deref() != Some(boot_before_reboot.as_str())
+                && n > points_before_reboot)
+                .then_some(n)
         },
     )
     .await;
@@ -1079,6 +1139,18 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
     checkpoint("pause/resume: traffic resumed");
 
     // --- Phase 7: stop / start (endpoint removed, then re-derived) ---
+    // Snapshot the boot id before the stop — the wait below must see
+    // the NEW boot (a bare count check false-passed in run 9: a
+    // delayed store write of a pre-stop envelope satisfied it ~2 s
+    // after start, with zero relay admissions, while the new guest was
+    // still booting — and the follow-on ssh wait then bore the whole
+    // boot and blew its budget).
+    let boot_before_restart = manager
+        .active_agent(VM_ID)
+        .await
+        .expect("agent before the stop")
+        .last_boot_id
+        .expect("boot id recorded");
     runtime
         .stop_vm(VM_ID, false, None)
         .await
@@ -1111,7 +1183,10 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
         || async {
             let agent = manager.active_agent(VM_ID).await?;
             let n = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
-            (agent.agent_id == agent_id && n > points_before_restart).then_some(n)
+            (agent.agent_id == agent_id
+                && agent.last_boot_id.as_deref() != Some(boot_before_restart.as_str())
+                && n > points_before_restart)
+                .then_some(n)
         },
     )
     .await;
@@ -1134,7 +1209,23 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
     );
     // Force the guest to make a NEW connection (its keep-alive rides
     // the old, unlinked socket inode): restart the agent in-guest and
-    // require the new traffic to still land.
+    // require the new traffic to still land. ssh may not be listening
+    // yet in this fresh boot — vsock telemetry needs no guest network,
+    // so the telemetry waits above prove nothing about sshd.
+    wait_for_ssh(&ssh_key).await;
+    // Snapshot the sequence BEFORE the in-guest restart: the agent
+    // sends envelopes serially, so at most one pre-restart envelope can
+    // still be in flight (and, because the manager persists batches
+    // with a delay, land after a post-restart snapshot). Requiring the
+    // row's sequence to pass snapshot+1 forces at least one genuinely
+    // post-restart envelope through the ADOPTED relay — a stale write
+    // alone cannot satisfy the wait.
+    let sequence_before_adopt = manager
+        .active_agent(VM_ID)
+        .await
+        .expect("agent before the in-guest restart")
+        .last_sequence
+        .expect("sequence recorded");
     ssh(&ssh_key, "sudo systemctl restart chv-monitor-agent");
     let points_before_adopt = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
     wait_until_diag(
@@ -1145,7 +1236,12 @@ async fn g5_real_vm_vsock_transport_and_lifecycle_matrix() {
         || async {
             let agent = manager.active_agent(VM_ID).await?;
             let n = manager.guest_points("vm.guest.cpu.utilization_ratio").await;
-            (agent.agent_id == agent_id && n > points_before_adopt).then_some(n)
+            (agent.agent_id == agent_id
+                && agent
+                    .last_sequence
+                    .is_some_and(|s| s > sequence_before_adopt + 1)
+                && n > points_before_adopt)
+                .then_some(n)
         },
     )
     .await;
