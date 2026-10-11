@@ -161,25 +161,43 @@ const VSOCK_CID_CEILING: u32 = 4_000_000_000;
 ///   `vm-config.json`. Recovery is explicit: restore the file to a
 ///   value at or above every allocated CID.
 ///
-/// The cursor is guarded by an exclusive `flock` so concurrent creates
-/// on one node cannot interleave the read-modify-write.
+/// The read-modify-write is guarded by an exclusive `flock` on a
+/// sidecar lock file (`<cursor>.lock`, never renamed) so concurrent
+/// creates on one node cannot interleave it.
 pub fn allocate_vsock_cid(cursor_path: &Path) -> std::io::Result<u32> {
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Read, Write};
 
     if let Some(parent) = cursor_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::OpenOptions::new()
+    // The commit below REPLACES the value file atomically (tmp+fsync+
+    // rename), so the flock must live on a separate, never-renamed
+    // lock file: a lock taken on the value file itself could end up
+    // held on a dead inode after a concurrent winner's rename (the
+    // loser would wake and read the stale pre-commit value — handing
+    // out a CID already committed to another VM). The sidecar's inode
+    // is stable for the node's lifetime, so the lock always guards the
+    // current read-modify-write.
+    let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(cursor_path)?;
-    file.lock()?;
+        .open(cursor_path.with_extension("lock"))?;
+    lock_file.lock()?;
     let outcome = (|| -> std::io::Result<u32> {
         let mut buf = String::new();
-        let mut f = &file;
-        f.read_to_string(&mut buf)?;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .truncate(false)
+            .open(cursor_path)
+        {
+            Ok(mut file) => {
+                file.read_to_string(&mut buf)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         // Decide from the content UNDER the lock (a pre-lock existence
         // check races concurrent first allocations). Empty means no
         // allocation has ever committed — either a fresh node, or a
@@ -214,18 +232,40 @@ pub fn allocate_vsock_cid(cursor_path: &Path) -> std::io::Result<u32> {
                     VSOCK_CID_CEILING
                 ))
             })?;
-        // Commit order matters for crash safety: write the new value at
-        // offset 0, THEN truncate to its length. A crash between the two
-        // leaves a torn (unparseable) file, which the next allocation
-        // rejects loudly; a crash before the write leaves the previous
-        // value intact. The value is only returned after sync_all.
-        f.seek(SeekFrom::Start(0))?;
-        write!(f, "{next}")?;
-        f.set_len(next.to_string().len() as u64)?;
-        f.sync_all()?;
+        // Atomic commit via tmp+fsync+rename: a reader can never
+        // observe a torn value (the rename is atomic), and the data is
+        // on disk before the rename is (fsync before rename, directory
+        // fsync after). The write-in-place pattern this replaces could
+        // crash between the write and the set_len and leave a
+        // PARSEABLE-BUT-SMALLER value — e.g. "10000" torn to "1000" —
+        // which the next allocation would silently treat as the
+        // baseline, rebasing the cursor below CIDs already committed to
+        // live VMs' vm-config.json and reopening reuse. A readback
+        // cannot catch that (the torn value is only observed by the
+        // NEXT process, whose own write then verifies intact); only
+        // an atomic replace removes the window.
+        let tmp_path = cursor_path.with_extension("tmp");
+        {
+            use std::fs::OpenOptions;
+            let mut tmp = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp_path)?;
+            write!(tmp, "{next}")?;
+            tmp.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, cursor_path)?;
+        if let Some(parent) = cursor_path.parent() {
+            // Best-effort: a failed directory fsync degrades to
+            // "durable after the next flush", never to torn content.
+            let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+        }
         Ok(next)
     })();
-    file.unlock()?;
+    // A failed unlock would mask the primary error; the lock is also
+    // released when the file drops, so the outcome is what matters.
+    let _ = lock_file.unlock();
     outcome
 }
 
@@ -414,6 +454,26 @@ mod vsock_tests {
         assert_eq!(
             std::fs::read_to_string(&cursor).unwrap().trim(),
             (VSOCK_CID_FLOOR + 2).to_string()
+        );
+    }
+
+    #[test]
+    fn vsock_cid_commit_is_an_atomic_replace_with_a_stable_lock_sidecar() {
+        // The commit is tmp+fsync+rename over the value file, and the
+        // flock lives on a never-renamed sidecar: a lock on the value
+        // file itself could be held on a dead inode after a concurrent
+        // winner's rename (stale read → duplicate CID).
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join("vsock-cid-cursor");
+        assert_eq!(allocate_vsock_cid(&cursor).unwrap(), VSOCK_CID_FLOOR);
+        assert!(
+            cursor.with_extension("lock").exists(),
+            "lock sidecar exists"
+        );
+        assert!(cursor.exists(), "value file committed");
+        assert!(
+            !cursor.with_extension("tmp").exists(),
+            "no tmp staging file lingers"
         );
     }
 

@@ -51,6 +51,12 @@ pub const VSOCK_MONITOR_PORT: u32 = 1024;
 /// on the host-side Unix socket the node's relay listens on.
 pub const VMADDR_CID_HOST: u32 = libc::VMADDR_CID_HOST;
 
+/// How long a guest→host vsock connect may take before the forwarder
+/// gives up on it (closing the loopback side so the client retries).
+/// Real connects complete in microseconds; this bound exists so a
+/// wedged connect cannot park per-connection tasks indefinitely.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Extract the host and port the agent's `server_url` designates
 /// (defaulting to 443 for a portless https URL). The loopback
 /// forwarder MUST listen on exactly this port: the HTTP client's
@@ -301,14 +307,33 @@ impl VsockTransport {
     /// each connection to the HOST over vsock on the fixed monitoring
     /// port.
     pub fn spawn(server_url: &str) -> io::Result<Self> {
-        let port = server_host_port(server_url)
-            .map(|(_, port)| port)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("cannot extract host and port from {server_url:?}"),
-                )
-            })?;
+        let (host, port) = server_host_port(server_url).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot extract host and port from {server_url:?}"),
+            )
+        })?;
+        // Fail loud on an IP-literal host: reqwest's `.resolve()`
+        // override only applies to HOSTNAMES, so an IP-literal URL
+        // would silently dial the management network instead of the
+        // forwarder — the authenticated traffic would leave over the
+        // wrong network with no error. Refusing to start is the only
+        // honest behavior (ADR-026: transport config must never
+        // quietly change which network carries the session). Bracketed
+        // IPv6 literals ("[::1]") are stripped before the parse so the
+        // canonical form is caught too.
+        let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+        if bare_host.parse::<std::net::IpAddr>().is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "server_url host {host:?} is an IP literal; vsock mode requires a DNS \
+                     name (the client's resolver override only applies to hostnames — an \
+                     IP literal would silently dial the management network instead of the \
+                     vsock forwarder)"
+                ),
+            ));
+        }
         Self::spawn_to(VMADDR_CID_HOST, VSOCK_MONITOR_PORT, port)
     }
 
@@ -331,17 +356,28 @@ impl VsockTransport {
                 };
                 let connect = VsockStream::connect(cid, port);
                 tokio::spawn(async move {
-                    match connect.await {
-                        Ok(mut vsock) => {
+                    // Bound the connect: a wedged AF_VSOCK connect would
+                    // otherwise park this task (and hold the accepted
+                    // loopback socket) until the guest process goes
+                    // away, and each client retry would accumulate
+                    // another one.
+                    match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+                        Ok(Ok(mut vsock)) => {
                             // The whole transport: splice bytes both
                             // ways until either side closes.
                             let _ = tokio::io::copy_bidirectional(&mut conn, &mut vsock).await;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::debug!(
                                 error = %e,
                                 port = port,
                                 "vsock transport: host connect failed — closing the loopback connection (the client retries with backoff)"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                port = port,
+                                "vsock transport: host connect timed out — closing the loopback connection (the client retries with backoff)"
                             );
                         }
                     }
@@ -390,6 +426,28 @@ mod tests {
         let transport = VsockTransport::spawn("https://m.example:18443").unwrap();
         assert_eq!(transport.loopback().port(), 18443);
         assert_eq!(transport.loopback().ip().to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn spawn_rejects_an_ip_literal_host() {
+        // reqwest's .resolve() override only applies to hostnames; an
+        // IP-literal server_url would silently dial the management
+        // network instead of the forwarder — the transport must refuse
+        // to start rather than ship traffic over the wrong network.
+        // IP-literal server_url would silently dial the management
+        // network instead of the forwarder — the transport must refuse
+        // to start rather than ship traffic over the wrong network.
+        let err = match VsockTransport::spawn("https://192.168.64.1:18443") {
+            Err(e) => e,
+            Ok(_) => panic!("vsock transport must reject an IP-literal server_url"),
+        };
+        assert!(err.to_string().contains("IP literal"), "got: {err}");
+        // The canonical bracketed IPv6 form must be caught too (the
+        // brackets are stripped before the parse).
+        assert!(
+            VsockTransport::spawn("https://[::1]:18443").is_err(),
+            "bracketed IPv6 literal must be rejected"
+        );
     }
 
     #[test]

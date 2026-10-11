@@ -829,17 +829,17 @@ impl ProcessCloudHypervisorAdapter {
     /// Idempotently start this VM's vsock relay, gated on the persisted
     /// create payload carrying the device. Best-effort by design: a
     /// relay failure degrades monitoring, never the VM.
-    fn ensure_vsock_relay(&self, vm_id: &str, vm_dir: Option<&std::path::Path>) {
+    async fn ensure_vsock_relay(&self, vm_id: &str, vm_dir: Option<&std::path::Path>) {
         if let (Some(relay), Some(vm_dir)) = (&self.vsock_relay, vm_dir) {
-            relay.ensure_started(vm_id, vm_dir);
+            relay.ensure_started(vm_id, vm_dir).await;
         }
     }
 
     /// Stop this VM's vsock relay (VM stopped or deleted — no VMM will
     /// connect to the endpoint again).
-    fn stop_vsock_relay(&self, vm_id: &str) {
+    async fn stop_vsock_relay(&self, vm_id: &str) {
         if let Some(relay) = &self.vsock_relay {
-            relay.stop(vm_id);
+            relay.stop(vm_id).await;
         }
     }
 
@@ -3133,8 +3133,20 @@ impl ProcessCloudHypervisorAdapter {
         // read below anyway).
         let _ = tokio::fs::remove_file(&api_socket).await;
         let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
-        if let Some(vsock_socket) = crate::vsock_relay::persisted_vsock_device_socket(&vm_dir) {
-            let _ = tokio::fs::remove_file(vsock_socket).await;
+        // The payload read is blocking I/O from this async context —
+        // run it on the blocking pool like its reboot-path sibling.
+        {
+            let vm_dir_for_vsock = vm_dir.clone();
+            if let Some(vsock_socket) = tokio::task::spawn_blocking(move || {
+                crate::vsock_relay::persisted_vsock_device_socket(&vm_dir_for_vsock)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "vsock: persisted payload read task failed");
+                None
+            }) {
+                let _ = tokio::fs::remove_file(&vsock_socket).await;
+            }
         }
 
         let config_path = vm_config_file(&vm_dir);
@@ -3294,7 +3306,7 @@ impl ProcessCloudHypervisorAdapter {
         // G5: the re-spawned VMM re-created the vsock device from the
         // persisted payload — its host-side relay must be up again
         // (idempotent, gated on the same payload).
-        self.ensure_vsock_relay(vm_id, Some(&vm_dir));
+        self.ensure_vsock_relay(vm_id, Some(&vm_dir)).await;
         Ok(())
     }
 
@@ -3342,8 +3354,17 @@ impl ProcessCloudHypervisorAdapter {
         // same hazard create_vm/respawn_vmm already defend against).
         // Unlinking the path is a no-op when the device cleaned up
         // (ENOENT) and never disturbs a lingering live socket inode.
+        // The payload read is blocking I/O from this async context.
         if let Some(vm_dir) = api_socket.parent() {
-            if let Some(vsock_socket) = crate::vsock_relay::persisted_vsock_device_socket(vm_dir) {
+            let vm_dir = vm_dir.to_path_buf();
+            if let Some(vsock_socket) = tokio::task::spawn_blocking(move || {
+                crate::vsock_relay::persisted_vsock_device_socket(&vm_dir)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "vsock: persisted payload read task failed");
+                None
+            }) {
                 let _ = tokio::fs::remove_file(&vsock_socket).await;
             }
         }
@@ -3827,7 +3848,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // this point the payload is persisted, so the relay gate can
         // read it; binding is synchronous, so a vsock VM is never
         // running without its host-side endpoint.
-        self.ensure_vsock_relay(&config.vm_id, Some(vm_runtime_dir));
+        self.ensure_vsock_relay(&config.vm_id, Some(vm_runtime_dir))
+            .await;
 
         __guard.succeeded = true;
         Ok(config.vm_id.clone())
@@ -3946,7 +3968,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // G5: even the idempotent path must not leave a vsock VM
                 // without its relay (e.g. the relay manager died with the
                 // previous agent process and the VM was re-adopted).
-                self.ensure_vsock_relay(vm_id, api_socket.parent());
+                self.ensure_vsock_relay(vm_id, api_socket.parent()).await;
                 // Idempotent success: VM is already in the desired state.
                 // The guard's succeeded flag must be set on every Ok return
                 // so RED metrics classify this as ok, not err.
@@ -3965,7 +3987,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // be up (idempotent: covers a fresh boot, a VMM re-spawn, an
         // adopted VM after an agent restart, and the already-running
         // idempotent path below).
-        self.ensure_vsock_relay(vm_id, api_socket.parent());
+        self.ensure_vsock_relay(vm_id, api_socket.parent()).await;
 
         __guard.succeeded = true;
         Ok(())
@@ -4113,7 +4135,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // successful stop from the caller's point of view: the VM is no
                 // longer in the runtime map. Mark the guard before the early
                 // return so RED metrics classify this as ok.
-                self.stop_vsock_relay(vm_id);
+                self.stop_vsock_relay(vm_id).await;
                 __guard.succeeded = true;
                 return Ok(());
             }
@@ -4278,7 +4300,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // G5: the VMM is gone (force-killed or exited with the guest) —
         // stop the vsock relay and remove its endpoint; a later start
         // re-derives it from the persisted payload.
-        self.stop_vsock_relay(vm_id);
+        self.stop_vsock_relay(vm_id).await;
         __guard.succeeded = true;
         Ok(())
     }
@@ -4304,7 +4326,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // then removes, and the delete cannot kill a VMM a start
                 // just adopted.
                 self.delete_untracked_vm(vm_id, operation_id).await?;
-                self.stop_vsock_relay(vm_id);
+                self.stop_vsock_relay(vm_id).await;
                 __guard.succeeded = true;
                 return Ok(());
             }
@@ -4337,7 +4359,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
         // G5: the VM (and with it the vsock device and its host-side
         // relay endpoint) is gone.
-        self.stop_vsock_relay(vm_id);
+        self.stop_vsock_relay(vm_id).await;
         __guard.succeeded = true;
         Ok(())
     }
@@ -5623,7 +5645,7 @@ impl ProcessCloudHypervisorAdapter {
             // the relay task; a stopped one simply records the entry so
             // the map matches the on-disk layout (the next start
             // re-derives it anyway).
-            self.ensure_vsock_relay(&vm_id, Some(&vm_dir));
+            self.ensure_vsock_relay(&vm_id, Some(&vm_dir)).await;
         }
         Ok(())
     }
@@ -9531,7 +9553,7 @@ mod tests {
     async fn delete_vm_stops_the_vsock_relay() {
         let fx = vsock_relay_fixture("vm-del");
         insert_entry(&fx.adapter, "vm-del", &fx.vm_dir, false).await;
-        fx.manager.ensure_started("vm-del", &fx.vm_dir);
+        fx.manager.ensure_started("vm-del", &fx.vm_dir).await;
         assert!(fx.relay_socket.exists());
 
         fx.adapter.delete_vm("vm-del", None).await.unwrap();
@@ -9575,7 +9597,7 @@ mod tests {
             }
         });
         insert_entry(&fx.adapter, "vm-stop", &fx.vm_dir, false).await;
-        fx.manager.ensure_started("vm-stop", &fx.vm_dir);
+        fx.manager.ensure_started("vm-stop", &fx.vm_dir).await;
         assert!(fx.relay_socket.exists());
 
         fx.adapter.stop_vm("vm-stop", false, None).await.unwrap();

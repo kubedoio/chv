@@ -33,15 +33,25 @@ changes with the transport.
 - The host kernel registers nothing for vsock CIDs under Cloud Hypervisor
   v53: **CID uniqueness is a CHV convention**, enforced by a durable,
   node-scoped, monotonically increasing cursor
-  (`<node_runtime_dir>/vsock-cid-cursor`, written under an exclusive
-  `flock`, commit order write-then-`set_len`).
+  (`<node_runtime_dir>/vsock-cid-cursor`, read-modify-write under an
+  exclusive `flock` on a never-renamed sidecar lock file
+  `<cursor>.lock`, committed by an atomic tmp-file → fsync → rename →
+  directory-fsync replace: a crash can never leave a torn or
+  parseable-but-smaller value that would rebase the cursor below
+  committed CIDs, and the stable lock-file inode means a waiter can
+  never wake up reading a stale pre-rename value).
 - First allocation on a fresh node is CID 1000 (above the reserved 0–2
   and well-known low CIDs); allocation fails loudly beyond 4 000 000 000
   rather than wrapping into reuse.
 - A non-empty malformed cursor file fails loudly (never re-issued from
   scratch — that would risk CID reuse against live VMs).
 - A VMM respawn (stop/start) keeps the CID from the persisted payload;
-  only a delete frees the VM's identity, and CIDs are never reused.
+  only a delete frees the VM's identity, and CIDs are never reused. A
+  crash-recovery re-create (the reconciler re-creating a VM whose VMM
+  died, or a Core op replay) draws a **fresh** CID — the previous VMM
+  is provably dead and the new payload records the new CID; the
+  abandoned CID is never re-issued. The guest's monitoring identity is
+  unaffected (it rides the disk, not the device).
 
 ## The device and its sockets
 
@@ -105,10 +115,13 @@ changes with the transport.
 - Because the pipe **is** the network path, vsock mode never uses a
   proxy. A failed host dial closes the loopback connection immediately;
   the client retries with its normal backoff.
-- `server_url` must use a **DNS name, not an IP literal**: IP-literal
-  URLs bypass the resolver override in the HTTP client, and vsock mode
-  would silently not take effect. (Deployments that must use an IP
-  literal should register a name for it or stay on tcp.)
+- `server_url` must use a **DNS name, not an IP literal**: the HTTP
+  client's resolver override only applies to hostnames, so an
+  IP-literal URL would dial the management network instead of the
+  forwarder. The agent therefore refuses to start in vsock mode with
+  an IP-literal `server_url` (fail loud: the transport must never
+  quietly change which network carries the session). Deployments that
+  must use an IP literal should register a name for it or stay on tcp.
 - `server_url` must also carry an **explicit unprivileged port** in
   vsock mode: the resolver override redirects the host to 127.0.0.1
   but the dial keeps the URL's port, so the forwarder must bind

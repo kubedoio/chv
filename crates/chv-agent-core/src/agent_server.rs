@@ -1250,13 +1250,26 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         // G5 vsock device (legacy direct-RPC path): same node-authority
         // semantics as the reconciler and the Core runtime — strictly
         // opt-in, durable monotonic node-scoped CID, device socket
-        // under the VM's runtime dir, fail closed.
+        // under the VM's runtime dir, fail closed. The allocator does
+        // blocking I/O (flock cursor); it runs on the blocking pool
+        // because this is an async context.
         let vsock = match vm_spec.vsock {
-            Some(_) => Some(
-                chv_hypervisor_api::prepare_vm_vsock_device(&self.runtime_dir, &vm_dir).map_err(
-                    |e| Status::internal(format!("vsock device preparation failed: {e}")),
-                )?,
-            ),
+            Some(_) => {
+                let runtime_dir = self.runtime_dir.clone();
+                let vm_dir_for_vsock = vm_dir.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        chv_hypervisor_api::prepare_vm_vsock_device(&runtime_dir, &vm_dir_for_vsock)
+                    })
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("vsock device preparation task failed: {e}"))
+                    })?
+                    .map_err(|e| {
+                        Status::internal(format!("vsock device preparation failed: {e}"))
+                    })?,
+                )
+            }
             None => None,
         };
         let config = VmConfig {

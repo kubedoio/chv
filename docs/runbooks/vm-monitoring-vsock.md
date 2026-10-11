@@ -44,8 +44,13 @@ guest agent → 127.0.0.1 loopback forwarder (in-guest)
    - Missing while the VM runs → restart `chv-agent` (adoption re-binds the
      endpoint for every live vsock VM; the guest is not disturbed):
      `sudo systemctl restart chv-agent`.
-   - "vsock relay: unparseable control-plane address" warning → the node's
-     `control_plane_addr` is wrong; fix it and restart `chv-agent`.
+   - "vsock monitoring relay disabled for this agent process" warning →
+     the node's `control_plane_addr` is wrong; fix it and restart
+     `chv-agent`.
+   - "vsock relay: cannot bind the guest endpoint" warning → a stale
+     socket file or a permissions problem on `<vm_dir>`; the warning
+     names the socket path. `systemctl restart chv-agent` re-runs the
+     adoption sweep and re-binds the endpoint.
 3. **Check the guest side.** In the guest:
    ```sh
    systemctl status chv-monitor-agent
@@ -58,8 +63,9 @@ guest agent → 127.0.0.1 loopback forwarder (in-guest)
    - Connect-then-EOF retries → the relay endpoint is missing or the
      control plane is unreachable from the node; see step 2.
 4. **Check `server_url` is a DNS name, not an IP literal.** IP-literal URLs
-   bypass the resolver override, so vsock mode silently does not take effect
-   (traffic continues over tcp). Register a name or stay on tcp.
+   bypass the resolver override (it only applies to hostnames), so vsock mode
+   refuses to start: the agent exits at boot with "vsock transport failed to
+   start … requires a DNS name". Register a name or stay on tcp.
 5. **Check `server_url` carries an explicit unprivileged port.** The
    forwarder binds `127.0.0.1` at the URL's port; a portless https URL means
    443, which the non-root `chv-monitor` service cannot bind — the agent

@@ -364,17 +364,30 @@ impl CloudHypervisorCoreRuntime {
         // monitoring transport, which is guest-initiated) and connects
         // out to "<socket>_<port>" per guest connection, which the
         // node-side relay (chv-agent) listens on. Fail closed: an
-        // opted-in VM is never silently created device-less.
+        // opted-in VM is never silently created device-less. The
+        // allocator does blocking I/O (flock cursor); it runs on the
+        // blocking pool because this is an async context.
         let vsock = match &definition.vsock {
-            Some(_) => Some(
-                chv_hypervisor_api::prepare_vm_vsock_device(&self.runtime_dir, &vm_dir).map_err(
-                    |e| {
+            Some(_) => {
+                let runtime_dir = self.runtime_dir.clone();
+                let vm_dir_for_vsock = vm_dir.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        chv_hypervisor_api::prepare_vm_vsock_device(&runtime_dir, &vm_dir_for_vsock)
+                    })
+                    .await
+                    .map_err(|e| {
+                        Self::map_err(ChvError::Internal {
+                            reason: format!("vsock device preparation task failed: {e}"),
+                        })
+                    })?
+                    .map_err(|e| {
                         Self::map_err(ChvError::Internal {
                             reason: format!("vsock device preparation failed: {e}"),
                         })
-                    },
-                )?,
-            ),
+                    })?,
+                )
+            }
             None => None,
         };
 

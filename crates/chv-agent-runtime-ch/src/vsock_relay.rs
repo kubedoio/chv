@@ -42,12 +42,13 @@ use chv_hypervisor_api::resources::vm_config_file;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Derive the relay's listening path from the VM's vsock DEVICE socket
 /// path. This must byte-match cloud-hypervisor v53.0's muxer convention:
@@ -195,15 +196,24 @@ impl VsockRelayManager {
     }
 
     /// Idempotently start this VM's relay, gated on the persisted create
-    /// payload carrying the vsock device. Synchronous by design: the
-    /// Unix listener is bound before returning, so a caller that just
-    /// created or started the VM can rely on the endpoint existing (the
-    /// VMM only connects out once the GUEST initiates, which is at least
-    /// a boot away). A stale relay socket file (agent died between
-    /// bind and cleanup) is unlinked first — Unix sockets need manual
+    /// payload carrying the vsock device. The Unix listener is bound
+    /// before returning, so a caller that just created or started the
+    /// VM can rely on the endpoint existing (the VMM only connects out
+    /// once the GUEST initiates, which is at least a boot away). The
+    /// whole prep+bind is serialized by the map lock (a tokio mutex, so
+    /// it can be held across the blocking-pool await) — note this
+    /// serializes relay prep across ALL VMs on the node and briefly
+    /// delays an unrelated VM's `stop`; the prep is a small config read
+    /// plus a bind, so this is the simple correct shape (a per-VM shard
+    /// is the escape hatch if node VM counts grow). The file work
+    /// (payload read, stale unlink, bind) is blocking I/O from async
+    /// lifecycle callers, so it runs on the blocking pool. A stale relay
+    /// socket file (agent died between bind and cleanup, or a caller
+    /// was cancelled between the bind and the map insert) is unlinked
+    /// by the next `ensure_started` — Unix sockets need manual
     /// unlinking and a leftover file would make the bind fail.
-    pub fn ensure_started(&self, vm_id: &str, vm_dir: &Path) {
-        let mut relays = self.relays.lock().expect("vsock relay map lock poisoned");
+    pub async fn ensure_started(&self, vm_id: &str, vm_dir: &Path) {
+        let mut relays = self.relays.lock().await;
         if let Some(entry) = relays.get(vm_id) {
             if !entry.handle.is_finished() {
                 return;
@@ -211,22 +221,32 @@ impl VsockRelayManager {
             // The entry's task died (e.g. the accept loop hit a fatal
             // error); fall through and start a fresh relay.
         }
-        let Some(device_socket) = persisted_vsock_device_socket(vm_dir) else {
-            return;
-        };
-        let relay_socket = relay_socket_path(&device_socket);
-        let _ = std::fs::remove_file(&relay_socket);
-        let listener = match UnixListener::bind(&relay_socket) {
-            Ok(listener) => listener,
-            Err(e) => {
-                warn!(
-                    vm_id = %vm_id,
-                    socket = %relay_socket.display(),
-                    error = %e,
-                    "vsock relay: cannot bind the guest endpoint — guest monitoring over vsock will fail until the next VM lifecycle operation"
-                );
-                return;
+        let vm_id_owned = vm_id.to_string();
+        let vm_dir = vm_dir.to_path_buf();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let device_socket = persisted_vsock_device_socket(&vm_dir)?;
+            let relay_socket = relay_socket_path(&device_socket);
+            let _ = std::fs::remove_file(&relay_socket);
+            match UnixListener::bind(&relay_socket) {
+                Ok(listener) => Some((relay_socket, listener)),
+                Err(e) => {
+                    warn!(
+                        vm_id = %vm_id_owned,
+                        socket = %relay_socket.display(),
+                        error = %e,
+                        "vsock relay: cannot bind the guest endpoint — guest monitoring over vsock will fail until the next VM lifecycle operation"
+                    );
+                    None
+                }
             }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            error!(vm_id = %vm_id, error = %e, "vsock relay: endpoint prep task failed");
+            None
+        });
+        let Some((relay_socket, listener)) = prepared else {
+            return;
         };
         info!(
             vm_id = %vm_id,
@@ -255,11 +275,11 @@ impl VsockRelayManager {
     /// this runs on VM stop and delete). Active pipes are separate
     /// tasks; they end when their peers (a dead VMM / a reconnecting
     /// guest) close, or on the idle timeout.
-    pub fn stop(&self, vm_id: &str) {
-        let mut relays = self.relays.lock().expect("vsock relay map lock poisoned");
+    pub async fn stop(&self, vm_id: &str) {
+        let mut relays = self.relays.lock().await;
         if let Some(entry) = relays.remove(vm_id) {
             entry.handle.abort();
-            let _ = std::fs::remove_file(&entry.relay_socket);
+            let _ = tokio::fs::remove_file(&entry.relay_socket).await;
             debug!(vm_id = %vm_id, "vsock monitoring relay stopped");
         }
     }
@@ -277,7 +297,27 @@ async fn accept_loop(
     loop {
         match listener.accept().await {
             Ok((conn, _)) => {
-                if active.load(Ordering::Relaxed) >= limits.max_connections {
+                // Exact bound: compare_exchange closes the
+                // check-then-act gap that could transiently admit one
+                // connection above the limit under concurrent accepts.
+                let admitted = loop {
+                    let current = active.load(Ordering::Relaxed);
+                    if current >= limits.max_connections {
+                        break false;
+                    }
+                    if active
+                        .compare_exchange(
+                            current,
+                            current + 1,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        break true;
+                    }
+                };
+                if !admitted {
                     debug!(
                         vm_id = %vm_id,
                         active = active.load(Ordering::Relaxed),
@@ -287,7 +327,6 @@ async fn accept_loop(
                     // connect-then-EOF and retries.
                     continue;
                 }
-                active.fetch_add(1, Ordering::Relaxed);
                 let active = Arc::clone(&active);
                 let cp_target = cp_target.clone();
                 let idle_timeout = limits.idle_timeout;
@@ -561,7 +600,7 @@ mod tests {
         let vm_dir = vm_dir_with_vsock(&tmp, device_socket.to_str().unwrap());
         let relay_socket = relay_socket_path(device_socket.to_str().unwrap());
 
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
         assert!(relay_socket.exists(), "the relay binds synchronously");
 
         // A fake "VMM": connect to the relay endpoint and exchange bytes.
@@ -572,13 +611,13 @@ mod tests {
         assert_eq!(&buf, b"hello-cp", "the echo CP answer rode the pipe back");
 
         // Idempotent: a second ensure does not disturb the endpoint.
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
         guest.write_all(b"again").await.unwrap();
         let mut buf = [0u8; 5];
         guest.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"again");
 
-        manager.stop("vm-test");
+        manager.stop("vm-test").await;
         assert!(!relay_socket.exists(), "stop unlinks the endpoint");
         assert!(UnixStream::connect(&relay_socket).await.is_err());
     }
@@ -591,13 +630,15 @@ mod tests {
 
         // No vsock device in the payload: no relay, no socket, no error.
         let vm_dir = vm_dir_without_vsock(&tmp);
-        manager.ensure_started("vm-plain", &vm_dir);
+        manager.ensure_started("vm-plain", &vm_dir).await;
         assert!(
             !relay_socket_path(vm_dir.join("vsock.sock").to_str().unwrap()).exists(),
             "a non-vsock VM must not get a relay endpoint"
         );
         // And an unreadable/missing payload is the same opt-out.
-        manager.ensure_started("vm-gone", &tmp.path().join("vms").join("vm-gone"));
+        manager
+            .ensure_started("vm-gone", &tmp.path().join("vms").join("vm-gone"))
+            .await;
     }
 
     #[tokio::test]
@@ -615,7 +656,7 @@ mod tests {
         let device_socket = tmp.path().join("vsock.sock");
         let vm_dir = vm_dir_with_vsock(&tmp, device_socket.to_str().unwrap());
         let relay_socket = relay_socket_path(device_socket.to_str().unwrap());
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
 
         // First connection pipes.
         let mut first = UnixStream::connect(&relay_socket).await.unwrap();
@@ -652,7 +693,7 @@ mod tests {
         let device_socket = tmp.path().join("vsock.sock");
         let vm_dir = vm_dir_with_vsock(&tmp, device_socket.to_str().unwrap());
         let relay_socket = relay_socket_path(device_socket.to_str().unwrap());
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
 
         let mut guest = UnixStream::connect(&relay_socket).await.unwrap();
         guest.write_all(b"ping").await.unwrap();
@@ -687,7 +728,7 @@ mod tests {
         let relay_socket = relay_socket_path(device_socket.to_str().unwrap());
         std::fs::write(&relay_socket, b"stale").unwrap();
 
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
         let mut guest = UnixStream::connect(&relay_socket).await.unwrap();
         guest.write_all(b"fresh").await.unwrap();
         let mut buf = [0u8; 5];
@@ -706,17 +747,17 @@ mod tests {
         let vm_dir = vm_dir_with_vsock(&tmp, device_socket.to_str().unwrap());
         let relay_socket = relay_socket_path(device_socket.to_str().unwrap());
 
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
         // Simulate the accept loop dying: stop() removed the entry, so
         // instead force-finish the task via its handle.
         {
-            let mut relays = manager.relays.lock().unwrap();
+            let mut relays = manager.relays.lock().await;
             let entry = relays.get_mut("vm-test").unwrap();
             entry.handle.abort();
         }
         // Give the abort a beat to land.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        manager.ensure_started("vm-test", &vm_dir);
+        manager.ensure_started("vm-test", &vm_dir).await;
         let mut guest = UnixStream::connect(&relay_socket).await.unwrap();
         guest.write_all(b"revived").await.unwrap();
         let mut buf = [0u8; 7];

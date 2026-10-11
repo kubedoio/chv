@@ -1336,15 +1336,26 @@ async fn prepare_vm_resources(
 
     // G5 vsock device (legacy path): same node-authority semantics as
     // the Core runtime — strictly opt-in, durable monotonic node-scoped
-    // CID, device socket under the VM's runtime dir, fail closed.
+    // CID, device socket under the VM's runtime dir, fail closed. The
+    // allocator does blocking I/O (flock cursor); it runs on the
+    // blocking pool because this is an async context.
     let vsock = match vm_spec.vsock {
-        Some(_) => Some(
-            chv_hypervisor_api::prepare_vm_vsock_device(runtime_dir, &vm_dir).map_err(|e| {
-                ChvError::Internal {
+        Some(_) => {
+            let runtime_dir = runtime_dir.to_path_buf();
+            let vm_dir = vm_dir.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    chv_hypervisor_api::prepare_vm_vsock_device(&runtime_dir, &vm_dir)
+                })
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("vsock device preparation task failed: {e}"),
+                })?
+                .map_err(|e| ChvError::Internal {
                     reason: format!("vsock device preparation failed: {e}"),
-                }
-            })?,
-        ),
+                })?,
+            )
+        }
         None => None,
     };
 
@@ -3273,6 +3284,81 @@ mod tests {
         let config = vms.get("vm-1").unwrap();
         assert_eq!(config.cpus, 1);
         assert_eq!(config.memory_bytes, 1024);
+        // G5: a spec without the opt-in creates device-less — the
+        // legacy path never silently attaches vsock.
+        assert!(config.vsock.is_none());
+    }
+
+    /// Like [`test_cache`] but vm-1 opts into the vsock monitoring
+    /// transport, so the legacy reconcile path's device threading can
+    /// be pinned: the created payload must carry a node-allocated CID
+    /// and the device socket under the VM's runtime dir, and the node
+    /// cursor must be committed.
+    fn vsock_test_cache() -> NodeCache {
+        use crate::cache::DesiredStateFragment;
+        NodeCache {
+            node_state: "TenantReady".to_string(),
+            vm_fragments: {
+                let mut m = HashMap::new();
+                m.insert("vm-1".to_string(), DesiredStateFragment {
+                    id: "vm-1".to_string(),
+                    kind: "vm".to_string(),
+                    generation: "1".to_string(),
+                    spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-1"}],"nics":[{"network_id":"net-1","mac_address":"00:00:00:00:00:01","ip_address":"10.0.0.2"}],"vsock":{"enabled":true}}"#.to_vec(),
+                    policy_json: vec![],
+                    updated_at: "2024-01-01T00:00:00Z".to_string(),
+                    updated_by: "cp".to_string(),
+                });
+                m
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_vms_threads_the_vsock_opt_in() {
+        // G5 pin: the legacy reconciler's create path allocates the
+        // device for an opted-in VM (fail closed, node-scoped CID from
+        // the durable cursor, socket under the VM's runtime dir). The
+        // opt-out shape is pinned by `reconciler_creates_missing_vm`.
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let mut rec = Reconciler::new_legacy(
+            Arc::new(tokio::sync::Mutex::new(vsock_test_cache())),
+            VmRuntime::new(mock.clone()),
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.reconcile_vms().await.unwrap();
+
+        let vms = mock.vms.lock().unwrap();
+        let config = vms.get("vm-1").expect("vm-1 created");
+        let vsock = config
+            .vsock
+            .as_ref()
+            .expect("opted-in VM carries the device");
+        assert!(
+            vsock.cid >= 1000,
+            "CID must come from the node allocator (floor 1000), got {}",
+            vsock.cid
+        );
+        assert_eq!(
+            vsock.socket_path,
+            dir.path().join("vms").join("vm-1").join("vsock.sock"),
+            "the device socket lives under the VM's runtime dir"
+        );
+        let cursor = std::fs::read_to_string(dir.path().join("vsock-cid-cursor"))
+            .expect("the node CID cursor is committed");
+        assert_eq!(cursor, vsock.cid.to_string());
     }
 
     #[tokio::test]
