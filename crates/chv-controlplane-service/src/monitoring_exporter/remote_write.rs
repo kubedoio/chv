@@ -109,9 +109,13 @@ pub struct RemoteWriteBody {
     /// is a programming error surfaced as a defensive signal, never
     /// silent data loss.
     pub skipped_unknown_metric: usize,
-    /// Oldest sample timestamp in the body (lag accounting).
+    /// Oldest sample timestamp in the body. Diagnostics and test
+    /// assertions only — the worker parks its cursor at PASS time by
+    /// design, so this is not an input to worker accounting.
     pub oldest_timestamp_ms: Option<u64>,
-    /// Newest sample timestamp in the body (cursor advance).
+    /// Newest sample timestamp in the body. Diagnostics and test
+    /// assertions only — same: the cursor advance is pass-time, not
+    /// newest-sample-time.
     pub newest_timestamp_ms: Option<u64>,
 }
 

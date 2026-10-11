@@ -711,6 +711,27 @@ async fn store_read_failures_are_not_destination_failures() {
     let outcome = f.exporter.run_pass(t0 + 30_000).await;
     assert_eq!(outcome, PassOutcome::Complete);
     assert!(!f.exporter.is_degraded());
+    assert_eq!(f.exporter.consecutive_failures(), 0);
+
+    // Enter a destination outage FIRST, so the interactions are
+    // pinned from a degraded state: a subsequent store failure must
+    // leave the degraded marking sticky (a local store problem is
+    // not a recovery signal) and must neither extend nor reset the
+    // destination backoff ladder.
+    f.transport.set_fail(true);
+    f.seed(
+        TargetKind::Node,
+        "node-1",
+        "node.cpu.capacity_ratio",
+        Source::NodeOs,
+        t0 + 40_000,
+        0.6,
+    )
+    .await;
+    let outcome = f.exporter.run_pass(t0 + 60_000).await;
+    assert_eq!(outcome, PassOutcome::DestinationFailed);
+    assert!(f.exporter.is_degraded());
+    assert_eq!(f.exporter.consecutive_failures(), 1);
 
     // Break the store's series table out from under the exporter.
     let pool = sqlx::SqlitePool::connect(&f.db_url).await.unwrap();
@@ -719,15 +740,20 @@ async fn store_read_failures_are_not_destination_failures() {
         .await
         .unwrap();
 
-    let outcome = f.exporter.run_pass(t0 + 60_000).await;
+    let outcome = f.exporter.run_pass(t0 + 90_000).await;
     assert_eq!(
         outcome,
         PassOutcome::StoreFailed,
         "a store read failure must be typed as StoreFailed, not DestinationFailed"
     );
     assert!(
-        !f.exporter.is_degraded(),
-        "a store read failure must not mark the destination degraded"
+        f.exporter.is_degraded(),
+        "a store read failure must not clear the destination-degraded marking"
+    );
+    assert_eq!(
+        f.exporter.consecutive_failures(),
+        1,
+        "a store read failure must neither extend nor reset the destination backoff ladder"
     );
     assert!(
         f.exporter.last_error().unwrap().contains("list_targets"),

@@ -112,16 +112,13 @@ pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
         tracing::subscriber::set_global_default(subscriber)?;
     }
 
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    metrics::set_global_recorder(recorder)
-        .map_err(|e| format!("failed to install metrics recorder: {e}"))?;
-
-    let _ = PROMETHEUS_HANDLE.set(handle);
+    // Order-independent with `install_prometheus_recorder`: if that
+    // already installed the recorder (tests), this is a no-op instead
+    // of an error; a recorder set by anyone else still fails loudly.
+    install_prometheus_recorder()?;
 
     Ok(())
 }
-
 pub fn operation_span(op_id: &str) -> Span {
     tracing::info_span!("operation", operation_id = op_id)
 }

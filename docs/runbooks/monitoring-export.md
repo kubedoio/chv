@@ -81,7 +81,7 @@ The exporter's own health is visible on the admin `/metrics` endpoint as three g
 
 | Gauge | Meaning |
 |---|---|
-| `chv_export_lag_seconds` | export backlog: age of the oldest unexported window |
+| `chv_export_lag_seconds` | export backlog: age of the oldest unexported window, including windows held by a rejected query, a render failure, or the first failed push. During a monitoring-store read failure the gauge holds its last value (no pass completes, so there is no new floor — the store-failure warn log is the live signal) |
 | `chv_export_degraded` | 0/1 — 1 means the destination is failing (backoff + retry is automatic); store read failures do NOT set this (they retry at the normal cadence with a warn log) |
 | `chv_export_samples_total` | counter of exported samples |
 

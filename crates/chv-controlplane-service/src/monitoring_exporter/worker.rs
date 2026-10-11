@@ -16,8 +16,11 @@
 //!
 //! Lag accounting: the cursor is the newest exported timestamp per
 //! (target kind, id); targets without data advance to `now` on every
-//! pass, so `now - min(cursor)` is the export's true backlog. Beyond
-//! `lag_degraded` (or after a failed pass) the worker warns and sets
+//! pass, so `now - min(cursor)` is the export's true backlog — with
+//! every held window (a rejected query, a render failure, the first
+//! failed push) folded into the floor so the gauge names the outage
+//! instead of reading zero through it. Beyond `lag_degraded` (or
+//! after a destination push failure) the worker warns and sets
 //! `chv_export_degraded` — visible on the admin `/metrics` alongside
 //! `chv_export_lag_seconds` and `chv_export_samples_total`.
 
@@ -339,17 +342,20 @@ impl MonitoringExporter {
                 Ok(targets) => {
                     if targets.len() >= MAX_TARGETS_PER_KIND {
                         // The store's list_targets caps at the LIMIT
-                        // with no pagination: targets beyond the
-                        // first page of a kind are never walked, and
-                        // the walk is the same first page every pass.
-                        // Loud, not silent starvation — the operator
-                        // must know the export is partial.
+                        // with no pagination, so the walk is the same
+                        // first page every pass. The page length
+                        // alone cannot distinguish exactly-N from
+                        // more-than-N — the warning is accurate
+                        // either way: IF there are targets beyond the
+                        // cap, they are not walked. Loud, not silent
+                        // starvation.
                         tracing::warn!(
                             target_kind = kind.as_str(),
                             limit = MAX_TARGETS_PER_KIND,
-                            "monitoring export target walk hit the list_targets cap; \
-                             targets beyond the first {MAX_TARGETS_PER_KIND} of this kind \
-                             are NOT exported in v1"
+                            "monitoring export target walk hit the list_targets cap; if \
+                             this kind has more than {MAX_TARGETS_PER_KIND} targets, the \
+                             tail beyond the first {MAX_TARGETS_PER_KIND} is NOT exported \
+                             in v1"
                         );
                     }
                     targets
@@ -433,6 +439,15 @@ impl MonitoringExporter {
                             // authority) and never advances the
                             // cursor: the window is retried next pass,
                             // bounded by the backfill clamp.
+                            // Deliberate asymmetry with list_targets
+                            // (which DOES fail the pass as
+                            // StoreFailed): a per-target rejection is
+                            // scoped to that target and already
+                            // visible as its own warn + held cursor +
+                            // lag contribution, while a failed
+                            // target listing means NO target can be
+                            // walked — a different, pass-level
+                            // condition.
                             tracing::warn!(
                                 target_kind = kind.as_str(),
                                 target_id = %target_id,
@@ -445,6 +460,10 @@ impl MonitoringExporter {
                     }
                 }
                 if query_failed {
+                    // The held window IS the backlog: fold it into the
+                    // lag floor so the gauge names what this target is
+                    // accumulating while its query is rejected.
+                    min_cursor = Some(min_cursor.unwrap_or(*cursor).min(*cursor));
                     continue;
                 }
 
@@ -482,12 +501,14 @@ impl MonitoringExporter {
                         // self-encoded in-memory buffer); a render
                         // failure is our own bug, never a reason to
                         // panic — skip the target, hold its cursor,
-                        // keep walking.
+                        // keep walking. The held window still counts
+                        // toward the lag floor.
                         self.last_error = Some(error.0.clone());
                         tracing::warn!(
                             error = %error.0,
                             "monitoring export render failed; target window held for retry"
                         );
+                        min_cursor = Some(min_cursor.unwrap_or(*cursor).min(*cursor));
                         continue;
                     }
                 };
@@ -524,12 +545,15 @@ impl MonitoringExporter {
                         // Destination-level failure: stop the pass
                         // with ONE request against the struggling
                         // receiver; the cursor stays put so the next
-                        // pass retries exactly this window.
+                        // pass retries exactly this window. The held
+                        // window is the lag floor — the gauge must
+                        // name the outage, not read zero through it.
                         self.last_error = Some(error.0.clone());
                         tracing::warn!(
                             error = %error.0,
                             "monitoring export push failed; will retry with backoff"
                         );
+                        min_cursor = Some(min_cursor.unwrap_or(*cursor).min(*cursor));
                         outcome = PassOutcome::DestinationFailed;
                         break;
                     }
@@ -583,7 +607,14 @@ impl MonitoringExporter {
             // destination backoff ladder.
             PassOutcome::StoreFailed => self.consecutive_failures,
         };
-        metrics::gauge!(METRIC_EXPORT_LAG_SECONDS).set(lag_ms as f64 / 1000.0);
+        // The lag gauge holds its last value through a store read
+        // failure: no pass completed, so there is no new floor to
+        // report — zeroing it would hide the very backlog the
+        // failure is accumulating (the store-failure warn log is the
+        // live signal; the runbook documents this).
+        if outcome != PassOutcome::StoreFailed {
+            metrics::gauge!(METRIC_EXPORT_LAG_SECONDS).set(lag_ms as f64 / 1000.0);
+        }
         metrics::gauge!(METRIC_EXPORT_DEGRADED).set(if degraded { 1.0 } else { 0.0 });
         outcome
     }
@@ -595,6 +626,12 @@ impl MonitoringExporter {
 
     pub fn is_degraded(&self) -> bool {
         self.degraded
+    }
+
+    /// The destination backoff ladder position (tests pin that a
+    /// store read failure neither extends nor resets it).
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
     }
 
     pub fn last_error(&self) -> Option<&str> {

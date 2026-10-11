@@ -108,8 +108,8 @@ max_batch = 10
 # export is an egress surface, so the data selection is always an
 # operator decision. The worker degrades but never blocks: ingest,
 # queries, alerting and VM lifecycle are unaffected by destination
-# outages (bounded backfill, skipped-and-counted beyond it, degraded
-# gauge + warnings while behind).
+# outages (bounded backfill, skipped with a time-range warning
+# beyond it, degraded gauge + warnings while behind).
 #
 # Requirements when enabled: an https:// destination (URL-validated:
 # no credentials in the URL, no link-local/unspecified IPs; internal

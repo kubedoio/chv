@@ -177,6 +177,16 @@ impl VictoriaMetrics {
             .arg(&storage_dir)
             .arg("-httpListenAddr")
             .arg(format!("127.0.0.1:{port}"))
+            // Rig-only knob, and an honest one: VictoriaMetrics
+            // guarantees in-memory data survives SIGKILL only after
+            // an `-inmemoryDataFlushInterval` flush (default 5 s).
+            // The outage leg kills the process hard, so it runs at
+            // the 1 s minimum and waits out the flush window before
+            // the kill — otherwise the receiver's own crash window
+            // eats the pre-outage sample and "both sides of the
+            // outage are queryable" would be unprovable by
+            // construction.
+            .arg("-inmemoryDataFlushInterval=1s")
             .arg("-tls")
             .arg("-tlsCertFile")
             .arg(&cert_path)
@@ -582,6 +592,12 @@ async fn destination_outage_degrades_and_recovers_without_loss() {
     );
     assert_eq!(exporter.exported_samples(), 1);
 
+    // Let the receiver make the pushed sample SIGKILL-durable before
+    // the outage (VM's own flush contract — see start_on_port). The
+    // EXPORTER has done its job the moment the push was accepted;
+    // this wait is about the receiver's crash window, not ours.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // OUTAGE: kill the destination, then produce a fresh sample. The
     // pass must fail at the first push, hold the cursor and degrade —
     // never panic, never block anyone else. The honest wait lets the
@@ -729,9 +745,11 @@ fn parse_tiers() -> Option<Vec<usize>> {
 }
 
 /// One series of the node-batch scale shape: a real registry metric a
-/// node reports for a VM through the gRPC terminal write path
-/// (dimensionless gauges, then net/block counter families fanned out
-/// over interfaces/devices — the production shape of a busy VM).
+/// node reports for a VM through the store's node-batch write path
+/// (the terminal write path the gRPC ingest service lands in — the
+/// transport layer itself is measured by the guest mTLS leg, not this
+/// one) (dimensionless gauges, then net/block counter families fanned
+/// out over interfaces/devices — the production shape of a busy VM).
 struct SeriesSpec {
     metric_id: &'static str,
     dimension: Option<(&'static str, String)>,
