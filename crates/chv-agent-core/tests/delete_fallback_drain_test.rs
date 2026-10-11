@@ -63,6 +63,7 @@ fn definition(vm_id: &str) -> VmDefinition {
         resource_version: ResourceVersion::new(1).expect("version"),
         cloud_init_userdata: None,
         hypervisor_tuning: None,
+        vsock: None,
     }
 }
 

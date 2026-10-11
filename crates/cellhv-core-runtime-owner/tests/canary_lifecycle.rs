@@ -69,6 +69,7 @@ fn create_submission(vm_id: &str, op_id: &str) -> SubmitMutation {
         resource_version: version(1),
         cloud_init_userdata: None,
         hypervisor_tuning: None,
+        vsock: None,
     };
     base_submission(vm_id, op_id, MutationCommand::CreateVm { definition })
 }

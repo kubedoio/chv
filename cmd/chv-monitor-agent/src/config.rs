@@ -57,6 +57,42 @@ pub struct AgentConfig {
     /// by default; the manager can never enable or supply plugins.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// G5: how the agent reaches the manager. `tcp` (the default)
+    /// dials the management network exactly as before; `vsock` rides
+    /// the VM's vsock device (which the deployment opted the VM into
+    /// via `vsock_enabled`) through the node's relay — same TLS/HTTP
+    /// stack, same credentials. Additive: a pre-G5 config parses
+    /// unchanged.
+    #[serde(default)]
+    pub transport: TransportConfig,
+}
+
+/// Manager transport selection (G5, ADR-026). `tcp` is the default and
+/// behaves exactly like pre-G5 builds; `vsock` redirects the manager
+/// dial onto the VM's vsock device — see `transport.rs` for why the
+/// TLS/HTTP stack itself is unchanged.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportConfig {
+    /// `type` in TOML; `kind` in Rust (`type` is reserved).
+    #[serde(default, rename = "type")]
+    pub kind: TransportKind,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            kind: TransportKind::Tcp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    #[default]
+    Tcp,
+    Vsock,
 }
 
 /// Collector family toggles (component spec "collection profiles").
@@ -535,6 +571,9 @@ mod tests {
             config.plugins.directory,
             PathBuf::from("/etc/chv-monitor/plugins.d")
         );
+        // G5 default: the example's [transport] section stays
+        // commented out, so the shipped default is plain TCP.
+        assert_eq!(config.transport.kind, super::TransportKind::Tcp);
     }
 
     const BASE: &str = "server_url = \"https://m\"\nmanager_ca_path = \"/ca.pem\"\n";
@@ -548,6 +587,44 @@ mod tests {
         assert!(!c.collectors.processes);
         assert!(c.checks.http.is_empty());
         assert!(!c.plugins.enabled);
+    }
+
+    #[test]
+    fn transport_section_defaults_and_values() {
+        // G5 is additive: no [transport] section means plain TCP with
+        // the pre-G5 meaning.
+        let c = AgentConfig::from_toml(BASE).unwrap();
+        assert_eq!(c.transport.kind, super::TransportKind::Tcp);
+
+        // Explicit values.
+        let c = AgentConfig::from_toml(&format!("{BASE}[transport]\ntype = \"tcp\"\n")).unwrap();
+        assert_eq!(c.transport.kind, super::TransportKind::Tcp);
+        let c = AgentConfig::from_toml(&format!("{BASE}[transport]\ntype = \"vsock\"\n")).unwrap();
+        assert_eq!(c.transport.kind, super::TransportKind::Vsock);
+
+        // The example's documented vsock line is exactly this shape.
+        let example = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/monitor-agent.toml"
+        ))
+        .unwrap();
+        let configured = example
+            .replace("# server_url = ", "server_url = ")
+            .replace("# manager_ca_path = ", "manager_ca_path = ")
+            .replace("# [transport]\n# type = ", "[transport]\ntype = ");
+        let c = AgentConfig::from_toml(&configured).unwrap();
+        assert_eq!(c.transport.kind, super::TransportKind::Vsock);
+
+        // Unknown kinds and unknown fields are rejected loudly.
+        let err =
+            AgentConfig::from_toml(&format!("{BASE}[transport]\ntype = \"carrier-pigeon\"\n"))
+                .unwrap_err();
+        assert!(matches!(err, super::ConfigError::Parse(_)));
+        let err = AgentConfig::from_toml(&format!(
+            "{BASE}[transport]\ntype = \"vsock\"\nextra = true\n"
+        ))
+        .unwrap_err();
+        assert!(matches!(err, super::ConfigError::Parse(_)));
     }
 
     #[test]

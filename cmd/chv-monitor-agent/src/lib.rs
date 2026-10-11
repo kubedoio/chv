@@ -9,9 +9,11 @@ pub mod checks;
 pub mod client;
 pub mod config;
 pub mod credential;
+pub mod fsutil;
 pub mod plugins;
 pub mod spool;
 pub mod state;
+pub mod transport;
 pub mod wire;
 
 pub use agent::{Agent, AgentError, TickOutcome};

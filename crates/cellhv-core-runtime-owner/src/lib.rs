@@ -876,6 +876,7 @@ mod tests {
                     resource_version: ResourceVersion::new(1).unwrap(),
                     cloud_init_userdata: None,
                     hypervisor_tuning: None,
+                    vsock: None,
                 },
             },
         }
@@ -1295,6 +1296,7 @@ mod tests {
                     resource_version: ResourceVersion::new(1).unwrap(),
                     cloud_init_userdata: None,
                     hypervisor_tuning: None,
+                    vsock: None,
                 },
             },
         }

@@ -908,6 +908,7 @@ mod tests {
             api_socket_path: std::path::PathBuf::from("/tmp/chv-test-vm-1.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.start_vm("vm-1", None).await.unwrap();
@@ -1134,6 +1135,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/g2-vm/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         checkpoint("creating vm");
         runtime

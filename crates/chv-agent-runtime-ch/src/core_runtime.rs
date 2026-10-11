@@ -355,6 +355,42 @@ impl CloudHypervisorCoreRuntime {
             }
         }
 
+        // G5 vsock device: strictly opt-in. The definition carries only
+        // the opt-in marker — the node authority owns the addressing.
+        // CID: durable, monotonic, node-scoped allocation (never reused;
+        // a VMM respawn keeps the CID persisted in vm-config.json).
+        // Socket: the device's host-side socket under the VM's runtime
+        // dir — the VMM binds it (the host→guest entry; unused by the
+        // monitoring transport, which is guest-initiated) and connects
+        // out to "<socket>_<port>" per guest connection, which the
+        // node-side relay (chv-agent) listens on. Fail closed: an
+        // opted-in VM is never silently created device-less. The
+        // allocator does blocking I/O (flock cursor); it runs on the
+        // blocking pool because this is an async context.
+        let vsock = match &definition.vsock {
+            Some(_) => {
+                let runtime_dir = self.runtime_dir.clone();
+                let vm_dir_for_vsock = vm_dir.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        chv_hypervisor_api::prepare_vm_vsock_device(&runtime_dir, &vm_dir_for_vsock)
+                    })
+                    .await
+                    .map_err(|e| {
+                        Self::map_err(ChvError::Internal {
+                            reason: format!("vsock device preparation task failed: {e}"),
+                        })
+                    })?
+                    .map_err(|e| {
+                        Self::map_err(ChvError::Internal {
+                            reason: format!("vsock device preparation failed: {e}"),
+                        })
+                    })?,
+                )
+            }
+            None => None,
+        };
+
         let config = VmConfig {
             vm_id: vm_id.to_string(),
             cpus: definition.compute.vcpus,
@@ -366,6 +402,7 @@ impl CloudHypervisorCoreRuntime {
             api_socket_path: vm_api_socket(&vm_dir),
             cloud_init_userdata: definition.cloud_init_userdata.clone(),
             hypervisor_overrides: definition.hypervisor_tuning.as_ref().map(tuning_to_legacy),
+            vsock,
         };
 
         if let Err(e) = self.adapter.create_vm(&config, Some(op_id)).await {

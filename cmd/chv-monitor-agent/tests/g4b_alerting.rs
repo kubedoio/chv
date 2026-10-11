@@ -837,6 +837,7 @@ async fn g4b_real_vm_alerting_and_signed_notifications() {
         api_socket_path: vm_dir.join("vm.sock"),
         cloud_init_userdata: Some(guest_userdata(&ssh_pubkey)),
         hypervisor_overrides: None,
+        vsock: None,
     };
 
     checkpoint("creating vm (production adapter, seed built)");

@@ -8,6 +8,7 @@ use cellhv_core_operations::{MigrationDisposition, OperationService, OperationSe
 use cellhv_core_types::{
     BootSpec, ComputeSpec, HostId, HostIdentity, NetworkAttachmentRef, ObservedPowerState,
     RequestedPowerState, ResourceVersion, StorageAttachmentRef, VmDefinition, VmId,
+    VsockDeviceSpec,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -176,6 +177,11 @@ fn convert_vm(
         .hypervisor_overrides
         .map(|value| parse_hypervisor_tuning(id, value))
         .transpose()?;
+    // G5 vsock opt-in: carried across the one-time legacy-cache → Core
+    // migration verbatim (a VM created with the device before the
+    // migration keeps it; the definition validator re-checks the
+    // enabled marker).
+    let vsock = spec.vsock;
     let requested_power_state = match spec.desired_state.as_str() {
         "Running" => RequestedPowerState::Running,
         "Stopped" => RequestedPowerState::Stopped,
@@ -263,6 +269,7 @@ fn convert_vm(
         resource_version: version,
         cloud_init_userdata: spec.cloud_init_userdata,
         hypervisor_tuning,
+        vsock,
     };
     definition
         .validate()
@@ -500,6 +507,13 @@ struct LegacyVmSpec {
     cloud_init_userdata: Option<String>,
     #[serde(default)]
     hypervisor_overrides: Option<serde_json::Value>,
+    /// G5: the vsock device opt-in. `deny_unknown_fields` means this
+    /// MUST be declared — a cache written by a post-G5 agent (whose VM
+    /// fragments carry the key once the CP produces it) would otherwise
+    /// be rejected as unsupported data on the core-activation import
+    /// path. Carried one-to-one into the Core definition.
+    #[serde(default)]
+    vsock: Option<VsockDeviceSpec>,
 }
 fn running() -> String {
     "Running".to_owned()
@@ -710,6 +724,43 @@ mod tests {
             plan(&serde_json::to_vec(&value).unwrap()),
             Err(MigrationError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn vsock_opt_in_imports_and_pre_g5_caches_stay_deviceless() {
+        // G5: the vsock opt-in is declared on LegacyVmSpec — a post-G5
+        // cache (whose spec_json carries the key once the CP produces
+        // it) imports instead of failing as unsupported data — and is
+        // carried one-to-one into the Core definition. A pre-G5 cache
+        // (no key) imports deviceless. The enabled:false double
+        // negative is rejected by the definition validation the import
+        // runs (never silently normalized to the opt-out).
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        let mut spec: serde_json::Value = serde_json::from_slice(
+            &value["vm_fragments"]["vm-a"]["spec_json"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        spec["vsock"] = json!({ "enabled": true });
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        let import = plan(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            import.definitions()[0].vsock,
+            Some(VsockDeviceSpec { enabled: true })
+        );
+
+        // Pre-G5 cache: no key, no device.
+        let plain = plan(&source("1")).unwrap();
+        assert_eq!(plain.definitions()[0].vsock, None);
+
+        // The double negative never crosses the import boundary.
+        spec["vsock"] = json!({ "enabled": false });
+        value["vm_fragments"]["vm-a"]["spec_json"] = json!(serde_json::to_vec(&spec).unwrap());
+        assert!(plan(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

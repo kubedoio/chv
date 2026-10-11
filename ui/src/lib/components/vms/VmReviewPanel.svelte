@@ -7,6 +7,7 @@
 		vcpu: number;
 		memoryMb: number;
 		username: string;
+		vsockEnabled: boolean;
 		overrideSummary: string;
 	}
 
@@ -18,6 +19,7 @@
 		vcpu,
 		memoryMb,
 		username,
+		vsockEnabled,
 		overrideSummary
 	}: Props = $props();
 </script>
@@ -53,6 +55,10 @@
 		<div class="flex justify-between border-b border-line pb-2">
 			<span class="text-muted">Hypervisor:</span>
 			<span class="font-medium text-ink">{overrideSummary}</span>
+		</div>
+		<div class="flex justify-between border-b border-line pb-2">
+			<span class="text-muted">Vsock Monitoring:</span>
+			<span class="font-medium text-ink">{vsockEnabled ? 'Enabled' : 'Off'}</span>
 		</div>
 	</div>
 

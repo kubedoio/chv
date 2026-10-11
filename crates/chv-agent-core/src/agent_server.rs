@@ -1247,6 +1247,31 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }
 
         let vm_dir = vm_runtime_dir(&self.runtime_dir, &vm.vm_id);
+        // G5 vsock device (legacy direct-RPC path): same node-authority
+        // semantics as the reconciler and the Core runtime — strictly
+        // opt-in, durable monotonic node-scoped CID, device socket
+        // under the VM's runtime dir, fail closed. The allocator does
+        // blocking I/O (flock cursor); it runs on the blocking pool
+        // because this is an async context.
+        let vsock = match vm_spec.vsock {
+            Some(_) => {
+                let runtime_dir = self.runtime_dir.clone();
+                let vm_dir_for_vsock = vm_dir.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        chv_hypervisor_api::prepare_vm_vsock_device(&runtime_dir, &vm_dir_for_vsock)
+                    })
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("vsock device preparation task failed: {e}"))
+                    })?
+                    .map_err(|e| {
+                        Status::internal(format!("vsock device preparation failed: {e}"))
+                    })?,
+                )
+            }
+            None => None,
+        };
         let config = VmConfig {
             vm_id: vm.vm_id.clone(),
             cpus: vm_spec.cpus,
@@ -1258,6 +1283,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             api_socket_path: vm_dir.join("vm.sock"),
             cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
             hypervisor_overrides: vm_spec.hypervisor_overrides.clone(),
+            vsock,
         };
         self.vm_runtime
             .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))
@@ -4454,6 +4480,7 @@ mod tests {
             api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         runtime
             .create_vm("vm-1", "1", &config, Some("op-1"))
@@ -4532,6 +4559,7 @@ mod tests {
             api_socket_path: std::path::PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         };
         server
             .vm_runtime

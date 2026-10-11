@@ -875,6 +875,7 @@ async fn g4_real_vm_collectors_checks_and_plugin_constraints() {
         api_socket_path: vm_dir.join("vm.sock"),
         cloud_init_userdata: Some(guest_userdata(&ssh_pubkey)),
         hypervisor_overrides: None,
+        vsock: None,
     };
 
     checkpoint("creating vm (production adapter, seed built)");

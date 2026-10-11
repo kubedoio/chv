@@ -15,6 +15,7 @@
 		loadingData: boolean;
 		advancedOpen: boolean;
 		hvOverrides: Record<string, boolean | string | undefined>;
+		vsockEnabled: boolean;
 		submitting: boolean;
 		onNameBlur?: () => void;
 		onImageLinkClick?: () => void;
@@ -33,6 +34,7 @@
 		loadingData,
 		advancedOpen = $bindable(),
 		hvOverrides = $bindable(),
+		vsockEnabled = $bindable(),
 		submitting,
 		onNameBlur,
 		onImageLinkClick
@@ -178,6 +180,22 @@
 		{#if advancedOpen}
 			<div class="mt-3 space-y-3 rounded border border-line bg-chrome/40 p-3">
 				<p class="text-xs text-muted">Select "Inherit" to use the global setting, or explicitly override for this VM.</p>
+
+				<div class="flex items-center justify-between gap-3 border-b border-line pb-3">
+					<span class="text-sm text-ink">
+						Vsock Monitoring Transport
+						<span class="block text-xs text-muted">
+							Attach a virtio-vsock device for guest monitoring without a management network
+						</span>
+					</span>
+					<input
+						type="checkbox"
+						checked={vsockEnabled}
+						onchange={(e) => (vsockEnabled = e.currentTarget.checked)}
+						class="h-4 w-4"
+						disabled={submitting}
+					/>
+				</div>
 
 				{#each booleanOverrides as item}
 					<div class="flex items-center justify-between gap-3">

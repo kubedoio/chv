@@ -6,5 +6,5 @@
 
 pub use chv_hypervisor_api::{
     AddDiskParams, AddNetParams, HypervisorAdapter as CloudHypervisorAdapter, VmConfig, VmCounters,
-    VmDiskConfig, VmInfo, VmNicConfig,
+    VmDiskConfig, VmInfo, VmNicConfig, VmVsockConfig,
 };

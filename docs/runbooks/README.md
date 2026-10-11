@@ -13,6 +13,7 @@ This directory contains operational runbooks for backup, restore, and disaster r
 | [Full Site Recovery](full-site-recovery.md) | Rebuild entire site from backups | Manual | 1–4 hrs |
 | [Monitoring Store](monitoring-store.md) | Monitoring history degraded/corrupted/disabled (retention, disk headroom, reset) | Automatic degradation + manual recovery | 5–10 min |
 | [Alerting and Notifications](alerting.md) | Alert rules, incidents, webhook/Slack delivery (configuration, secret rotation, dead-letter triage) | Automatic evaluation + manual configuration | 5–15 min |
+| [VM Monitoring vsock Transport](vm-monitoring-vsock.md) | Guest monitoring over the optional vsock device (opt-in, relay diagnosis, transport switch, batch enrollment) | Automatic relay rebind + manual diagnosis | 5–15 min |
 
 ## Severity Levels
 

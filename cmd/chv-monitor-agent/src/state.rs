@@ -109,11 +109,11 @@ impl AgentState {
     }
 }
 
-/// Write via tmp+rename so a crash never leaves a torn state file.
+/// Write via tmp+fsync+rename so a crash never leaves a torn OR EMPTY
+/// state file — a rename can reach disk before the data it points at
+/// when the guest is hard-reset (see `fsutil`).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    crate::fsutil::write_durable(path, bytes, 0o600)
 }
 
 #[cfg(test)]

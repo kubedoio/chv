@@ -12,6 +12,8 @@ use crate::wire::{
 pub enum ClientError {
     #[error("transport failure: {0}")]
     Transport(#[from] reqwest::Error),
+    #[error("invalid server_url: {0}")]
+    InvalidServerUrl(String),
     #[error("failed to decode manager response: {0}")]
     Decode(#[from] serde_json::Error),
     #[error("manager refused: status {status} code={code} message={message}")]
@@ -32,10 +34,18 @@ impl ManagerClient {
     /// Build a client trusting `manager_ca_pem` for the manager's
     /// server certificate, optionally presenting the agent credential
     /// as the TLS client identity.
+    ///
+    /// G5: pass a `transport` to redirect the TCP dial onto the VM's
+    /// vsock device (loopback forwarder → host relay). Everything
+    /// above the dial — the URL, TLS SNI, certificate validation, the
+    /// mTLS identity — is IDENTICAL for both transports (design D1:
+    /// one TLS/HTTP stack; the transport choice lives strictly below
+    /// it). `None` dials the management network as before.
     pub fn new(
         server_url: &str,
         manager_ca_pem: &str,
         credential: Option<&StoredCredential>,
+        transport: Option<&crate::transport::VsockTransport>,
     ) -> Result<Self, ClientError> {
         let mut builder = reqwest::Client::builder()
             .tls_built_in_root_certs(false)
@@ -43,6 +53,16 @@ impl ManagerClient {
             // Long enough for slow cold TLS handshakes, short enough
             // that an unresponsive manager cannot stall a tick.
             .timeout(std::time::Duration::from_secs(30));
+        if let Some(transport) = transport {
+            let host = crate::transport::server_host(server_url).ok_or_else(|| {
+                ClientError::InvalidServerUrl(format!(
+                    "cannot extract the TLS host from {server_url:?}"
+                ))
+            })?;
+            // The pipe IS the network path: a configured proxy would
+            // bypass or break it, so vsock mode never uses one.
+            builder = builder.resolve(&host, transport.loopback()).no_proxy();
+        }
         if let Some(cred) = credential {
             let identity_pem = format!("{}\n{}", cred.certificate_pem, cred.private_key_pem);
             builder = builder.identity(reqwest::Identity::from_pem(identity_pem.as_bytes())?);

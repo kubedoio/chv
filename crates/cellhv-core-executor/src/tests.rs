@@ -50,6 +50,7 @@ fn submit(vm: &str, op: &str) -> SubmitMutation {
                 resource_version: ResourceVersion::new(1).unwrap(),
                 cloud_init_userdata: None,
                 hypervisor_tuning: None,
+                vsock: None,
             },
         },
     }

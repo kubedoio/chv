@@ -39,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!(
         server_url = %config.server_url,
+        transport = ?config.transport.kind,
         interval_seconds = config.interval_seconds,
         spool_dir = %config.spool_dir.display(),
         "guest monitoring agent starting"

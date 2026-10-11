@@ -356,6 +356,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 image_ref: spec.image_ref,
                 boot_mode: spec.boot_mode,
                 desired_power_state: spec.desired_power_state,
+                vsock_enabled: None,
                 requested_unix_ms: now,
             })
             .await

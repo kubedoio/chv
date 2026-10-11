@@ -595,6 +595,7 @@ async fn g3_real_vm_guest_agent_enrolls_collects_and_revokes() {
         api_socket_path: vm_dir.join("vm.sock"),
         cloud_init_userdata: Some(guest_userdata()),
         hypervisor_overrides: None,
+        vsock: None,
     };
 
     checkpoint("creating vm (production adapter, seed built)");

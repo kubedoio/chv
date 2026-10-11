@@ -12,7 +12,8 @@ use cellhv_core_operations::{MutationCommand, SubmitMutation};
 use cellhv_core_types::{
     BootSpec, ComputeSpec, HypervisorTuning, IdempotencyKey, NetworkAttachmentRef, NicAddressing,
     ObservedPowerState, OperationId, OperationRequestMetadata, RequestedPowerState,
-    ResourceVersion, StorageAttachmentRef, VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
+    ResourceVersion, StorageAttachmentRef, VmDefinition, VmId, VsockDeviceSpec,
+    LEGACY_OPERATION_ID_PREFIX,
 };
 use cellhv_nodecache_migration::{legacy_network_attachment_id, legacy_storage_attachment_id};
 use chv_errors::ChvError;
@@ -286,6 +287,11 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
         _ => return invalid("desired_state", "must be Running or Stopped"),
     };
     let hypervisor_tuning = spec.hypervisor_overrides.map(tuning_from_legacy);
+    // G5 vsock opt-in: the spec marker maps one-to-one onto the Core
+    // mirror (the legacy boundary has already rejected the
+    // enabled:false double negative before we get here; the definition
+    // validator re-checks it — defense in depth at the Core boundary).
+    let vsock = spec.vsock.map(|v| VsockDeviceSpec { enabled: v.enabled });
     // An empty (or whitespace) seed path is semantically absent — the
     // executor treats it that way, and normalizing here keeps the durable
     // definition free of Some("") sentinel values that older validators
@@ -363,6 +369,7 @@ fn convert_create_spec(vm_id: &str, spec: VmSpec) -> Result<VmDefinition, ChvErr
         resource_version: ResourceVersion::new(1).expect("one is a valid resource version"),
         cloud_init_userdata: spec.cloud_init_userdata,
         hypervisor_tuning,
+        vsock,
     };
     definition.validate()?;
     Ok(definition)
@@ -454,6 +461,7 @@ mod tests {
             desired_state: "Stopped".to_owned(),
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+            vsock: None,
         }
     }
 
@@ -763,6 +771,22 @@ mod tests {
         assert_eq!(tuning.serial_mode.as_deref(), Some("Null"));
         assert_eq!(tuning.console_mode.as_deref(), Some("Pty"));
         assert_eq!(tuning.tpm_socket_path.as_deref(), Some("/run/tpm.sock"));
+    }
+
+    #[test]
+    fn vsock_opt_in_maps_to_the_core_mirror() {
+        // G5 parity pin: the legacy spec's opt-in marker reaches the
+        // durable Core definition verbatim — Some({enabled: true})
+        // carries across, and None (every pre-G5 spec) stays None. The
+        // adapter never invents a device and never drops one; the Core
+        // validator owns the enabled:false double-negative rejection.
+        let mut spec = minimal_spec();
+        spec.vsock = Some(crate::spec::VsockSpec { enabled: true });
+        let definition = convert_create_spec("vm-vsock", spec).expect("conversion");
+        assert_eq!(definition.vsock, Some(VsockDeviceSpec { enabled: true }));
+
+        let definition = convert_create_spec("vm-plain", minimal_spec()).expect("conversion");
+        assert_eq!(definition.vsock, None);
     }
 
     #[test]
