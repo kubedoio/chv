@@ -1267,8 +1267,11 @@ pub struct MonitoringExportConfig {
     #[serde(default = "default_export_interval_secs")]
     pub interval_secs: u64,
     /// Bounded catch-up window on restart or destination outage:
-    /// samples older than this are skipped (and counted), never
-    /// replayed unboundedly — monitoring.db is disposable telemetry.
+    /// samples older than this are skipped with a time-range
+    /// warning, never replayed unboundedly — monitoring.db is
+    /// disposable telemetry (the exact skipped count is deliberately
+    /// not reported: counting would mean reading the data being
+    /// discarded).
     #[serde(default = "default_export_max_backfill_secs")]
     pub max_backfill_secs: u64,
     /// Beyond this lag the exporter is marked degraded (warn + gauge);

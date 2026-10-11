@@ -29,7 +29,9 @@ use chv_monitoring_core::model::{Source, TargetKind};
 use chv_monitoring_store::{MonitoringStore, Resolution};
 use tokio::sync::watch;
 
-use super::remote_write::{render_push, ExportPoint, ExportSeries, RemoteWriteBody};
+use super::remote_write::{
+    render_push, ExportPoint, ExportPushError, ExportSeries, RemoteWriteBody,
+};
 use crate::notification_dispatcher::backoff_delay;
 
 /// Push body limit per target per pass: the store's own
@@ -42,9 +44,11 @@ const MAX_POINTS_PER_SERIES: usize = 1000;
 /// the store's query cap (pinned by test).
 const MAX_METRIC_IDS_PER_CALL: usize = chv_monitoring_store::query::MAX_METRIC_IDS_PER_QUERY;
 /// How many targets per kind one pass will walk (the store's
-/// `list_targets` LIMIT). 500-VM campaigns plus nodes fit; beyond
-/// this, targets are processed in later passes (list_targets is
-/// ordered, so the walk is deterministic).
+/// `list_targets` LIMIT — ordered by target id). Targets beyond the
+/// first `MAX_TARGETS_PER_KIND` of a kind are NOT walked by v1: the
+/// same first page returns every pass, so alphabetical tail targets
+/// would never export. The pass warns loudly at the cap (pinned by
+/// the runbook's scale boundary) instead of starving silently.
 const MAX_TARGETS_PER_KIND: usize = 1000;
 
 /// Metric names emitted on the admin `/metrics` surface (preserved
@@ -53,11 +57,6 @@ const MAX_TARGETS_PER_KIND: usize = 1000;
 pub(crate) const METRIC_EXPORT_LAG_SECONDS: &str = "chv_export_lag_seconds";
 pub(crate) const METRIC_EXPORT_DEGRADED: &str = "chv_export_degraded";
 pub(crate) const METRIC_EXPORT_SAMPLES_TOTAL: &str = "chv_export_samples_total";
-
-/// One remote-write push. Errors carry only a redacted
-/// classification — never the destination URL or its credentials.
-#[derive(Debug)]
-pub struct ExportPushError(pub String);
 
 /// Seam for tests (the dispatcher's `NotificationTransport` pattern):
 /// one authenticated remote-write POST of a rendered body.
@@ -175,6 +174,12 @@ pub enum PassOutcome {
     /// A push failed (destination-level): the pass stopped at the
     /// first failure; cursors for the remaining targets stay put.
     DestinationFailed,
+    /// The monitoring store could not be read (store-level, NOT the
+    /// destination): the pass stopped, nothing was pushed, and the
+    /// next pass retries at the normal cadence — no destination
+    /// backoff and no destination-degraded marking for a local
+    /// store problem.
+    StoreFailed,
 }
 
 /// The export worker. Constructed fail-loud: an invalid allowlist,
@@ -287,14 +292,24 @@ impl MonitoringExporter {
     }
 
     /// Run until shutdown. One pass per interval (or per backoff
-    /// after a failure); the pass itself is bounded by the store's
-    /// own query caps.
+    /// after a destination failure, with the dispatcher's ±20%
+    /// jitter so N managers against one recovering receiver do not
+    /// retry in lockstep); the pass itself is bounded by the store's
+    /// own query caps. Store-level failures retry at the normal
+    /// cadence — backing off for a local problem would only delay
+    /// recovery.
     pub async fn run(mut self, mut shutdown: watch::Receiver<()>) {
         loop {
             let delay = if self.consecutive_failures == 0 {
                 self.settings.interval
             } else {
-                backoff_delay(self.consecutive_failures)
+                let backoff = backoff_delay(self.consecutive_failures);
+                let jitter = crate::notification_dispatcher::jitter_ms(backoff);
+                if jitter >= 0 {
+                    backoff + Duration::from_millis(jitter as u64)
+                } else {
+                    backoff.saturating_sub(Duration::from_millis(jitter.unsigned_abs()))
+                }
             };
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
@@ -316,16 +331,40 @@ impl MonitoringExporter {
     pub async fn run_pass(&mut self, now: u64) -> PassOutcome {
         let mut outcome = PassOutcome::Complete;
         let mut min_cursor: Option<u64> = None;
+        let mut new_cursors = 0usize;
+        let backfill_start = now.saturating_sub(self.settings.max_backfill_ms);
 
         for kind in &self.target_kinds {
             let targets = match self.store.list_targets(kind, MAX_TARGETS_PER_KIND).await {
-                Ok(targets) => targets,
+                Ok(targets) => {
+                    if targets.len() >= MAX_TARGETS_PER_KIND {
+                        // The store's list_targets caps at the LIMIT
+                        // with no pagination: targets beyond the
+                        // first page of a kind are never walked, and
+                        // the walk is the same first page every pass.
+                        // Loud, not silent starvation — the operator
+                        // must know the export is partial.
+                        tracing::warn!(
+                            target_kind = kind.as_str(),
+                            limit = MAX_TARGETS_PER_KIND,
+                            "monitoring export target walk hit the list_targets cap; \
+                             targets beyond the first {MAX_TARGETS_PER_KIND} of this kind \
+                             are NOT exported in v1"
+                        );
+                    }
+                    targets
+                }
                 Err(error) => {
                     // A store that cannot be queried is a typed
                     // degradation, never a panic and never a block on
-                    // anyone else.
+                    // anyone else — and never a destination signal:
+                    // no backoff, no destination-degraded marking.
                     self.last_error = Some(format!("list_targets failed: {error:?}"));
-                    outcome = PassOutcome::DestinationFailed;
+                    tracing::warn!(
+                        error = ?error,
+                        "monitoring export store read failed; retrying at the normal cadence"
+                    );
+                    outcome = PassOutcome::StoreFailed;
                     break;
                 }
             };
@@ -335,22 +374,31 @@ impl MonitoringExporter {
                     .cursor
                     .entry(key)
                     // Restart semantics: bounded catch-up, never an
-                    // unbounded replay of disposable telemetry.
-                    .or_insert(now.saturating_sub(self.settings.max_backfill_ms));
+                    // unbounded replay of disposable telemetry. A
+                    // first-seen target (fresh process, or a newly
+                    // discovered target) starts here too — the same
+                    // bound applies, reported once per pass below
+                    // rather than as a per-target skip warning (the
+                    // clamp warning below fires for a cursor that
+                    // has lagged in-session, e.g. after a long
+                    // destination outage).
+                    .or_insert_with(|| {
+                        new_cursors += 1;
+                        backfill_start
+                    });
 
                 // Clamp to the backfill window; the skipped backlog
                 // is reported as a time range (counting the skipped
                 // samples would mean reading the data being thrown
                 // away).
-                let window_start = now.saturating_sub(self.settings.max_backfill_ms);
-                if *cursor < window_start {
+                if *cursor < backfill_start {
                     tracing::warn!(
                         target_kind = kind.as_str(),
                         target_id = %target_id,
-                        skipped_ms = window_start - *cursor,
+                        skipped_ms = backfill_start - *cursor,
                         "monitoring export backlog beyond max_backfill_seconds skipped"
                     );
-                    *cursor = window_start;
+                    *cursor = backfill_start;
                 }
                 if *cursor >= now {
                     min_cursor = Some(min_cursor.unwrap_or(*cursor).min(*cursor));
@@ -427,7 +475,22 @@ impl MonitoringExporter {
                     min_cursor = Some(min_cursor.unwrap_or(*cursor).min(*cursor));
                     continue;
                 }
-                let body = render_push(&export_series);
+                let body = match render_push(&export_series) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        // Unreachable in practice (rendering a
+                        // self-encoded in-memory buffer); a render
+                        // failure is our own bug, never a reason to
+                        // panic — skip the target, hold its cursor,
+                        // keep walking.
+                        self.last_error = Some(error.0.clone());
+                        tracing::warn!(
+                            error = %error.0,
+                            "monitoring export render failed; target window held for retry"
+                        );
+                        continue;
+                    }
+                };
                 if body.skipped_unknown_metric > 0 {
                     // Unreachable through construction (the allowlist
                     // is registry-validated); defensive visibility.
@@ -478,11 +541,30 @@ impl MonitoringExporter {
             }
         }
 
+        // First-seen targets (fresh process, newly discovered):
+        // their pre-window history is not exported — the same
+        // bounded-backfill rule as everything else, reported once
+        // per pass instead of per target.
+        if new_cursors > 0 {
+            tracing::info!(
+                targets = new_cursors,
+                max_backfill_ms = self.settings.max_backfill_ms,
+                "monitoring export: new targets start at the backfill window; \
+                 older history is not exported"
+            );
+        }
+
         // Degraded signal: backlog beyond the threshold, or a failed
-        // pass. Never blocks anything; visible as the gauge + warn.
+        // destination push. A store read failure is NOT a destination
+        // signal — it leaves the degraded state untouched and retries
+        // at the normal cadence. Never blocks anything; visible as
+        // the gauge + warn.
         let lag_ms = now.saturating_sub(min_cursor.unwrap_or(now));
-        let degraded =
-            outcome == PassOutcome::DestinationFailed || lag_ms > self.settings.lag_degraded_ms;
+        let degraded = match outcome {
+            PassOutcome::Complete => lag_ms > self.settings.lag_degraded_ms,
+            PassOutcome::DestinationFailed => true,
+            PassOutcome::StoreFailed => self.degraded,
+        };
         if degraded && !self.degraded {
             tracing::warn!(
                 lag_ms,
@@ -494,10 +576,12 @@ impl MonitoringExporter {
             tracing::info!("monitoring export recovered");
         }
         self.degraded = degraded;
-        self.consecutive_failures = if outcome == PassOutcome::DestinationFailed {
-            self.consecutive_failures + 1
-        } else {
-            0
+        self.consecutive_failures = match outcome {
+            PassOutcome::DestinationFailed => self.consecutive_failures + 1,
+            PassOutcome::Complete => 0,
+            // A store read failure neither extends nor resets the
+            // destination backoff ladder.
+            PassOutcome::StoreFailed => self.consecutive_failures,
         };
         metrics::gauge!(METRIC_EXPORT_LAG_SECONDS).set(lag_ms as f64 / 1000.0);
         metrics::gauge!(METRIC_EXPORT_DEGRADED).set(if degraded { 1.0 } else { 0.0 });

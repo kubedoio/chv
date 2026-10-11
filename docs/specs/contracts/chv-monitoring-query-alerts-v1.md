@@ -295,6 +295,8 @@ Wire semantics:
 | Derived metrics | exported like any allowlisted metric (computed by the history query path) |
 | Transport | Prometheus remote-write v1, snappy-compressed protobuf, `Authorization: Bearer` when a token file is configured |
 
+One wire-inherent precision note: remote-write carries sample values as IEEE-754 doubles, so counter deltas beyond 2⁵³ lose exact integer precision on export (the native read API preserves them as decimal strings). This is a property of the wire format, not a rounding bug in the exporter.
+
 Delivery model:
 
 - One pass per `interval_secs` (default 15). Per pass, each target's allowlisted window is read from the monitoring store in chunks of the store's 8-metric-ids-per-query cap (allowlists up to 64 ids) and pushed. The cursor parks at pass time on success.

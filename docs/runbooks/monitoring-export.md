@@ -68,8 +68,12 @@ Cursor and failure semantics:
 
 - The cursor parks at pass time on success — each pass exports the window since the last successful one.
 - A target whose query is rejected does not advance; it is retried next pass, bounded by the backfill clamp.
-- A destination failure fails the whole pass at the first push: the cursor is held, the worker backs off, and the exporter is marked degraded. Recovery re-exports the held window — at-least-once delivery within `max_backfill_secs`. Receivers should tolerate duplicate samples in that window (remote-write receivers generally deduplicate by timestamp).
+- A destination failure fails the whole pass at the first push: the cursor is held, the worker backs off (with ±20% jitter, so multiple managers against one recovering receiver do not retry in lockstep), and the exporter is marked degraded. Recovery re-exports the held window — at-least-once delivery within `max_backfill_secs`. Receivers should tolerate duplicate samples in that window (remote-write receivers generally deduplicate by timestamp).
+- A monitoring-store read failure is NOT a destination failure: the pass stops, nothing is pushed, and the next pass retries at the normal cadence — no destination backoff and no destination-degraded marking for a local store problem (the failure is visible as a warn log naming the failed read).
 - On restart the same bounded backfill applies: a fresh exporter never replays older-than-backfill history. monitoring.db is disposable telemetry; export is not a durability mechanism for it.
+- **Scale boundary (v1):** one pass walks at most the first 1,000 targets per kind (ordered by target id). A fleet beyond that logs a loud warning at the cap — targets beyond the first page of a kind are not exported in v1. The qualification campaign covers 500 VMs.
+
+First-seen targets (a fresh process, or a newly discovered VM) start at the backfill window like everything else; the per-target skip warning fires for a cursor that lagged in-session (e.g. after a long destination outage), and a first-seen target's pre-window history is dropped under the same bounded-backfill rule, reported once per pass in an aggregate log line.
 
 ## 4. Observability
 
@@ -78,7 +82,7 @@ The exporter's own health is visible on the admin `/metrics` endpoint as three g
 | Gauge | Meaning |
 |---|---|
 | `chv_export_lag_seconds` | export backlog: age of the oldest unexported window |
-| `chv_export_degraded` | 0/1 — 1 means the destination is failing (backoff + retry is automatic) |
+| `chv_export_degraded` | 0/1 — 1 means the destination is failing (backoff + retry is automatic); store read failures do NOT set this (they retry at the normal cadence with a warn log) |
 | `chv_export_samples_total` | counter of exported samples |
 
 Degraded state is a warn-level log, never an error storm. Destination errors are redacted — no URLs and no tokens appear in logs.
@@ -107,7 +111,7 @@ Degraded state is a warn-level log, never an error storm. Destination errors are
    ```
 
    Check that the returned series carry the `target_kind`/`target_id`/`source` labels. **Note:** VictoriaMetrics buffers fresh inserts and flushes them to searchable parts on an interval (default 5 s) — a query immediately after a push may legitimately return empty. Wait a few seconds before concluding data is missing.
-5. **Old data missing after a long outage?** That is the bounded backfill by design: samples older than `max_backfill_secs` (default 600) are skipped, with a warning in the logs. If a longer catch-up window is wanted, raise the value in `controlplane.toml` and restart — before the next outage, not after.
+5. **Old data missing after a long outage?** That is the bounded backfill by design: samples older than `max_backfill_secs` (default 600) are skipped, with a warning in the logs. If a longer catch-up window is wanted, raise the value in `controlplane.toml` and restart — before the next outage, not after. The same bound applies to a first-seen target (fresh process, newly discovered VM): its pre-window history starts at the backfill window, reported in one aggregate log line per pass.
 6. **Which series should I expect?** `chv_` + the metric id with dots replaced by underscores; only allowlisted `metric_ids`, only allowlisted kinds/sources; counters appear as same-epoch deltas (§2). If a series is absent, first check it is in the allowlist and passes the kind/source filters, then check the receiver-side flush interval (step 4).
 
 ## 8. What this deliberately does NOT do

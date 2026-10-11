@@ -11,9 +11,10 @@ use chv_monitoring_core::model::{SampleBuilder, SampleValue, Source, TargetKind}
 use chv_monitoring_store::{IngestOutcome, MonitoringStore, MonitoringStoreConfig, NodeBatch};
 use prost::Message as _;
 
+use super::remote_write::ExportPushError;
 use super::remote_write::RemoteWriteBody;
 use super::remote_write::WriteRequest;
-use super::worker::{ExportPushError, ExportTransport, MonitoringExporter, PassOutcome};
+use super::worker::{ExportTransport, MonitoringExporter, PassOutcome};
 
 const BASE_MS: u64 = 10_000_000_000;
 
@@ -26,6 +27,7 @@ type PushedSample = (String, String, String, f64, i64);
 struct MockTransport {
     fail: std::sync::atomic::AtomicBool,
     pushes: std::sync::Mutex<Vec<Vec<PushedSample>>>,
+    attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl MockTransport {
@@ -33,11 +35,18 @@ impl MockTransport {
         Self {
             fail: std::sync::atomic::AtomicBool::new(false),
             pushes: std::sync::Mutex::new(Vec::new()),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     fn set_fail(&self, fail: bool) {
         self.fail.store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every push attempt, successful or failed — the run-loop test
+    /// proves the backoff schedule by watching attempts, not pushes.
+    fn attempts(&self) -> usize {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The decoded pushes: (metric name, target_id, source, value,
@@ -60,6 +69,8 @@ impl MockTransport {
 #[async_trait::async_trait]
 impl ExportTransport for MockTransport {
     async fn push(&self, body: &RemoteWriteBody) -> Result<(), ExportPushError> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(ExportPushError("connect failed".to_string()));
         }
@@ -101,6 +112,7 @@ struct Fixture {
     transport: Arc<MockTransport>,
     monitoring: Arc<MonitoringStore>,
     next_sequence: std::cell::Cell<u64>,
+    db_url: String,
     _dir: tempfile::TempDir,
 }
 
@@ -118,9 +130,10 @@ fn export_config(metric_ids: &[&str]) -> MonitoringExportConfig {
 
 async fn fixture(config: &MonitoringExportConfig) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
+    let db_url = format!("sqlite://{}/monitoring.db", dir.path().display());
     let monitoring = Arc::new(
         MonitoringStore::connect(MonitoringStoreConfig {
-            database_url: format!("sqlite://{}/monitoring.db", dir.path().display()),
+            database_url: db_url.clone(),
             migrations_dir: std::path::PathBuf::from(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../cmd/chv-controlplane/monitoring-migrations"
@@ -138,6 +151,7 @@ async fn fixture(config: &MonitoringExportConfig) -> Fixture {
         transport,
         monitoring,
         next_sequence: std::cell::Cell::new(0),
+        db_url,
         _dir: dir,
     }
 }
@@ -674,4 +688,238 @@ fn export_telemetry_is_additive_to_the_preserved_instrumentation() {
             "exported series name {name} collides with a preserved family"
         );
     }
+}
+
+#[tokio::test]
+async fn store_read_failures_are_not_destination_failures() {
+    // A store that cannot be read must fail the pass as a STORE
+    // failure: no destination-degraded marking, no destination
+    // backoff ladder — mislabeling a local problem as a destination
+    // outage would both lie on the gauge and delay recovery. The
+    // pass retries at the normal cadence.
+    let mut f = fixture(&export_config(&["node.cpu.capacity_ratio"])).await;
+    let t0 = BASE_MS;
+    f.seed(
+        TargetKind::Node,
+        "node-1",
+        "node.cpu.capacity_ratio",
+        Source::NodeOs,
+        t0,
+        0.5,
+    )
+    .await;
+    let outcome = f.exporter.run_pass(t0 + 30_000).await;
+    assert_eq!(outcome, PassOutcome::Complete);
+    assert!(!f.exporter.is_degraded());
+
+    // Break the store's series table out from under the exporter.
+    let pool = sqlx::SqlitePool::connect(&f.db_url).await.unwrap();
+    sqlx::query("DROP TABLE monitoring_series")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let outcome = f.exporter.run_pass(t0 + 60_000).await;
+    assert_eq!(
+        outcome,
+        PassOutcome::StoreFailed,
+        "a store read failure must be typed as StoreFailed, not DestinationFailed"
+    );
+    assert!(
+        !f.exporter.is_degraded(),
+        "a store read failure must not mark the destination degraded"
+    );
+    assert!(
+        f.exporter.last_error().unwrap().contains("list_targets"),
+        "the failure must name the failed read: {:?}",
+        f.exporter.last_error()
+    );
+    assert_eq!(f.exporter.exported_samples(), 1, "nothing new exported");
+}
+
+/// Poll until `cond` holds, panicking with the timeout otherwise.
+/// The run-loop test below watches real-time cadence and backoff, so
+/// it polls with generous deadlines instead of sleeping blindly.
+async fn eventually(timeout: std::time::Duration, cond: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run-loop condition not met within {timeout:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn run_loop_exports_on_cadence_backs_off_recovers_and_stops() {
+    // The production entry point (`run`) — its cadence sleep, its
+    // destination backoff with jitter, and its shutdown — none of
+    // which the run_pass tests reach. The worker honors the
+    // configured interval verbatim; 1 s keeps the loop observable
+    // without waiting out the config-validation floor. run() stamps
+    // passes with the real clock, so every seed lives in the real
+    // now, and each phase seeds fresh data: a quiet target produces
+    // no push, which would make cadence unobservable.
+    let mut config = export_config(&["node.cpu.capacity_ratio"]);
+    config.interval_secs = 1;
+    let f = fixture(&config).await;
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    f.seed(
+        TargetKind::Node,
+        "node-run-1",
+        "node.cpu.capacity_ratio",
+        Source::NodeOs,
+        t - 30_000,
+        0.5,
+    )
+    .await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    // The task owns the fixture (and therefore the tempdir) for as
+    // long as it runs; the test observes through the shared
+    // transport and seeds through the shared store.
+    let transport = f.transport.clone();
+    let monitoring = f.monitoring.clone();
+    let mut sequence = 1u64;
+    let handle = tokio::spawn(async move { f.exporter.run(shutdown_rx).await });
+
+    // A fresh sample at the real now: the cursor parks at each pass
+    // time, so anything observed before the last pass is outside
+    // every future window — the seed must be at (or after) the
+    // current instant for the NEXT pass to carry it. (The closure
+    // form cannot express an async block borrowing its argument.)
+    async fn seed_fresh(monitoring: &MonitoringStore, sequence: &mut u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let sample = SampleBuilder::new(
+            TargetKind::Node,
+            "node-run-1",
+            "node.cpu.capacity_ratio",
+            Source::NodeOs,
+            now,
+        )
+        .unwrap()
+        .value(SampleValue::Float(0.5))
+        .epoch("boot-1", "identity-1")
+        .build()
+        .unwrap();
+        let seq = *sequence;
+        *sequence += 1;
+        let batch = NodeBatch {
+            boot_id: "boot-1".to_string(),
+            sequence: seq,
+            sent_at_ms: now,
+            samples: vec![sample],
+        };
+        let outcome = monitoring
+            .ingest_node_batch("node-run-1", &batch, now)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, IngestOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    // First pass lands within the cadence and exports the seed.
+    eventually(std::time::Duration::from_secs(15), || {
+        transport.push_count() >= 1
+    })
+    .await;
+
+    // Cadence continues: fresh data on the next interval is picked
+    // up by the NEXT pass, not lost.
+    seed_fresh(&monitoring, &mut sequence).await;
+    eventually(std::time::Duration::from_secs(10), || {
+        transport.push_count() >= 2
+    })
+    .await;
+
+    // Destination outage: the next cadence pass with data fails at
+    // the push, and the retry schedule is the backoff ladder (5 s ±
+    // 20% at one failure — at least 4 s), not the 1 s cadence.
+    transport.set_fail(true);
+    seed_fresh(&monitoring, &mut sequence).await;
+    let baseline = transport.attempts();
+    eventually(std::time::Duration::from_secs(10), || {
+        transport.attempts() > baseline
+    })
+    .await;
+    let failed_attempt = transport.attempts();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(
+        transport.attempts(),
+        failed_attempt,
+        "the retry after a destination failure must be held back by the backoff ladder"
+    );
+
+    // Recovery: the destination returns, the held window is pushed,
+    // the loop keeps running.
+    transport.set_fail(false);
+    eventually(std::time::Duration::from_secs(20), || {
+        transport.attempts() > failed_attempt
+    })
+    .await;
+    eventually(std::time::Duration::from_secs(5), || {
+        transport.push_count() >= 3
+    })
+    .await;
+
+    // Shutdown: the loop exits cleanly.
+    drop(shutdown_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("run() must exit after shutdown")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn export_gauges_reach_the_prometheus_exposition() {
+    // The disjointness pin above proves the export gauge NAMES are
+    // safe; this test proves the WIRING — a running exporter's
+    // gauges reach the exact exposition the admin /metrics route
+    // renders (the route serves `prometheus_handle()`'s render, so
+    // what this test reads is what an operator scrapes). Together
+    // with the route test in `tests.rs`
+    // (`webui_metrics_stays_prometheus_and_renamed_ui_route_serves_the_spa`)
+    // this is the full pin the interface asked for.
+    chv_observability::install_prometheus_recorder().expect("install prometheus recorder");
+    let handle = chv_observability::prometheus_handle().expect("recorder handle");
+
+    let mut f = fixture(&export_config(&["node.cpu.capacity_ratio"])).await;
+    let t0 = BASE_MS;
+    f.seed(
+        TargetKind::Node,
+        "node-gauge-pin",
+        "node.cpu.capacity_ratio",
+        Source::NodeOs,
+        t0,
+        0.5,
+    )
+    .await;
+    let outcome = f.exporter.run_pass(t0 + 30_000).await;
+    assert_eq!(outcome, PassOutcome::Complete);
+    assert_eq!(f.exporter.exported_samples(), 1);
+
+    let exposition = handle.render();
+    for name in [
+        "chv_export_lag_seconds",
+        "chv_export_degraded",
+        "chv_export_samples_total",
+    ] {
+        assert!(
+            exposition.contains(name),
+            "{name} missing from the /metrics exposition:\n{exposition}"
+        );
+    }
+    assert!(
+        exposition.contains("chv_export_samples_total{outcome=\"exported\"}"),
+        "the exported-samples counter must carry its outcome label:\n{exposition}"
+    );
 }

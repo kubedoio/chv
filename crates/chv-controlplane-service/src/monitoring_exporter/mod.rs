@@ -5,7 +5,9 @@
 //! remote-write v1 (VictoriaMetrics/Prometheus/Mimir-compatible),
 //! reading the bounded native monitoring store on a cadence. The
 //! worker degrades but never blocks: destination outages back up to a
-//! bounded catch-up window, then samples are skipped and counted —
+//! bounded catch-up window, then samples are skipped with a
+//! time-range warning (the exact skipped count is deliberately not
+//! reported — counting would mean reading the data being discarded) —
 //! ingest, queries, alerting and VM lifecycle are unaffected
 //! (ADR-027 decision 11: export must never become load-bearing for
 //! the native UI).
@@ -22,8 +24,7 @@ pub mod worker;
 #[cfg(test)]
 mod worker_tests;
 
-pub use remote_write::{render_push, ExportPoint, ExportSeries, RemoteWriteBody};
+pub use remote_write::{render_push, ExportPoint, ExportPushError, ExportSeries, RemoteWriteBody};
 pub use worker::{
-    ExportPushError, ExportTransport, ExporterSettings, MonitoringExporter, PassOutcome,
-    ReqwestExportTransport,
+    ExportTransport, ExporterSettings, MonitoringExporter, PassOutcome, ReqwestExportTransport,
 };

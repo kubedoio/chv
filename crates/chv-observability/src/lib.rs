@@ -75,6 +75,23 @@ pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
     PROMETHEUS_HANDLE.get()
 }
 
+/// Install only the Prometheus metrics recorder — no tracing
+/// subscriber, no log-format env. Idempotent: succeeds immediately if
+/// this process already installed the recorder through this function
+/// or [`init_logger`]. Tests use this to render the exact exposition
+/// the admin `/metrics` route serves without depending on tracing's
+/// own once-per-process global.
+pub fn install_prometheus_recorder() -> Result<(), Box<dyn std::error::Error>> {
+    if PROMETHEUS_HANDLE.get().is_some() {
+        return Ok(());
+    }
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::set_global_recorder(recorder)?;
+    let _ = PROMETHEUS_HANDLE.set(handle);
+    Ok(())
+}
+
 pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
     let use_json = std::env::var("CHV_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

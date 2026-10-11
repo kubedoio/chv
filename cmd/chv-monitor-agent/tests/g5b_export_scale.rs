@@ -632,6 +632,16 @@ async fn destination_outage_degrades_and_recovers_without_loss() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].1, 0.2, "the post-recovery sample is the latest");
 
+    // BOTH sides of the outage are queryable at their own times: the
+    // pre-outage sample (pushed before the outage) must still be
+    // readable at its timestamp — a receiver that dropped the oldest
+    // sample would otherwise pass the assertion above.
+    let pre = rig
+        .wait_for_series("chv_node_cpu_capacity_ratio", t0, 1)
+        .await;
+    assert_eq!(pre.len(), 1);
+    assert_eq!(pre[0].1, 0.1, "the pre-outage sample survived the outage");
+
     rig.vm.stop().await;
 }
 

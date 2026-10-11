@@ -210,23 +210,33 @@ fn encode_protobuf(series: &[ExportSeries]) -> (WriteRequest, BodyStats) {
     (request, stats)
 }
 
+/// One remote-write push. Errors carry only a redacted
+/// classification — never the destination URL or its credentials.
+#[derive(Debug)]
+pub struct ExportPushError(pub String);
+
 /// Render and snappy-compress a push body from the given series.
-pub fn render_push(series: &[ExportSeries]) -> RemoteWriteBody {
+/// Compression of a self-encoded in-memory buffer cannot fail in
+/// practice; the `Result` keeps that invariant off the panic path in
+/// service code (the caller logs and retries the window).
+pub fn render_push(series: &[ExportSeries]) -> Result<RemoteWriteBody, ExportPushError> {
     let (request, stats) = encode_protobuf(series);
     let raw = request.encode_to_vec();
     let mut encoder = snap::raw::Encoder::new();
-    let bytes = encoder
-        .compress_vec(&raw)
-        .expect("snappy compression of an in-memory buffer cannot fail");
+    let bytes = encoder.compress_vec(&raw).map_err(|error| {
+        ExportPushError(format!(
+            "snappy compression of the export body failed: {error}"
+        ))
+    })?;
 
-    RemoteWriteBody {
+    Ok(RemoteWriteBody {
         bytes,
         series_count: stats.series_count,
         sample_count: stats.sample_count,
         skipped_unknown_metric: stats.skipped_unknown_metric,
         oldest_timestamp_ms: stats.oldest,
         newest_timestamp_ms: stats.newest,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -301,7 +311,7 @@ mod tests {
 
     #[test]
     fn encoded_bodies_decode_back_through_prost() {
-        let body = render_push(&[sample_series()]);
+        let body = render_push(&[sample_series()]).unwrap();
         // Snappy round-trip first: the body must be the raw BLOCK
         // format a conforming receiver decompresses.
         let mut decoder = snap::raw::Decoder::new();
@@ -341,8 +351,8 @@ mod tests {
 
     #[test]
     fn rendering_is_deterministic() {
-        let a = render_push(&[sample_series()]);
-        let b = render_push(&[sample_series()]);
+        let a = render_push(&[sample_series()]).unwrap();
+        let b = render_push(&[sample_series()]).unwrap();
         assert_eq!(a.bytes, b.bytes);
     }
 
@@ -350,7 +360,7 @@ mod tests {
     fn pointless_empty_series_are_skipped() {
         let mut empty = sample_series();
         empty.points.clear();
-        let body = render_push(&[empty]);
+        let body = render_push(&[empty]).unwrap();
         assert_eq!(body.series_count, 0);
         assert_eq!(body.sample_count, 0);
         assert_eq!(body.oldest_timestamp_ms, None);
@@ -388,7 +398,7 @@ mod tests {
         // it ever fires, the stat is visible rather than silent loss.
         let mut series = sample_series();
         series.metric_id = "not.a.registry.metric".to_string();
-        let body = render_push(&[series, sample_series()]);
+        let body = render_push(&[series, sample_series()]).unwrap();
         assert_eq!(body.skipped_unknown_metric, 1);
         assert_eq!(body.series_count, 1);
         assert_eq!(body.sample_count, 2);
