@@ -731,10 +731,16 @@ const MAX_ENABLED_RULES_PER_TICK: i64 = 500;
 const ORPHAN_SWEEP_GRACE_MS: i64 = 60_000;
 /// Active incidents examined per sweep pass.
 const ORPHAN_SWEEP_MAX_INCIDENTS: i64 = 1_000;
-/// Rules fetched per key-listing page; must cover the config rule
+/// Rules fetched per key-listing page; must cover the TOTAL rule
 /// ceiling so the sweep's snapshot is one atomic page (see the
-/// assert in `sweep_orphaned_incidents`).
+/// assertion in `sweep_orphaned_incidents`). Mirrors chv-config's
+/// `MAX_RULES_CEILING` (500) — that crate is not a dependency here,
+/// so this is a named mirror, not a reference: raise both together.
 const RULE_KEY_PAGE_SIZE: i64 = 500;
+/// The mirrored total-rule ceiling the page-size invariant anchors
+/// against (chv-config `MAX_RULES_CEILING`; enabled rules are a
+/// subset, so this is the stronger anchor).
+const TOTAL_RULE_CEILING_MIRROR: i64 = 500;
 /// The transition reason recorded when the backstop sweep retires
 /// an incident no rule produces anymore.
 const ORPHAN_SWEEP_REASON: &str = "rule removed or retargeted (backstop sweep)";
@@ -834,8 +840,8 @@ impl AlertEvaluatorWorker {
         // beyond one page; this compile-time assertion pins the
         // invariant.
         const _: () = assert!(
-            RULE_KEY_PAGE_SIZE >= MAX_ENABLED_RULES_PER_TICK,
-            "the sweep's key paging assumes the rule ceiling fits one page"
+            RULE_KEY_PAGE_SIZE >= TOTAL_RULE_CEILING_MIRROR,
+            "the sweep's key paging assumes the total rule ceiling fits one page"
         );
         let mut live_keys = std::collections::HashSet::new();
         let mut offset = 0i64;
@@ -906,11 +912,11 @@ impl AlertEvaluatorWorker {
     /// Deliberate duplication with the BFF's `resolved_notify_events`
     /// (and this crate's `notify_events`): the store stays
     /// payload-opaque (it persists envelopes, never renders them), so
-    /// a shared builder would need a chv-monitoring-core dependency
-    /// on chv-controlplane-store or a chv-controlplane-service
-    /// dependency on the BFF — both worse boundaries than three
-    /// small, independently tested copies of a closed 10-field
-    /// envelope construction.
+    /// a shared builder would need either a chv-monitoring-core
+    /// dependency on chv-controlplane-store or a BFF dependency on
+    /// chv-controlplane-service — both new edges, and both worse
+    /// boundaries than three small, independently tested copies of
+    /// the closed wire-envelope construction.
     fn retire_notify_events(
         &self,
         incident: &chv_controlplane_store::IncidentRow,
