@@ -38,6 +38,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 [dev-dependencies]
 chv-agent-core = { path = "../../crates/chv-agent-core" }
 chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
+chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store", features = ["test-util"] }
 chv-hypervisor-api = { path = "../../crates/chv-hypervisor-api" }
@@ -47,6 +48,9 @@ axum = { workspace = true }
 # signatures (g4b evidence: the test must not reuse the signer's
 # code). Same version line as chv-controlplane-service.
 hmac = "0.12"
+# Digest pin verification of the VictoriaMetrics binary (g5b export
+# rig): the evidence run must state and check the binary sha256.
+hex = "0.4"
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
