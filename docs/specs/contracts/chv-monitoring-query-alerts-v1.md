@@ -277,6 +277,41 @@ Delivery semantics:
 
 Use HTTPS and a strict destination allowlist to prevent server-side request forgery.
 
+## External export (optional)
+
+Export is an optional, operator-configured egress path ([ADR-027](../adr/027-monitoring-history-alerts-and-export.md), decision 9). It is never load-bearing for the native query and alert API above: every read in this contract is served from CHV's own monitoring store whether or not export is enabled, and an unreachable destination never changes a native read or alert evaluation. Export adds **no new API surface** — it is configured only through the control-plane config file (`[monitoring.export]` in `/etc/chv/controlplane.toml`), never through this HTTP API, the UI, or anything a guest can reach. See the [export runbook](../../runbooks/monitoring-export.md) for operations.
+
+Configuration authority is operator config only, validated fail-loud at boot: an enabled export requires a destination and a non-empty `metric_ids`. The destination is HTTPS-only under the webhook-destination URL rules — no credentials in the URL, no link-local or unspecified IP literals, with loopback and private ranges allowed deliberately for internal receivers. Metric IDs are registry-validated, target kinds are `node`/`vm`, and source filters come from the ingestion vocabulary. An optional bearer-token file is read once at start; an optional private CA bundle may be supplied. The allowlist is the export's data filter — it selects from the closed v1 registry vocabulary ([metric contract v1](chv-monitoring-metrics-v1.md)) only.
+
+Wire semantics:
+
+| Concept | Exported shape |
+|---|---|
+| Series name | `chv_` + registry metric id with `.` → `_` (e.g. `node.cpu.capacity_ratio` → `chv_node_cpu_capacity_ratio`); the mapping is injective across the registry and pinned by test |
+| Fixed labels | `target_kind` (`node`/`vm`), `target_id`, `source` (snake_case ingestion source) |
+| Per-metric labels | the metric's dimensions (`interface_id`, `mount_id`, `block_device_id`, `window`, …) |
+| Gauges | bucketed values as stored |
+| Counters | same-epoch deltas only; a lone counter point with no predecessor exports nothing (store contract) |
+| Derived metrics | exported like any allowlisted metric (computed by the history query path) |
+| Transport | Prometheus remote-write v1, snappy-compressed protobuf, `Authorization: Bearer` when a token file is configured |
+
+One wire-inherent precision note: remote-write carries sample values as IEEE-754 doubles, so counter deltas beyond 2⁵³ lose exact integer precision on export (the native read API preserves them as decimal strings). This is a property of the wire format, not a rounding bug in the exporter.
+
+Delivery model:
+
+- One pass per `interval_secs` (default 15). Per pass, each target's allowlisted window is read from the monitoring store in chunks of the store's 8-metric-ids-per-query cap (allowlists up to 64 ids) and pushed. The cursor parks at pass time on success.
+- A target whose read is rejected does not advance and is retried next pass.
+- A destination failure fails the whole pass at the first push: the cursor is held, retries use exponential backoff, and the exporter is marked degraded (`chv_export_degraded` gauge plus warn logs; destination errors are redacted — no URLs, no tokens).
+- Recovery re-exports the held window: **at-least-once**, bounded by `max_backfill_secs` (default 600). A process restart applies the same bound — samples older than the backfill window are skipped with a warning, never replayed unboundedly. Monitoring history is disposable telemetry; export is not a backup mechanism.
+
+Exporter observability is three gauges on the admin `/metrics`: `chv_export_lag_seconds` (backlog age), `chv_export_degraded` (0/1), and `chv_export_samples_total`. These names are disjoint from every other `chv_observability` constant (pinned by test).
+
+A backend is **supported** only after compatibility is proven against the real backend binary by the qualification rig (ADR-027 decision 12 — a self-written decoder is never the only proof). VictoriaMetrics OSS single-node v1.153.0 is qualified: pushes are accepted, exact names, labels, and values are read back through its own query API, and outage recovery and restart-bounded backfill are proven. Honest limitation: VictoriaMetrics OSS single-node has no bearer-token authentication, so the token path is unit-pinned only against that backend.
+
+On the receiver side, for VictoriaMetrics, `GET /api/v1/query?query=chv_node_cpu_capacity_ratio` returns the series with labels `target_kind`, `target_id`, and `source` (plus dimensions where the metric has them). Fresh inserts become queryable after the backend's insert-flush interval (VictoriaMetrics default ~5 s) — an immediate post-push query may legitimately return empty.
+
+Out of scope: multi-destination fan-out, per-tenant or per-project routing (v1 monitoring is fleet-scoped), any guest- or API-triggered export, HTTP destinations, and any effect on the native read/alert API when the destination is unreachable.
+
 ## Error model
 
 Responses use typed error codes `invalid_range`, `unknown_metric`, `unknown_dimension`, `invalid_rule`, `unsupported_source`, `permission_denied`, `query_too_large`, `monitoring_unavailable`, `revision_conflict`. Alerting adds two conflict (409) classes: a rule revision precondition mismatch (the client reloads and retries) and the configured rule ceiling; the delivery test also answers 409 when no destination is configured. Alerting reads and mutations are backed by the operational database and do not return `monitoring_unavailable`. Return a request ID for operator correlation. Monitoring unavailable does not mean node or VM unhealthy.

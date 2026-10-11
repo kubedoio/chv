@@ -630,8 +630,11 @@ fn chrono_now_ms() -> i64 {
 
 /// ±20% jitter on a backoff delay, in milliseconds. The magnitude
 /// never exceeds 20% of the backoff, so the net delay (backoff +
-/// jitter) always stays positive.
-fn jitter_ms(backoff: Duration) -> i64 {
+/// jitter) always stays positive. Shared by the notification
+/// dispatcher and the monitoring export worker (interface D4: the
+/// export retry uses the same jitter so N managers against one
+/// recovering receiver do not retry in lockstep).
+pub(crate) fn jitter_ms(backoff: Duration) -> i64 {
     use rand::RngExt;
     let base = backoff.as_millis() as f64;
     let spread = base * BACKOFF_JITTER_FRACTION;

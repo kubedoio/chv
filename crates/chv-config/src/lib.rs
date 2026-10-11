@@ -782,6 +782,11 @@ pub struct MonitoringConfig {
     /// outbox events are enqueued.
     #[serde(default)]
     pub notifications: MonitoringNotificationsConfig,
+    /// Optional external export (ADR-027 decision 9, prompt-05 task 7).
+    /// Off by default and inert without an explicit metric allowlist;
+    /// never load-bearing for the native UI.
+    #[serde(default)]
+    pub export: MonitoringExportConfig,
 }
 
 /// Guest monitoring agent ingestion configuration
@@ -1223,6 +1228,244 @@ fn default_notifications_max_batch() -> u32 {
     10
 }
 
+/// Optional external export configuration
+/// (`[monitoring.export]`, ADR-027 decision 9 — prompt-05 task 7).
+///
+/// Off by default and inert without an explicit metric allowlist:
+/// export is an egress surface, so "selected data" must be an operator
+/// decision, never a default. The destination comes ONLY from this
+/// operator section (the allowlist discipline the notifications
+/// transport uses); the transport adds HTTPS-only, no-redirects and
+/// the cloud-metadata IP rejections, and pushes Prometheus
+/// remote-write v1 (VictoriaMetrics/Prometheus/Mimir-compatible).
+///
+/// The worker degrades, never blocks: ingest, queries, alerting and
+/// VM lifecycle are unaffected by export failures (ADR-027 decision
+/// 11 — export must never become load-bearing for the native UI).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitoringExportConfig {
+    /// Master switch (explicit opt-in; default false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Remote-write destination, e.g.
+    /// `https://victoriametrics.internal:8428/api/v1/write`.
+    /// Required when enabled; validated like a webhook destination
+    /// (HTTPS-only, no URL credentials, no link-local/unspecified IP).
+    #[serde(default)]
+    pub destination_url: Option<String>,
+    /// Optional bearer token file for the destination (read once at
+    /// worker start; the token never lives in the config file or the
+    /// logs). 1..=4096 bytes.
+    #[serde(default)]
+    pub bearer_token_path: Option<PathBuf>,
+    /// Optional PEM CA bundle for internal destinations; system roots
+    /// when unset.
+    #[serde(default)]
+    pub ca_cert_path: Option<PathBuf>,
+    /// Export pass cadence.
+    #[serde(default = "default_export_interval_secs")]
+    pub interval_secs: u64,
+    /// Bounded catch-up window on restart or destination outage:
+    /// samples older than this are skipped with a time-range
+    /// warning, never replayed unboundedly — monitoring.db is
+    /// disposable telemetry (the exact skipped count is deliberately
+    /// not reported: counting would mean reading the data being
+    /// discarded).
+    #[serde(default = "default_export_max_backfill_secs")]
+    pub max_backfill_secs: u64,
+    /// Beyond this lag the exporter is marked degraded (warn + gauge);
+    /// never blocks anything.
+    #[serde(default = "default_export_lag_degraded_secs")]
+    pub lag_degraded_secs: u64,
+    /// The data filter: metric ids to export (the closed v1 registry
+    /// vocabulary). REQUIRED when enabled — an enabled export with no
+    /// selection is a boot error. Unknown ids are rejected when the
+    /// exporter is constructed (registry-validated, loud at boot).
+    #[serde(default)]
+    pub metric_ids: Vec<String>,
+    /// Optional target-kind filter (vocabulary: `node`, `vm`); empty
+    /// means both. Re-validated against the registry at boot.
+    #[serde(default)]
+    pub target_kinds: Vec<String>,
+    /// Optional source filter (vocabulary: the ingestion contract's
+    /// snake_case source strings, e.g. `node_os`, `vmm`, `guest_agent`,
+    /// `derived`); empty means every source the metric allows.
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+impl Default for MonitoringExportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            destination_url: None,
+            bearer_token_path: None,
+            ca_cert_path: None,
+            interval_secs: default_export_interval_secs(),
+            max_backfill_secs: default_export_max_backfill_secs(),
+            lag_degraded_secs: default_export_lag_degraded_secs(),
+            metric_ids: Vec::new(),
+            target_kinds: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+}
+
+/// The target-kind vocabulary the export filter accepts (mirrors
+/// `chv_monitoring_core::model::TargetKind::as_str` for the kinds that
+/// carry monitoring series; the worker re-validates authoritatively).
+pub const EXPORT_TARGET_KINDS: &[&str] = &["node", "vm"];
+/// The source-filter vocabulary (mirrors
+/// `chv_monitoring_core::model::Source::as_str`; the worker
+/// re-validates authoritatively against the registry).
+pub const EXPORT_SOURCES: &[&str] = &[
+    "node_os",
+    "vmm",
+    "vm_cgroup",
+    "storage_provider",
+    "network_provider",
+    "guest_agent",
+    "derived",
+];
+
+impl MonitoringExportConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_METRIC_IDS: usize = 64;
+
+        if !self.enabled {
+            // Structural checks only when disabled? No — an operator
+            // PRE-configuring the section should get the same loud
+            // feedback; but a disabled section with no destination is
+            // the shipped default, so require nothing then.
+            return Ok(());
+        }
+        let Some(url) = &self.destination_url else {
+            return Err(
+                "monitoring.export.destination_url is required when export is enabled".to_string(),
+            );
+        };
+        validate_notification_url("export.destination_url", url)?;
+
+        if self.metric_ids.is_empty() {
+            return Err(
+                "monitoring.export.metric_ids is required when export is enabled — export is \
+                 an egress surface, the data selection must be explicit (unknown metric ids \
+                 are rejected at startup against the v1 registry)"
+                    .to_string(),
+            );
+        }
+        if self.metric_ids.len() > MAX_METRIC_IDS {
+            return Err(format!(
+                "monitoring.export.metric_ids must have at most {MAX_METRIC_IDS} entries, got {}",
+                self.metric_ids.len()
+            ));
+        }
+        if let Some(dup) = first_duplicate(&self.metric_ids) {
+            return Err(format!(
+                "monitoring.export.metric_ids contains {dup:?} twice"
+            ));
+        }
+
+        for kind in &self.target_kinds {
+            if !EXPORT_TARGET_KINDS.contains(&kind.as_str()) {
+                return Err(format!(
+                    "monitoring.export.target_kinds entry {kind:?} is not one of \
+                     {EXPORT_TARGET_KINDS:?}"
+                ));
+            }
+        }
+        if let Some(dup) = first_duplicate(&self.target_kinds) {
+            return Err(format!(
+                "monitoring.export.target_kinds contains {dup:?} twice"
+            ));
+        }
+
+        for source in &self.sources {
+            if !EXPORT_SOURCES.contains(&source.as_str()) {
+                return Err(format!(
+                    "monitoring.export.sources entry {source:?} is not one of {EXPORT_SOURCES:?}"
+                ));
+            }
+        }
+        if let Some(dup) = first_duplicate(&self.sources) {
+            return Err(format!("monitoring.export.sources contains {dup:?} twice"));
+        }
+
+        if !(5..=60).contains(&self.interval_secs) {
+            return Err(format!(
+                "monitoring.export.interval_secs must be 5..=60, got {}",
+                self.interval_secs
+            ));
+        }
+        if !(60..=3600).contains(&self.max_backfill_secs) {
+            return Err(format!(
+                "monitoring.export.max_backfill_secs must be 60..=3600, got {}",
+                self.max_backfill_secs
+            ));
+        }
+        if !(30..=3600).contains(&self.lag_degraded_secs) {
+            return Err(format!(
+                "monitoring.export.lag_degraded_secs must be 30..=3600, got {}",
+                self.lag_degraded_secs
+            ));
+        }
+        // The degraded threshold must sit inside the backfill window:
+        // a lag marker beyond what the exporter would ever replay
+        // could never fire.
+        if self.lag_degraded_secs > self.max_backfill_secs {
+            return Err(
+                "monitoring.export.lag_degraded_secs must not exceed max_backfill_secs — the \
+                 degraded marker must be reachable inside the bounded catch-up window"
+                    .to_string(),
+            );
+        }
+
+        if let Some(token_path) = &self.bearer_token_path {
+            if !token_path.is_file() {
+                return Err(format!(
+                    "monitoring.export.bearer_token_path is not a readable file: {}",
+                    token_path.display()
+                ));
+            }
+            let len = std::fs::metadata(token_path).map(|m| m.len()).unwrap_or(0);
+            if !(1..=4096).contains(&len) {
+                return Err(format!(
+                    "monitoring.export.bearer_token_path must point at a 1..=4096 byte file, \
+                     got {len} bytes"
+                ));
+            }
+        }
+        if let Some(ca_path) = &self.ca_cert_path {
+            if !ca_path.is_file() {
+                return Err(format!(
+                    "monitoring.export.ca_cert_path is not a readable file: {}",
+                    ca_path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn first_duplicate(items: &[String]) -> Option<&str> {
+    let mut seen = std::collections::BTreeSet::new();
+    items
+        .iter()
+        .find(|i| !seen.insert(i.as_str()))
+        .map(|i| i.as_str())
+}
+
+fn default_export_interval_secs() -> u64 {
+    15
+}
+fn default_export_max_backfill_secs() -> u64 {
+    600
+}
+fn default_export_lag_degraded_secs() -> u64 {
+    120
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
@@ -1241,6 +1484,7 @@ impl Default for MonitoringConfig {
             guest_ingestion: MonitoringGuestIngestConfig::default(),
             alerting: MonitoringAlertingConfig::default(),
             notifications: MonitoringNotificationsConfig::default(),
+            export: MonitoringExportConfig::default(),
         }
     }
 }
@@ -2136,5 +2380,163 @@ client_ca_path = "/etc/chv/tls/chv-ca.crt"
         let config_path = dir.path().join("stord.toml");
         std::fs::write(&config_path, contents).expect("write config");
         Ok(load_stord_config(Some(&config_path))?)
+    }
+
+    #[test]
+    fn export_defaults_to_off_and_valid() {
+        let monitoring = MonitoringConfig::default();
+        assert!(!monitoring.export.enabled);
+        assert!(monitoring.export.destination_url.is_none());
+        assert!(monitoring.export.metric_ids.is_empty());
+        assert!(monitoring.export.validate().is_ok());
+    }
+
+    #[test]
+    fn export_section_parses_from_toml() {
+        let raw = r#"
+[monitoring.export]
+enabled = true
+destination_url = "https://victoriametrics.internal:8428/api/v1/write"
+interval_secs = 30
+max_backfill_secs = 900
+lag_degraded_secs = 180
+metric_ids = ["vm.cpu.capacity_ratio", "vm.memory.guest_available_bytes"]
+target_kinds = ["vm"]
+sources = ["vmm", "derived"]
+"#;
+        let value: toml::Value = toml::from_str(raw).expect("parse toml");
+        let export: MonitoringExportConfig = value
+            .get("monitoring")
+            .unwrap()
+            .get("export")
+            .map(|v| MonitoringExportConfig::deserialize(v.clone()).expect("export section"))
+            .unwrap_or_default();
+        assert!(export.enabled);
+        assert_eq!(
+            export.destination_url.as_deref(),
+            Some("https://victoriametrics.internal:8428/api/v1/write")
+        );
+        assert_eq!(export.metric_ids.len(), 2);
+        assert_eq!(export.target_kinds, vec!["vm".to_string()]);
+        assert!(export.validate().is_ok());
+    }
+
+    #[test]
+    fn export_rejects_unknown_fields() {
+        let raw = r#"
+[monitoring.export]
+enabled = true
+destination_url = "https://vm.internal:8428/api/v1/write"
+metric_ids = ["vm.cpu.capacity_ratio"]
+nonsense = true
+"#;
+        let value: toml::Value = toml::from_str(raw).expect("parse toml");
+        let err = MonitoringExportConfig::deserialize(
+            value
+                .get("monitoring")
+                .unwrap()
+                .get("export")
+                .unwrap()
+                .clone(),
+        )
+        .expect_err("unknown field must be rejected");
+        assert!(err.to_string().contains("nonsense"), "{err}");
+    }
+
+    fn export_config_for_validate() -> MonitoringExportConfig {
+        MonitoringExportConfig {
+            enabled: true,
+            destination_url: Some("https://victoriametrics.internal:8428/api/v1/write".into()),
+            metric_ids: vec!["vm.cpu.capacity_ratio".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn export_requires_destination_and_selection_when_enabled() {
+        // No destination.
+        let mut cfg = export_config_for_validate();
+        cfg.destination_url = None;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("destination_url"), "{err}");
+        // No metric selection: an egress surface must be explicit.
+        let mut cfg = export_config_for_validate();
+        cfg.metric_ids = Vec::new();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("metric_ids"), "{err}");
+        // Disabled sections are exempt (the shipped default).
+        let mut cfg = export_config_for_validate();
+        cfg.enabled = false;
+        cfg.destination_url = None;
+        cfg.metric_ids = Vec::new();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn export_rejects_unsafe_destinations() {
+        let mut cfg = export_config_for_validate();
+        cfg.destination_url = Some("http://victoriametrics.internal:8428/api/v1/write".into());
+        assert!(cfg.validate().unwrap_err().contains("https://"));
+        // Cloud-metadata hazard, same rule as notifications.
+        let mut cfg = export_config_for_validate();
+        cfg.destination_url = Some("https://169.254.169.254/api/v1/write".into());
+        assert!(cfg.validate().unwrap_err().contains("link-local"));
+        // Credentials in the URL.
+        let mut cfg = export_config_for_validate();
+        cfg.destination_url =
+            Some("https://user:secret@victoriametrics.internal:8428/api/v1/write".into());
+        assert!(cfg.validate().unwrap_err().contains("credentials"));
+        // Internal private/loopback receivers are legitimate.
+        let mut cfg = export_config_for_validate();
+        cfg.destination_url = Some("https://127.0.0.1:8428/api/v1/write".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn export_rejects_bad_filters_and_bounds() {
+        let mut cfg = export_config_for_validate();
+        cfg.target_kinds = vec!["volume".into()];
+        assert!(cfg.validate().unwrap_err().contains("target_kinds"));
+        let mut cfg = export_config_for_validate();
+        cfg.sources = vec!["guest".into()];
+        assert!(cfg.validate().unwrap_err().contains("sources"));
+        let mut cfg = export_config_for_validate();
+        cfg.metric_ids = vec!["a".into(), "a".into()];
+        assert!(cfg.validate().unwrap_err().contains("twice"));
+        let mut cfg = export_config_for_validate();
+        cfg.interval_secs = 1;
+        assert!(cfg.validate().unwrap_err().contains("interval_secs"));
+        let mut cfg = export_config_for_validate();
+        cfg.lag_degraded_secs = 3600;
+        cfg.max_backfill_secs = 300;
+        // The degraded marker must be reachable inside the catch-up
+        // window, or it could never fire.
+        assert!(cfg.validate().unwrap_err().contains("lag_degraded_secs"));
+        let mut cfg = export_config_for_validate();
+        cfg.metric_ids = (0..65).map(|i| format!("m{i}")).collect();
+        assert!(cfg.validate().unwrap_err().contains("at most 64"));
+    }
+
+    #[test]
+    fn export_bearer_token_and_ca_paths_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "sufficiently-long-token-material").unwrap();
+
+        let mut cfg = export_config_for_validate();
+        cfg.bearer_token_path = Some(dir.path().join("missing"));
+        assert!(cfg.validate().unwrap_err().contains("bearer_token_path"));
+
+        cfg.bearer_token_path = Some(token.clone());
+        assert!(cfg.validate().is_ok());
+
+        // Empty token file: an empty Authorization header is never a
+        // real deployment shape.
+        std::fs::write(&token, "").unwrap();
+        assert!(cfg.validate().unwrap_err().contains("bearer_token_path"));
+
+        let mut cfg = export_config_for_validate();
+        cfg.ca_cert_path = Some(dir.path().join("missing-ca.pem"));
+        assert!(cfg.validate().unwrap_err().contains("ca_cert_path"));
     }
 }

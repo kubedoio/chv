@@ -924,12 +924,14 @@ dependencies = [
  "cron",
  "dashmap",
  "futures",
+ "hex",
  "hmac",
  "hyper-util",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
  "object_store",
+ "prost",
  "rand 0.10.3",
  "rcgen",
  "reqwest 0.12.28",
@@ -938,6 +940,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "snap",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
@@ -1015,6 +1018,7 @@ dependencies = [
  "axum 0.7.9",
  "chv-agent-core",
  "chv-agent-runtime-ch",
+ "chv-config",
  "chv-controlplane-service",
  "chv-controlplane-store",
  "chv-hypervisor-api",
@@ -1022,6 +1026,7 @@ dependencies = [
  "chv-monitoring-core",
  "chv-monitoring-store",
  "chv-observability",
+ "hex",
  "hmac",
  "libc",
  "rcgen",
@@ -4736,6 +4741,12 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "snap"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"

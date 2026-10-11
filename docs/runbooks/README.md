@@ -14,6 +14,7 @@ This directory contains operational runbooks for backup, restore, and disaster r
 | [Monitoring Store](monitoring-store.md) | Monitoring history degraded/corrupted/disabled (retention, disk headroom, reset) | Automatic degradation + manual recovery | 5–10 min |
 | [Alerting and Notifications](alerting.md) | Alert rules, incidents, webhook/Slack delivery (configuration, secret rotation, dead-letter triage) | Automatic evaluation + manual configuration | 5–15 min |
 | [VM Monitoring vsock Transport](vm-monitoring-vsock.md) | Guest monitoring over the optional vsock device (opt-in, relay diagnosis, transport switch, batch enrollment) | Automatic relay rebind + manual diagnosis | 5–15 min |
+| [Monitoring Export](monitoring-export.md) | Optional remote-write export to an external backend (VictoriaMetrics/Prometheus) — configuration, degraded state, backfill bounds, readback | Automatic export + manual configuration | 5–15 min |
 
 ## Severity Levels
 
