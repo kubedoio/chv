@@ -9,10 +9,11 @@
 static binary digest-verified against `scripts/install.sh`'s pin,
 rust-hypervisor-fw, guest image `noble-qual-patched.img` (qcow2). The
 guest package under test is `chv-monitor-agent_0.3.0_amd64.deb`
-(`e9fc83183922383713896fd5214bb158d630cc0a74249307466273d872080285`)
-built from the final branch state with every gate-catch fix compiled
-in, byte-compared against `target/release/chv-monitor-agent` before
-the run. The manager runs in-process in the test binary — the real
+(`66c73932cf2a55000e724d7953c13c0b5a1f347c05f74c936384d7f88210812e`,
+branch tip `f13fc634`)
+built from the final branch state with every gate-catch fix and every
+review fix (rounds 1–2) compiled in, byte-compared against
+`target/release/chv-monitor-agent` before the run. The manager runs in-process in the test binary — the real
 `chv-controlplane-service` HTTPS/TLS/ingest stack and the real
 `MonitoringStore`; the VM is driven through the production
 `ProcessCloudHypervisorAdapter` (real `vm.create`/`vm.boot`/`vm.reboot`/
@@ -40,15 +41,25 @@ assumed:
 - **Identity and replay continuity** (`agent_id`, ingest sequence
   advancing past the pre-switch value) across every transport switch
   and lifecycle event.
+- **New-boot proof, not count proof.** The manager persists batches
+  with a delay, so a bare "point count rose" check can false-pass on
+  a pre-event envelope still in flight at the snapshot (run 9 caught
+  exactly this on the stop/start leg). The reboot and stop/start
+  waits therefore require the agent's reported **boot id to change**;
+  the switch and adoption waits require the **ingest sequence to pass
+  snapshot+1** (the agent sends serially, so at most one stale
+  envelope can be in flight).
 
 The guest's `server_url` uses a DNS name (`g5-manager.chv.internal`)
 with a DNS-only SAN in the manager certificate, because IP-literal
 URLs bypass the resolver override that redirects the dial onto the
 loopback forwarder (hyper behavior, verified on this rig in an earlier
 iteration: the client dialed the URL port on 127.0.0.1 and nothing
-else moved).
+else moved). The agent now refuses to start in vsock mode with an
+IP-literal `server_url` (IPv4 and bracketed IPv6), so this
+requirement is enforced at boot rather than left to documentation.
 
-## Results (final run, EXIT=0, 415 s)
+## Results (final run, EXIT=0, 378 s)
 
 ```
 matrix: boot=PASS pipe-enroll=PASS pipe-telemetry=PASS switch-tcp=PASS
@@ -91,7 +102,9 @@ Legs, as observed in the run log:
 8. **Stop/start** — graceful stop removes both the relay endpoint and
    the device socket; `start_vm` respawns the VMM, re-derives the
    relay from the persisted payload, re-creates the device socket,
-   and telemetry resumes with the same identity.
+   and telemetry resumes with the same identity. The wait gates on
+   the guest's boot id changing, so the pass is the NEW boot's
+   ingest, not a stale count.
 9. **Node restart (adoption)** — a FRESH adapter + relay manager
    adopts the running VM: the endpoint is unlinked and re-bound by the
    new manager, and after an in-guest agent restart the new traffic
@@ -107,8 +120,9 @@ Legs, as observed in the run log:
 
 ## Gate catches (what the rig found and fixed before PASS)
 
-Two real defects were caught by earlier iterations of this rig and
-are part of the evidence that the gate has teeth:
+Two product defects and one rig-assertion defect were caught by
+earlier iterations of this rig and are part of the evidence that the
+gate has teeth:
 
 1. **The forwarder must own the `server_url` port.** reqwest's
    `.resolve()` override redirects the host to 127.0.0.1 but the dial
@@ -128,6 +142,17 @@ are part of the evidence that the gate has teeth:
    entries, and the spool drain drops unparsable entries instead of
    wedging. Recorded as the identity-file durability decision in the
    agent security contract.
+3. **A count-based resume wait can false-pass.** Run 9: the
+   stop/start wait passed ~2 s after `start_vm` — with zero relay
+   admissions, while the new guest was still booting — because the
+   manager persisted a pre-stop envelope still in flight at the
+   snapshot, and the follow-on sshd wait then absorbed the whole
+   (~2 min) boot and blew its budget. Not a product defect, but a
+   proof-strength defect: the leg claimed "guest back" without a
+   guest. Fix: the resume waits gate on the reported boot id changing
+   (reboot, stop/start) or on the ingest sequence passing
+   snapshot+1 (switches, adoption); an explicit sshd wait precedes
+   the in-guest restart.
 
 ## Known caveats carried on #602
 
