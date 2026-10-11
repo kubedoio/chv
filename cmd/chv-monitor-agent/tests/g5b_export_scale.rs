@@ -178,14 +178,16 @@ impl VictoriaMetrics {
             .arg("-httpListenAddr")
             .arg(format!("127.0.0.1:{port}"))
             // Rig-only knob, and an honest one: VictoriaMetrics
-            // guarantees in-memory data survives SIGKILL only after
-            // an `-inmemoryDataFlushInterval` flush (default 5 s).
-            // The outage leg kills the process hard, so it runs at
-            // the 1 s minimum and waits out the flush window before
-            // the kill — otherwise the receiver's own crash window
-            // eats the pre-outage sample and "both sides of the
-            // outage are queryable" would be unprovable by
-            // construction.
+            // persists in-memory data to disk parts on the
+            // `-inmemoryDataFlushInterval` cadence (default 5 s), and
+            // only DISK parts survive a SIGKILL. Measured on this
+            // exact pinned binary: inserts ≤5 s old are still lost on
+            // SIGKILL even at the 1 s minimum (fresh inserts sit in a
+            // pre-part buffer whose formation dominates), while ≥10 s
+            // old inserts survive. The outage leg therefore waits out
+            // a measured window — see the comment there — before the
+            // kill, so the receiver's crash window is never the
+            // reason the pre-outage readback fails.
             .arg("-inmemoryDataFlushInterval=1s")
             .arg("-tls")
             .arg("-tlsCertFile")
@@ -420,6 +422,29 @@ impl Rig {
         }
     }
 
+    /// Wait until the instant query at `time_ms` reports `expected`
+    /// as the latest value of the (single) series. Presence alone is
+    /// not enough when older samples are already queryable: a sample
+    /// loaded from disk parts answers immediately while a freshly
+    /// pushed one needs VictoriaMetrics' insert-visibility window,
+    /// so a `wait_for_series(.., 1)` poll would return early with the
+    /// OLD value and the "latest" assertion would race.
+    async fn wait_for_latest_value(&self, query: &str, time_ms: u64, expected: f64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let result = self.query(query, time_ms).await;
+            if result.len() == 1 && (result[0].1 - expected).abs() < 1e-9 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "g5b: series {query:?} did not report {expected} as the latest value \
+                 within 20 s (last result: {result:?})"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Wait out VictoriaMetrics' insert-flush interval so a subsequent
     /// "must be empty" assertion cannot pass merely because stored
     /// data is still invisible.
@@ -593,10 +618,13 @@ async fn destination_outage_degrades_and_recovers_without_loss() {
     assert_eq!(exporter.exported_samples(), 1);
 
     // Let the receiver make the pushed sample SIGKILL-durable before
-    // the outage (VM's own flush contract — see start_on_port). The
+    // the outage. Measured on the pinned VictoriaMetrics binary with
+    // the rig's 1 s flush flag: inserts ≤5 s old were lost on
+    // SIGKILL (pre-part buffer), ≥10 s old survived — so the leg
+    // waits 20 s, 2× the highest surviving-measurement boundary. The
     // EXPORTER has done its job the moment the push was accepted;
     // this wait is about the receiver's crash window, not ours.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     // OUTAGE: kill the destination, then produce a fresh sample. The
     // pass must fail at the first push, hold the cursor and degrade —
@@ -642,11 +670,12 @@ async fn destination_outage_degrades_and_recovers_without_loss() {
         "the outage-window sample exported after recovery"
     );
 
-    let all = rig
-        .wait_for_series("chv_node_cpu_capacity_ratio", t0 + 60_000, 1)
+    // The post-recovery sample must be the LATEST at a later query
+    // time. Value-aware wait: the pre-outage sample (retained on
+    // disk) answers instantly, while this freshly pushed one needs
+    // the insert-visibility window first.
+    rig.wait_for_latest_value("chv_node_cpu_capacity_ratio", t0 + 60_000, 0.2)
         .await;
-    assert_eq!(all.len(), 1);
-    assert_eq!(all[0].1, 0.2, "the post-recovery sample is the latest");
 
     // BOTH sides of the outage are queryable at their own times: the
     // pre-outage sample (pushed before the outage) must still be
