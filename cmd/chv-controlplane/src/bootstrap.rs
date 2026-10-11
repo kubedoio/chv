@@ -408,6 +408,15 @@ pub async fn build_service(
             "invalid [monitoring.notifications]: {reason}"
         )));
     }
+    // Optional external export (ADR-027 decision 9, campaign #602
+    // PR-8): same fail-loud-at-boot contract — an enabled export with
+    // no metric selection, or an unsafe destination, is an operator
+    // error to fix in the config, not a silent no-export degradation.
+    if let Err(reason) = config.monitoring.export.validate() {
+        return Err(ControlPlaneServiceError::Internal(format!(
+            "invalid [monitoring.export]: {reason}"
+        )));
+    }
 
     // Guest monitoring agent ingestion (ADR-026, campaign #602 G3):
     // an explicit deployment decision, never a side effect. Enabling
