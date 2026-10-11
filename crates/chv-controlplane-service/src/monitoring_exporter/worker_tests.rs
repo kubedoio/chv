@@ -517,3 +517,60 @@ fn settings_are_bounded_by_the_config_validation() {
     assert!(cfg.lag_degraded_secs <= cfg.max_backfill_secs);
     assert!(Duration::from_secs(cfg.interval_secs) >= Duration::from_secs(5));
 }
+
+#[test]
+fn export_telemetry_is_additive_to_the_preserved_instrumentation() {
+    // Prompt-05 task 7 first clause: PRESERVE the existing
+    // `/metrics` instrumentation and the `monitoring/rules/*.yml`
+    // files that consume it. This pin holds the additive direction:
+    // the three export gauges are new, distinct names, and no
+    // exported monitoring series can ever collide with a preserved
+    // control-plane family (a receiver — and the rule files — must
+    // never conflate the two).
+    use chv_observability::{
+        CHV_CP_CONSECUTIVE_DRIFT_TICKS, CHV_CP_CONVERGENCE_AVG_MS, CHV_CP_DRIFT_COUNT,
+        CHV_CP_PENDING_OPERATIONS, CHV_EBPF_BYTES_TOTAL, CHV_EBPF_PACKETS_TOTAL,
+        CHV_GRPC_SERVER_DURATION_SECONDS, CHV_GRPC_SERVER_REQUESTS_TOTAL,
+        CHV_MIGRATION_BYTES_TRANSFERRED, CHV_MIGRATION_DIRTY_BLOCKS,
+        CHV_MIGRATION_DURATION_SECONDS, CHV_MIGRATION_PHASE, CHV_NODES_READY,
+        CHV_OPERATION_DURATION_SECONDS, CHV_VMS_TOTAL, CHV_VM_OPS_TOTAL,
+        CHV_VM_OP_DURATION_SECONDS, CHV_VXLAN_FDB_ENTRIES, NWD_FABRIC_APPLY_TOTAL,
+        NWD_FABRIC_REMOVE_TOTAL,
+    };
+    let preserved = [
+        CHV_VMS_TOTAL,
+        CHV_NODES_READY,
+        CHV_OPERATION_DURATION_SECONDS,
+        CHV_GRPC_SERVER_REQUESTS_TOTAL,
+        CHV_GRPC_SERVER_DURATION_SECONDS,
+        CHV_VM_OPS_TOTAL,
+        CHV_VM_OP_DURATION_SECONDS,
+        CHV_MIGRATION_PHASE,
+        CHV_MIGRATION_BYTES_TRANSFERRED,
+        CHV_MIGRATION_DURATION_SECONDS,
+        CHV_MIGRATION_DIRTY_BLOCKS,
+        CHV_VXLAN_FDB_ENTRIES,
+        CHV_EBPF_PACKETS_TOTAL,
+        CHV_EBPF_BYTES_TOTAL,
+        CHV_CP_DRIFT_COUNT,
+        CHV_CP_PENDING_OPERATIONS,
+        CHV_CP_CONVERGENCE_AVG_MS,
+        CHV_CP_CONSECUTIVE_DRIFT_TICKS,
+        NWD_FABRIC_APPLY_TOTAL,
+        NWD_FABRIC_REMOVE_TOTAL,
+    ];
+    for name in [
+        super::worker::METRIC_EXPORT_LAG_SECONDS,
+        super::worker::METRIC_EXPORT_DEGRADED,
+        super::worker::METRIC_EXPORT_SAMPLES_TOTAL,
+    ] {
+        assert!(!preserved.contains(&name), "export gauge {name} collides");
+    }
+    for def in chv_monitoring_core::registry::all() {
+        let name = chv_monitoring_core::registry::prometheus_name(def.id).unwrap();
+        assert!(
+            !preserved.contains(&name.as_str()),
+            "exported series name {name} collides with a preserved family"
+        );
+    }
+}

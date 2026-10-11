@@ -42,10 +42,11 @@ const MAX_POINTS_PER_SERIES: usize = 1000;
 const MAX_TARGETS_PER_KIND: usize = 1000;
 
 /// Metric names emitted on the admin `/metrics` surface (preserved
-/// instrumentation — additive, never renamed).
-const METRIC_EXPORT_LAG_SECONDS: &str = "chv_export_lag_seconds";
-const METRIC_EXPORT_DEGRADED: &str = "chv_export_degraded";
-const METRIC_EXPORT_SAMPLES_TOTAL: &str = "chv_export_samples_total";
+/// instrumentation — additive, never renamed). `pub(crate)` for the
+/// preservation pin in the test suite.
+pub(crate) const METRIC_EXPORT_LAG_SECONDS: &str = "chv_export_lag_seconds";
+pub(crate) const METRIC_EXPORT_DEGRADED: &str = "chv_export_degraded";
+pub(crate) const METRIC_EXPORT_SAMPLES_TOTAL: &str = "chv_export_samples_total";
 
 /// One remote-write push. Errors carry only a redacted
 /// classification — never the destination URL or its credentials.

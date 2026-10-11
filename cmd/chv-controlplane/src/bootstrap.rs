@@ -2,6 +2,7 @@ use chv_config::{ControlPlaneConfig, ControlPlaneTlsConfig};
 use chv_controlplane_service::{
     alert_evaluator::{AlertEvaluatorWorker, EvaluatorChannels},
     compat::{CompatibilityMatrix, Component},
+    monitoring_exporter::{MonitoringExporter, ReqwestExportTransport},
     notification_dispatcher::{DispatcherSettings, NotificationDispatcher},
     validate_security_mode, ControlPlaneComponents, ControlPlaneMutationService,
     ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
@@ -867,6 +868,89 @@ pub async fn build_service(
         tokio::spawn(async {})
     };
 
+    // Optional external export worker (ADR-027 decision 9, #602 PR-8).
+    //
+    // Runs only when explicitly enabled with a metric selection, and
+    // only with the monitoring store up: without stored samples there
+    // is nothing to export — degrading export (never the control
+    // plane, never the native graphs) is the honest behavior. The
+    // exporter degrades on destination outages by design; see the
+    // worker docs for the bounded-backfill contract.
+    let export_config = &config.monitoring.export;
+    let monitoring_exporter_handle =
+        if export_config.enabled && !export_config.metric_ids.is_empty() {
+            match monitoring_store.as_ref() {
+                Some(store) => {
+                    // Bearer token and CA are operator contracts:
+                    // unreadable or invalid material is a boot error,
+                    // never a silent unauthenticated or
+                    // system-roots fallback that would fail (or
+                    // weaken) every push later.
+                    let bearer_token = match &export_config.bearer_token_path {
+                        Some(path) => match std::fs::read_to_string(path) {
+                            Ok(raw) => {
+                                let token = raw.trim();
+                                if token.is_empty() {
+                                    return Err(ControlPlaneServiceError::Internal(format!(
+                                        "monitoring.export.bearer_token_path {} is empty \
+                                         after trimming surrounding whitespace",
+                                        path.display()
+                                    )));
+                                }
+                                Some(token.to_string())
+                            }
+                            Err(e) => {
+                                return Err(ControlPlaneServiceError::Internal(format!(
+                                    "cannot read monitoring.export.bearer_token_path {}: {e}",
+                                    path.display()
+                                )));
+                            }
+                        },
+                        None => None,
+                    };
+                    let ca_pem = match &export_config.ca_cert_path {
+                        Some(path) => match std::fs::read_to_string(path) {
+                            Ok(pem) => Some(pem),
+                            Err(e) => {
+                                return Err(ControlPlaneServiceError::Internal(format!(
+                                    "cannot read monitoring.export.ca_cert_path {}: {e}",
+                                    path.display()
+                                )));
+                            }
+                        },
+                        None => None,
+                    };
+                    // destination_url is guaranteed by the config
+                    // validation above; the defensive fallback fails
+                    // loud rather than pushing anywhere.
+                    let destination = export_config.destination_url.as_deref().unwrap_or("");
+                    let transport =
+                        ReqwestExportTransport::new(destination, bearer_token, ca_pem.as_deref())
+                            .map_err(ControlPlaneServiceError::Internal)?;
+                    let exporter = MonitoringExporter::new(
+                        export_config,
+                        store.clone(),
+                        std::sync::Arc::new(transport),
+                    )
+                    .map_err(ControlPlaneServiceError::Internal)?;
+                    let shutdown = shutdown_rx.clone();
+                    tokio::spawn(async move { exporter.run(shutdown).await })
+                }
+                None => {
+                    tracing::warn!(
+                        "monitoring.export is enabled but the monitoring store is unavailable; \
+                         export is degraded until the control plane is restarted with the \
+                         monitoring store reachable (local monitoring, alerting and VM \
+                         lifecycle are unaffected)"
+                    );
+                    tokio::spawn(async {})
+                }
+            }
+        } else {
+            tracing::debug!("monitoring.export not enabled; exporter not started");
+            tokio::spawn(async {})
+        };
+
     let migration_reaper = chv_controlplane_service::MigrationReaper::new(
         pool.clone(),
         node_client_pool.clone(),
@@ -894,6 +978,7 @@ pub async fn build_service(
             monitoring_worker_handle,
             alert_evaluator_handle,
             notification_dispatcher_handle,
+            monitoring_exporter_handle,
         ],
     ))
 }
