@@ -13,8 +13,17 @@
 //! - [`remote_write`]: the wire format (hand-defined prost
 //!   `WriteRequest`, snappy block compression, the maintained
 //!   `chv_*` name mapping, golden-bytes tests).
-//! - The worker itself lands in the next commit of this series.
+//! - [`worker`]: the cadence-pass worker (lag cursor, bounded
+//!   backfill, pass-level backoff, degraded signal, transport seam).
 
 pub mod remote_write;
+pub mod worker;
+
+#[cfg(test)]
+mod worker_tests;
 
 pub use remote_write::{render_push, ExportPoint, ExportSeries, RemoteWriteBody};
+pub use worker::{
+    ExportPushError, ExportTransport, ExporterSettings, MonitoringExporter, PassOutcome,
+    ReqwestExportTransport,
+};
