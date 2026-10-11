@@ -731,6 +731,10 @@ const MAX_ENABLED_RULES_PER_TICK: i64 = 500;
 const ORPHAN_SWEEP_GRACE_MS: i64 = 60_000;
 /// Active incidents examined per sweep pass.
 const ORPHAN_SWEEP_MAX_INCIDENTS: i64 = 1_000;
+/// Rules fetched per key-listing page; must cover the config rule
+/// ceiling so the sweep's snapshot is one atomic page (see the
+/// assert in `sweep_orphaned_incidents`).
+const RULE_KEY_PAGE_SIZE: i64 = 500;
 /// The transition reason recorded when the backstop sweep retires
 /// an incident no rule produces anymore.
 const ORPHAN_SWEEP_REASON: &str = "rule removed or retargeted (backstop sweep)";
@@ -820,10 +824,26 @@ impl AlertEvaluatorWorker {
         // The COMPLETE key set — every rule, enabled or disabled (a
         // disabled rule's incidents hold by design and must never be
         // swept). Paged: correctness requires the full set.
+        //
+        // Airtight because the page size covers the config rule
+        // ceiling (the listing is a single page, so there is no
+        // mid-paging window in which a concurrent rule creation could
+        // shift pagination and skip a live key — a skipped OLD key's
+        // old incident would be swept wrongly, and the grace only
+        // protects fresh incidents). The loop below keeps working
+        // beyond one page; this compile-time assertion pins the
+        // invariant.
+        const _: () = assert!(
+            RULE_KEY_PAGE_SIZE >= MAX_ENABLED_RULES_PER_TICK,
+            "the sweep's key paging assumes the rule ceiling fits one page"
+        );
         let mut live_keys = std::collections::HashSet::new();
         let mut offset = 0i64;
         loop {
-            let (rules, total) = self.rules.list(false, None, 500, offset).await?;
+            let (rules, total) = self
+                .rules
+                .list(false, None, RULE_KEY_PAGE_SIZE, offset)
+                .await?;
             let page = rules.len() as i64;
             live_keys.extend(rules.iter().map(dedup_key));
             offset += page;
@@ -851,6 +871,11 @@ impl AlertEvaluatorWorker {
                 continue;
             }
             if incident.status == chv_controlplane_store::INCIDENT_STATUS_FIRING {
+                tracing::info!(
+                    alert_id = %incident.alert_id,
+                    rule_id = incident.rule_id.as_deref().unwrap_or(""),
+                    "alert evaluation: backstop sweep resolved an orphaned firing incident"
+                );
                 let notify = self.retire_notify_events(incident, now_ms);
                 self.alerts
                     .resolve_incident(
@@ -862,6 +887,11 @@ impl AlertEvaluatorWorker {
                     )
                     .await?;
             } else {
+                tracing::info!(
+                    alert_id = %incident.alert_id,
+                    rule_id = incident.rule_id.as_deref().unwrap_or(""),
+                    "alert evaluation: backstop sweep deleted an orphaned pending incident"
+                );
                 self.alerts.clear_pending(&incident.alert_id).await?;
             }
         }
@@ -872,6 +902,15 @@ impl AlertEvaluatorWorker {
     /// configured channel — the same envelope shape the BFF's
     /// rule-retire path renders. Silence (an overlay) suppresses
     /// delivery, never the transition.
+    ///
+    /// Deliberate duplication with the BFF's `resolved_notify_events`
+    /// (and this crate's `notify_events`): the store stays
+    /// payload-opaque (it persists envelopes, never renders them), so
+    /// a shared builder would need a chv-monitoring-core dependency
+    /// on chv-controlplane-store or a chv-controlplane-service
+    /// dependency on the BFF — both worse boundaries than three
+    /// small, independently tested copies of a closed 10-field
+    /// envelope construction.
     fn retire_notify_events(
         &self,
         incident: &chv_controlplane_store::IncidentRow,
@@ -3093,6 +3132,47 @@ mod worker_tests {
             .await
             .expect("a disabled rule's incident holds");
         assert_eq!(incident.status, "firing");
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_deletes_never_fired_pending_of_deleted_rules() {
+        // The sweep's pending branch: a never-fired pending orphan is
+        // DELETED (like a pending cleared before its hold), not
+        // resolved — no transition, no notification.
+        let f = fixture(EvaluatorChannels {
+            webhook: true,
+            slack: false,
+        })
+        .await;
+        // A held rule: the incident stays pending, never fires.
+        let rule = f
+            .rules
+            .create(&cpu_rule(3_600, 60, 0.9))
+            .await
+            .expect("rule");
+        f.seed_cpu(BASE_MS as u64 - 30_000, 0.95).await;
+        f.worker.evaluation_pass(BASE_MS).await;
+        let incident = active_incident(&f, &dedup_key(&rule))
+            .await
+            .expect("pending");
+        assert_eq!(incident.status, "pending");
+
+        // Crash simulation: deleted with no retire; after the grace
+        // window the sweep must delete the pending orphan entirely.
+        f.rules
+            .delete(&rule.rule_id, rule.revision)
+            .await
+            .expect("delete");
+        f.worker.evaluation_pass(BASE_MS + 120_000).await;
+        assert!(
+            f.alerts.get_incident(&incident.alert_id).await.is_err(),
+            "a never-fired pending orphan is deleted, not resolved"
+        );
+        assert_eq!(
+            outbox_count(&f, "resolved").await,
+            0,
+            "no resolved notification for a never-fired incident"
+        );
     }
 
     #[tokio::test]
