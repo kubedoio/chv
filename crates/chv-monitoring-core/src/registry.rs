@@ -389,6 +389,31 @@ pub fn lookup(metric_id: &str) -> Option<&'static MetricDef> {
     REGISTRY.iter().find(|d| d.id == metric_id)
 }
 
+/// Iterate the whole registry (export name pinning, tooling).
+pub fn all() -> impl Iterator<Item = &'static MetricDef> {
+    REGISTRY.iter()
+}
+
+/// The Prometheus export name for a registry id — the "separately
+/// maintained `chv_*` underscore name registry" the `MetricDef.id`
+/// doc refers to (campaign #602 PR-8). The v1 rule is total and
+/// deterministic (`chv_` + `.`→`_`, e.g. `vm.cpu.capacity_ratio` →
+/// `chv_vm_cpu_capacity_ratio`, consistent with the control plane's
+/// existing `chv_*` families), but it lives HERE — next to the
+/// registry it derives from, not at an export call site — so a
+/// deliberate per-metric exception can be introduced without touching
+/// the exporter. `None` for ids outside the registry (callers treat
+/// that as a programming error: exporters validate their allowlist
+/// against `lookup` at construction).
+///
+/// Uniqueness and Prometheus-name validity across the whole registry
+/// are pinned by test — the dotted ids contain underscores, so the
+/// mapping is only injective as long as no future id pair differs
+/// purely in a `.`-vs-`_` position.
+pub fn prometheus_name(metric_id: &str) -> Option<String> {
+    lookup(metric_id).map(|def| format!("chv_{}", def.id.replace('.', "_")))
+}
+
 /// Metric-specific server-side staleness threshold override
 /// (query/alerts contract v1: "`stale` is decided server-side from
 /// metric-specific thresholds"). Metrics on the guest agent's
@@ -607,5 +632,34 @@ mod tests {
         // dimension.
         let def = lookup("node.memory.psi_some_ratio").unwrap();
         assert!(def.dimensions.contains(&"window"));
+    }
+
+    #[test]
+    fn prometheus_names_are_unique_and_valid_for_every_metric() {
+        // The export name mapping (PR-8) must stay injective across
+        // the registry — dotted ids contain underscores, so a future
+        // id pair differing only in a `.`-vs-`_` position would
+        // collide after replacement — and every produced name and
+        // dimension key must be a valid Prometheus label name, or
+        // exported series would be rejected by conforming receivers.
+        fn valid_label_name(name: &str) -> bool {
+            let mut chars = name.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+                _ => return false,
+            }
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for def in all() {
+            let name = prometheus_name(def.id).expect("registry id must map");
+            assert!(name.starts_with("chv_"), "{}", name);
+            assert!(valid_label_name(&name), "{}", name);
+            assert!(seen.insert(name.clone()), "duplicate export name {name}");
+            for key in def.dimensions {
+                assert!(valid_label_name(key), "{}.{key}", def.id);
+            }
+        }
+        assert!(prometheus_name("not.a.registry.metric").is_none());
     }
 }
