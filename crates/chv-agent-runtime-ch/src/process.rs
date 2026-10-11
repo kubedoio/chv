@@ -3334,6 +3334,20 @@ impl ProcessCloudHypervisorAdapter {
             }
         };
 
+        // G5: vm.reboot tears the VM down and re-creates it in the SAME
+        // VMM, re-attaching the vsock device from the persisted config —
+        // which re-binds the device socket path. The vsock muxer only
+        // unlinks that path on a clean process EXIT, so a teardown that
+        // skips it would leave a stale file and fail the re-bind (the
+        // same hazard create_vm/respawn_vmm already defend against).
+        // Unlinking the path is a no-op when the device cleaned up
+        // (ENOENT) and never disturbs a lingering live socket inode.
+        if let Some(vm_dir) = api_socket.parent() {
+            if let Some(vsock_socket) = crate::vsock_relay::persisted_vsock_device_socket(vm_dir) {
+                let _ = tokio::fs::remove_file(&vsock_socket).await;
+            }
+        }
+
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
         if status == 0 {
             warn!(

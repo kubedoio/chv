@@ -332,6 +332,11 @@ async fn relay_connection(
         }
     };
     let last_activity_ms = Arc::new(AtomicU64::new(now_unix_ms()));
+    debug!(
+        vm_id = %vm_id,
+        cp_target = %cp_target,
+        "vsock relay connection admitted (piping bytes, no inspection)"
+    );
     let mut guest = ActivityTrackingStream::new(guest, Arc::clone(&last_activity_ms));
     let mut cp = ActivityTrackingStream::new(cp, Arc::clone(&last_activity_ms));
     tokio::select! {
