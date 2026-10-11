@@ -120,6 +120,29 @@ async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()>
 /// detection is marker-based and cannot distinguish a frozen boot from
 /// a legitimately quiet marker-less guest, so operators opt in per
 /// node (see `BootWatchdogAgentConfig`).
+/// G5 (prompt-06 task 3): the node-side vsock monitoring relay manager,
+/// wired from the node's control-plane address — the per-VM relays pipe
+/// guest TLS bytes to the control plane's existing mTLS listener.
+/// Fail-soft by design: an unparseable address disables the relay
+/// (vsock VMs still run; guest monitoring over vsock is unavailable and
+/// the gap is logged loudly) — monitoring plumbing must never gate VM
+/// lifecycle.
+fn maybe_vsock_relay(
+    config: &AgentConfig,
+) -> Option<Arc<chv_agent_runtime_ch::vsock_relay::VsockRelayManager>> {
+    match chv_agent_runtime_ch::vsock_relay::VsockRelayManager::new(&config.control_plane_addr) {
+        Ok(manager) => Some(Arc::new(manager)),
+        Err(e) => {
+            warn!(
+                error = %e,
+                control_plane_addr = %config.control_plane_addr,
+                "vsock monitoring relay disabled for this agent process"
+            );
+            None
+        }
+    }
+}
+
 fn spawn_boot_watchdog(
     process_adapter: &Arc<ProcessCloudHypervisorAdapter>,
     config: &chv_config::BootWatchdogAgentConfig,
@@ -302,7 +325,10 @@ async fn start_core_native(
     let activated = cellhv_core_startup::StartupTransaction::begin(&paths)?
         .activate_native_only(configured_seed)?;
     let process_adapter =
-        chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path);
+        chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path)
+            // G5: wire the vsock monitoring relay BEFORE adoption so live vsock
+            // VMs get their endpoint back at startup.
+            .with_vsock_relay(maybe_vsock_relay(config));
     if let Err(e) = process_adapter.adopt_running_vms(&config.runtime_dir).await {
         warn!(error = %e, "vm runtime state adoption failed; starting with an empty runtime map");
     }
@@ -837,7 +863,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let process_adapter = Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
+    let process_adapter = Arc::new(
+        ProcessCloudHypervisorAdapter::new(&config.chv_binary_path)
+            // G5: wire the vsock monitoring relay BEFORE adoption so
+            // live vsock VMs get their endpoint back at startup.
+            .with_vsock_relay(maybe_vsock_relay(&config)),
+    );
     // Rebuild the in-memory VM map from on-disk runtime state before any
     // mode wiring: VMs outlive agent restarts, and lifecycle ops must not
     // fail with NotFound against VMs this node still runs. Fail-soft: an

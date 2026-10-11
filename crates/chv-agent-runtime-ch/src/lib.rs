@@ -7,6 +7,7 @@ pub mod core_runtime;
 pub(crate) mod linux_observation;
 pub mod mock;
 pub mod process;
+pub mod vsock_relay;
 
 pub use adapter::{CloudHypervisorAdapter, VmConfig};
 pub use ch_api::CloudHypervisorApiClient;

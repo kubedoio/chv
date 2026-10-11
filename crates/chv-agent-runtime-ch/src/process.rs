@@ -546,6 +546,15 @@ pub struct ProcessCloudHypervisorAdapter {
     /// await (the tick copies out / writes back records around its
     /// async work).
     boot_watchdog: std::sync::RwLock<Option<BootWatchdog>>,
+    /// G5 vsock monitoring relay (one per vsock-enabled VM), `None`
+    /// until [`Self::with_vsock_relay`] wires it from the node's
+    /// control-plane address. The relay is host-side plumbing for the
+    /// VM's vsock device, so its lifecycle rides THIS adapter's create/
+    /// start/stop/delete paths — the single choke point both authority
+    /// paths (Core runtime and legacy reconciler/direct RPC) go
+    /// through. `None` (tests, or an unparseable CP address at wiring
+    /// time) disables relays entirely; VMs are unaffected.
+    vsock_relay: Option<Arc<crate::vsock_relay::VsockRelayManager>>,
 }
 
 /// Node configuration for the guest-liveness (boot) watchdog. Mirrors
@@ -799,6 +808,38 @@ impl ProcessCloudHypervisorAdapter {
             console_draining: Arc::new(AtomicBool::new(false)),
             vms_root: std::sync::RwLock::new(None),
             boot_watchdog: std::sync::RwLock::new(None),
+            vsock_relay: None,
+        }
+    }
+
+    /// G5: attach the per-VM vsock monitoring relay manager, wired from
+    /// the node's `control_plane_addr`. Fail-soft by design: callers
+    /// pass `None` when the address cannot be parsed (the relay is
+    /// monitoring plumbing — its absence must never affect VM
+    /// lifecycle). Call BEFORE `adopt_running_vms` so adopted vsock VMs
+    /// get their relay at startup.
+    pub fn with_vsock_relay(
+        mut self,
+        relay: Option<Arc<crate::vsock_relay::VsockRelayManager>>,
+    ) -> Self {
+        self.vsock_relay = relay;
+        self
+    }
+
+    /// Idempotently start this VM's vsock relay, gated on the persisted
+    /// create payload carrying the device. Best-effort by design: a
+    /// relay failure degrades monitoring, never the VM.
+    fn ensure_vsock_relay(&self, vm_id: &str, vm_dir: Option<&std::path::Path>) {
+        if let (Some(relay), Some(vm_dir)) = (&self.vsock_relay, vm_dir) {
+            relay.ensure_started(vm_id, vm_dir);
+        }
+    }
+
+    /// Stop this VM's vsock relay (VM stopped or deleted — no VMM will
+    /// connect to the endpoint again).
+    fn stop_vsock_relay(&self, vm_id: &str) {
+        if let Some(relay) = &self.vsock_relay {
+            relay.stop(vm_id);
         }
     }
 
@@ -3083,9 +3124,18 @@ impl ProcessCloudHypervisorAdapter {
 
         // Stale sockets from an unclean VMM death would fail both binds
         // (api socket, serial listener). Only ever files this adapter
-        // owns.
+        // owns. The vsock device socket has the same hazard (the muxer
+        // binds it at vm.create and unlinks only on a clean shutdown),
+        // but its path comes from the persisted payload — the exact
+        // path the re-spawn is about to re-create the device with — so
+        // unlink it by parsing that payload once (a VM without the
+        // device has no file to leak, and the parse is the payload we
+        // read below anyway).
         let _ = tokio::fs::remove_file(&api_socket).await;
         let _ = tokio::fs::remove_file(vm_dir.join("serial.sock")).await;
+        if let Some(vsock_socket) = crate::vsock_relay::persisted_vsock_device_socket(&vm_dir) {
+            let _ = tokio::fs::remove_file(vsock_socket).await;
+        }
 
         let config_path = vm_config_file(&vm_dir);
         let body = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
@@ -3241,6 +3291,10 @@ impl ProcessCloudHypervisorAdapter {
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success after re-spawn (VM may have auto-booted)");
         }
+        // G5: the re-spawned VMM re-created the vsock device from the
+        // persisted payload — its host-side relay must be up again
+        // (idempotent, gated on the same payload).
+        self.ensure_vsock_relay(vm_id, Some(&vm_dir));
         Ok(())
     }
 
@@ -3754,6 +3808,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             ConsoleLogMode::Fresh,
         );
 
+        // G5: start this VM's vsock monitoring relay (no-op without the
+        // device, or when the node never wired a relay manager). After
+        // this point the payload is persisted, so the relay gate can
+        // read it; binding is synchronous, so a vsock VM is never
+        // running without its host-side endpoint.
+        self.ensure_vsock_relay(&config.vm_id, Some(vm_runtime_dir));
+
         __guard.succeeded = true;
         Ok(config.vm_id.clone())
     }
@@ -3868,6 +3929,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     self.heal_dead_serial_manager(vm_id, operation_id).await;
                 }
                 info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                // G5: even the idempotent path must not leave a vsock VM
+                // without its relay (e.g. the relay manager died with the
+                // previous agent process and the VM was re-adopted).
+                self.ensure_vsock_relay(vm_id, api_socket.parent());
                 // Idempotent success: VM is already in the desired state.
                 // The guard's succeeded flag must be set on every Ok return
                 // so RED metrics classify this as ok, not err.
@@ -3881,6 +3946,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
+
+        // G5: the VM is (or is becoming) running — its vsock relay must
+        // be up (idempotent: covers a fresh boot, a VMM re-spawn, an
+        // adopted VM after an agent restart, and the already-running
+        // idempotent path below).
+        self.ensure_vsock_relay(vm_id, api_socket.parent());
 
         __guard.succeeded = true;
         Ok(())
@@ -4028,6 +4099,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // successful stop from the caller's point of view: the VM is no
                 // longer in the runtime map. Mark the guard before the early
                 // return so RED metrics classify this as ok.
+                self.stop_vsock_relay(vm_id);
                 __guard.succeeded = true;
                 return Ok(());
             }
@@ -4189,6 +4261,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 }
             }
         }
+        // G5: the VMM is gone (force-killed or exited with the guest) —
+        // stop the vsock relay and remove its endpoint; a later start
+        // re-derives it from the persisted payload.
+        self.stop_vsock_relay(vm_id);
         __guard.succeeded = true;
         Ok(())
     }
@@ -4214,6 +4290,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 // then removes, and the delete cannot kill a VMM a start
                 // just adopted.
                 self.delete_untracked_vm(vm_id, operation_id).await?;
+                self.stop_vsock_relay(vm_id);
                 __guard.succeeded = true;
                 return Ok(());
             }
@@ -4244,6 +4321,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             let _ = tokio::fs::remove_file(vm_pid_file(&vm_dir)).await;
             let _ = tokio::fs::remove_file(vm_config_file(&vm_dir)).await;
         }
+        // G5: the VM (and with it the vsock device and its host-side
+        // relay endpoint) is gone.
+        self.stop_vsock_relay(vm_id);
         __guard.succeeded = true;
         Ok(())
     }
@@ -5522,6 +5602,14 @@ impl ProcessCloudHypervisorAdapter {
                     "adopted stopped vm runtime dir after agent restart"
                 );
             }
+
+            // G5: re-establish this VM's vsock relay (idempotent, gated
+            // on the persisted create payload). A LIVE adopted VM needs
+            // its endpoint back — the previous agent process died with
+            // the relay task; a stopped one simply records the entry so
+            // the map matches the on-disk layout (the next start
+            // re-derives it anyway).
+            self.ensure_vsock_relay(&vm_id, Some(&vm_dir));
         }
         Ok(())
     }
@@ -5566,8 +5654,9 @@ mod tests {
     use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig, VmVsockConfig};
     use chv_common::hypervisor::HypervisorOverrides;
     use chv_errors::ChvError;
+    use chv_hypervisor_api::resources::{vm_config_file, vm_pid_file};
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -9335,6 +9424,204 @@ mod tests {
         assert!(
             payload.get("vsock").is_none(),
             "vsock must be absent from the payload when not configured"
+        );
+    }
+
+    /// Shared fixture for the G5 relay-lifecycle tests: an adapter with a
+    /// relay manager wired at a throwaway CP target, a VM runtime dir
+    /// whose persisted payload carries the vsock device, and a dead
+    /// in-memory entry (the `true` child) so lifecycle ops run their
+    /// non-process-spawning paths.
+    struct VsockRelayFixture {
+        adapter: ProcessCloudHypervisorAdapter,
+        manager: Arc<crate::vsock_relay::VsockRelayManager>,
+        vm_dir: PathBuf,
+        relay_socket: PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    fn vsock_relay_fixture(vm_id: &str) -> VsockRelayFixture {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vms").join(vm_id);
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let device_socket = vm_dir.join("vsock.sock");
+        // The persisted create payload exactly as build_vm_create_payload
+        // writes it (the relay gate and the respawn unlink parse this).
+        std::fs::write(
+            vm_config_file(&vm_dir),
+            serde_json::json!({
+                "cpus": 1,
+                "vsock": { "cid": 1000, "socket": device_socket.to_string_lossy() }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manager =
+            Arc::new(crate::vsock_relay::VsockRelayManager::new("http://127.0.0.1:1").unwrap());
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("cloud-hypervisor"))
+            .with_vsock_relay(Some(Arc::clone(&manager)));
+        VsockRelayFixture {
+            adapter,
+            manager,
+            relay_socket: crate::vsock_relay::relay_socket_path(
+                device_socket.to_string_lossy().as_ref(),
+            ),
+            vm_dir,
+            _dir: dir,
+        }
+    }
+
+    async fn insert_entry(
+        adapter: &ProcessCloudHypervisorAdapter,
+        vm_id: &str,
+        vm_dir: &Path,
+        live_child: bool,
+    ) {
+        // A live child (a `sleep`) takes start_vm down the AlreadyRunning
+        // path; a reaped `true` child takes stop/delete down their
+        // dead-process paths.
+        let child = if live_child {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap()
+        } else {
+            let mut child = tokio::process::Command::new("true").spawn().unwrap();
+            let _ = child.wait().await;
+            child
+        };
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
+        let mut map = adapter.vms.write().await;
+        map.insert(
+            vm_id.to_string(),
+            VmProcess {
+                api_socket: vm_dir.join("vm.sock"),
+                child: VmmChild::Owned(child),
+                console_io: nix::unistd::pipe()
+                    .map(|(r, d)| {
+                        drop(d);
+                        r
+                    })
+                    .expect("pipe"),
+                serial_transport: SerialTransport::Pty,
+                console_fanout: fanout,
+                broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
+                last_cpu_at: None,
+                boot_watermark: AtomicU64::new(0),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_vm_stops_the_vsock_relay() {
+        let fx = vsock_relay_fixture("vm-del");
+        insert_entry(&fx.adapter, "vm-del", &fx.vm_dir, false).await;
+        fx.manager.ensure_started("vm-del", &fx.vm_dir);
+        assert!(fx.relay_socket.exists());
+
+        fx.adapter.delete_vm("vm-del", None).await.unwrap();
+        assert!(
+            !fx.relay_socket.exists(),
+            "delete must stop the relay and remove its endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_vm_stops_the_vsock_relay() {
+        use std::io::{Read as _, Write as _};
+        let fx = vsock_relay_fixture("vm-stop");
+        // Graceful stop: the fake api socket answers vm.power-button with
+        // 204 and the vm.info poll with a terminal Shutdown state.
+        let api_sock = fx.vm_dir.join("vm.sock");
+        let api_listener = std::os::unix::net::UnixListener::bind(&api_sock).unwrap();
+        let api_server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut conn, _)) = api_listener.accept() else {
+                    return;
+                };
+                let mut request = [0u8; 1024];
+                let _ = conn.read(&mut request);
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("PUT") {
+                    // vm.power-button
+                    let _ = conn.write_all(b"HTTP/1.1 204 No Content\r\n\r\n");
+                } else {
+                    // vm.info poll
+                    let body = r#"{"state":"Shutdown"}"#;
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+        });
+        insert_entry(&fx.adapter, "vm-stop", &fx.vm_dir, false).await;
+        fx.manager.ensure_started("vm-stop", &fx.vm_dir);
+        assert!(fx.relay_socket.exists());
+
+        fx.adapter.stop_vm("vm-stop", false, None).await.unwrap();
+        api_server.join().expect("api server thread");
+        assert!(
+            !fx.relay_socket.exists(),
+            "a successful stop must stop the relay and remove its endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_vm_reestablishes_the_vsock_relay_for_a_running_vm() {
+        use std::io::{Read as _, Write as _};
+        let fx = vsock_relay_fixture("vm-start");
+        // Already-running path: vm.info reports a booted (Paused) state,
+        // so start_vm returns idempotent success — after re-establishing
+        // the relay. The relay is deliberately NOT running before the
+        // call: this is the agent-restart shape (live VM, dead relay).
+        let api_sock = fx.vm_dir.join("vm.sock");
+        let api_listener = std::os::unix::net::UnixListener::bind(&api_sock).unwrap();
+        let api_server = std::thread::spawn(move || {
+            let (mut conn, _) = api_listener.accept().expect("api accept");
+            let mut request = [0u8; 1024];
+            let _ = conn.read(&mut request);
+            let body = r#"{"state":"Paused"}"#;
+            let _ = conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            );
+        });
+        insert_entry(&fx.adapter, "vm-start", &fx.vm_dir, true).await;
+        assert!(!fx.relay_socket.exists());
+
+        fx.adapter.start_vm("vm-start", None).await.unwrap();
+        api_server.join().expect("api server thread");
+        assert!(
+            fx.relay_socket.exists(),
+            "the idempotent start path must re-establish a vsock VM's relay"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopt_running_vms_reestablishes_the_vsock_relay() {
+        // Agent restart with a vsock VM's artifacts on disk (here: a dead
+        // VMM — adoption still records the entry, and the relay must be
+        // re-derived from the persisted payload).
+        let fx = vsock_relay_fixture("vm-adopt");
+        // A pidfile pointing at a dead pid: adoption records the entry
+        // without process-spawning machinery.
+        std::fs::write(vm_pid_file(&fx.vm_dir), "4294967295").unwrap();
+        assert!(!fx.relay_socket.exists());
+
+        fx.adapter.adopt_running_vms(fx._dir.path()).await.unwrap();
+        assert!(
+            fx.relay_socket.exists(),
+            "adoption must re-establish a vsock VM's relay from the persisted payload"
         );
     }
 
