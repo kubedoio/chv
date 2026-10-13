@@ -15,6 +15,7 @@
 | `chv-stord` restart, backends intact | `Degraded` | denied | continue if possible | recover service, rebuild sessions where possible | S3 |
 | `chv-nwd` restart, topology preserved | `Degraded` | denied | continue with brief disturbance possible | reconstruct policy and exposure rules | S3 |
 | `chv-stord` persistent failure | `Degraded` to `Failed` depending on scope | denied | affected VMs may lose storage service | escalate, block risky ops, operator action | S4 |
+| Volvisor unavailable (after ADR-028 integration) | `Degraded` | denied for Volvisor-backed placements and destructive storage operations | established attachments continue where safe | preserve attachment state; reconcile after recovery; do not retry ambiguous destructive operations blindly | S3/S4 |
 | `chv-nwd` persistent failure | `Degraded` to `Failed` depending on scope | denied | connectivity impact likely | deterministic rebuild attempt, operator action | S4 |
 | Cloud Hypervisor process crash for one VM | VM-scoped degraded condition | allowed depending on node health | impacted VM only | restart or honor VM policy | S3 |
 | node disk full in runtime paths | `Degraded` | denied | continue only if safe | block new ops, emit alert | S3 |

@@ -6,6 +6,7 @@ Track supported version combinations for a tested node bundle.
 ## Required dimensions
 - control plane version
 - `chv-agent` version
+- Volvisor API and daemon version for bundles that integrate it
 - `chv-stord` version
 - `chv-nwd` version
 - Cloud Hypervisor version
@@ -18,9 +19,10 @@ Track supported version combinations for a tested node bundle.
 
 ## Suggested table shape
 
-| Control Plane | chv-agent | chv-stord | chv-nwd | Cloud Hypervisor | Host Bundle | Status | Notes |
-|---|---|---|---|---|---|---|---|
-| 0.1.x | 0.1.x | 0.1.x | 0.1.x | pinned | 0.1.x | supported | MVP-1 baseline |
+| Control Plane | chv-agent | Volvisor API/daemon | chv-stord | chv-nwd | Cloud Hypervisor | Host Bundle | Status | Notes |
+|---|---|---|---|---|---|---|---|---|
+| 0.1.x | 0.1.x | — | 0.1.x | 0.1.x | pinned | 0.1.x | current | Legacy storage implementation |
+| TBD | TBD | pinned pair | transition only | TBD | pinned | TBD | planned | Volvisor integration; qualify before support |
 
 ## Versioning guidance
 - use explicit compatibility ranges where possible
