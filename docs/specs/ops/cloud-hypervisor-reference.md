@@ -83,6 +83,7 @@ cloud-hypervisor [OPTIONS]
 | `-v` | Increase debug output level (repeatable) | |
 | `--log-file <path>` | Log file path (stderr if not set) | |
 | `--api-socket <socket>` | HTTP API Unix socket: `path=<path>` or `fd=<fd>` | |
+| `--no-shutdown` | Keep the VMM process alive after a guest-triggered shutdown | disabled |
 | `--event-monitor <monitor>` | Event file: `path=<path>` or `fd=<fd>` | |
 | `--restore <restore>` | Restore from snapshot: `source_url=<url>,prefault=on\|off` | |
 | `--seccomp <mode>` | `true\|false\|log` | `true` |
@@ -163,13 +164,25 @@ curl --unix-socket /tmp/ch.sock -i -X PUT 'http://localhost/api/v1/vm.shutdown'
 ## How CHV launches Cloud Hypervisor
 
 CHV does not configure the VM on the cloud-hypervisor command line. The agent
-spawns the VMM with a single flag — the API socket — with stdout discarded and
-stderr appended to `cloud-hypervisor.stderr.log` in the VM runtime directory
+spawns the VMM with `--no-shutdown` and the API socket, with stdout discarded
+and stderr appended to `cloud-hypervisor.stderr.log` in the VM runtime directory
 (`crates/chv-agent-runtime-ch/src/process.rs`):
 
 ```bash
-cloud-hypervisor --api-socket /var/lib/chv/agent/vms/{vm_id}/vm.sock
+cloud-hypervisor --no-shutdown --api-socket /var/lib/chv/agent/vms/{vm_id}/vm.sock
 ```
+
+With this option, a guest poweroff leaves Cloud Hypervisor running and reports
+the VM in a terminal state. A later start calls `/vm.boot` on that same VMM;
+the agent still re-spawns and re-creates the VM when the VMM itself exited
+unexpectedly. Delete requests `/vmm.shutdown`, verifies process exit, and then
+uses the existing identity-checked SIGKILL fallback if needed. Force stop also
+continues to use that verified kill path. The lifecycle regression tests are
+in [`process.rs`](../../../crates/chv-agent-runtime-ch/src/process.rs); the
+KVM lifecycle qualification covers same-process stop/start in
+[`m4.3-lifecycle.sh`](../../../scripts/integration/qual/m4.3-lifecycle.sh).
+Verification status and the high-risk lifecycle disclosure are recorded in
+[`issue-457-no-shutdown.md`](../../evidence/issue-457-no-shutdown.md).
 
 The VM itself is then created over the **REST API**: the agent builds the full
 `VmConfig` JSON (cpus, memory, payload — firmware or kernel —, disks including

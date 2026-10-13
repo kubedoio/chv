@@ -15,7 +15,7 @@
 #
 #   A. create → start → guest-boot evidence (console.log kernel banner +
 #      logind) → reboot (guest-level, same CH process) → stop (graceful)
-#      → start (re-spawn path) → still healthy.
+#      → start (same VMM process) → still healthy.
 #   B. S1 replay: SIGKILL the agent while Running — CH survives, the
 #      restarted agent re-adopts it (same CH pid, exactly one CH process,
 #      no duplicate state).
@@ -464,57 +464,27 @@ save_console_evidence "boot2"
 qual_chvctl vm stop "$VM_ID" >/dev/null 2>&1 \
     && qual_pass "vm stop accepted" \
     || qual_error "vm stop rejected"
-ch_gone() { ! ch_alive; }
-
-# wait_guest_down DESC — wait for the CH process to exit after a graceful
-# stop, detecting and remediating the #345 wedge: after a graceful stop of
-# an ADOPTED VM, the guest powers down but the VMM process can stay alive
-# with a DEAD API socket (the agent's stop loop treats the dead socket as
-# "process disappeared" and reports success). The wedged process is
-# SIGTERM-immune and blocks the next start (re-spawn refused on Alive).
-# Detection: process alive AND vm.info unreachable on 3 consecutive polls
-# (the normal exit path has the API die only ~2s before the process —
-# 3 strikes avoid racing it). Remediation: SIGKILL, the verified-effective
-# operator escape (issue #345; frozen candidate, fix lands post-rc1).
-wait_guest_down() {
-    local desc="$1" waited=0 strikes=0 pid
-    while ch_alive; do
-        if curl -sg --max-time 2 --unix-socket "${VMS_DIR}/${VM_ID}/vm.sock" \
-            http://localhost/api/v1/vm.info >/dev/null 2>&1; then
-            strikes=0
-        else
-            strikes=$((strikes + 1))
-            if [ "$strikes" -ge 3 ]; then
-                pid="$(ch_pid)"
-                qual_error "${desc}: #345 wedge — CH process ${pid} alive with a dead API after the graceful stop (the stop reported success on the dead-socket premise); remediating with SIGKILL"
-                kill -9 "$pid" 2>/dev/null || true
-                local i=0
-                while ch_alive && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
-                if ch_gone; then
-                    qual_warn "${desc}: wedged VMM cleared by SIGKILL — issue #345 (candidate unchanged; fix post-rc1 on main)"
-                    return 0
-                fi
-                qual_error "${desc}: SIGKILL did not clear the VMM process ${pid}"
-                return 1
-            fi
-        fi
-        sleep 2
-        waited=$((waited + 2))
-        if [ "$waited" -ge "$STOP_TIMEOUT" ]; then
-            qual_error "${desc}: guest did not stop within ${STOP_TIMEOUT}s (process alive, API reachable — not the #345 wedge)"
-            return 1
-        fi
-    done
-    qual_pass "${desc}: guest down (CH process exited)"
+# A clean guest stop keeps the VMM and its API alive with --no-shutdown.
+# Wait for vm.info to report a terminal guest state, then pin the process
+# identity across the next start.
+guest_terminal() {
+    curl -sg --max-time 2 --unix-socket "${VMS_DIR}/${VM_ID}/vm.sock" \
+        http://localhost/api/v1/vm.info 2>/dev/null \
+        | grep -Eq '"state"[[:space:]]*:[[:space:]]*"(Shutdown|Created)"'
 }
-wait_guest_down "Leg A stop"
-assert_no_ch_process "Leg A after stop"
+wait_for "guest terminal state after graceful stop" "$STOP_TIMEOUT" guest_terminal \
+    || qual_error "guest did not reach Shutdown/Created while the VMM remained available"
+assert_one_ch_process "Leg A after guest stop"
+CH_PID_STOPPED="$(ch_pid)"
+[ "$CH_PID_STOPPED" = "$CH_PID_A" ] \
+    && qual_pass "guest stop retained the same CH process (${CH_PID_A})" \
+    || qual_error "guest stop changed CH process (${CH_PID_A:-?} → ${CH_PID_STOPPED:-?})"
 vm_stopped_desired() { [ "$(vm_json_field power_state)" = "Stopped" ]; }
 wait_for "VM Stopped (desired state)" 60 vm_stopped_desired \
     || qual_error "VM power_state never reached Stopped"
 save_console_evidence "after-stop"
 
-# Second start — the re-spawn path (VM previously ran and stopped).
+# Second start — boot the stopped guest through the retained VMM.
 qual_chvctl vm start "$VM_ID" >/dev/null 2>&1 \
     && qual_pass "second vm start accepted" \
     || qual_error "second vm start rejected"
@@ -522,10 +492,10 @@ wait_for "VM Running again (desired state)" 60 vm_running_desired \
     || qual_error "VM did not return to Running after second start"
 assert_one_ch_process "Leg A second start"
 CH_PID_B="$(ch_pid)"
-if [ -n "$CH_PID_B" ] && [ "$CH_PID_B" != "$CH_PID_A" ]; then
-    qual_pass "second start spawned a fresh CH process (${CH_PID_A} → ${CH_PID_B})"
+if [ -n "$CH_PID_B" ] && [ "$CH_PID_B" = "$CH_PID_A" ]; then
+    qual_pass "second start reused the retained CH process (${CH_PID_A})"
 else
-    qual_error "second start reused the old CH pid (${CH_PID_B})"
+    qual_error "second start replaced the retained CH process (${CH_PID_A:-?} → ${CH_PID_B:-?})"
 fi
 wait_for "guest kernel banner after second start" "$BOOT_TIMEOUT" console_banner \
     || qual_error "no boot evidence after second start"
@@ -699,8 +669,13 @@ logind_ready "Leg F pre-stop"
 qual_chvctl vm stop "$VM_ID" >/dev/null 2>&1 \
     && qual_pass "final vm stop accepted" \
     || qual_error "final vm stop rejected"
-wait_guest_down "Leg F stop"
-assert_no_ch_process "Leg F after stop"
+wait_for "Leg F guest terminal state" "$STOP_TIMEOUT" guest_terminal \
+    || qual_error "Leg F guest did not reach Shutdown/Created"
+assert_one_ch_process "Leg F after guest stop"
+CH_PID_F_STOPPED="$(ch_pid)"
+[ "$CH_PID_F_STOPPED" = "$CH_PID_E" ] \
+    && qual_pass "Leg F guest stop retained the same CH process (${CH_PID_E})" \
+    || qual_error "Leg F guest stop changed CH process (${CH_PID_E:-?} → ${CH_PID_F_STOPPED:-?})"
 wait_for "VM Stopped (desired state)" 60 vm_stopped_desired || true
 save_console_evidence "final-stop"
 

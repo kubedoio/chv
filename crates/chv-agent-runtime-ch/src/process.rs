@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -143,6 +143,38 @@ enum SerialTransport {
     Pty,
 }
 
+/// Recover the configured serial transport from the persisted create
+/// payload. The socket path is not a reliable mode discriminator: CH
+/// removes the Socket endpoint while a guest is shut down, even though a
+/// later `/vm.boot` recreates it.
+fn persisted_serial_transport(vm_dir: &Path) -> SerialTransport {
+    let serial_socket = vm_dir.join("serial.sock");
+    let payload = std::fs::read_to_string(vm_config_file(vm_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+
+    match payload
+        .as_ref()
+        .and_then(|p| p.pointer("/serial/mode"))
+        .and_then(|m| m.as_str())
+    {
+        Some("Socket") => {
+            let socket = payload
+                .as_ref()
+                .and_then(|p| p.pointer("/serial/socket"))
+                .and_then(|s| s.as_str())
+                .map(PathBuf::from)
+                .unwrap_or(serial_socket);
+            SerialTransport::Socket(socket)
+        }
+        Some(_) => SerialTransport::Pty,
+        // Older payloads may not record a mode. Preserve the previous
+        // best-effort inference for those only.
+        None if serial_socket.exists() => SerialTransport::Socket(serial_socket),
+        None => SerialTransport::Pty,
+    }
+}
+
 /// The cloud-hypervisor process backing a tracked VM.
 ///
 /// Normally the agent owns the process end-to-end (`Owned`). After an
@@ -150,10 +182,11 @@ enum SerialTransport {
 /// `Child` handle: it is tracked by pid (`Adopted`) and every signal is
 /// guarded by a `/proc/<pid>/cmdline` re-validation against the VM's
 /// api-socket path so a recycled pid can never be killed by mistake.
-/// A dead VMM is not an error state: cloud-hypervisor v43 exits with
-/// the guest (the VMM control loop's Exit dispatch runs `vmm_shutdown`),
-/// so a stopped VM's entry legitimately points at an exited process —
-/// `start_vm` re-spawns it from the persisted creation payload. `Dead`
+/// A dead VMM is not an error state: crashes and older Cloud Hypervisor
+/// behavior can leave a stopped VM's entry pointing at an exited process —
+/// `start_vm` re-spawns it from the persisted creation payload. With
+/// `--no-shutdown`, a clean guest shutdown leaves the VMM alive and the next
+/// start boots that VM in place. `Dead`
 /// marks a re-derived entry whose VMM is provably gone and whose pid was
 /// never known (no pidfile — e.g. a force-stop residual): there is
 /// nothing to signal, wait for, or prove.
@@ -2290,6 +2323,34 @@ impl ProcessCloudHypervisorAdapter {
         })
     }
 
+    /// Prefer Cloud Hypervisor's orderly VMM shutdown for delete, then
+    /// retain the existing identity-checked SIGKILL fallback and
+    /// fail-closed restoration if the VMM does not exit.
+    async fn shutdown_removed_vmm_or_kill(
+        &self,
+        vm_id: &str,
+        mut proc: VmProcess,
+    ) -> Result<(), ChvError> {
+        let api_socket = proc.api_socket.clone();
+        if let Ok(status) =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await
+        {
+            if status == 200 || status == 204 {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if matches!(proc.child.prove_exited(&api_socket), Liveness::Exited) {
+                        // `try_wait` above reaps owned children. The
+                        // descriptor is dropped only after that process
+                        // death proof, preserving the serial-fd ordering.
+                        return Ok(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        self.kill_removed_vmm_or_restore(vm_id, proc).await
+    }
+
     /// Builds the cloud-hypervisor serial-console config object for the
     /// VM creation payload. `Socket` (the default transport) points the
     /// serial console at a unix-stream listener inside the VM runtime
@@ -3100,11 +3161,9 @@ impl ProcessCloudHypervisorAdapter {
 
     /// Re-spawns the cloud-hypervisor process for a tracked VM whose VMM
     /// has exited, then re-creates and boots the VM from the payload
-    /// persisted at create time. cloud-hypervisor v43 exits with the
-    /// guest (VMM control-loop Exit dispatch → `vmm_shutdown`), so a
-    /// start after a graceful stop has no daemon to `vm.boot` against —
-    /// the start contract ("make the VM running") is honored by
-    /// rebuilding the process. Mirrors `create_vm`'s post-spawn tail:
+    /// persisted at create time. This remains the recovery path for VMM
+    /// crashes and unexpected exits; clean guest stops keep the VMM alive
+    /// via `--no-shutdown` and boot it in place. Mirrors `create_vm`'s post-spawn tail:
     /// fail-closed child guard, fresh console endpoint, fresh fan-out
     /// channel; console.log is APPENDED (the stop path already truncated
     /// it by design, and a crash leaves boot history worth keeping).
@@ -3162,7 +3221,9 @@ impl ProcessCloudHypervisorAdapter {
         })?;
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
-        cmd.arg("--api-socket").arg(&api_socket);
+        cmd.arg("--no-shutdown")
+            .arg("--api-socket")
+            .arg(&api_socket);
         cmd.stdout(Stdio::null());
         let stderr_log_path = vm_dir.join("cloud-hypervisor.stderr.log");
         match std::fs::OpenOptions::new()
@@ -3595,7 +3656,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
-        cmd.arg("--api-socket").arg(&config.api_socket_path);
+        cmd.arg("--no-shutdown")
+            .arg("--api-socket")
+            .arg(&config.api_socket_path);
 
         let vm_runtime_dir = config
             .api_socket_path
@@ -3863,15 +3926,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // must never both re-spawn a process for it.
         let _lifecycle = self.vm_op_lock(vm_id).lock_owned().await;
 
-        // cloud-hypervisor v43 exits when the guest exits (VMM control
-        // loop Exit dispatch → vmm_shutdown), so a start after a graceful
-        // stop — or any guest-side poweroff — has no daemon to boot
-        // against. The start contract is "make the VM running": re-spawn
-        // the VMM and re-create the VM from the payload persisted at
-        // create time instead of failing on a dead api socket. Liveness
-        // is proven, not assumed: an indeterminate probe result refuses
-        // the re-spawn (a second VMM on one disk is never acceptable)
-        // with an error the caller can retry.
+        // Clean guest poweroff normally leaves the VMM alive under
+        // `--no-shutdown`, so the start contract is met with `/vm.boot` on
+        // that process. If the VMM itself exited (crash, external shutdown,
+        // or older behavior), re-spawn and re-create from the persisted
+        // payload. Liveness is proven, not assumed: an indeterminate probe
+        // refuses re-spawn (two VMMs must never own one disk) with a
+        // retryable error.
         //
         // Force-stop residual: the force paths remove the in-memory
         // entry while the persisted payload survives on disk. Re-derive
@@ -3945,14 +4006,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             start_vm_action("")
         };
 
-        // Respawn broadcaster if it died while the VM was running.
-        // This must happen BEFORE the idempotent early return so console
-        // output doesn't stall when start_vm is called on an already-running VM.
-        self.respawn_broadcaster_if_dead(vm_id, &serial_transport, &fanout, &broadcaster_alive)
-            .await;
-
         match action {
             StartVmAction::AlreadyRunning => {
+                // The console endpoint is live on an already-running VM,
+                // so a dead broadcaster can reconnect before this
+                // idempotent early return.
+                self.respawn_broadcaster_if_dead(
+                    vm_id,
+                    &serial_transport,
+                    &fanout,
+                    &broadcaster_alive,
+                )
+                .await;
                 // Issue-#409 self-heal, adopted VMs only: the reconciler
                 // (and any operator re-drive) lands here shortly after
                 // an agent restart re-adopted a live VMM, making this
@@ -3979,10 +4044,33 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             StartVmAction::Boot => {}
         }
 
+        // A clean guest shutdown keeps this VMM alive, so a subsequent
+        // `/vm.boot` is a new guest boot in the same process. Scope the
+        // watchdog's console evidence to bytes written before this boot;
+        // the pid alone no longer identifies a boot generation.
+        if let Some(vm_dir) = api_socket.parent() {
+            let watermark = std::fs::metadata(vm_console_log(vm_dir))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let vms = self.vms.read().await;
+            if let Some(proc) = vms.get(vm_id) {
+                proc.boot_watermark.store(watermark, Ordering::SeqCst);
+            }
+        }
+
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
+
+        // A guest shutdown tears down Cloud Hypervisor's serial-console
+        // endpoint along with the VM. The listener is recreated during
+        // `/vm.boot`, so reconnect a dead broadcaster only after that
+        // request has completed; attempting this before boot exhausts the
+        // bounded retries against a missing socket and leaves console
+        // capture down until another lifecycle call.
+        self.respawn_broadcaster_if_dead(vm_id, &serial_transport, &fanout, &broadcaster_alive)
+            .await;
 
         // G5: the VM is (or is becoming) running — its vsock relay must
         // be up (idempotent: covers a fresh boot, a VMM re-spawn, an
@@ -4056,27 +4144,20 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 }
             }
         } else {
-            // Graceful stop: send the ACPI power button so the guest OS can
-            // shut itself down cleanly. cloud-hypervisor v43 exits WITH the
-            // guest (the VMM control loop's Exit dispatch runs vmm_shutdown),
-            // so once the guest reaches Shutdown the VMM process is gone —
-            // there is no daemon to keep alive. The VmProcess entry
-            // deliberately STAYS in the map (with its child reaped and
-            // marked `Dead` — see the zombie-prevention note below) so a
-            // later start re-spawns the VMM and re-creates the VM from the
-            // payload persisted at create time (see `respawn_vmm`), and
-            // stop/delete remain idempotent against the dead process. Poll
-            // vm.info for the graceful window (see `GRACEFUL_STOP_WINDOW`)
-            // waiting for a non-running terminal state (Shutdown or
-            // Created).
+            // Ask the guest to shut down cleanly. With `--no-shutdown`, a
+            // confirmed terminal guest state leaves the VMM alive so start
+            // can boot the same VM and delete can explicitly stop the VMM.
+            // A lost API socket is not proof of a clean shutdown: retain
+            // strict process-death verification and the kill fallback.
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await;
             // Poll vm.info waiting for the VM to reach a non-running
-            // terminal state (Shutdown or Created). A guest that powers
-            // itself off takes the process with it (v43 exits with the
-            // guest), so the request failing mid-window is the normal
-            // completion signal too.
+            // terminal state (Shutdown or Created). If the API disappears
+            // mid-window, the VMM may have exited unexpectedly; the
+            // process check below distinguishes that from a clean guest
+            // shutdown, which leaves the VMM alive under `--no-shutdown`.
             let start = std::time::Instant::now();
             let mut graceful_shutdown = false;
+            let mut guest_terminal = false;
             while start.elapsed() < Self::GRACEFUL_STOP_WINDOW {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok((200, body)) =
@@ -4087,11 +4168,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
                         if state == "Shutdown" || state == "Created" {
                             graceful_shutdown = true;
+                            guest_terminal = true;
                             break;
                         }
                     }
                 } else {
-                    // CH process disappeared — treat as stopped
+                    // The API became unreachable. The process check below
+                    // distinguishes an exited VMM from a wedged one.
                     graceful_shutdown = true;
                     break;
                 }
@@ -4178,6 +4261,24 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     Err(e) => {
                         warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to truncate console.log")
                     }
+                }
+            }
+
+            // An API-confirmed terminal guest state is the supported
+            // `--no-shutdown` case. Keep the VMM, its process identity,
+            // console connection and vsock relay attached: `/vm.boot`
+            // starts a fresh guest in this same VMM. The start path records
+            // a new console watermark immediately before that boot.
+            if guest_terminal {
+                let vmm_alive = {
+                    let mut vms = self.vms.write().await;
+                    vms.get_mut(vm_id).is_some_and(|proc| {
+                        matches!(proc.child.prove_exited(&proc.api_socket), Liveness::Alive)
+                    })
+                };
+                if vmm_alive {
+                    __guard.succeeded = true;
+                    return Ok(());
                 }
             }
 
@@ -4349,7 +4450,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // stays idempotent for the already-dead case.
         let api_socket = proc.api_socket.clone();
         let vm_dir = proc.api_socket.parent().map(|p| p.to_path_buf());
-        self.kill_removed_vmm_or_restore(vm_id, proc).await?;
+        self.shutdown_removed_vmm_or_kill(vm_id, proc).await?;
         // Remove the runtime artifacts this adapter owns: the api socket,
         // the pid file and the persisted creation payload. Disk images and
         // the VM directory itself belong to the storage/authority layers.
@@ -5225,12 +5326,7 @@ impl ProcessCloudHypervisorAdapter {
             Some(pid) => VmmChild::Adopted(pid),
             None => VmmChild::Dead,
         };
-        let serial_sock = vm_dir.join("serial.sock");
-        let serial_transport = if serial_sock.exists() {
-            SerialTransport::Socket(serial_sock)
-        } else {
-            SerialTransport::Pty
-        };
+        let serial_transport = persisted_serial_transport(&vm_dir);
 
         // Re-attach the console only for a live VMM on the Socket
         // transport (mirrors adoption); anything else gets the EOF
@@ -5468,9 +5564,8 @@ impl ProcessCloudHypervisorAdapter {
     ///   the broadcaster and console.log writer resume in append mode,
     ///   preserving pre-restart history) and is tracked as
     ///   [`VmmChild::Adopted`];
-    /// - a dead VMM (cloud-hypervisor v43 exits with the guest) still
-    ///   gets an entry — stop/delete are then idempotent and the next
-    ///   start re-spawns from the persisted payload;
+    /// - a dead VMM still gets an entry — stop/delete are then idempotent
+    ///   and the next start re-spawns from the persisted payload;
     /// - entries without a parseable `ch.pid` are skipped with a warning
     ///   (ops on them keep today's NotFound semantics rather than
     ///   guessing at process identity);
@@ -5544,12 +5639,7 @@ impl ProcessCloudHypervisorAdapter {
             };
 
             let vmm_alive = pid_is_cloud_hypervisor(pid, &api_socket, self.expected_vmm_exe());
-            let serial_sock = vm_dir.join("serial.sock");
-            let serial_transport = if serial_sock.exists() {
-                SerialTransport::Socket(serial_sock)
-            } else {
-                SerialTransport::Pty
-            };
+            let serial_transport = persisted_serial_transport(&vm_dir);
 
             // Re-attach the console only for a live VMM on the Socket
             // transport; anything else gets the EOF placeholder (an
@@ -5682,6 +5772,7 @@ mod tests {
     use super::build_vm_create_payload;
     use super::cloud_init_meta_data;
     use super::parse_http_status;
+    use super::persisted_serial_transport;
     use super::ConsoleFanout;
     use super::ConsoleLogMode;
     use super::ProcessCloudHypervisorAdapter;
@@ -5783,6 +5874,49 @@ mod tests {
             assert_eq!(value["mode"], serde_json::json!(mode));
             assert!(value.get("socket").is_none());
         }
+    }
+
+    #[test]
+    fn persisted_serial_transport_uses_config_when_socket_is_temporarily_absent() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-stopped");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let socket_path = vm_dir.join("serial.sock");
+        std::fs::write(
+            vm_config_file(&vm_dir),
+            serde_json::json!({
+                "serial": {
+                    "mode": "Socket",
+                    "socket": socket_path.to_string_lossy()
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(!socket_path.exists(), "a stopped guest has no listener");
+        assert!(matches!(
+            persisted_serial_transport(&vm_dir),
+            SerialTransport::Socket(path) if path == socket_path
+        ));
+    }
+
+    #[test]
+    fn persisted_serial_transport_preserves_explicit_pty_mode() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-pty");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(
+            vm_config_file(&vm_dir),
+            serde_json::json!({ "serial": { "mode": "Pty" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(vm_dir.join("serial.sock"), b"stale socket path").unwrap();
+
+        assert!(matches!(
+            persisted_serial_transport(&vm_dir),
+            SerialTransport::Pty
+        ));
     }
 
     #[tokio::test]
@@ -7528,6 +7662,17 @@ mod tests {
         let dead_pid = dead_child.id().expect("freshly spawned child has a pid");
         let _ = dead_child.wait().await;
         std::fs::write(dead_dir.join("ch.pid"), format!("{dead_pid}")).unwrap();
+        std::fs::write(
+            dead_dir.join("vm-config.json"),
+            serde_json::json!({
+                "serial": {
+                    "mode": "Socket",
+                    "socket": dead_dir.join("serial.sock").to_string_lossy()
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // vm-nopid: no pidfile → skipped with today's NotFound semantics.
         std::fs::create_dir_all(vms_base.join("vm-nopid")).unwrap();
@@ -7568,6 +7713,10 @@ mod tests {
                 panic!("dead VMM must be tracked as Adopted");
             };
             assert_eq!(*dead_tracked_pid, dead_pid);
+            assert!(matches!(
+                &dead.serial_transport,
+                SerialTransport::Socket(path) if path == &dead_dir.join("serial.sock")
+            ), "adoption must recover Socket mode even when the stopped guest removed its listener");
             assert!(
                 !super::pid_is_cloud_hypervisor(*dead_tracked_pid, &dead_dir.join("vm.sock"), None),
                 "dead VMM must classify as exited"
@@ -7671,6 +7820,105 @@ mod tests {
             "expected Io from the failed spawn, got {err:?}"
         );
         assert!(adapter.vms.read().await.contains_key("vm-rs"));
+    }
+
+    #[tokio::test]
+    async fn start_vm_boots_a_stopped_guest_in_the_same_vmm() {
+        use std::io::{Read as _, Write as _};
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-stopped");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        let serial_socket = vm_dir.join("serial.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&api_socket).unwrap();
+        let (release_console_tx, release_console_rx) = std::sync::mpsc::channel();
+        let serial_socket_for_server = serial_socket.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let n = conn.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                if request.starts_with("GET") {
+                    let body = r#"{"state":"Shutdown"}"#;
+                    conn.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                } else {
+                    assert!(request.starts_with("PUT /api/v1/vm.boot "));
+                    // Cloud Hypervisor recreates its serial listener as
+                    // part of boot after guest shutdown dropped the prior
+                    // VM's console devices.
+                    let serial_listener =
+                        std::os::unix::net::UnixListener::bind(&serial_socket_for_server).unwrap();
+                    conn.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+                    let (_peer, _) = serial_listener.accept().unwrap();
+                    let _ = release_console_rx.recv_timeout(std::time::Duration::from_secs(5));
+                }
+            }
+        });
+        let console_log = vm_dir.join("console.log");
+        std::fs::write(&console_log, b"old boot output\n").unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
+        adapter.vms.write().await.insert(
+            "vm-stopped".to_string(),
+            VmProcess {
+                api_socket,
+                child: VmmChild::Owned(child),
+                console_io: std::fs::File::open("/dev/null").unwrap().into(),
+                serial_transport: SerialTransport::Socket(serial_socket),
+                console_fanout: fanout,
+                broadcaster_alive: broadcaster_alive.clone(),
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
+                last_cpu_at: None,
+                boot_watermark: AtomicU64::new(0),
+            },
+        );
+
+        adapter.start_vm("vm-stopped", None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !broadcaster_alive.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("console broadcaster should restart after vm.boot");
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "a dead broadcaster must reconnect after vm.boot recreates the serial listener"
+        );
+        let vms = adapter.vms.read().await;
+        let proc = vms.get("vm-stopped").unwrap();
+        assert_eq!(proc.child.vmm_pid(), Some(pid));
+        assert_eq!(
+            proc.boot_watermark.load(Ordering::SeqCst),
+            std::fs::metadata(console_log).unwrap().len()
+        );
+        drop(vms);
+        let _ = release_console_tx.send(());
+        server.join().expect("fake VMM API server");
+        let mut vms = adapter.vms.write().await;
+        if let Some(proc) = vms.remove("vm-stopped") {
+            let mut child = match proc.child {
+                VmmChild::Owned(child) => child,
+                _ => panic!("test VMM should remain owned"),
+            };
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
     }
 
     /// Writes the stand-in "cloud-hypervisor" binary for the untracked-VMM
@@ -9219,6 +9467,55 @@ mod tests {
         assert!(!adapter.vms.read().await.contains_key("vm-del"));
     }
 
+    #[tokio::test]
+    async fn delete_vm_requests_graceful_vmm_shutdown() {
+        use std::io::{Read as _, Write as _};
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-del-shutdown");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let api_socket = vm_dir.join("vm.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&api_socket).unwrap();
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let n = conn.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..n]);
+            assert!(request.starts_with("PUT /api/v1/vmm.shutdown "));
+            conn.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            )
+            .unwrap();
+        });
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (fanout, _) = ConsoleFanout::new(Vec::new());
+        adapter.vms.write().await.insert(
+            "vm-del-shutdown".to_string(),
+            VmProcess {
+                api_socket: api_socket.clone(),
+                child: VmmChild::Owned(child),
+                console_io: std::fs::File::open("/dev/null").unwrap().into(),
+                serial_transport: SerialTransport::Pty,
+                console_fanout: fanout,
+                broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                cpu_ticks: chv_monitoring_core::CounterState::new(),
+                last_cpu_at: None,
+                boot_watermark: AtomicU64::new(0),
+            },
+        );
+
+        adapter.delete_vm("vm-del-shutdown", None).await.unwrap();
+        server.join().expect("fake VMM API server");
+        assert!(!adapter.vms.read().await.contains_key("vm-del-shutdown"));
+        assert!(!super::pid_exists(pid), "graceful VMM shutdown must exit");
+    }
+
     /// Lifecycle operations serialize per VM: with the per-VM mutex held
     /// by an external holder, a lifecycle op on the same VM must block
     /// instead of running concurrently (two concurrent starts over an
@@ -9607,6 +9904,73 @@ mod tests {
             !fx.relay_socket.exists(),
             "a successful stop must stop the relay and remove its endpoint"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_vm_keeps_live_vmm_and_vsock_relay_after_guest_shutdown() {
+        use std::io::{Read as _, Write as _};
+        let fx = vsock_relay_fixture("vm-stop-live");
+        let api_sock = fx.vm_dir.join("vm.sock");
+        let api_listener = std::os::unix::net::UnixListener::bind(&api_sock).unwrap();
+        let api_server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut conn, _)) = api_listener.accept() else {
+                    return;
+                };
+                let mut request = [0u8; 1024];
+                let _ = conn.read(&mut request);
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("PUT") {
+                    let _ = conn.write_all(b"HTTP/1.1 204 No Content\r\n\r\n");
+                } else {
+                    let body = r#"{"state":"Shutdown"}"#;
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+        });
+        insert_entry(&fx.adapter, "vm-stop-live", &fx.vm_dir, true).await;
+        fx.manager.ensure_started("vm-stop-live", &fx.vm_dir).await;
+        let pid = fx.adapter.vms.read().await["vm-stop-live"]
+            .child
+            .vmm_pid()
+            .unwrap();
+
+        fx.adapter
+            .stop_vm("vm-stop-live", false, None)
+            .await
+            .unwrap();
+        api_server.join().expect("api server thread");
+        assert!(
+            super::pid_exists(pid),
+            "clean guest stop keeps the VMM alive"
+        );
+        assert!(
+            fx.relay_socket.exists(),
+            "the VMM's vsock relay stays attached"
+        );
+        assert!(matches!(
+            fx.adapter.vms.read().await["vm-stop-live"].child,
+            VmmChild::Owned(_)
+        ));
+
+        let mut vms = fx.adapter.vms.write().await;
+        if let Some(proc) = vms.remove("vm-stop-live") {
+            let mut child = match proc.child {
+                VmmChild::Owned(child) => child,
+                _ => panic!("test VMM should remain owned"),
+            };
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        drop(vms);
+        fx.manager.stop("vm-stop-live").await;
     }
 
     #[tokio::test]
