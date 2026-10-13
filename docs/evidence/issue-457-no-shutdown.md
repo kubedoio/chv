@@ -14,9 +14,11 @@ couplings: start boots a `Created` guest in place and advances the watchdog
 console watermark; the console broadcaster reconnect is attempted after
 `/vm.boot` recreates Cloud Hypervisor's serial endpoint; the vsock relay stays
 bound across a guest stop; crashes and agent restarts retain the existing
-respawn/adoption paths; and delete requests `/vmm.shutdown` before the
-identity-checked kill fallback. The focused console regression test exercises
-the endpoint being absent until `/vm.boot`.
+respawn/adoption paths; adoption recovers Socket mode from the persisted
+create payload when a stopped guest has removed `serial.sock`; and delete
+requests `/vmm.shutdown` before the identity-checked kill fallback. The
+focused console regression tests exercise the endpoint being absent until
+`/vm.boot` and the stopped-VM adoption case.
 
 Cloud Hypervisor v53.0's guest-exit path calls `vm_shutdown`, which takes and
 shuts down the VM object while leaving the VMM control loop available under
@@ -26,7 +28,8 @@ The regression tests in
 [`process.rs`](../../crates/chv-agent-runtime-ch/src/process.rs) cover a live
 VMM and vsock relay surviving guest shutdown, a later `/vm.boot` reusing that
 same process with a fresh watchdog watermark and a re-established console
-broadcaster, and delete requesting `/vmm.shutdown`. The real-KVM lifecycle qualification in
+broadcaster, stopped-VM adoption preserving its configured Socket transport,
+and delete requesting `/vmm.shutdown`. The real-KVM lifecycle qualification in
 [`m4.3-lifecycle.sh`](../../scripts/integration/qual/m4.3-lifecycle.sh) now
 checks the same-process stop/start contract; this qualification run has not
 been performed for this change yet.

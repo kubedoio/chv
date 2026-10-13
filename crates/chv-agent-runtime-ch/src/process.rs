@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -141,6 +141,38 @@ enum SerialTransport {
     /// kernel keeps the pty pair alive across guest reboots; consumers
     /// re-dup the stored slave fd.
     Pty,
+}
+
+/// Recover the configured serial transport from the persisted create
+/// payload. The socket path is not a reliable mode discriminator: CH
+/// removes the Socket endpoint while a guest is shut down, even though a
+/// later `/vm.boot` recreates it.
+fn persisted_serial_transport(vm_dir: &Path) -> SerialTransport {
+    let serial_socket = vm_dir.join("serial.sock");
+    let payload = std::fs::read_to_string(vm_config_file(vm_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+
+    match payload
+        .as_ref()
+        .and_then(|p| p.pointer("/serial/mode"))
+        .and_then(|m| m.as_str())
+    {
+        Some("Socket") => {
+            let socket = payload
+                .as_ref()
+                .and_then(|p| p.pointer("/serial/socket"))
+                .and_then(|s| s.as_str())
+                .map(PathBuf::from)
+                .unwrap_or(serial_socket);
+            SerialTransport::Socket(socket)
+        }
+        Some(_) => SerialTransport::Pty,
+        // Older payloads may not record a mode. Preserve the previous
+        // best-effort inference for those only.
+        None if serial_socket.exists() => SerialTransport::Socket(serial_socket),
+        None => SerialTransport::Pty,
+    }
 }
 
 /// The cloud-hypervisor process backing a tracked VM.
@@ -4119,10 +4151,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // strict process-death verification and the kill fallback.
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await;
             // Poll vm.info waiting for the VM to reach a non-running
-            // terminal state (Shutdown or Created). A guest that powers
-            // itself off takes the process with it (v43 exits with the
-            // guest), so the request failing mid-window is the normal
-            // completion signal too.
+            // terminal state (Shutdown or Created). If the API disappears
+            // mid-window, the VMM may have exited unexpectedly; the
+            // process check below distinguishes that from a clean guest
+            // shutdown, which leaves the VMM alive under `--no-shutdown`.
             let start = std::time::Instant::now();
             let mut graceful_shutdown = false;
             let mut guest_terminal = false;
@@ -5294,12 +5326,7 @@ impl ProcessCloudHypervisorAdapter {
             Some(pid) => VmmChild::Adopted(pid),
             None => VmmChild::Dead,
         };
-        let serial_sock = vm_dir.join("serial.sock");
-        let serial_transport = if serial_sock.exists() {
-            SerialTransport::Socket(serial_sock)
-        } else {
-            SerialTransport::Pty
-        };
+        let serial_transport = persisted_serial_transport(&vm_dir);
 
         // Re-attach the console only for a live VMM on the Socket
         // transport (mirrors adoption); anything else gets the EOF
@@ -5537,9 +5564,8 @@ impl ProcessCloudHypervisorAdapter {
     ///   the broadcaster and console.log writer resume in append mode,
     ///   preserving pre-restart history) and is tracked as
     ///   [`VmmChild::Adopted`];
-    /// - a dead VMM (cloud-hypervisor v43 exits with the guest) still
-    ///   gets an entry — stop/delete are then idempotent and the next
-    ///   start re-spawns from the persisted payload;
+    /// - a dead VMM still gets an entry — stop/delete are then idempotent
+    ///   and the next start re-spawns from the persisted payload;
     /// - entries without a parseable `ch.pid` are skipped with a warning
     ///   (ops on them keep today's NotFound semantics rather than
     ///   guessing at process identity);
@@ -5613,12 +5639,7 @@ impl ProcessCloudHypervisorAdapter {
             };
 
             let vmm_alive = pid_is_cloud_hypervisor(pid, &api_socket, self.expected_vmm_exe());
-            let serial_sock = vm_dir.join("serial.sock");
-            let serial_transport = if serial_sock.exists() {
-                SerialTransport::Socket(serial_sock)
-            } else {
-                SerialTransport::Pty
-            };
+            let serial_transport = persisted_serial_transport(&vm_dir);
 
             // Re-attach the console only for a live VMM on the Socket
             // transport; anything else gets the EOF placeholder (an
@@ -5751,6 +5772,7 @@ mod tests {
     use super::build_vm_create_payload;
     use super::cloud_init_meta_data;
     use super::parse_http_status;
+    use super::persisted_serial_transport;
     use super::ConsoleFanout;
     use super::ConsoleLogMode;
     use super::ProcessCloudHypervisorAdapter;
@@ -5852,6 +5874,49 @@ mod tests {
             assert_eq!(value["mode"], serde_json::json!(mode));
             assert!(value.get("socket").is_none());
         }
+    }
+
+    #[test]
+    fn persisted_serial_transport_uses_config_when_socket_is_temporarily_absent() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-stopped");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let socket_path = vm_dir.join("serial.sock");
+        std::fs::write(
+            vm_config_file(&vm_dir),
+            serde_json::json!({
+                "serial": {
+                    "mode": "Socket",
+                    "socket": socket_path.to_string_lossy()
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(!socket_path.exists(), "a stopped guest has no listener");
+        assert!(matches!(
+            persisted_serial_transport(&vm_dir),
+            SerialTransport::Socket(path) if path == socket_path
+        ));
+    }
+
+    #[test]
+    fn persisted_serial_transport_preserves_explicit_pty_mode() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vm_dir = dir.path().join("vm-pty");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(
+            vm_config_file(&vm_dir),
+            serde_json::json!({ "serial": { "mode": "Pty" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(vm_dir.join("serial.sock"), b"stale socket path").unwrap();
+
+        assert!(matches!(
+            persisted_serial_transport(&vm_dir),
+            SerialTransport::Pty
+        ));
     }
 
     #[tokio::test]
@@ -7597,6 +7662,17 @@ mod tests {
         let dead_pid = dead_child.id().expect("freshly spawned child has a pid");
         let _ = dead_child.wait().await;
         std::fs::write(dead_dir.join("ch.pid"), format!("{dead_pid}")).unwrap();
+        std::fs::write(
+            dead_dir.join("vm-config.json"),
+            serde_json::json!({
+                "serial": {
+                    "mode": "Socket",
+                    "socket": dead_dir.join("serial.sock").to_string_lossy()
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // vm-nopid: no pidfile → skipped with today's NotFound semantics.
         std::fs::create_dir_all(vms_base.join("vm-nopid")).unwrap();
@@ -7637,6 +7713,10 @@ mod tests {
                 panic!("dead VMM must be tracked as Adopted");
             };
             assert_eq!(*dead_tracked_pid, dead_pid);
+            assert!(matches!(
+                &dead.serial_transport,
+                SerialTransport::Socket(path) if path == &dead_dir.join("serial.sock")
+            ), "adoption must recover Socket mode even when the stopped guest removed its listener");
             assert!(
                 !super::pid_is_cloud_hypervisor(*dead_tracked_pid, &dead_dir.join("vm.sock"), None),
                 "dead VMM must classify as exited"
