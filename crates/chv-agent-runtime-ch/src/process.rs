@@ -3974,14 +3974,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             start_vm_action("")
         };
 
-        // Respawn broadcaster if it died while the VM was running.
-        // This must happen BEFORE the idempotent early return so console
-        // output doesn't stall when start_vm is called on an already-running VM.
-        self.respawn_broadcaster_if_dead(vm_id, &serial_transport, &fanout, &broadcaster_alive)
-            .await;
-
         match action {
             StartVmAction::AlreadyRunning => {
+                // The console endpoint is live on an already-running VM,
+                // so a dead broadcaster can reconnect before this
+                // idempotent early return.
+                self.respawn_broadcaster_if_dead(
+                    vm_id,
+                    &serial_transport,
+                    &fanout,
+                    &broadcaster_alive,
+                )
+                .await;
                 // Issue-#409 self-heal, adopted VMs only: the reconciler
                 // (and any operator re-drive) lands here shortly after
                 // an agent restart re-adopted a live VMM, making this
@@ -4026,6 +4030,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
+
+        // A guest shutdown tears down Cloud Hypervisor's serial-console
+        // endpoint along with the VM. The listener is recreated during
+        // `/vm.boot`, so reconnect a dead broadcaster only after that
+        // request has completed; attempting this before boot exhausts the
+        // bounded retries against a missing socket and leaves console
+        // capture down until another lifecycle call.
+        self.respawn_broadcaster_if_dead(vm_id, &serial_transport, &fanout, &broadcaster_alive)
+            .await;
 
         // G5: the VM is (or is becoming) running — its vsock relay must
         // be up (idempotent: covers a fresh boot, a VMM re-spawn, an
@@ -7736,7 +7749,10 @@ mod tests {
         let vm_dir = dir.path().join("vm-stopped");
         std::fs::create_dir_all(&vm_dir).unwrap();
         let api_socket = vm_dir.join("vm.sock");
+        let serial_socket = vm_dir.join("serial.sock");
         let listener = std::os::unix::net::UnixListener::bind(&api_socket).unwrap();
+        let (release_console_tx, release_console_rx) = std::sync::mpsc::channel();
+        let serial_socket_for_server = serial_socket.clone();
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
                 let (mut conn, _) = listener.accept().unwrap();
@@ -7756,7 +7772,14 @@ mod tests {
                     .unwrap();
                 } else {
                     assert!(request.starts_with("PUT /api/v1/vm.boot "));
+                    // Cloud Hypervisor recreates its serial listener as
+                    // part of boot after guest shutdown dropped the prior
+                    // VM's console devices.
+                    let serial_listener =
+                        std::os::unix::net::UnixListener::bind(&serial_socket_for_server).unwrap();
                     conn.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+                    let (_peer, _) = serial_listener.accept().unwrap();
+                    let _ = release_console_rx.recv_timeout(std::time::Duration::from_secs(5));
                 }
             }
         });
@@ -7769,15 +7792,16 @@ mod tests {
             .unwrap();
         let pid = child.id().unwrap();
         let (fanout, _) = ConsoleFanout::new(Vec::new());
+        let broadcaster_alive = Arc::new(AtomicBool::new(false));
         adapter.vms.write().await.insert(
             "vm-stopped".to_string(),
             VmProcess {
                 api_socket,
                 child: VmmChild::Owned(child),
                 console_io: std::fs::File::open("/dev/null").unwrap().into(),
-                serial_transport: SerialTransport::Pty,
+                serial_transport: SerialTransport::Socket(serial_socket),
                 console_fanout: fanout,
-                broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                broadcaster_alive: broadcaster_alive.clone(),
                 cpu_ticks: chv_monitoring_core::CounterState::new(),
                 last_cpu_at: None,
                 boot_watermark: AtomicU64::new(0),
@@ -7785,7 +7809,17 @@ mod tests {
         );
 
         adapter.start_vm("vm-stopped", None).await.unwrap();
-        server.join().expect("fake VMM API server");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !broadcaster_alive.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("console broadcaster should restart after vm.boot");
+        assert!(
+            broadcaster_alive.load(Ordering::SeqCst),
+            "a dead broadcaster must reconnect after vm.boot recreates the serial listener"
+        );
         let vms = adapter.vms.read().await;
         let proc = vms.get("vm-stopped").unwrap();
         assert_eq!(proc.child.vmm_pid(), Some(pid));
@@ -7794,6 +7828,8 @@ mod tests {
             std::fs::metadata(console_log).unwrap().len()
         );
         drop(vms);
+        let _ = release_console_tx.send(());
+        server.join().expect("fake VMM API server");
         let mut vms = adapter.vms.write().await;
         if let Some(proc) = vms.remove("vm-stopped") {
             let mut child = match proc.child {
