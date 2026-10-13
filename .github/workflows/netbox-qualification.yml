@@ -73,7 +73,7 @@ jobs:
       # -------------------------------------------------------------------
       - name: Upload qualification logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7 (pinned 2026-09-30)
         with:
           name: netbox-qualification-logs-${{ github.run_id }}
           path: /tmp/chv-netbox-qualify-logs/
@@ -86,7 +86,7 @@ jobs:
       # -------------------------------------------------------------------
       - name: Upload recorded fixtures
         if: always() && inputs.record == true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (pinned 2026-09-30)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7 (pinned 2026-09-30)
         with:
           name: netbox-recorded-fixtures-${{ github.run_id }}
           path: crates/chv-netbox-sim/tests/fixtures/netbox4/
