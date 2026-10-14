@@ -26,7 +26,10 @@ Each node uses an explicit state machine.
 
 ## Readiness rules
 - `HostReady`: base host verified, local cache available, `chv-agent` running
-- `StorageReady`: `chv-stord` is healthy and serving
+- `StorageReady` (current implementation): `chv-stord` is healthy and serving
+- `StorageReady` (target after ADR-028 integration): Volvisor is healthy, its
+  API/version is compatible, and required capabilities are available; any
+  explicitly retained legacy-owned volumes also have a healthy `chv-stord`
 - `NetworkReady`: `chv-nwd` is healthy and required topology is ready
 - `TenantReady`: both storage and network readiness satisfied
 
@@ -40,7 +43,8 @@ Each node uses an explicit state machine.
 ## Transitions
 - `Discovered -> Bootstrapping`
 - `Bootstrapping -> HostReady`
-- `HostReady -> StorageReady` when `chv-stord` is ready
+- `HostReady -> StorageReady` when the storage service(s) required by the
+  configured volume owners are ready
 - `HostReady -> NetworkReady` when `chv-nwd` is ready
 - `StorageReady + NetworkReady -> TenantReady`
 - `TenantReady -> Degraded` if critical service readiness is lost

@@ -4,13 +4,15 @@
 1. host OS starts
 2. installer-provided prerequisites are verified
 3. `chv-agent` starts and loads the local durable cache
-4. `chv-stord` and `chv-nwd` start in parallel
+4. Current implementation: `chv-stord` and `chv-nwd` start in parallel. Target
+   after ADR-028 integration: Volvisor and `chv-nwd` start in parallel; `chv-stord`
+   remains only while legacy-owned volumes exist.
 5. `chv-agent` evaluates service readiness
 6. node reports `HostReady`, then `StorageReady`, then `NetworkReady`
 7. node enters `TenantReady`
 8. control plane may schedule new workloads
 
-## VM create sequence
+## VM create sequence (current implementation)
 1. control plane issues `CreateVm`
 2. `chv-agent` validates node readiness and desired-state generation
 3. `chv-agent` asks `chv-stord` to open/prepare required volumes
@@ -20,13 +22,19 @@
 7. `chv-agent` boots the VM via the local API socket
 8. observed state is reported upstream
 
-## Volume attach sequence
+## Volume attach sequence (current implementation)
 1. desired attach arrives
 2. `chv-agent` validates VM and node state
 3. `chv-agent` calls `AttachVolumeToVm` on `chv-stord`
 4. `chv-stord` returns export metadata
 5. `chv-agent` performs the VMM hotplug action
 6. result is reported through telemetry
+
+After Volvisor integration, new Volvisor-owned volumes use the agent's
+Volvisor adapter for storage preparation and attachment fencing. The agent
+still performs VMM hotplug and reports the observed attachment phase. Legacy
+volumes continue through `chv-stord` until explicit owner migration; the two
+services never mutate the same volume.
 
 ## Network exposure sequence
 1. desired exposure arrives

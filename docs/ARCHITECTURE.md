@@ -6,14 +6,17 @@ This document describes the high-level architecture of CHV, the boundaries betwe
 
 CHV is a Linux-first, cloud-image-first virtualization platform. It targets sovereign private cloud and edge environments. Operators get full control over the hypervisor stack without the operational complexity of OpenStack or the licensing cost of VMware vSphere. VMs run on Cloud Hypervisor (the VMM); the binary is `cloud-hypervisor`.
 
-The system is built around four binaries:
+The currently shipped CHV runtime is built around four binaries. Volvisor is
+the selected storage target; its node service has not yet been integrated into
+CHV releases.
 
-| Binary | Responsibility | Runtime |
-|--------|---------------|---------|
-| `chv-controlplane` | Orchestration, desired-state management, node enrollment, Web UI BFF | Control-plane host |
-| `chv-agent` | VM lifecycle, Cloud Hypervisor runtime, serial console, local telemetry | Hypervisor host |
-| `chv-stord` | Volume management, storage pools, images, snapshots | Hypervisor host (sidecar to agent) |
-| `chv-nwd` | Network topology, bridges, firewall/NAT, DHCP, DNS | Hypervisor host (sidecar to agent) |
+| Binary | Responsibility | Runtime | Status |
+|--------|---------------|---------|--------|
+| `chv-controlplane` | Orchestration, desired-state management, node enrollment, Web UI BFF | Control-plane host | Shipped |
+| `chv-agent` | VM lifecycle, Cloud Hypervisor runtime, serial console, local telemetry | Hypervisor host | Shipped |
+| `volvisord` | Provider records, capabilities, capacity/health and storage lifecycle | Hypervisor host, called through `chv-agent` | Selected target; integration pending |
+| `chv-stord` | Current storage path; retained for existing volumes during the Volvisor transition | Hypervisor host (sidecar to agent) | Shipped; current implementation |
+| `chv-nwd` | Network topology, bridges, firewall/NAT, DHCP, DNS | Hypervisor host (sidecar to agent) | Shipped |
 
 ## Architectural Boundaries
 
@@ -31,7 +34,11 @@ See ADR-002: [Control Plane to Node Boundary](./specs/adr/002-control-plane-boun
 
 ### Agent ↔ Storage / Network
 
-- `chv-agent` communicates with `chv-stord` and `chv-nwd` via local gRPC (Unix socket or loopback).
+- The target architecture has `chv-agent` communicate with the node-local Volvisor service through its
+  versioned authenticated internal API, and with `chv-nwd` via local gRPC.
+  During the ownership transition it may also call `chv-stord` for volumes
+  explicitly marked as legacy-owned. Volvisor and `chv-stord` must never
+  independently mutate the same volume.
 - These daemons may be upgraded independently inside a compatibility matrix, but the default is a bundle-tested node release.
 
 See ADR-001: [Node Runtime Split](./specs/adr/001-node-runtime-split.md)
@@ -39,7 +46,7 @@ See ADR-001: [Node Runtime Split](./specs/adr/001-node-runtime-split.md)
 ### Web UI ↔ Backend
 
 - The browser talks **only** to the control-plane backend-for-frontend (BFF) HTTP service (`chv-webui-bff`).
-- Direct browser access to `chv-agent`, `chv-stord`, `chv-nwd`, or Cloud Hypervisor APIs is forbidden.
+- Direct browser access to `chv-agent`, Volvisor, `chv-stord`, `chv-nwd`, or Cloud Hypervisor APIs is forbidden.
 
 See ADR-002-WebUI: [WebUI Architecture Boundary](./specs/adr/002-webui-architecture-boundary.md)
 
@@ -57,11 +64,11 @@ chv-controlplane (BFF)
 SQLite (desired_state, operation_journal)
     │
     ▼
-Reconcile loop
+Reconcile loop (target after Volvisor integration)
     │ gRPC CreateVm
     ▼
 chv-agent
-    │ 1. call chv-stord (prepare volume)
+    │ 1. Volvisor: prepare/attach; existing volumes remain on chv-stord until ownership migration
     │ 2. call chv-nwd   (ensure network)
     │ 3. call cloud-hypervisor (vm.create)
     ▼
@@ -121,14 +128,35 @@ Tasks are first-class UI objects; users can inspect progress, cancel queued task
 
 ## Storage Datapath
 
-MVP-1 uses a host-side `chv-stord` daemon. Supported storage classes:
+CHV selects Volvisor as its storage lifecycle and provider authority. CHV keeps
+the tenant API, tenant-visible volume IDs, and VM desired state; `chv-agent` is
+the node integration point and remains the only component that calls Cloud
+Hypervisor. Volvisor owns provider-side volume records and generations,
+capabilities, capacity/health, and storage-side fencing.
+This is the target architecture; Volvisor is a prototype and its capabilities
+are not enabled for tenants until each CHV integration passes its qualification
+gates. See [ADR-028](./specs/adr/028-volvisor-storage-orchestration.md) and
+the [adoption plan](./plans/2026-10-13-volvisor-storage-adoption.md).
 
-- Local raw / qcow2 files
-- LVM thin pools
-- iSCSI (planned adapter; not a complete production backend)
-- Ceph RBD (planned adapter; not a complete production backend)
+The selected fast path remains host-side; adopting Volvisor does not require a
+storage VM or a mandatory NBD proxy. Current storage behavior remains on
+`chv-stord` until the agent adapter and explicit volume-owner transition are
+implemented. New Volvisor-backed classes can be enabled only after their
+provider and CHV integration are qualified:
 
-The storage-VM / NBD model was explicitly rejected for MVP-1.
+- `native-local` (initial integration target: LVM)
+- `ceph-rbd` (later, existing Ceph cluster adapter)
+- `nearline-replicated` (later, after replication and fencing qualification)
+- Existing raw/qcow2 and other legacy classes remain on `chv-stord` until an explicit migration.
+
+After the owner transition is implemented, `chv-stord` serves only volumes
+explicitly marked as legacy-owned. Volvisor-backed volumes use advertised
+capabilities and fail closed when a requested class or policy is unavailable.
+The Web UI and `chvctl` continue to call CHV APIs; Volvisor is not a second
+tenant-facing control plane.
+
+The former storage-VM / NBD model remains rejected for the native-local
+foreground path.
 
 ### Migration Security Model
 
